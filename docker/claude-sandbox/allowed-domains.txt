@@ -10,3 +10,4 @@ registry.npmjs.org
 .pypi.org
 files.pythonhosted.org
 .golang.org
+packages.typst.org
