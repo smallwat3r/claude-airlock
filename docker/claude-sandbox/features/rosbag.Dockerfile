@@ -1,10 +1,15 @@
-# claude: Rosbag tooling: mcap CLI, Python rosbags, mcap, mcap-ros1/ros2-support
+# claude: Rosbag tooling: mcap CLI, sqlite3 CLI, Python rosbags, mcap, mcap-ros1/ros2-support
 # Reading, writing and conversion (ROS1 + ROS2, sqlite3 + mcap storage)
 RUN uv pip install --system --break-system-packages \
     rosbags==0.11.9 \
     mcap==1.6.0 \
     mcap-ros1-support==0.9.0 \
     mcap-ros2-support==0.6.0
+
+# sqlite3 CLI, to inspect ROS2 .db3 bags directly
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
 
 # mcap CLI (inspect/filter/recover .mcap rosbags), pinned and checksum-verified.
 # Update from https://github.com/foxglove/mcap/releases (no upstream checksum
