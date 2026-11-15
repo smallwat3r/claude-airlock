@@ -101,7 +101,7 @@ done
 PROJECT="$(mktemp -d "${TMPDIR:-/tmp}/claude-smoke-XXXXXX")"
 SESSION_ERR="$(mktemp)"
 # The sessions leave a cache volume named after the project behind
-# shellcheck disable=SC2317 # called by the trap
+# shellcheck disable=SC2317,SC2329 # called by the trap
 cleanup() {
   local volume
   for volume in $(docker volume ls -q --filter "name=claude-cache-$(basename "${PROJECT}")"); do
