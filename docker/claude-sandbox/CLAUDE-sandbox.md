@@ -1,4 +1,3 @@
-<!-- Template: bin/claude-docker appends one bullet per "# claude:" line of the base and selected feature Dockerfiles after the last line. -->
 # Docker sandbox
 You are running inside a sandboxed Docker image. The container is read-only
 (no sudo, no apt), writable space is /tmp, ~/.cache, ~/.npm and the mounted
@@ -17,3 +16,4 @@ the proxy means the domain is blocked: do not retry or work around it, tell
 the user which domain to add to allowed-domains.txt.
 
 Preinstalled, so do not install them again:
+- _Placeholder: at build time bin/claude-docker replaces this line with one bullet per `# claude:` line of the base and selected feature Dockerfiles._

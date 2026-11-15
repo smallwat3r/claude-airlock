@@ -150,7 +150,9 @@ prepare_image() {
   for file in "${parts[@]}"; do
     DOCKERFILE+="$(cat "${file}")"$'\n\n'
   done
-  CLAUDE_MD="$(cat "${DOCKERFILE_DIR}/CLAUDE-sandbox.md"
+  # The template ends with a placeholder bullet, visible when the file is
+  # read on its own, the generated tool list takes its place
+  CLAUDE_MD="$(grep -v '^- _Placeholder:' "${DOCKERFILE_DIR}/CLAUDE-sandbox.md"
     sed -n 's/^# claude: /- /p' "${parts[@]}")"
   IMAGE="${IMAGE_NAME}:$(printf '%s\n' "${HOME}" "${DOCKERFILE}" "${CLAUDE_MD}" \
     | sha256 | cut -c1-12)"

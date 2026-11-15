@@ -109,6 +109,7 @@ out="$(run_case 'prepare_image; echo "${IMAGE}"; echo "${CLAUDE_MD}"' CLAUDE_DOC
 check "image tag is a content hash" has '^claude-code-sandbox:[0-9a-f]{12}$' "${out}"
 check "CLAUDE.md lists a selected feature" has '^- Go ' "${out}"
 check "CLAUDE.md omits unselected features" lacks 'KiCad' "${out}"
+check "CLAUDE.md drops the template placeholder" lacks 'Placeholder' "${out}"
 
 tamper='before="$(host_exec_fingerprint)"; %s; report_tampering "${before}"'
 # shellcheck disable=SC2059 # the format string is the template above
