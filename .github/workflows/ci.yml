@@ -15,9 +15,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: shellcheck bin/claude-docker bin/claude-statusline test/launcher-test.sh
-      - run: test/launcher-test.sh
-      - run: pipx run ruff check docker/claude-sandbox/update-pins.py
+      - run: shellcheck bin/claude-statusline test/smoke-test.sh
+      - run: test/launcher_test.py
+      - run: pipx run ruff check bin/claude-docker claude_sandbox test/launcher_test.py docker/update-pins.py
       # Every feature must assemble into the generated Dockerfile
       - run: bin/claude-docker --dockerfile | grep -q '^ENTRYPOINT'
 

@@ -7,7 +7,8 @@ from editors that can launch a custom `claude` program.
 ## Requirements
 
 - Docker (Linux, or Docker Desktop on macOS)
-- bash, and `jq` on the host if you use the statusline outside the sandbox
+- Python 3.9 or later for the launcher, standard library only
+- bash and `jq` on the host if you use the statusline outside the sandbox
 
 ## Install
 
@@ -16,8 +17,12 @@ git clone https://github.com/smallwat3r/claude-sandbox.git ~/code/claude-sandbox
 export PATH="$HOME/code/claude-sandbox/bin:$PATH"
 ```
 
-Put `bin/` on your `PATH` rather than symlinking the script, it locates the
-Dockerfile relative to its own directory.
+Or leave `PATH` alone and symlink the launcher into a directory already on
+it, it finds the rest of the checkout from where it really is:
+
+```
+ln -s ~/code/claude-sandbox/bin/claude-docker ~/.local/bin/claude-docker
+```
 
 ## Usage
 
@@ -43,7 +48,7 @@ sandbox, it is common to run with `--dangerously-skip-permissions`.
 | `CLAUDE_DOCKER_EXTRA_DIRS=a:b` | Extra directories to mount, same as repeated `--add-dir` |
 | `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` | The same read-only, as repeated `--add-dir-ro` |
 | `CLAUDE_DOCKER_FEATURES="go typst"` | Tools to build into the image, see [The image](#the-image) |
-| `CLAUDE_DOCKER_NET_FILTER=1` | Restrict egress to `docker/claude-sandbox/allowed-domains.txt` |
+| `CLAUDE_DOCKER_NET_FILTER=1` | Restrict egress to `docker/allowed-domains.txt` |
 | `CLAUDE_DOCKER_SSH_AGENT=1` | Forward the SSH agent, needed for git over SSH |
 | `CLAUDE_DOCKER_SOCKET=1` | `docker ps` and `docker logs` on the host daemon, `full` adds `inspect` |
 | `CLAUDE_DOCKER_RW_CONFIG=1` | Leave `~/.claude/settings.json` and `hooks` writable |
@@ -152,7 +157,7 @@ read-write project safe to trust blindly afterwards:
 
 ## The image
 
-The image is assembled from `docker/claude-sandbox`: `base.Dockerfile`
+The image is assembled from `docker`: `base.Dockerfile`
 (Claude Code's needs plus git, gh, Python with uv, Node.js and a C
 toolchain), the features you select, then `tail.Dockerfile`. Each feature
 is one plain Dockerfile fragment in `features/`:
@@ -212,16 +217,21 @@ version, Debian packages follow the pinned base image. Claude Code's
 auto-updater is off, so upgrading means refreshing the pins:
 
 ```
-docker/claude-sandbox/update-pins.py
+docker/update-pins.py
 ```
 
 It also covers your own fragments and the two sidecar images.
 
 ## Tests
 
-`test/launcher-test.sh` checks the launcher's security-relevant behaviour
+`test/launcher_test.py` checks the launcher's security-relevant behaviour
 without needing Docker: what gets mounted, shadowed and switched off by
 default. CI runs it together with shellcheck and a small image build.
+
+`test/smoke-test.sh` is the end-to-end check, run on the host against a real
+Docker daemon. It replaces the sidecars, then starts open, filtered and
+socket-proxy sessions in a throwaway project and checks the sandbox from the
+inside. Run it after changing the launcher or moving the checkout.
 
 ## Statusline
 

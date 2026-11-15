@@ -2,7 +2,8 @@
 """Refresh every pinned version, sha256 and image digest of the sandbox.
 
 Covers the Dockerfile parts (base, tail, features, plus your own features in
-~/.config/claude-sandbox/features) and the sidecar images in bin/claude-docker.
+~/.config/claude-sandbox/features) and the sidecar images in
+claude_sandbox/network.py.
 A pin that appears in none of the files is skipped, so removing a feature
 needs no change here.
 
@@ -247,7 +248,7 @@ def default_paths() -> list[Path]:
         here / "tail.Dockerfile",
         *sorted((here / "features").glob("*.Dockerfile")),
         *sorted((config / "claude-sandbox" / "features").glob("*.Dockerfile")),
-        here.parents[1] / "bin" / "claude-docker",
+        here.parent / "claude_sandbox" / "network.py",
     ]
 
 
