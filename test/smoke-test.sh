@@ -127,6 +127,7 @@ check "project is mounted read-write" touch written-by-session
 check_fails ".env is shadowed" [ -s .env ]
 check ".env.example stays readable" [ -s .env.example ]
 check_fails "settings.json is read-only" [ -w /home/node/.claude/settings.json ]
+check_fails "skills are read-only" [ -w /home/node/.claude/skills ]
 check "CLAUDE.md lists the installed tools" grep -q "^- Python 3 with uv" /etc/claude-code/CLAUDE.md
 check_fails "CLAUDE.md has no template placeholder" grep -q Placeholder /etc/claude-code/CLAUDE.md
 check "claude starts" claude --version

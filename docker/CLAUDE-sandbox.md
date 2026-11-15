@@ -6,8 +6,9 @@ everything else outside the project is gone when the session ends. For extra
 Python packages create a venv (e.g. uv venv /tmp/venv), npm packages install
 locally into the project.
 
-~/.claude is shared with the host and writable, except settings.json and
-hooks, which are read-only unless CLAUDE_DOCKER_RW_CONFIG=1 is set. Do not
+~/.claude is shared with the host and writable, except settings.json,
+hooks, CLAUDE.md, skills and agents, which are read-only unless
+CLAUDE_DOCKER_RW_CONFIG=1 is set. Do not
 try to change them from here, ask the user to do it on the host.
 
 If CLAUDE_DOCKER_NET_FILTER=1 is set, egress goes through a proxy that only

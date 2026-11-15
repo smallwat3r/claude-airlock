@@ -32,7 +32,7 @@ Environment, all optional:
   CLAUDE_DOCKER_NET_FILTER  1 restricts egress to allowed-domains.txt
   CLAUDE_DOCKER_SSH_AGENT   1 forwards the SSH agent
   CLAUDE_DOCKER_SOCKET      1 allows docker ps and logs, full adds inspect
-  CLAUDE_DOCKER_RW_CONFIG   1 leaves ~/.claude settings and hooks writable
+  CLAUDE_DOCKER_RW_CONFIG   1 leaves the protected ~/.claude config writable
   CLAUDE_DOCKER_SHADOW      extra file name globs to hide, colon separated
   CLAUDE_DOCKER_MEMORY      memory limit
   CLAUDE_DOCKER_PIDS        process limit

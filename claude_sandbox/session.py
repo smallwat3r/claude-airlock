@@ -261,14 +261,19 @@ def session_args(action: str, env: Mapping[str, str]) -> list[str]:
     return args
 
 
+PROTECTED_CONFIG = ("settings.json", "hooks", "CLAUDE.md", "skills", "agents")
+
+
 def protect_config_args(settings: Settings, host: Host) -> list[str]:
     """~/.claude is shared read-write with the host, and settings.json and
     hooks hold commands the host's own claude runs. Left writable, a
     compromised session could plant a hook there and get code execution
-    outside the sandbox, so they are mounted read-only on top. The cost:
-    settings changed from inside the sandbox are not saved.
-    CLAUDE_DOCKER_RW_CONFIG=1 opts out. Plugins stay writable (claude updates
-    them itself), their hook scripts are the remaining gap."""
+    outside the sandbox, so they are mounted read-only on top. CLAUDE.md,
+    skills and agents get the same treatment: they are instructions every
+    later session follows, on the host too. The cost: none of these can be
+    changed from inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out.
+    Plugins stay writable (claude updates them itself), their hook scripts
+    are the remaining gap."""
     if settings.rw_config:
         # Shown by bin/claude-statusline
         return [env_arg("CLAUDE_DOCKER_RW_CONFIG", 1)]
@@ -276,7 +281,7 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
         mount_arg(
             f"{host.claude_dir}/{item}", f"{CONTAINER_HOME}/.claude/{item}", "ro,z"
         )
-        for item in ("settings.json", "hooks")
+        for item in PROTECTED_CONFIG
         if os.path.exists(os.path.join(host.claude_dir, item))
     ]
 

@@ -43,21 +43,22 @@ claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 Any other argument is forwarded to `claude`. Since the container is the
 sandbox, it is common to run with `--dangerously-skip-permissions`.
 
-| Variable | Effect |
-| --- | --- |
-| `CLAUDE_DOCKER_EXTRA_DIRS=a:b` | Extra directories to mount, same as repeated `--add-dir` |
-| `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` | The same read-only, as repeated `--add-dir-ro` |
-| `CLAUDE_DOCKER_FEATURES="go typst"` | Tools to build into the image, see [The image](#the-image) |
-| `CLAUDE_DOCKER_NET_FILTER=1` | Restrict egress to `docker/allowed-domains.txt` |
-| `CLAUDE_DOCKER_SSH_AGENT=1` | Forward the SSH agent, needed for git over SSH |
-| `CLAUDE_DOCKER_SOCKET=1` | `docker ps` and `docker logs` on the host daemon, `full` adds `inspect` |
-| `CLAUDE_DOCKER_RW_CONFIG=1` | Leave `~/.claude/settings.json` and `hooks` writable |
-| `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` | Extra file name globs to hide, on top of the `.env` family |
-| `CLAUDE_DOCKER_MEMORY=16g`, `CLAUDE_DOCKER_PIDS=512` | Container limits, defaults shown |
-| `CLAUDE_DOCKER_CACHE=0` | Keep `~/.cache` on a tmpfs instead of a per-project volume |
-| `CLAUDE_DOCKER_SHARED_DIR=~/scratch` | Scratch directory shared between sessions, default `~/claude-shared`, empty for none |
-| `CLAUDE_DOCKER_RUNTIME=runsc` | Container runtime, e.g. gVisor, must be installed in Docker |
-| `ANTHROPIC_API_KEY`, `GH_TOKEN` | Passed through when set, `GH_TOKEN` is how `gh` logs in |
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_EXTRA_DIRS=a:b` | none | Extra directories to mount, same as repeated `--add-dir` |
+| `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` | none | The same read-only, as repeated `--add-dir-ro` |
+| `CLAUDE_DOCKER_FEATURES="go typst"` | `features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
+| `CLAUDE_DOCKER_NET_FILTER=1` | `0` | Restrict egress to `docker/allowed-domains.txt` |
+| `CLAUDE_DOCKER_SSH_AGENT=1` | `0` | Forward the SSH agent, needed for git over SSH |
+| `CLAUDE_DOCKER_SOCKET=1` | `0` | `docker ps` and `docker logs` on the host daemon, `full` adds `inspect` |
+| `CLAUDE_DOCKER_RW_CONFIG=1` | `0` | Leave `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` writable |
+| `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` | none | Extra file name globs to hide, on top of the `.env` family |
+| `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Container memory limit |
+| `CLAUDE_DOCKER_PIDS=1024` | `512` | Container process limit |
+| `CLAUDE_DOCKER_CACHE=0` | `1` | Keep `~/.cache` on a tmpfs instead of a per-project volume |
+| `CLAUDE_DOCKER_SHARED_DIR=~/scratch` | `~/claude-shared` if it exists | Scratch directory shared between sessions, empty for none |
+| `CLAUDE_DOCKER_RUNTIME=runsc` | Docker's default | Container runtime, e.g. gVisor, must be installed in Docker |
+| `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
 The on and off switches take `0` or `1` (`CLAUDE_DOCKER_SOCKET` also
 `full`). Any other value, such as `true`, stops the launcher instead of
@@ -90,8 +91,9 @@ or none when set empty.
   their host paths, plus `~/.claude` so login, settings and history persist.
   `~/.claude/settings.json` and `~/.claude/hooks` are read-only on top: they
   hold commands your host `claude` runs, so a session must not be able to
-  plant one. Settings changed inside the sandbox are therefore not saved,
-  unless you set `CLAUDE_DOCKER_RW_CONFIG=1`.
+  plant one. `~/.claude/CLAUDE.md`, `skills` and `agents` are read-only too,
+  they are instructions every later session follows. None of these can be
+  changed inside the sandbox, unless you set `CLAUDE_DOCKER_RW_CONFIG=1`.
 - Refuses to mount the home directory, its parents or the filesystem root.
 - Keeps `~/.cache` (Go modules, uv, npm) in a Docker volume per project, so
   a session does not download its dependencies again. Per project on

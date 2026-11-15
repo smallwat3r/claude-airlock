@@ -101,6 +101,8 @@ class LauncherTest(unittest.TestCase):
         self.project = self.home / "proj"
         for directory in (
             self.home / ".claude" / "hooks",
+            self.home / ".claude" / "skills",
+            self.home / ".claude" / "agents",
             self.project / ".git" / "hooks",
             self.home / "ref",
             self.work / "bin",
@@ -108,6 +110,7 @@ class LauncherTest(unittest.TestCase):
         ):
             directory.mkdir(parents=True)
         (self.home / ".claude" / "settings.json").write_text("{}\n")
+        (self.home / ".claude" / "CLAUDE.md").write_text("# Rules\n")
         (self.project / ".git" / "config").write_text("[core]\n\tbare = false\n")
         for name in (".env", ".env.example", ".netrc", "key.pem"):
             (self.project / name).touch()
@@ -176,9 +179,9 @@ class DefaultSessionTest(LauncherTest):
         ]
         self.assertEqual(len(shadowed), 2)
 
-    def test_settings_and_hooks_are_read_only(self):
+    def test_shared_config_is_read_only(self):
         claude = self.home / ".claude"
-        for item in ("settings.json", "hooks"):
+        for item in ("settings.json", "hooks", "CLAUDE.md", "skills", "agents"):
             self.assertIn(
                 f"--volume={claude / item}:/home/node/.claude/{item}:ro,z", self.flags
             )
@@ -235,7 +238,9 @@ class OptionsTest(LauncherTest):
         self.assertIn("--env=SSH_AUTH_SOCK=/tmp/ssh-agent.sock", flags)
         self.assertIn("--volume=/tmp/agent.sock:/tmp/ssh-agent.sock:z", flags)
         self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
-        self.assertFalse([flag for flag in flags if "settings.json" in flag])
+        self.assertFalse(
+            [flag for flag in flags if "/.claude/" in flag and flag.endswith(":ro,z")]
+        )
         self.assertIn("--tmpfs=/home/node/.cache:exec,size=2g", flags)
         self.assertIn("--runtime=runsc", flags)
 
