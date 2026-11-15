@@ -50,11 +50,30 @@ sandbox, it is common to run with `--dangerously-skip-permissions`.
 | `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` | Extra file name globs to hide, on top of the `.env` family |
 | `CLAUDE_DOCKER_MEMORY=16g`, `CLAUDE_DOCKER_PIDS=512` | Container limits, defaults shown |
 | `CLAUDE_DOCKER_CACHE=0` | Keep `~/.cache` on a tmpfs instead of a per-project volume |
+| `CLAUDE_DOCKER_SHARED_DIR=~/scratch` | Scratch directory shared between sessions, default `~/claude-shared`, empty for none |
 | `CLAUDE_DOCKER_RUNTIME=runsc` | Container runtime, e.g. gVisor, must be installed in Docker |
 | `ANTHROPIC_API_KEY`, `GH_TOKEN` | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
+To change a default for every session, put the same variables in
+`~/.config/claude-sandbox/config`, one per line. The environment still wins,
+so a single session can override the file:
+
+```
+# ~/.config/claude-sandbox/config
+CLAUDE_DOCKER_MEMORY=8g
+CLAUDE_DOCKER_NET_FILTER=1
+CLAUDE_DOCKER_SHARED_DIR=/home/me/scratch
+```
+
+Values are taken literally, without quotes or `~` expansion, and an unknown
+name stops the launcher instead of being ignored. The file is only read from
+your config directory, never from the project, which the session can write to.
+`CLAUDE_DOCKER_EXTRA_DIRS` and `CLAUDE_DOCKER_EXTRA_DIRS_RO` are not accepted
+there, extra directories belong to one project, not to every session.
+
 `~/claude-shared` is always mounted when it exists, as a scratch directory
-shared between sessions.
+shared between sessions. `CLAUDE_DOCKER_SHARED_DIR` names another directory,
+or none when set empty.
 
 ## What the sandbox does
 
