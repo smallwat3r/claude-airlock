@@ -152,6 +152,7 @@ is one plain Dockerfile fragment in `features/`:
 | `ocrab` | Ocrab font |
 | `playwright` | Playwright (Python) with headless Chromium |
 | `python` | mypy, ruff, black, pytest, ipython, pyright (Python 3 and uv are already in the base) |
+| `reverse` | gdb-multiarch, binutils-multiarch, strace, ltrace, binwalk and the Python capstone, lief, pyelftools libraries |
 | `rosbag` | mcap CLI, sqlite3 CLI and the Python rosbag libraries |
 | `shell` | shellcheck, shfmt |
 | `typst` | Typst |
