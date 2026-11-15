@@ -145,11 +145,11 @@ is one plain Dockerfile fragment in `features/`:
 | `cpp` | cmake, clangd |
 | `docker` | Docker CLI, for `CLAUDE_DOCKER_SOCKET` |
 | `docs` | pandoc, poppler-utils, qpdf, gnuplot |
+| `font` | fontforge, fonttools, ttfautohint, woff2, fontconfig and the Ocrab font |
 | `go` | Go, gopls |
 | `kicad` | KiCad 9 with `kicad-cli` |
 | `loadtest` | wrk, hey, for HTTP load testing |
 | `media` | ffmpeg, ImageMagick, webp |
-| `ocrab` | Ocrab font |
 | `playwright` | Playwright (Python) with headless Chromium |
 | `python` | mypy, ruff, black, pytest, ipython, pyright (Python 3 and uv are already in the base) |
 | `reverse` | gdb-multiarch, binutils-multiarch, strace, ltrace, binwalk and the Python capstone, lief, pyelftools libraries |
