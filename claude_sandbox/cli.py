@@ -45,9 +45,10 @@ def parse_args(
             action = arg[2:]
         elif option in ("--add-dir", "--add-dir-ro"):
             if not has_value:
-                value = next(args, None)
-                if value is None:
+                following = next(args, None)
+                if following is None:
                     raise Fatal(f"{option} requires a path")
+                value = following
             add_extra_dir(dirs, value, host, read_only=option == "--add-dir-ro")
         else:
             claude_args.append(arg)
