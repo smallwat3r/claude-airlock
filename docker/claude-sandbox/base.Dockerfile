@@ -10,7 +10,7 @@
 # update-pins.py. Debian packages are not: apt drops old versions from its
 # mirrors, so they follow the pinned base image's release instead.
 #
-# claude: Python 3 with uv, mypy, ruff, black, pytest, ipython
+# claude: Python 3 with uv
 # claude: Node.js and npm/npx, gcc/g++/make/pkg-config
 # claude: git, gh, ssh, ripgrep, fd, jq, tree
 
@@ -59,11 +59,3 @@ ENV UV_TOOL_DIR=/home/node/.cache/uv-tools \
     UV_TOOL_BIN_DIR=/home/node/.cache/bin \
     NPM_CONFIG_CACHE=/home/node/.cache/npm
 ENV PATH="/home/node/.cache/bin:${PATH}"
-
-# Python tooling (available system-wide)
-RUN uv pip install --system --break-system-packages \
-    mypy==2.4.1 \
-    ruff==0.17.5 \
-    black==26.10.1 \
-    pytest==9.2.0 \
-    ipython==9.18.1

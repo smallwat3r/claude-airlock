@@ -148,6 +148,7 @@ is one plain Dockerfile fragment in `features/`:
 | `media` | ffmpeg, ImageMagick, webp |
 | `ocrab` | Ocrab font |
 | `playwright` | Playwright (Python) with headless Chromium |
+| `python` | mypy, ruff, black, pytest, ipython (Python 3 and uv are already in the base) |
 | `rosbag` | mcap CLI and the Python rosbag libraries |
 | `typst` | Typst |
 
