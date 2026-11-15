@@ -59,6 +59,10 @@ sandbox, it is common to run with `--dangerously-skip-permissions`.
 | `CLAUDE_DOCKER_RUNTIME=runsc` | Container runtime, e.g. gVisor, must be installed in Docker |
 | `ANTHROPIC_API_KEY`, `GH_TOKEN` | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
+The on and off switches take `0` or `1` (`CLAUDE_DOCKER_SOCKET` also
+`full`). Any other value, such as `true`, stops the launcher instead of
+quietly leaving a restriction off.
+
 To change a default for every session, put the same variables in
 `~/.config/claude-sandbox/config`, one per line. The environment still wins,
 so a single session can override the file:
@@ -117,7 +121,7 @@ or none when set empty.
 - With `CLAUDE_DOCKER_SOCKET=1` (and the `docker` feature for the CLI), lets
   the session see the host's containers through
   [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
-  with our own rules (`docker-socket-proxy.cfg`): `docker ps` and
+  with our own rules (`docker/docker-socket-proxy.cfg`): `docker ps` and
   `docker logs` work, everything else is denied. `docker inspect` gets a
   stub answer, enough for the CLI to fetch logs, so container environments
   stay hidden. Logs of containers started with a TTY cannot be decoded in
@@ -157,10 +161,10 @@ read-write project safe to trust blindly afterwards:
 
 ## The image
 
-The image is assembled from `docker`: `base.Dockerfile`
+The image is assembled from the parts in `docker/`: `base.Dockerfile`
 (Claude Code's needs plus git, gh, Python with uv, Node.js and a C
 toolchain), the features you select, then `tail.Dockerfile`. Each feature
-is one plain Dockerfile fragment in `features/`:
+is one plain Dockerfile fragment in `docker/features/`:
 
 | Feature | Adds |
 | --- | --- |
@@ -226,12 +230,14 @@ It also covers your own fragments and the two sidecar images.
 
 `test/launcher_test.py` checks the launcher's security-relevant behaviour
 without needing Docker: what gets mounted, shadowed and switched off by
-default. CI runs it together with shellcheck and a small image build.
+default. It runs the launcher against a fake `docker` that records every
+call. CI runs it together with ruff, shellcheck and a small image build.
 
-`test/smoke-test.sh` is the end-to-end check, run on the host against a real
-Docker daemon. It replaces the sidecars, then starts open, filtered and
-socket-proxy sessions in a throwaway project and checks the sandbox from the
-inside. Run it after changing the launcher or moving the checkout.
+`test/smoke-test.sh` is the end-to-end check, run by hand on the host against
+a real Docker daemon. It replaces the sidecars, then starts open, filtered
+and socket-proxy sessions in a throwaway project and checks the sandbox from
+the inside. Run it after changing the launcher, the Dockerfile parts or the
+sidecar configuration, or after moving the checkout.
 
 ## Statusline
 
@@ -250,7 +256,8 @@ it in `~/.claude/settings.json`:
 ```
 
 The script is mounted into the container at its host path, so the same
-setting works inside and outside the sandbox.
+setting works inside and outside the sandbox. That also holds when the
+setting names a symlink to the script, it is mounted there as well.
 
 ## Editor integration
 
