@@ -147,6 +147,7 @@ is one plain Dockerfile fragment in `features/`:
 | `docs` | pandoc, poppler-utils, qpdf, gnuplot |
 | `go` | Go, gopls |
 | `kicad` | KiCad 9 with `kicad-cli` |
+| `loadtest` | wrk, hey, for HTTP load testing |
 | `media` | ffmpeg, ImageMagick, webp |
 | `ocrab` | Ocrab font |
 | `playwright` | Playwright (Python) with headless Chromium |
