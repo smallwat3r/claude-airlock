@@ -180,10 +180,26 @@ def pin_uv(pins: Pins) -> None:
     print("uv", uv)
 
 
+def npm_latest(package: str) -> str:
+    return fetch_json(f"https://registry.npmjs.org/{package}/latest")["version"]
+
+
 def pin_claude_code(pins: Pins) -> None:
-    latest = fetch_json("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
-    pins.set_arg("CLAUDE_CODE_VERSION", latest["version"])
-    print("claude-code", latest["version"])
+    version = npm_latest("@anthropic-ai/claude-code")
+    pins.set_arg("CLAUDE_CODE_VERSION", version)
+    print("claude-code", version)
+
+
+def pin_pyright(pins: Pins) -> None:
+    version = npm_latest("pyright")
+    pins.set_arg("PYRIGHT_VERSION", version)
+    print("pyright", version)
+
+
+def pin_gopls(pins: Pins) -> None:
+    latest = fetch_json("https://proxy.golang.org/golang.org/x/tools/gopls/@latest")
+    pins.set_arg("GOPLS_VERSION", latest["Version"])
+    print("gopls", latest["Version"])
 
 
 def pin_pypi(pins: Pins) -> None:
@@ -216,6 +232,8 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"(?m)^ARG OCRAB_VERSION=", pin_ocrab),
     (r"astral-sh/uv:[0-9.]+", pin_uv),
     (r"(?m)^ARG CLAUDE_CODE_VERSION=", pin_claude_code),
+    (r"(?m)^ARG PYRIGHT_VERSION=", pin_pyright),
+    (r"(?m)^ARG GOPLS_VERSION=", pin_gopls),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),
 ]

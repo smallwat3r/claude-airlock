@@ -1,4 +1,4 @@
-# claude: Go (GOPATH is ~/.cache/go)
+# claude: Go with gopls (GOPATH is ~/.cache/go)
 # Official tarball (apt's is outdated), pinned and checksum-verified. The shas
 # are recorded on purpose: fetching them from the same server as the artifact
 # would verify nothing. Update version and shas from https://go.dev/dl
@@ -21,3 +21,12 @@ RUN ARCH="$(dpkg --print-architecture)" \
 # module cache could never be written. ~/.cache is writable.
 ENV GOPATH=/home/node/.cache/go
 ENV PATH="/usr/local/go/bin:/home/node/.cache/go/bin:${PATH}"
+
+# gopls, the language server behind Claude Code's gopls-lsp plugin. Installed
+# to /usr/local/bin because GOPATH is mounted over at runtime, with a
+# throwaway GOPATH and build cache so neither stays in the image. go install
+# verifies the module against the Go checksum database.
+ARG GOPLS_VERSION=v0.24.0
+RUN GOBIN=/usr/local/bin GOPATH=/tmp/gopath GOCACHE=/tmp/gocache \
+    go install "golang.org/x/tools/gopls@${GOPLS_VERSION}" \
+    && rm -rf /tmp/gopath /tmp/gocache
