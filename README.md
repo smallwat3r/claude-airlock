@@ -140,6 +140,7 @@ is one plain Dockerfile fragment in `features/`:
 
 | Feature | Adds |
 | --- | --- |
+| `ble` | tshark and scapy, for offline analysis of BLE captures |
 | `cad` | OpenSCAD, admesh |
 | `cpp` | cmake, clangd |
 | `docker` | Docker CLI, for `CLAUDE_DOCKER_SOCKET` |
