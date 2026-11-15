@@ -143,7 +143,9 @@ echo "Session with the egress filter"
 # shellcheck disable=SC2016
 session "${INSIDE}"'
 check "an allowed domain is reachable" curl -fsS -m 15 -o /dev/null https://api.github.com
-check_fails "another domain is blocked" curl -fsS -m 15 -o /dev/null https://example.com
+# Refused by the proxy itself, a proxy that is down would also fail the request
+check "another domain is blocked with a 403" \
+  bash -c "curl -sS -m 15 -o /dev/null https://example.com 2>&1 | grep -q 403"
 check_fails "direct connections fail" curl -fsS -m 5 --noproxy "*" -o /dev/null https://1.1.1.1
 ' CLAUDE_DOCKER_NET_FILTER=1
 check "the egress proxy is running" \

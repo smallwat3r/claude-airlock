@@ -256,6 +256,10 @@ class OptionsTest(LauncherTest):
         self.assertIn(
             ["network", "create", "--internal", "claude-docker-net"], result.calls
         )
+        # Waited for, a session must not start ahead of its proxy
+        self.assertTrue(
+            [c for c in result.calls if c[:2] == ["exec", "claude-egress-proxy"]]
+        )
         proxy = result.sidecar("claude-egress-proxy")
         self.assertIn("--network=claude-docker-net", proxy)
         self.assertTrue(any("allowed-domains.txt" in arg for arg in proxy))

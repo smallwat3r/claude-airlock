@@ -7,6 +7,8 @@ import hashlib
 import os
 import stat
 import subprocess
+import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from .settings import DOCKERFILE_DIR, Fatal, Settings
 PROXY_IMAGE = "tecnativa/docker-socket-proxy:latest@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
 SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
 EGRESS_PROXY = "claude-egress-proxy"
+EGRESS_PORT = 3128
 EGRESS_CONFIG_LABEL = "claude-sandbox.config"
 # Filtered mode joins an internal network with no route out, open mode a
 # plain bridge network. Both are user-defined so container names resolve.
@@ -89,6 +92,24 @@ def start_egress_proxy() -> None:
     ]
     start_sidecar(EGRESS_PROXY, FILTER_NET, options, SQUID_IMAGE)
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
+    wait_for_egress_proxy()
+
+
+def wait_for_egress_proxy(timeout: float = 15.0) -> None:
+    """Wait until squid accepts connections. It takes a moment to listen
+    after its container starts, and a session started sooner has its first
+    requests refused."""
+    probe = f"exec 3<>/dev/tcp/127.0.0.1/{EGRESS_PORT}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if docker_ok("exec", EGRESS_PROXY, "bash", "-c", probe):
+            return
+        time.sleep(0.2)
+    print(
+        "claude-docker: the egress proxy is slow to start,"
+        " the session's first requests may fail",
+        file=sys.stderr,
+    )
 
 
 def egress_proxy_current() -> bool:
@@ -141,7 +162,7 @@ def network_args(settings: Settings) -> list[str]:
 
     if not egress_proxy_current():
         start_egress_proxy()
-    proxy = f"{EGRESS_PROXY}:3128"
+    proxy = f"{EGRESS_PROXY}:{EGRESS_PORT}"
     no_proxy = f"localhost,127.0.0.1,{socket_proxy_name(settings)}"
     return [
         f"--network={network}",
