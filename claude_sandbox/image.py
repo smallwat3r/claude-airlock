@@ -135,7 +135,7 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     files for its fragment to COPY, in a directory of its name next to the
     fragment, which goes into the build context under that name. The image
     tag is a hash of all of it plus the host home (the image symlinks it to
-    /home/node), so editing a part, changing the selection or moving home
+    /home/sandbox), so editing a part, changing the selection or moving home
     rebuilds, with the layer cache, and each feature set keeps its own
     image. The language servers the parts declare become a plugin in the
     image, which claude is started with (see cli.py), so that a session has

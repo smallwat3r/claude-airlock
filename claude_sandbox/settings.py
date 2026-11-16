@@ -21,7 +21,7 @@ DOCKERFILE_DIR = os.path.join(_REPO_DIR, "docker")
 # What more than one module has to agree on: the home of the image's user,
 # where a session finds its ~/.claude, and the port the egress proxy
 # listens on
-CONTAINER_HOME = "/home/node"
+CONTAINER_HOME = "/home/sandbox"
 CONTAINER_CLAUDE = f"{CONTAINER_HOME}/.claude"
 EGRESS_PORT = 3128
 # What Claude follows or runs of ~/.claude, on the host as in a session:

@@ -495,9 +495,9 @@ class TraceTest(LauncherTest):
         self.assertIn("prompt      early", result.stdout)
 
     def test_a_sandboxed_session_is_found_under_the_container_home(self):
-        # The host home is a link to /home/node in the image, and Claude
+        # The host home is a link to /home/sandbox in the image, and Claude
         # Code records the project by its resolved path
-        seen = "/home/node/proj"
+        seen = "/home/sandbox/proj"
         entry = {
             "type": "assistant",
             "timestamp": "2026-01-03T10:00:00Z",
@@ -514,7 +514,10 @@ class TraceTest(LauncherTest):
                         "type": "tool_use",
                         "id": "s2",
                         "name": "Write",
-                        "input": {"file_path": "/home/node/out.go", "content": "x\n"},
+                        "input": {
+                            "file_path": "/home/sandbox/out.go",
+                            "content": "x\n",
+                        },
                     },
                     {
                         "type": "tool_use",
@@ -525,14 +528,14 @@ class TraceTest(LauncherTest):
                 ]
             },
         }
-        self.transcripts = self.transcripts.with_name("-home-node-proj")
+        self.transcripts = self.transcripts.with_name("-home-sandbox-proj")
         self.write_transcript("5a9d0000-0000-4000-8000-000000000000", [entry])
         listed = self.launch("--trace", "list").stdout
         self.assertIn("5a9d0000", listed)
         self.assertIn("3fa9c0de", listed)
         result = self.launch("--trace", "5a9d")
         self.assertEqual(result.status, 0, result.stderr)
-        self.assertIn("/home/node/out.go x1  OUTSIDE PROJECT", result.stdout)
+        self.assertIn("/home/sandbox/out.go x1  OUTSIDE PROJECT", result.stdout)
         self.assertNotIn("in.go x1  OUTSIDE", result.stdout)
         self.assertNotIn("cwd:", result.stdout)
 

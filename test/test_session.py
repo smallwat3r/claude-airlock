@@ -50,14 +50,15 @@ class DefaultSessionTest(LauncherTest):
         claude = self.home / ".claude"
         for item in ("settings.json", "hooks", "CLAUDE.md", "skills", "agents"):
             self.assertIn(
-                f"--volume={claude / item}:/home/node/.claude/{item}:ro,z", self.flags
+                f"--volume={claude / item}:/home/sandbox/.claude/{item}:ro,z",
+                self.flags,
             )
 
     def test_what_claude_keeps_for_one_session_is_the_sessions_own(self):
         # Sourced by every command of the session it is of, on the host too
         for name in ("shell-snapshots", "session-env"):
             options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
-            self.assertIn(f"--tmpfs=/home/node/.claude/{name}:{options}", self.flags)
+            self.assertIn(f"--tmpfs=/home/sandbox/.claude/{name}:{options}", self.flags)
             # What it goes over is there, docker would make it as root
             self.assertTrue((self.base / name).is_dir())
 
@@ -111,7 +112,7 @@ class DefaultSessionTest(LauncherTest):
         self.assertIn("--network=claude-docker-open-net", self.flags)
 
     def test_cache_is_a_per_project_volume(self):
-        pattern = r"^--volume=claude-cache-proj-[0-9a-f]{8}:/home/node/\.cache$"
+        pattern = r"^--volume=claude-cache-proj-[0-9a-f]{8}:/home/sandbox/\.cache$"
         self.assertTrue(any(re.match(pattern, flag) for flag in self.flags))
 
     def test_no_tty_without_a_terminal(self):
@@ -143,9 +144,9 @@ class OptionsTest(LauncherTest):
         claude = self.home / ".claude"
         for item in ("settings.json", "hooks", "rules"):
             self.assertIn(
-                f"--volume={claude / item}:/home/node/.claude/{item}:z", flags
+                f"--volume={claude / item}:/home/sandbox/.claude/{item}:z", flags
             )
-        self.assertIn("--tmpfs=/home/node/.cache:exec,size=2g", flags)
+        self.assertIn("--tmpfs=/home/sandbox/.cache:exec,size=2g", flags)
         self.assertIn("--runtime=runsc", flags)
 
     def test_a_flag_must_be_0_or_1(self):
@@ -259,13 +260,13 @@ class OptionsTest(LauncherTest):
         claude = self.home / ".claude"
         for name in ("settings.json", "CLAUDE.md", "hooks", "skills", "agents"):
             self.assertIn(
-                f"--volume={claude / name}:/home/node/.claude/{name}:ro,z", flags
+                f"--volume={claude / name}:/home/sandbox/.claude/{name}:ro,z", flags
             )
         # Not there before: made empty, so that a session cannot make them
         for name in ("commands", "rules"):
             self.assertEqual(list((claude / name).iterdir()), [])
             self.assertIn(
-                f"--volume={claude / name}:/home/node/.claude/{name}:ro,z", flags
+                f"--volume={claude / name}:/home/sandbox/.claude/{name}:ro,z", flags
             )
 
     def test_the_seeded_config_leaves_the_other_projects_out(self):
@@ -299,7 +300,7 @@ class HomeTest(LauncherTest):
     """A session's ~/.claude is the launcher's, with named parts of the
     host's."""
 
-    CLAUDE = "/home/node/.claude"
+    CLAUDE = "/home/sandbox/.claude"
 
     def mounted_at(self, flags: list[str], target: str) -> list[str]:
         return [

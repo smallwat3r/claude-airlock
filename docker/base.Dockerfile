@@ -58,9 +58,14 @@ RUN apt-get update \
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
+# The base image calls its user and that user's home node, after what it is
+# for upstream. Here they are named for what they are in a session.
+RUN groupmod --new-name sandbox node \
+    && usermod --login sandbox --home /home/sandbox --move-home node
+
 # The home directory is read-only at runtime, so point uv's tool installs and
 # npm's cache at the writable ~/.cache, which also persists per project
-ENV UV_TOOL_DIR=/home/node/.cache/uv-tools \
-    UV_TOOL_BIN_DIR=/home/node/.cache/bin \
-    NPM_CONFIG_CACHE=/home/node/.cache/npm
-ENV PATH="/home/node/.cache/bin:${PATH}"
+ENV UV_TOOL_DIR=/home/sandbox/.cache/uv-tools \
+    UV_TOOL_BIN_DIR=/home/sandbox/.cache/bin \
+    NPM_CONFIG_CACHE=/home/sandbox/.cache/npm
+ENV PATH="/home/sandbox/.cache/bin:${PATH}"

@@ -225,7 +225,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         f"--name={name}",
         f"--user={os.getuid()}:{os.getgid()}",
         f"--workdir={host.project_dir}",
-        # Run under the host home path (symlinked to /home/node in the image)
+        # Run under the host home path (symlinked to /home/sandbox in the image)
         # so absolute paths in the config of ~/.claude resolve consistently
         env_arg("HOME", host.home),
         env_arg("TERM", "xterm-256color"),

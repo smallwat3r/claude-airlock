@@ -22,8 +22,8 @@ RUN ARCH="$(dpkg --print-architecture)" \
 
 # The default GOPATH (~/go) sits on the read-only root filesystem, where the
 # module cache could never be written. ~/.cache is writable.
-ENV GOPATH=/home/node/.cache/go
-ENV PATH="/usr/local/go/bin:/home/node/.cache/go/bin:${PATH}"
+ENV GOPATH=/home/sandbox/.cache/go
+ENV PATH="/usr/local/go/bin:/home/sandbox/.cache/go/bin:${PATH}"
 
 # gopls, the language server behind Claude Code's gopls-lsp plugin. Installed
 # to /usr/local/bin because GOPATH is mounted over at runtime, with a

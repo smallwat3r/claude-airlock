@@ -9,7 +9,7 @@ import unittest
 
 from harness import LauncherTest
 
-CLAUDE = "/home/node/.claude"
+CLAUDE = "/home/sandbox/.claude"
 
 
 class HistoryTest(LauncherTest):
