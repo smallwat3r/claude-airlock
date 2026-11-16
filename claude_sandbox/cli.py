@@ -129,15 +129,15 @@ def main(argv: list[str]) -> int:
     watched = [host.project_dir] + [extra.path for extra in dirs]
     pending = Path(host.pending_checks_dir, name + ".json")
     report_unchecked_sessions(pending.parent)
-    before = host_exec_fingerprint(watched)
-    save_pending_check(pending, watched, before)
+    before = host_exec_fingerprint(watched, host.claude_dir)
+    save_pending_check(pending, watched, host.claude_dir, before)
     collect_ended_captures(host)
     # The capture first, a filtered session's address is its sidecar's
     # Nested, joining them in brackets takes Python 3.10
     with session_captured(settings, host, name, image.tag):  # noqa: SIM117
         with session_address_recorded(settings, host, name, capture or name):
             status = run_session(run_args, image, claude_args)
-    report_tampering(before, host_exec_fingerprint(watched))
+    report_tampering(before, host_exec_fingerprint(watched, host.claude_dir))
     pending.unlink(missing_ok=True)
     return status
 

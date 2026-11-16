@@ -1,16 +1,47 @@
-"""Noticing what a session left behind that can run commands on the host."""
+"""Noticing what a session left behind that can run commands on the host,
+or that Claude follows there."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from .docker import session_alive
 from .settings import private_dir
+
+# What Claude follows or starts in a project, on the host as in a session:
+# its settings, the servers it is told to run and its instructions. Relative
+# to the project, single files then whole directories.
+PROJECT_FILES = (
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".mcp.json",
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    ".claude/CLAUDE.md",
+)
+PROJECT_TREES = (
+    ".claude/hooks",
+    ".claude/commands",
+    ".claude/skills",
+    ".claude/agents",
+    ".claude/rules",
+)
+# The same of ~/.claude. Most of it is mounted read-only and cannot differ,
+# unless CLAUDE_DOCKER_RW_CONFIG=1 leaves it writable.
+CONFIG_FILES = ("settings.json", "CLAUDE.md")
+CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
+# The files whose commands are followed to the scripts they name
+COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
+# No more of a file than this is read. Which files are hashed is partly up
+# to the session, and one could be made as large as the disk.
+HASHED_BYTES = 64 * 1024 * 1024
 
 
 def sha256_hex(data: bytes) -> str:
@@ -35,35 +66,180 @@ def git_config_hash(file: str) -> str:
 
 
 def file_hash(path: str) -> str:
+    """Hash of a file, of a link where it points and what is there. Of a
+    file past HASHED_BYTES, its start and its size."""
+    digest = hashlib.sha256()
     try:
         if os.path.islink(path):
-            return sha256_hex(b"link:" + os.fsencode(os.readlink(path)))
-        return sha256_hex(Path(path).read_bytes())
+            digest.update(b"link:" + os.fsencode(os.readlink(path)) + b"\n")
+            if not os.path.isfile(path):
+                return digest.hexdigest()
+        with open(path, "rb") as file:
+            left = HASHED_BYTES
+            while left > 0 and (chunk := file.read(min(left, 1024 * 1024))):
+                digest.update(chunk)
+                left -= len(chunk)
+            if left == 0:
+                digest.update(b"size:%d" % os.fstat(file.fileno()).st_size)
     except OSError:
         return "unreadable"
+    return digest.hexdigest()
 
 
-def host_exec_fingerprint(directories: list[str]) -> dict[str, str]:
-    """Hashes, by path, of the files in the mounted directories that run
-    commands on the host once the session is over: git config and hooks, and
-    the project's Claude settings (hooks, statusline). They have to stay
-    writable for git and claude to work, so instead of locking them the
-    launcher compares this before and after a session (see
-    report_tampering)."""
-    fingerprint = {}
-    for directory in directories:
-        git_config = os.path.join(directory, ".git", "config")
-        if os.path.isfile(git_config):
-            fingerprint[git_config] = git_config_hash(git_config)
-        watched = [
-            os.path.join(directory, ".claude", "settings.json"),
-            os.path.join(directory, ".claude", "settings.local.json"),
+def tree_files(root: str) -> list[str]:
+    """Every file under a directory. A link to a directory is listed and not
+    entered, the root too: a session can point one at the whole disk, and
+    the link itself is what changed then."""
+    if os.path.islink(root):
+        return [root]
+    found = []
+    for directory, subdirs, files in os.walk(root):
+        links = [
+            name for name in subdirs if os.path.islink(os.path.join(directory, name))
         ]
-        for hooks_dir, _, files in os.walk(os.path.join(directory, ".git", "hooks")):
-            watched += [os.path.join(hooks_dir, name) for name in files]
-        for path in watched:
-            if os.path.isfile(path) or os.path.islink(path):
-                fingerprint[path] = file_hash(path)
+        found += [os.path.join(directory, name) for name in (*files, *links)]
+    return found
+
+
+def module_git_dirs(directory: str) -> Iterator[str]:
+    """The git directories of the submodules kept under a directory, and of
+    theirs. A submodule's name can hold slashes, so they sit at any depth."""
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if os.path.isfile(os.path.join(entry.path, "HEAD")):
+            yield entry.path
+            yield from module_git_dirs(os.path.join(entry.path, "modules"))
+        else:
+            yield from module_git_dirs(entry.path)
+
+
+def git_configs(git_dir: str) -> list[str]:
+    """The config files of a git directory: its own, and the ones a
+    worktree reads on top once extensions.worktreeConfig is set."""
+    configs = [os.path.join(git_dir, name) for name in ("config", "config.worktree")]
+    configs += map(str, sorted(Path(git_dir, "worktrees").glob("*/config.worktree")))
+    return [config for config in configs if os.path.isfile(config)]
+
+
+def moved_hooks_dir(directory: str) -> str | None:
+    """The directory core.hooksPath has git take its hooks from in place of
+    .git/hooks (husky and the like), when it is inside the project. One
+    outside is out of a session's reach, unless it is mounted too and then
+    it is the session's choice of what gets read here."""
+    try:
+        value = subprocess.run(
+            ["git", "config", "--file", os.path.join(directory, ".git", "config")]
+            + ["--type=path", "--get", "core.hooksPath"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            text=True,
+            errors="replace",
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    hooks = os.path.realpath(os.path.join(directory, value))
+    inside = hooks.startswith(os.path.realpath(directory) + os.sep)
+    return (
+        os.path.normpath(os.path.join(directory, value)) if value and inside else None
+    )
+
+
+def commands_in(value: object) -> Iterator[str]:
+    """Every "command" in a settings file, of a hook, a statusline or a
+    server, at whatever depth."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if key == "command" and isinstance(inner, str):
+                yield inner
+            else:
+                yield from commands_in(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from commands_in(inner)
+
+
+def named_files(settings_file: str, base: str) -> list[str]:
+    """The files the commands of a settings file name. A hook that runs a
+    script is changed by changing the script, with the settings as they
+    were. Found by taking each word of a command for a path, relative ones
+    from base, which catches the usual "path/to/script arguments" and
+    misses a path a shell would have to work out."""
+    try:
+        settings = json.loads(Path(settings_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    home = os.path.expanduser("~")
+    found = []
+    for command in commands_in(settings):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        for word in words:
+            for variable in ("${CLAUDE_PROJECT_DIR}", "$CLAUDE_PROJECT_DIR"):
+                word = word.replace(variable, base)
+            if word == "~" or word.startswith("~/"):
+                word = home + word[1:]
+            path = os.path.normpath(os.path.join(base, word))
+            if os.path.isfile(path):
+                found.append(path)
+    return found
+
+
+def claude_files(
+    root: str,
+    files: tuple[str, ...],
+    trees: tuple[str, ...],
+    command_files: tuple[str, ...],
+) -> list[str]:
+    """What is watched of a project or of ~/.claude for Claude's sake."""
+    watched = [os.path.join(root, name) for name in files]
+    for name in trees:
+        watched += tree_files(os.path.join(root, name))
+    for name in command_files:
+        watched += named_files(os.path.join(root, name), root)
+    return watched
+
+
+def host_exec_fingerprint(
+    directories: list[str], claude_dir: str = ""
+) -> dict[str, str]:
+    """Hashes, by path, of the files a session can write that run commands
+    on the host once it is over, or that Claude follows there. In each
+    mounted directory: the git config and hooks, of its submodules too,
+    Claude's settings and the scripts they name, and its instructions
+    (CLAUDE.md, skills, agents, commands, rules). In ~/.claude the same,
+    most of which is read-only in a session. They have to stay writable for
+    git and claude to work, so instead of locking them the launcher compares
+    this before and after a session (see report_tampering). Not seen: a
+    CLAUDE.md below the top of a project, and what a script goes on to
+    run."""
+    fingerprint = {}
+    watched = []
+    for directory in directories:
+        git_dir = os.path.join(directory, ".git")
+        modules = module_git_dirs(os.path.join(git_dir, "modules"))
+        for each in (git_dir, *modules):
+            for config in git_configs(each):
+                fingerprint[config] = git_config_hash(config)
+            watched += tree_files(os.path.join(each, "hooks"))
+        moved = moved_hooks_dir(directory)
+        if moved:
+            watched += tree_files(moved)
+        watched += claude_files(directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES)
+    if claude_dir:
+        watched += claude_files(
+            claude_dir, CONFIG_FILES, CONFIG_TREES, ("settings.json",)
+        )
+    for path in watched:
+        if os.path.isfile(path) or os.path.islink(path):
+            fingerprint[path] = file_hash(path)
     return fingerprint
 
 
@@ -84,12 +260,12 @@ def report_tampering(
         heading = (
             f"claude-docker: the session {unchecked} ended without its check. Since"
             " it started, by its doing or yours, these files that can run commands"
-            " on the host have changed:"
+            " on the host, or that Claude follows there, have changed:"
         )
     else:
         heading = (
             "claude-docker: this session changed files that can run commands"
-            " on the host:"
+            " on the host, or that Claude follows there:"
         )
     print(
         heading,
@@ -100,13 +276,20 @@ def report_tampering(
     )
 
 
-def save_pending_check(file: Path, watched: list[str], before: dict[str, str]) -> None:
+def save_pending_check(
+    file: Path, watched: list[str], claude_dir: str, before: dict[str, str]
+) -> None:
     """Keep a session's starting fingerprint on disk until its check has
     run. A launcher that dies with its terminal (a killed Emacs buffer, a
     closed window, a crash) never gets to compare, the next launch finds
     this file and does it instead (see report_unchecked_sessions)."""
     private_dir(str(file.parent))
-    pending = {"pid": os.getpid(), "watched": watched, "before": before}
+    pending = {
+        "pid": os.getpid(),
+        "watched": watched,
+        "claude_dir": claude_dir,
+        "before": before,
+    }
     file.write_text(json.dumps(pending), encoding="utf-8")
 
 
@@ -116,9 +299,11 @@ def report_unchecked_sessions(directory: Path) -> None:
     for file in sorted(directory.glob("*.json")):
         try:
             pending = json.loads(file.read_text(encoding="utf-8"))
-            pid, watched, before = (
+            pid, watched, claude_dir, before = (
                 int(pending["pid"]),
                 [str(watched_dir) for watched_dir in pending["watched"]],
+                # Not in a check saved by an earlier version
+                str(pending.get("claude_dir", "")),
                 {str(k): str(v) for k, v in pending["before"].items()},
             )
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -131,5 +316,6 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         if session_alive(pid, file.stem):
             continue
-        report_tampering(before, host_exec_fingerprint(watched), unchecked=file.stem)
+        after = host_exec_fingerprint(watched, claude_dir)
+        report_tampering(before, after, unchecked=file.stem)
         file.unlink(missing_ok=True)

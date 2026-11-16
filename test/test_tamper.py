@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The check for files a session changed that can run commands on the host,
-at the end of a session and for one that ended without it."""
+"""The check for files a session changed that can run commands on the host
+or that Claude follows there, at the end of a session and for one that ended
+without it."""
 
 from __future__ import annotations
 
@@ -31,6 +32,47 @@ class TamperingTest(LauncherTest):
     def test_new_project_claude_settings_are_reported(self):
         result = self.launch(session='mkdir .claude; echo "{}" > .claude/settings.json')
         self.assertIn(f"  {self.project}/.claude/settings.json\n", result.stderr)
+
+    def test_a_hook_where_git_was_told_to_look_is_reported(self):
+        (self.project / ".git" / "config").write_text("[core]\n\thooksPath = .husky\n")
+        (self.project / ".husky").mkdir()
+        result = self.launch(session="echo x > .husky/pre-commit")
+        self.assertIn(f"  {self.project}/.husky/pre-commit\n", result.stderr)
+
+    def test_a_submodule_hook_is_reported(self):
+        module = self.project / ".git" / "modules" / "libs" / "one"
+        (module / "hooks").mkdir(parents=True)
+        (module / "HEAD").write_text("ref: refs/heads/main\n")
+        result = self.launch(session="echo x > .git/modules/libs/one/hooks/post-merge")
+        self.assertIn(f"  {module}/hooks/post-merge\n", result.stderr)
+
+    def test_a_script_the_settings_name_is_reported(self):
+        (self.project / ".claude").mkdir()
+        (self.project / "tools").mkdir()
+        (self.project / "tools" / "format.sh").write_text("true\n")
+        hook = {"type": "command", "command": "$CLAUDE_PROJECT_DIR/tools/format.sh -q"}
+        settings = {"hooks": {"PostToolUse": [{"hooks": [hook]}]}}
+        (self.project / ".claude" / "settings.json").write_text(json.dumps(settings))
+        result = self.launch(session="echo evil >> tools/format.sh")
+        self.assertIn(f"  {self.project}/tools/format.sh\n", result.stderr)
+        self.assertNotIn("settings.json", result.stderr)
+
+    def test_changed_instructions_are_reported(self):
+        result = self.launch(
+            session="echo x > CLAUDE.md; mkdir -p .claude/skills/s;"
+            ' echo x > .claude/skills/s/SKILL.md; echo x > "$HOME/.claude/CLAUDE.md"'
+        )
+        for path in (
+            self.project / "CLAUDE.md",
+            self.project / ".claude" / "skills" / "s" / "SKILL.md",
+            self.home / ".claude" / "CLAUDE.md",
+        ):
+            self.assertIn(f"  {path}\n", result.stderr)
+
+    def test_a_link_to_a_directory_is_reported_and_not_followed(self):
+        result = self.launch(session="mkdir .claude; ln -s / .claude/skills")
+        self.assertIn(f"  {self.project}/.claude/skills\n", result.stderr)
+        self.assertNotIn("/etc/", result.stderr)
 
     def test_branch_tracking_is_not_reported(self):
         result = self.launch(

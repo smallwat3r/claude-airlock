@@ -253,8 +253,15 @@ that ended without it (a killed Emacs buffer) is collected by the next
   `docker volume ls --filter name=claude-cache-` and remove what you no
   longer need. `CLAUDE_DOCKER_CACHE=0` goes back to a 2g tmpfs.
 - When a session ends, warns if it changed files that run commands on the
-  host: `.git/config` (branch tracking aside), git hooks, and the
-  project's `.claude/settings.json`. They have to stay writable for git and
+  host, or that Claude follows there. In the project and every extra
+  directory: `.git/config` (branch tracking aside) and git hooks, of
+  submodules too and where `core.hooksPath` moved them (husky and the
+  like), Claude's `.claude/settings.json`, `settings.local.json` and
+  `.mcp.json` with the scripts their commands name, and its instructions,
+  `CLAUDE.md` and the `hooks`, `commands`, `skills`, `agents` and `rules`
+  of `.claude`. In `~/.claude` the same, where it matters for what is not
+  mounted read-only: `commands`, `rules`, and a script `settings.json`
+  names outside `hooks`. They have to stay writable for git and
   claude to work, so they are checked rather than locked. The warning is
   printed when the launcher returns, so end a session with `/exit` or
   Ctrl-D to see it there. A session that ends without it, because its Emacs
@@ -308,8 +315,11 @@ read-write project safe to trust blindly afterwards:
 - Anything in the project can be changed, including files that run code on
   the host later: `.git/config` (`core.fsmonitor`, `core.hooksPath`), git
   hooks, `.claude/settings.json`, Makefiles and scripts. The launcher warns
-  about the first three when a session ends, the rest is for you to review
-  in the diff before running things outside the sandbox.
+  about git's and Claude's own when a session ends (see above), the rest is
+  for you to review in the diff before running things outside the sandbox:
+  build files, package scripts, the configuration of a hook manager such
+  as pre-commit, a `CLAUDE.md` below the top of the project, and a
+  repository planted in a subdirectory.
 - `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
   plugin's hook scripts are not protected the way `settings.json` is.
 - The egress allowlist includes GitHub, so with a forwarded SSH agent or a
