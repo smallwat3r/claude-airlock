@@ -8,6 +8,17 @@ from editors that can launch a custom `claude` program.
 and a process sidecar that share one network namespace, the egress proxy,
 the Docker socket proxy and the SSH agent are opt-in](docs/architecture.excalidraw.png)
 
+Contents:
+
+- [Requirements](#requirements), [Install](#install) and [Usage](#usage),
+  with the [settings](#settings)
+- [What the sandbox does](#what-the-sandbox-does) and its
+  [known limits](#known-limits)
+- [Reviewing a session](#reviewing-a-session) with `--trace`
+- [The image](#the-image) and its features
+- [Tests](#tests), [Statusline](#statusline) and
+  [Editor integration](#editor-integration)
+
 ## Requirements
 
 - Docker (Linux, or Docker Desktop on macOS)
@@ -33,16 +44,32 @@ ln -s ~/code/claude-sandbox/bin/claude-docker ~/.local/bin/claude-docker
 ```
 cd ~/code/my-project
 claude-docker                       # builds the image on first use
+claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
+```
+
+Any other argument is forwarded to `claude`. Since the container is the
+sandbox, it is common to run with `--dangerously-skip-permissions`.
+
+The launcher's own options, `claude-docker --help` lists them with the
+settings:
+
+```
+# What a session gets
 claude-docker --add-dir ~/code/api  # mount a second project read-write
 claude-docker --add-dir-ro ~/code/lib   # mount reference code read-only
 claude-docker --worktree feature-x  # second session on its own git worktree
+claude-docker --shell               # bash in the same sandbox, to look around
+
+# The image, see "The image"
 claude-docker --rebuild             # clean image rebuild, then exit
 claude-docker --prune               # delete all sandbox images but the current one
 claude-docker --dockerfile          # print the generated Dockerfile, then exit
-claude-docker --shell               # bash in the same sandbox, to look around
+
+# The egress filter, see "The opt-in doors"
 claude-docker --net-log             # domains the egress filter denied
 claude-docker --net-reload          # restart the egress filter
-claude-docker --help                # the launcher's options and settings
+
+# What a session did, see "Reviewing a session"
 claude-docker --trace               # what the latest session here did
 claude-docker --trace list          # this project's sessions, latest first
 claude-docker --trace 3fa9 --verbose > trace.txt   # one session, in detail
@@ -50,14 +77,12 @@ claude-docker --trace --json | jq 'select(.what == "net")'   # as JSON Lines
 claude-docker --trace --only bash,net   # just the commands and the network
 claude-docker --trace --failed      # just what went wrong
 claude-docker --trace --follow      # what the sessions here do, as they do it
-claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
 
-Any other argument is forwarded to `claude`. Since the container is the
-sandbox, it is common to run with `--dangerously-skip-permissions`.
+### Settings
 
-The settings. The on and off switches are shown at their default, the
-others with an example value:
+All optional, set in the environment. The on and off switches are shown at
+their default, the others with an example value:
 
 - `CLAUDE_DOCKER_EXTRA_DIRS=a:b` (default: none)
 
@@ -139,6 +164,8 @@ The on and off switches take `1` for on and `0` for off
 (`CLAUDE_DOCKER_SOCKET` also `full`). Any other value, such as `true`, stops the launcher instead of
 quietly leaving a restriction off.
 
+### The config file
+
 To change a default for every session, put the same variables in
 `~/.config/claude-sandbox/config`, one per line. The environment still wins,
 so a single session can override the file:
@@ -192,6 +219,7 @@ or none when set empty.
   - The volumes have no size cap, `docker volume ls --filter
     name=claude-cache-` lists them.
   - `CLAUDE_DOCKER_CACHE=0` goes back to a 2g tmpfs.
+- Claude Code's own state directory, `~/.local/state/claude`, read-write.
 - The git config, read-only, with the files it pulls in through `include`
   and `includeIf`. There is no gpg in the image, so commit signing is off
   inside the container: sign the commits on the host before pushing.
@@ -236,7 +264,7 @@ or none when set empty.
 - Runs as your user, with a read-only root filesystem, all capabilities
   dropped, `no-new-privileges`, and PID and memory limits.
 - Writable space is the mounts, the cache volume and a few size-capped
-  tmpfs (`/tmp`, `~/.npm`).
+  tmpfs (`/tmp`, `~/.npm`, `~/.config`).
 - Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`
   runs the session under gVisor if you have it.
 
@@ -673,6 +701,7 @@ All of it under `~/.local/state/claude-sandbox`, but for the proxy's log:
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
 | `destinations.json` | What each project is known to reach | 2000 destinations per project |
 | `names`, `proxies`, `sidecars.lock` | Not records: what the running launchers hold a lock on, so that two do not take the same container name, start the same proxy at once or remove one another still uses | Empty files |
+| `agents`, `pending-checks`, `login-synced` | Not records: the sockets in front of the SSH agent, where each running session started from for the check when it ends, and the login the host and the sandbox last had in common | A few small files |
 | `history` | Not a record: what the sessions of each project remember, see [What is read-only or hidden](#what-is-read-only-or-hidden). The one part mounted into a session | As much as Claude Code writes |
 
 - `docker volume rm claude-egress-log` (with the proxy removed) clears the
@@ -803,7 +832,7 @@ What the comment lines of a fragment say:
 
 | Line | Says |
 | --- | --- |
-| `# claude-feat: NAME` | The name of the feature |
+| `# claude-feat: NAME` | The feature, for whoever reads the fragment. Its name is that of the file |
 | `# claude-feat-md: ...` | What it adds. Baked into the image as system-level memory, so Claude always knows exactly what is installed |
 | `# claude-feat-requires: other` | A feature it needs, selecting the first then builds both |
 | `# claude-feat-lsp: ...` | A language server it installs, as the `lspServers` of a Claude Code plugin (see `docker/features/go.Dockerfile`) |
@@ -850,8 +879,9 @@ docker/update-pins.py
 without needing Docker: what gets mounted, shadowed and switched off by
 default, the tamper check, the network capture, the records the launcher
 keeps of a session and `--trace`. It runs the
-launcher against a fake `docker` that records every call. CI runs it
-together with ruff, shellcheck and a small image build.
+launcher against a fake `docker` that records every call. CI runs it on
+Python 3.9 and the latest, together with ruff, mypy, shellcheck and a small
+image build.
 
 The checks are in `test/test_*.py`, by topic, with what they share in
 `test/harness.py`. They need nothing but Python: `test/launcher_test.py`
