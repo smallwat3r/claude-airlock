@@ -37,11 +37,12 @@ from pathlib import Path
 from typing import Any
 
 from .capture import cut_short
-from .doors import door_events
+from .door_events import door_events
+from .egress_log import ProxyRequest, logged_requests, made_by
 from .events import Event, Who, clean, flat
-from .network import ProxyRequest, logged_requests, made_by
 from .pcap import Capture, Connection, Flow, Lookup, Request, read_capture
 from .processes import ProcessRecord, read_record, shown_lineage
+from .projects import project_root
 from .recorder import compare
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
@@ -50,7 +51,6 @@ from .transcript import (
     FILE_TOOLS,
     call_label,
     entry_times,
-    project_root,
     prompts,
     read_entries,
     session_files,

@@ -28,14 +28,16 @@ from collections import Counter
 from pathlib import Path
 
 from .capture import cut_short
-from .doors import door_events
+from .door_events import door_events
+from .egress_log import logged_requests, made_by
 from .events import flat
-from .network import logged_requests, made_by
+from .files import json_object, private_dir
 from .pcap import Capture, read_capture
 from .processes import read_record
+from .projects import project_root, transcript_files
 from .recorder import compare
 from .records import NetSession, recorded_sessions
-from .settings import EGRESS_PORT, Fatal, Host, private_dir
+from .settings import EGRESS_PORT, Fatal, Host
 from .shown import reached, size
 from .transcript import (
     FILE_TOOLS,
@@ -43,10 +45,8 @@ from .transcript import (
     file_path,
     modified,
     outside,
-    project_root,
     read_entries,
     tool_calls,
-    transcript_files,
 )
 
 # To one destination in one session, from this many bytes on it is said
@@ -125,12 +125,7 @@ def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
     descriptor = os.open(host.destinations_file, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(descriptor, "r+", encoding="utf-8", errors="replace") as record:
         fcntl.flock(record, fcntl.LOCK_EX)
-        try:
-            projects = json.loads(record.read() or "{}")
-        except (ValueError, RecursionError):
-            projects = {}
-        if not isinstance(projects, dict):
-            projects = {}
+        projects = json_object(record.read()) or {}
         recorded = projects.get(host.project_dir)
         first = not isinstance(recorded, dict)
         known: dict[str, object] = dict(recorded) if isinstance(recorded, dict) else {}

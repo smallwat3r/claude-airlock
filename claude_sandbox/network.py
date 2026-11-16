@@ -1,6 +1,8 @@
 """The session's network and the two sidecars: the egress filter and the
 Docker socket proxy.
 
+What the egress filter logged is read by egress_log.py.
+
 The networks and the proxies are shared by every session, of every project,
 so what is done to them is done by one launcher at a time (see
 sidecars_locked). A proxy is started by the first session that needs it and
@@ -9,27 +11,21 @@ host's Docker socket, which is not left open for no one."""
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import ipaddress
 import os
 import stat
-import subprocess
 import sys
 import threading
 import time
-from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from .background import in_background
 from .docker import (
     container_label,
-    docker,
-    docker_bytes,
     docker_must,
     docker_ok,
     docker_output,
@@ -37,6 +33,7 @@ from .docker import (
     mount_arg,
     running_containers,
 )
+from .files import lock_file, private_dir, try_lock_file
 from .records import NetSession, record_net_session
 from .settings import (
     DOCKERFILE_DIR,
@@ -44,7 +41,6 @@ from .settings import (
     Fatal,
     Host,
     Settings,
-    private_dir,
 )
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
@@ -310,35 +306,6 @@ def egress_proxy_current() -> bool:
     return sidecar_current(EGRESS_PROXY, egress_config_hash())
 
 
-def access_log(stderr: int | None = None) -> str | None:
-    """The egress proxy's log, the rotated file then the current one, None
-    when it cannot be read. Read through the proxy's container, the volume
-    it is in is not reachable from the host otherwise, and when the proxy
-    is not running (no filtered session is) through one made for it."""
-    current = f"{EGRESS_LOG_DIR}/access.log"
-    read = ("sh", "-c", f"cat {current}.0 2>/dev/null; cat {current}")
-    log = docker(
-        "exec", EGRESS_PROXY, *read, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    if log.returncode == 0:
-        return log.stdout
-    # Not asked of a volume that is not there, docker would make it
-    if not docker_ok("volume", "inspect", EGRESS_LOG_VOLUME):
-        return None
-    log = docker(
-        "run",
-        "--rm",
-        "--network=none",
-        f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}:ro",
-        f"--entrypoint={read[0]}",
-        SQUID_IMAGE,
-        *read[1:],
-        stdout=subprocess.PIPE,
-        stderr=stderr,
-    )
-    return log.stdout if log.returncode == 0 else None
-
-
 def rotate_access_log() -> None:
     """Rotate the proxy's log out once it is over the limit. Best effort,
     a session is not held up over its proxy's housekeeping."""
@@ -389,115 +356,6 @@ def session_address_recorded(
         yield
 
 
-@dataclass(frozen=True)
-class ProxyRequest:
-    """A line of the egress proxy's log."""
-
-    ended: float
-    seconds: float
-    # Of the container that asked
-    address: str
-    denied: bool
-    method: str
-    url: str
-    size: int
-
-    @property
-    def began(self) -> float:
-        return self.ended - self.seconds
-
-    @property
-    def port(self) -> int:
-        """The port asked for, the usual one of the scheme when the URL
-        names none, 0 for a URL that cannot be read."""
-        try:
-            # CONNECT names host:port, the other methods a whole URL
-            target = urlsplit(self.url if "://" in self.url else "//" + self.url)
-            return target.port or (443 if target.scheme == "https" else 80)
-        except ValueError:
-            return 0
-
-
-def parse_proxy_request(line: str) -> ProxyRequest | None:
-    """A line of squid's native log format, none for anything else."""
-    try:
-        ended, milliseconds, address, result, sent, method, url = line.split()[:7]
-        return ProxyRequest(
-            float(ended),
-            float(milliseconds) / 1000,
-            address,
-            "DENIED" in result,
-            method,
-            url,
-            int(sent),
-        )
-    except ValueError:
-        return None
-
-
-def made_by(
-    request: ProxyRequest, session: NetSession, start: float, end: float
-) -> bool:
-    """Whether a session made a request between start and end: it came
-    from the session's address and was open at some point of that time.
-    The proxy logs a tunnel when it closes, which can be much later."""
-    return (
-        session.ip == request.address
-        and request.ended >= max(start, session.start)
-        and request.began <= min(end, session.until)
-    )
-
-
-def logged_requests(stderr: int | None = None) -> list[ProxyRequest] | None:
-    """Every request in the egress proxy's log, None when the log cannot
-    be read."""
-    log = access_log(stderr)
-    if log is None:
-        return None
-    return [r for r in map(parse_proxy_request, log.splitlines()) if r]
-
-
-def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
-    """The requests the egress proxy logged past the first offset bytes of
-    its current log file, and the offset to ask with next time. Without an
-    offset none, just where the log ends now. A log that was rotated since
-    is read from its start. None when the log cannot be read."""
-    file = f"{EGRESS_LOG_DIR}/access.log"
-    script = (
-        'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
-        ' [ "$size" -lt "$from" ] && from=0;'
-        ' echo "$from"; tail -c +"$((from + 1))" "$1"'
-    )
-    asked = [] if offset is None else [str(offset)]
-    said = docker_bytes("exec", EGRESS_PROXY, "sh", "-c", script, "sh", file, *asked)
-    if said is None:
-        return None
-    first, _, log = said.partition(b"\n")
-    try:
-        start = int(first)
-    except ValueError:
-        return None
-    # A line still being written is left for the next time
-    whole = log[: log.rfind(b"\n") + 1]
-    lines = whole.decode("utf-8", "replace").splitlines()
-    return start + len(whole), [r for r in map(parse_proxy_request, lines) if r]
-
-
-def net_log() -> int:
-    """Print the domains the egress filter refused, most frequent first. The
-    quickest way to find what a project needs added to allowed-domains.txt."""
-    requests = logged_requests(stderr=subprocess.DEVNULL)
-    if requests is None:
-        raise Fatal(
-            "the egress filter has no log yet "
-            "(start a CLAUDE_DOCKER_NET_FILTER=1 session first)"
-        )
-    denied = Counter(request.url for request in requests if request.denied)
-    for url, count in sorted(denied.items(), key=lambda item: (-item[1], item[0])):
-        print(f"{count:7d} {url}")
-    return 0
-
-
 def namespace_args(settings: Settings) -> list[str]:
     """What sets up a session's network namespace, given to the container
     that owns it: the session, or its capture sidecar (see capture.py)."""
@@ -541,15 +399,11 @@ def sidecars_locked(host: Host) -> Iterator[None]:
     proxies, which the sessions of every project share: two that start
     together would each remove and start the same proxy, and one of them
     fail."""
-    private_dir(host.state_dir)
-    descriptor = os.open(
-        os.path.join(host.state_dir, "sidecars.lock"), os.O_RDWR | os.O_CREAT, 0o600
-    )
+    lock = lock_file(os.path.join(private_dir(host.state_dir), "sidecars.lock"))
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
-        os.close(descriptor)
+        os.close(lock)
 
 
 def session_proxies(settings: Settings) -> list[str]:
@@ -560,12 +414,12 @@ def session_proxies(settings: Settings) -> list[str]:
     return proxies
 
 
-def proxy_use_file(host: Host, proxy: str) -> int:
+def proxy_use_file(host: Host, proxy: str) -> str:
     """The file a launcher holds a lock on for as long as a session of its
-    uses a proxy, opened. The lock is let go of with the launcher, however
-    it ends."""
+    uses a proxy, shared with the launchers of the other sessions that
+    do."""
     directory = private_dir(os.path.join(host.state_dir, "proxies"))
-    return os.open(os.path.join(directory, proxy), os.O_RDWR | os.O_CREAT, 0o600)
+    return os.path.join(directory, proxy)
 
 
 def proxy_in_use(host: Host, proxy: str) -> bool:
@@ -573,13 +427,10 @@ def proxy_in_use(host: Host, proxy: str) -> bool:
     one, whose container is not there yet, or has one running), or a
     session is on one of the proxy's networks, which one that outlived
     its launcher still is."""
-    descriptor = proxy_use_file(host, proxy)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    alone = try_lock_file(proxy_use_file(host, proxy))
+    if alone is None:
         return True
-    finally:
-        os.close(descriptor)
+    os.close(alone)
     states = (network_state(network) for network in PROXY_NETWORKS[proxy])
     return any(state.sessions for state in states if state)
 
@@ -601,9 +452,10 @@ def session_network(settings: Settings, host: Host) -> Iterator[None]:
     with sidecars_locked(host):
         prepare_network(settings)
         start_socket_proxy(settings)
-        uses = [proxy_use_file(host, proxy) for proxy in session_proxies(settings)]
-        for use in uses:
-            fcntl.flock(use, fcntl.LOCK_SH)
+        uses = [
+            lock_file(proxy_use_file(host, proxy), shared=True)
+            for proxy in session_proxies(settings)
+        ]
     try:
         yield
     finally:

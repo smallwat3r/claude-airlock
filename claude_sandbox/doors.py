@@ -17,7 +17,8 @@ from. While a session runs, the launcher reads that log and notes the
 calls of the session's address.
 
 Both go to one file of the launcher's state directory, a line per use,
-which names the project and the session."""
+which names the project and the session. How a use is shown is in
+door_events.py."""
 
 from __future__ import annotations
 
@@ -31,16 +32,15 @@ import subprocess
 import sys
 import threading
 import time
-from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 
 from .docker import env_arg, mount_arg
-from .events import Event, Who, clean
+from .files import json_object, private_dir
 from .network import session_address, socket_proxy_name, socket_proxy_options
 from .reader import Cursor, NotThis
 from .records import append_kept
-from .settings import Host, Settings, private_dir
+from .settings import Host, Settings
 
 # The lines kept, the oldest go once there are more
 KEPT_USES = 5000
@@ -105,10 +105,10 @@ def read_uses(
     try:
         with open(host.doors_file, encoding="utf-8", errors="replace") as record:
             for line in record:
+                said = json_object(line) or {}
                 try:
-                    said = json.loads(line)
                     when = float(said["t"])
-                except (ValueError, KeyError, TypeError, RecursionError):
+                except (ValueError, KeyError, TypeError):
                     continue
                 if (
                     said.get("project") == host.project_dir
@@ -450,74 +450,3 @@ def socket_proxy_watched(
         yield
     finally:
         watch.close()
-
-
-def use_event(said: dict) -> Event | None:
-    """A use of a door as an event, none for a line that is not one. The
-    record is the launcher's own, what it holds was still chosen by a
-    session: it is cleaned like the rest."""
-    when, door = float(said["t"]), said.get("door")
-    refused = bool(said.get("refused"))
-    if door == "ssh-agent":
-        did = said.get("did")
-        if did == "sign":
-            comment = f" ({said['comment']})" if said.get("comment") else ""
-            detail = f"signed {said.get('what', 'something')} with {said.get('key')}{comment}"
-            if refused:
-                detail = "asked for " + detail[len("signed ") :]
-        elif did == "list":
-            detail = f"listed the keys, {said.get('keys', 0)} of them"
-        else:
-            detail = str(said.get("what", "sent a request"))
-        fields = {
-            key: said[key]
-            for key in ("did", "key", "comment", "what", "keys")
-            if key in said
-        }
-        if refused:
-            by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
-            detail += f"  REFUSED by the {by}"
-            fields["error"] = f"refused by the {by}"
-        return Event(when, Who.SANDBOX, "ssh-agent", [clean(detail)], fields)
-    if door == "docker":
-        status = said.get("status")
-        denied = status == 403
-        detail = f"{said.get('method')} {said.get('path')} {status}"
-        fields = {
-            "method": said.get("method"),
-            "path": said.get("path"),
-            "status": status,
-            "denied": denied,
-        }
-        if denied:
-            detail += "  DENIED"
-        return Event(when, Who.SANDBOX, "docker", [clean(detail)], fields)
-    return None
-
-
-def door_events(
-    host: Host, start: float, end: float, session: str | None = None
-) -> tuple[list[str], list[Event]]:
-    """What this project's sessions did through the doors between two
-    times, as summary lines and as events. Of one session when it is
-    named: a transcript does not say which container wrote it, the
-    launcher of a session knows."""
-    uses = read_uses(host, start, end, session)
-    events = [event for event in map(use_event, uses) if event]
-    by_door = Counter(event.what for event in events)
-    lines = []
-    if by_door["ssh-agent"]:
-        signed = sum(
-            event.fields.get("did") == "sign" and "error" not in event.fields
-            for event in events
-        )
-        lines.append(
-            f"ssh agent   {by_door['ssh-agent']} requests, {signed} signatures"
-        )
-    if by_door["docker"]:
-        denied = sum(bool(event.fields.get("denied")) for event in events)
-        lines.append(
-            f"docker      {by_door['docker']} calls"
-            + (f", {denied} DENIED" if denied else "")
-        )
-    return lines, events

@@ -17,7 +17,7 @@ from unittest import mock
 
 from harness import LauncherTest, follow, network, prompts_at, settings
 
-from claude_sandbox import doors
+from claude_sandbox import door_events, doors
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (
@@ -149,7 +149,7 @@ class AgentDoorTest(LauncherTest):
         self.assertEqual(answers, [b"\x05"])
         (asked,) = self.uses()
         self.assertEqual((asked["what"], asked["refused"]), ("a signature", True))
-        event = doors.use_event(asked)
+        event = door_events.use_event(asked)
         self.assertIn("REFUSED by the agent", event.details[0])
         self.assertTrue(event.fields["error"])
 
@@ -189,7 +189,7 @@ class AgentDoorTest(LauncherTest):
         )
         # The extension ssh signs with is passed on and not noted
         self.assertEqual([use["did"] for use in uses[5:]], ["list"])
-        event = doors.use_event(uses[0])
+        event = door_events.use_event(uses[0])
         self.assertIn("REFUSED by the launcher", event.details[0])
         self.assertEqual(event.fields["error"], "refused by the launcher")
 

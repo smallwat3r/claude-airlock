@@ -33,10 +33,13 @@ from pathlib import Path
 
 from .capture import CaptureSidecar, captured_since, cut_short, running_captures
 from .docker import running_containers
-from .doors import read_uses, use_event
+from .door_events import use_event
+from .doors import read_uses
+from .egress_log import logged_since
 from .events import Event, clean, flat
-from .network import logged_since
+from .files import json_object, open_plain
 from .pcap import Capture, PcapReader, take_frames
+from .projects import project_root, transcript_files
 from .records import recorded_sessions
 from .settings import Fatal, Host
 from .trace import (
@@ -53,13 +56,9 @@ from .trace import (
 )
 from .transcript import (
     Walk,
-    open_transcript,
-    parse_entry,
-    project_root,
     read_entries,
     session_files,
     title,
-    transcript_files,
 )
 
 # Seconds between two looks at what is followed
@@ -104,15 +103,15 @@ class TranscriptTail:
         """The events of what was written since the last time."""
         events: list[Event] = []
         for line in self._new_lines():
-            entry = parse_entry(line)
+            entry = json_object(line)
             if entry:
                 events += self._events(entry)
         return events
 
     def _new_lines(self) -> Iterator[bytes]:
         """The lines completed since the last time, none while it is not
-        a plain file that can be read (see open_transcript)."""
-        file = open_transcript(self.path)
+        a plain file that can be read (see open_plain)."""
+        file = open_plain(self.path)
         if file is None:
             return
         with file:
