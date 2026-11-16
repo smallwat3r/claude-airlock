@@ -346,6 +346,7 @@ directory of the same name holding files the fragment copies in:
 | `go` | Go, gopls |
 | `kicad` | KiCad 9 with `kicad-cli` |
 | `loadtest` | wrk, hey, for HTTP load testing |
+| `excalidraw` | `excalidraw-export`, renders an [Excalidraw](https://excalidraw.com) scene to PNG or SVG offline, and takes the scene back out of one. Brings in `playwright` for its headless Chromium |
 | `media` | ffmpeg, ImageMagick, webp |
 | `playwright` | Playwright (Python) with headless Chromium |
 | `python` | mypy, ruff, black, pytest, ipython, pyright (Python 3 and uv are already in the base) |

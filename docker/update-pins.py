@@ -197,6 +197,16 @@ def pin_pyright(pins: Pins) -> None:
     print("pyright", version)
 
 
+def pin_excalidraw(pins: Pins) -> None:
+    for name, package in (
+        ("EXCALIDRAW_VERSION", "@excalidraw/excalidraw"),
+        ("EXCALIDRAW_ESBUILD_VERSION", "esbuild"),
+    ):
+        version = npm_latest(package)
+        pins.set_arg(name, version)
+        print(package, version)
+
+
 def pin_gopls(pins: Pins) -> None:
     latest = fetch_json("https://proxy.golang.org/golang.org/x/tools/gopls/@latest")
     pins.set_arg("GOPLS_VERSION", latest["Version"])
@@ -234,6 +244,7 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"astral-sh/uv:[0-9.]+", pin_uv),
     (r"(?m)^ARG CLAUDE_CODE_VERSION=", pin_claude_code),
     (r"(?m)^ARG PYRIGHT_VERSION=", pin_pyright),
+    (r"(?m)^ARG EXCALIDRAW_VERSION=", pin_excalidraw),
     (r"(?m)^ARG GOPLS_VERSION=", pin_gopls),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),

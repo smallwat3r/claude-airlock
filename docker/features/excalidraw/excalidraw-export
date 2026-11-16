@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Render an Excalidraw scene to a PNG or an SVG that holds the scene.
+
+usage: excalidraw-export SCENE OUTPUT [--scale N]
+
+SCENE is an .excalidraw file, a list of element skeletons as Excalidraw's
+convertToExcalidrawElements takes them (both JSON), or a PNG or SVG that
+was exported with its scene inside. OUTPUT ends in .png or .svg for a
+picture, in .excalidraw or .json for the scene alone, which is how the
+scene of a picture is taken out to be edited.
+
+The same scene always gives the same file. Nothing is fetched from the
+network: the page, the bundle and the fonts are served from
+/opt/excalidraw and every other request is refused."""
+
+import argparse
+import base64
+import json
+import re
+import sys
+from pathlib import Path
+
+from playwright.sync_api import Error, Route, sync_playwright
+
+ASSETS = Path("/opt/excalidraw")
+# A name that resolves nowhere, the page only exists in the routes below
+ORIGIN = "http://excalidraw.invalid"
+PAGE = """<!doctype html><meta charset="utf-8">
+<script>window.EXCALIDRAW_ASSET_PATH = "/";</script>
+<script src="/excalidraw.js"></script>"""
+PNG_MAGIC = b"\x89PNG"
+PICTURES = {"png": "image/png", "svg": "image/svg+xml"}
+SCENES = ("excalidraw", "json")
+# Excalidraw draws each shape's wobble from a random seed and gives every
+# element a random id and the time it was made. Run before the bundle, this
+# makes all three the same on every run, so a scene that did not change
+# gives the file it gave before, and git has nothing to show.
+REPEATABLE = """(() => {
+  let state = 0x2545f491;
+  const next = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 2 ** 32;
+  };
+  Math.random = next;
+  Date.now = () => 1700000000000;
+  crypto.getRandomValues = (array) => {
+    for (let index = 0; index < array.length; index++) {
+      array[index] = Math.floor(next() * 256);
+    }
+    return array;
+  };
+})()"""
+EXPORT = """async ({source, format, scale}) => {
+  let scene;
+  if (source.picture) {
+    const bytes = Uint8Array.from(atob(source.picture), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], {type: source.type});
+    scene = await Excalidraw.loadFromBlob(blob, null, null);
+  } else if (Array.isArray(source.scene)) {
+    scene = {elements: Excalidraw.convertToExcalidrawElements(source.scene)};
+  } else {
+    scene = source.scene;
+  }
+  const appState = {viewBackgroundColor: "#ffffff", ...scene.appState};
+  const files = scene.files || {};
+  if (format === "scene") {
+    return Excalidraw.serializeAsJSON(scene.elements, appState, files, "local");
+  }
+  const options = {
+    elements: scene.elements,
+    files,
+    exportPadding: 24,
+    appState: {...appState, exportBackground: true, exportEmbedScene: true},
+  };
+  if (format === "svg") {
+    return (await Excalidraw.exportToSvg(options)).outerHTML;
+  }
+  const blob = await Excalidraw.exportToBlob({
+    ...options,
+    mimeType: "image/png",
+    getDimensions: (width, height) => (
+      {width: width * scale, height: height * scale, scale}
+    ),
+  });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""));
+}"""
+
+
+def read_source(path: Path) -> dict:
+    """What the page is given: a scene as JSON, or a picture holding one.
+    Told apart by content, a name such as x.excalidraw.png says little.
+    Raises OSError or ValueError when the file is none of them."""
+    data = path.read_bytes()
+    if data.startswith(PNG_MAGIC):
+        kind = PICTURES["png"]
+    elif data.lstrip().startswith(b"<"):
+        kind = PICTURES["svg"]
+    else:
+        scene = json.loads(data)
+        is_scene = isinstance(scene, dict) and "elements" in scene
+        if not (isinstance(scene, list) or is_scene):
+            raise ValueError("neither a list of elements nor an object with elements")
+        return {"scene": scene}
+    return {"picture": base64.b64encode(data).decode(), "type": kind}
+
+
+def serve(route: Route) -> None:
+    """Answer a request of the page from the assets, refuse anything else."""
+    path = route.request.url.removeprefix(ORIGIN).split("?")[0]
+    if not route.request.url.startswith(ORIGIN + "/"):
+        route.abort()
+    elif path == "/":
+        route.fulfill(body=PAGE, content_type="text/html")
+    else:
+        file = (ASSETS / path.lstrip("/")).resolve()
+        if file.is_relative_to(ASSETS) and file.is_file():
+            route.fulfill(path=str(file))
+        else:
+            route.abort()
+
+
+def render(source: dict, output_format: str, scale: float) -> bytes:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.add_init_script(REPEATABLE)
+            page.route("**/*", serve)
+            page.goto(ORIGIN + "/")
+
+            def export(as_format: str) -> str:
+                options = {"source": source, "format": as_format, "scale": scale}
+                return page.evaluate(EXPORT, options)
+
+            # Text is measured and drawn with the fonts the page has loaded,
+            # and it has none yet. A first export as SVG carries the fonts
+            # the scene uses, registering those makes the second one right.
+            # The page starts over in between, so that the second export
+            # draws the same random numbers whatever the first one used.
+            fonts = re.findall(r"@font-face\s*{[^}]*}", export("svg"))
+            page.reload()
+            page.add_style_tag(content="\n".join(fonts))
+            page.evaluate(
+                "Promise.all(Array.from(document.fonts, (font) => font.load()))"
+            )
+            result = export(output_format)
+        finally:
+            browser.close()
+    if output_format == "png":
+        return base64.b64decode(result)
+    return (result.rstrip("\n") + "\n").encode()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("scene", type=Path, help="JSON, or a PNG or SVG holding one")
+    parser.add_argument("output", type=Path, help=".png, .svg, .excalidraw or .json")
+    parser.add_argument("--scale", type=float, default=2, help="of a PNG, default 2")
+    args = parser.parse_args()
+    suffix = args.output.suffix.lstrip(".").lower()
+    if suffix not in (*PICTURES, *SCENES):
+        parser.error("the output must end in .png, .svg, .excalidraw or .json")
+    if not 0 < args.scale <= 8:
+        parser.error("the scale must be above 0 and at most 8")
+    try:
+        source = read_source(args.scene)
+    except (OSError, ValueError) as error:
+        print(f"excalidraw-export: {args.scene}: {error}", file=sys.stderr)
+        return 1
+    output_format = suffix if suffix in PICTURES else "scene"
+    try:
+        args.output.write_bytes(render(source, output_format, args.scale))
+    except (Error, OSError) as error:
+        # Of an error from the page, the line that says what, not the stack
+        print(f"excalidraw-export: {str(error).splitlines()[0]}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
