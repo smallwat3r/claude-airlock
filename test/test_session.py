@@ -176,7 +176,9 @@ class SocketProxyTest(LauncherTest):
             self.addCleanup(patch.stop)
 
     def sidecar_for(self, mode: str) -> tuple[list[str], list[str]]:
-        args = network.socket_proxy_args(settings.Settings(socket=mode))
+        asked = settings.Settings(socket=mode)
+        network.start_socket_proxy(asked)
+        args = network.socket_proxy_args(asked)
         sidecars = [call for call in self.calls() if call[0] == "run"]
         self.assertEqual(len(sidecars), 1)
         return args, sidecars[0]

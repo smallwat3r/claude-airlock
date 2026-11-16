@@ -169,6 +169,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # in the terminal's scrollback.
         env_arg("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", 1),
         env_arg("CLAUDE_CONFIG_DIR", f"{CONTAINER_HOME}/.claude"),
+        *telemetry_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
         env_arg("CLAUDE_DOCKER_SANDBOX", name),

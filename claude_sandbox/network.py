@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import os
 import stat
 import subprocess
@@ -19,8 +18,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .docker import docker, docker_must, docker_ok, docker_output, env_arg, mount_arg
-from .settings import DOCKERFILE_DIR, Fatal, Host, Settings, private_dir
+from .docker import (
+    container_label,
+    docker,
+    docker_bytes,
+    docker_must,
+    docker_ok,
+    docker_output,
+    env_arg,
+    mount_arg,
+)
+from .records import NetSession, record_net_session
+from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
@@ -135,13 +144,7 @@ def egress_proxy_current() -> bool:
     connections of other filtered sessions."""
     if not sidecar_running(EGRESS_PROXY):
         return False
-    label = docker_output(
-        "container",
-        "inspect",
-        f'--format={{{{index .Config.Labels "{EGRESS_CONFIG_LABEL}"}}}}',
-        EGRESS_PROXY,
-    )
-    return label.strip() == egress_config_hash()
+    return container_label(EGRESS_PROXY, EGRESS_CONFIG_LABEL) == egress_config_hash()
 
 
 def access_log(stderr: int | None = None) -> str | None:
@@ -180,27 +183,13 @@ def session_address(name: str) -> str:
         return ""
 
 
-def record_net_session(host: Host, session: dict) -> None:
-    """Add a line to the launcher's record of sessions whose network use
-    can be traced: the name and project of each, when it started, and its
-    address on the filtered network or the file of its capture."""
-    private_dir(host.state_dir)
-    with open(host.net_sessions_file, "a", encoding="utf-8") as sessions:
-        sessions.write(json.dumps(session) + "\n")
-
-
 def record_address(
     name: str, owner: str, host: Host, started: float, stop: threading.Event
 ) -> None:
     while True:
         address = session_address(owner)
         if address:
-            session = {
-                "name": name,
-                "project": host.project_dir,
-                "ip": address,
-                "start": started,
-            }
+            session = NetSession(name, host.project_dir, started, ip=address)
             record_net_session(host, session)
             return
         if stop.wait(0.2):
@@ -254,7 +243,8 @@ class ProxyRequest:
 
     @property
     def port(self) -> int:
-        """The port asked for, 0 when the URL does not say."""
+        """The port asked for, the usual one of the scheme when the URL
+        names none, 0 for a URL that cannot be read."""
         try:
             # CONNECT names host:port, the other methods a whole URL
             target = urlsplit(self.url if "://" in self.url else "//" + self.url)
@@ -289,6 +279,32 @@ def logged_requests(stderr: int | None = None) -> list[ProxyRequest] | None:
     return [r for r in map(parse_proxy_request, log.splitlines()) if r]
 
 
+def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
+    """The requests the egress proxy logged past the first offset bytes of
+    its current log file, and the offset to ask with next time. Without an
+    offset none, just where the log ends now. A log that was rotated since
+    is read from its start. None when the log cannot be read."""
+    file = f"{EGRESS_LOG_DIR}/access.log"
+    script = (
+        'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
+        ' [ "$size" -lt "$from" ] && from=0;'
+        ' echo "$from"; tail -c +"$((from + 1))" "$1"'
+    )
+    asked = [] if offset is None else [str(offset)]
+    said = docker_bytes("exec", EGRESS_PROXY, "sh", "-c", script, "sh", file, *asked)
+    if said is None:
+        return None
+    first, _, log = said.partition(b"\n")
+    try:
+        start = int(first)
+    except ValueError:
+        return None
+    # A line still being written is left for the next time
+    whole = log[: log.rfind(b"\n") + 1]
+    lines = whole.decode("utf-8", "replace").splitlines()
+    return start + len(whole), [r for r in map(parse_proxy_request, lines) if r]
+
+
 def net_log() -> int:
     """Print the domains the egress filter refused, most frequent first. The
     quickest way to find what a project needs added to allowed-domains.txt."""
@@ -321,25 +337,32 @@ def namespace_args(settings: Settings) -> list[str]:
     return [network, "--dns=127.0.0.1"]
 
 
+def prepare_network(settings: Settings) -> None:
+    """Create the session's network as needed, and in filtered mode start
+    the egress proxy, or replace one started from another config."""
+    ensure_network(network_name(settings))
+    if not settings.net_filter:
+        return
+    if not egress_proxy_current():
+        start_egress_proxy()
+    rotate_access_log()
+
+
 def network_args(settings: Settings, capture: str = "") -> list[str]:
     """Network: open egress by default, in the network namespace of the
     capture sidecar when one is named (see capture.py). In filtered mode
-    the container joins
-    an internal network with no route out, where egress goes through a squid
-    sidecar (dual-homed on the internal net and the default bridge) that only
-    allows domains listed in docker/allowed-domains.txt.
-    Filtering is by the host named in the CONNECT request, so it survives CDN
-    IP churn. Creates the network and starts the sidecar as needed."""
-    ensure_network(network_name(settings))
+    the container joins an internal network with no route out, where
+    egress goes through a squid sidecar (dual-homed on the internal net and
+    the default bridge) that only allows domains listed in
+    docker/allowed-domains.txt. Filtering is by the host named in the
+    CONNECT request, so it survives CDN IP churn. The network and the
+    sidecar are those of prepare_network."""
     namespace = (
         [f"--network=container:{capture}"] if capture else namespace_args(settings)
     )
     if not settings.net_filter:
         return namespace
 
-    if not egress_proxy_current():
-        start_egress_proxy()
-    rotate_access_log()
     proxy = f"{EGRESS_PROXY}:{EGRESS_PORT}"
     no_proxy = f"localhost,127.0.0.1,{socket_proxy_name(settings)}"
     return [
@@ -366,18 +389,18 @@ def is_socket(path: str) -> bool:
         return False
 
 
-def socket_proxy_args(settings: Settings) -> list[str]:
-    """Docker socket proxy, opt-in (and the docker feature for the CLI). A
-    write call to the host daemon (which runs as root) would let this
-    container spawn a sibling that mounts the host filesystem, escaping the
-    sandbox entirely, so writes are blocked in both modes:
+def socket_proxy_options(settings: Settings) -> list[str] | None:
+    """What the socket proxy of the session's mode is started with, None
+    when the session gets none: not asked for, or no Docker socket on the
+    host. A write call to the host daemon (which runs as root) would let
+    the session spawn a sibling that mounts the host filesystem, escaping
+    the sandbox entirely, so writes are blocked in both modes:
       CLAUDE_DOCKER_SOCKET=1     docker ps and docker logs only, through our
                                  own HAProxy rules (docker-socket-proxy.cfg)
       CLAUDE_DOCKER_SOCKET=full  every read under /containers, which adds
                                  inspect, stats and top. inspect shows the
                                  environment of every container on the host,
-                                 secrets included.
-    Starts the sidecar as needed."""
+                                 secrets included."""
     if settings.socket == "1":
         # The image renders this template into its HAProxy config. No allow
         # switches are passed, so if a future image ignored the template, its
@@ -399,20 +422,34 @@ def socket_proxy_args(settings: Settings) -> list[str]:
         mode_options = [env_arg(name, 1) for name in allowed]
         mode_options += [env_arg(name, 0) for name in blocked]
     else:
-        return []
+        return None
     if not is_socket(DOCKER_SOCK):
-        return []
+        return None
+    return [mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"), *mode_options]
 
+
+def start_socket_proxy(settings: Settings) -> None:
+    """Start the Docker socket proxy of the session's mode as needed, and
+    put it on the session's network. Opt-in, nothing without it."""
+    options = socket_proxy_options(settings)
+    if options is None:
+        return
     name = socket_proxy_name(settings)
     network = network_name(settings)
     if not sidecar_running(name):
-        socket_mount = mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro")
-        start_sidecar(name, network, [socket_mount, *mode_options], PROXY_IMAGE)
+        start_sidecar(name, network, options, PROXY_IMAGE)
     # A proxy left over from a previous run may sit on another network
     # (e.g. after toggling CLAUDE_DOCKER_NET_FILTER), attach it to ours
     docker_ok("network", "connect", network, name)
+
+
+def socket_proxy_args(settings: Settings) -> list[str]:
+    """What points the session's docker CLI (the docker feature) at the
+    socket proxy of start_socket_proxy, nothing without one."""
+    if socket_proxy_options(settings) is None:
+        return []
     return [
-        env_arg("DOCKER_HOST", f"tcp://{name}:2375"),
+        env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),
         # Shown by bin/claude-statusline
         env_arg("CLAUDE_DOCKER_SOCKET", settings.socket),
     ]

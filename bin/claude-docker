@@ -10,11 +10,12 @@ with the project directory mounted read-write and ~/.claude persisted.
   claude-docker --dockerfile     print the generated Dockerfile, then exit
   claude-docker --net-log        domains the egress filter denied, then exit
   claude-docker --net-reload     restart the egress filter, then exit
-  claude-docker --trace [list | SESSION] [--full | --json]
+  claude-docker --trace [list | SESSION] [--follow] [--full | --json]
                                  what the latest session of this project
                                  did, or the one whose id starts with
                                  SESSION, list lists them, --json gives
-                                 JSON Lines
+                                 JSON Lines, --follow shows what the
+                                 sessions do as they do it
   claude-docker --worktree [NAME]   second session on its own checkout
 
 --worktree is claude's own flag, forwarded like any other claude arg: it
@@ -52,9 +53,11 @@ To override a default for every session, put NAME=value lines in
 ~/.config/claude-sandbox/config, the environment still wins.
 
 The code is the claude_sandbox package next to this directory: settings.py
-(the settings and their defaults), image.py, session.py, network.py,
-capture.py, tamper.py, trace.py and cli.py. Standard library only, and no
-syntax newer than Python 3.9, the version macOS ships.
+(the settings and their defaults), docker.py, image.py, session.py,
+network.py, tamper.py and cli.py for a session, capture.py, pcap.py and
+records.py for the record of its network use, events.py, transcript.py,
+trace.py and follow.py for --trace. Standard library only, and no syntax
+newer than Python 3.9, the version macOS ships.
 """
 
 import os

@@ -60,6 +60,7 @@ class Settings:
     features: str | None = None
     net_filter: bool = False
     net_log: bool = True
+    telemetry: bool = False
     ssh_agent: bool = False
     socket: str = "0"  # 0, 1 or full
     rw_config: bool = False
@@ -104,9 +105,7 @@ class Host:
 
     @property
     def net_sessions_file(self) -> str:
-        # A line per session with a network record: the address a filtered
-        # one had on the internal network (see network.py), the capture of
-        # any one unless switched off (see capture.py)
+        # A line per session with a network record, see records.py
         return os.path.join(self.state_dir, "net-sessions.jsonl")
 
     @property

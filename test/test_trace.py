@@ -7,12 +7,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import unittest
 
 from harness import (
+    LAUNCHER,
     LauncherTest,
     prompts_at,
+    transcript,
 )
 
 
@@ -87,6 +91,65 @@ class TraceTest(LauncherTest):
             stdout = self.launch("--trace", form).stdout
             self.assertNotRegex(stdout, r"[\x00-\x08\x0b-\x1f\x7f]")
 
+    def test_colour_marks_what_a_line_is_and_changes_nothing_else(self):
+        plain = self.launch("--trace").stdout
+        coloured = self.launch("--trace", FORCE_COLOR="1").stdout
+        self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", coloured), plain)
+        when = "\x1b[2m2026-01-02 10:00:0"
+        for expected in (
+            "\x1b[2m# session",
+            "\x1b[2muser     prompt    fix the build\x1b[0m",
+            "\x1b[33mclaude   bash      $ make ]0;ownedall\x1b[0m",
+            "\x1b[1;31mclaude   bash      result: FAILED, 2.0s\x1b[0m",
+            "\x1b[1;31mclaude   bash      out: no rule\x1b[0m",
+            "\x1b[1;31mclaude   edit      file: /etc/passwd  OUTSIDE PROJECT\x1b[0m",
+            "\x1b[35mclaude   edit      result: ok, 2.0s\x1b[0m",
+            "\x1b[35mclaude   write     file: main.go (1 lines)\x1b[0m",
+        ):
+            self.assertIn(expected, coloured)
+        self.assertEqual(coloured.count(when), plain.count("\n2026-01-02 10:00:0"))
+
+    def test_colour_is_for_a_terminal_and_never_for_json(self):
+        self.assertNotIn("\x1b", self.launch("--trace").stdout)
+        self.assertNotIn(
+            "\x1b", self.launch("--trace", "--json", FORCE_COLOR="1").stdout
+        )
+        refused = self.launch("--trace", FORCE_COLOR="1", NO_COLOR="1").stdout
+        self.assertNotIn("\x1b", refused)
+
+    def test_a_step_of_the_model_says_what_it_used_once(self):
+        def said(block: dict, **usage: object) -> dict:
+            used = {"input_tokens": 4, "cache_read_input_tokens": 180000, **usage}
+            message = {"id": "msg_1", "content": [block], "usage": used}
+            return {
+                "type": "assistant",
+                "timestamp": "2026-01-02T11:00:00Z",
+                "message": message,
+            }
+
+        think = {"output_tokens_details": {"thinking_tokens": 300}}
+        last = {"output_tokens": 1400, "cache_creation_input_tokens": 1996, **think}
+        entries = [
+            said({"type": "thinking", "thinking": "hm"}, output_tokens=5),
+            # The last entry of a step is the one to go by
+            said({"type": "text", "text": "done"}, **last),
+        ]
+        self.write_transcript("0b", entries)
+        stdout = self.launch("--trace", "0b").stdout
+        step = "claude   step      1.4k tokens out (300 thinking), 182.0k in (2.0k new)"
+        self.assertEqual(stdout.count(step), 1)
+        self.assertLess(stdout.index(step), stdout.index("claude   reply     done"))
+        self.assertIn(
+            "# tokens      1.4k out, 182.0k in (180.0k from the cache), over 1 steps",
+            stdout,
+        )
+        used, _ = map(
+            json.loads, self.launch("--trace", "0b", "--json").stdout.split("\n")[:2]
+        )
+        self.assertEqual((used["what"], used["output_tokens"]), ("step", 1400))
+        self.assertEqual(used["cache_read_input_tokens"], 180000)
+        self.assertNotIn("step", self.launch("--trace", "3fa9").stdout)
+
     def test_json_gives_an_object_per_event_with_its_values(self):
         result = self.launch("--trace", "--json")
         self.assertEqual(result.status, 0, result.stderr)
@@ -129,6 +192,69 @@ class TraceTest(LauncherTest):
         (self.transcripts / "ffff.jsonl").symlink_to(secret)
         self.assertNotIn("TOP SECRET", self.launch("--trace", "list").stdout)
         self.assertNotEqual(self.launch("--trace", "ffff").status, 0)
+
+    def test_nothing_a_session_writes_stops_the_trace(self):
+        def call(**tool_input) -> str:
+            block = {"type": "tool_use", "id": "h1", "name": "WebFetch"}
+            entry = {
+                "type": "assistant",
+                "timestamp": "2026-01-02T10:00:05Z",
+                "message": {"content": [{**block, "input": tool_input}]},
+            }
+            return json.dumps(entry)
+
+        file = self.transcripts / f"{self.SESSION}.jsonl"
+        hostile = [
+            call(url="http://[::1"),
+            # Nested deeper than can be read, then as deep as just can
+            "[" * 100_000,
+            call(deep="DEEP").replace('"DEEP"', "[" * 900 + "]" * 900),
+            call(count="NAN").replace('"NAN"', "NaN"),
+            call(count="HUGE").replace('"HUGE"', "1e999"),
+        ]
+        file.write_text(file.read_text() + "\n" + "\n".join(hostile) + "\n")
+        for option in ("--full", "--json"):
+            result = self.launch("--trace", option)
+            self.assertEqual(result.status, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        self.assertIn("http://[::1 x1", self.launch("--trace").stdout)
+        for line in result.stdout.splitlines():
+            json.loads(line, parse_constant=self.fail)
+
+    def test_a_transcript_swapped_for_a_link_or_a_pipe_is_not_read(self):
+        # After it was listed, which the session can do while it runs
+        secret = self.work / "secret.jsonl"
+        secret.write_text(json.dumps({"type": "ai-title", "aiTitle": "TOP SECRET"}))
+        swapped = self.transcripts / "ffff.jsonl"
+        swapped.symlink_to(secret)
+        self.assertEqual(transcript.read_entries(swapped), [])
+        swapped.unlink()
+        os.mkfifo(swapped)
+        self.assertEqual(transcript.read_entries(swapped), [])
+
+    def test_a_reader_that_leaves_early_ends_the_trace_quietly(self):
+        file = self.transcripts / f"{self.SESSION}.jsonl"
+        file.write_text(file.read_text() * 2000)
+        piped = subprocess.run(
+            f'{sys.executable} "{LAUNCHER}" --trace --full | head -n 1',
+            shell=True,
+            cwd=self.project,
+            env={**self.fake_docker_env(), "HOME": str(self.home)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertIn("# session", piped.stdout)
+        self.assertEqual(piped.stderr, "")
+
+    def test_full_and_json_are_not_given_together(self):
+        result = self.launch("--trace", "--full", "--json")
+        self.assertNotEqual(result.status, 0)
+        self.assertIn("usage:", result.stderr)
+
+    def test_a_directory_that_is_gone_does_not_stop_the_trace(self):
+        result = self.launch("--trace", CLAUDE_DOCKER_EXTRA_DIRS="/no/such/dir")
+        self.assertEqual(result.status, 0, result.stderr)
 
     def test_a_date_out_of_range_does_not_stop_the_trace(self):
         file = self.transcripts / f"{self.SESSION}.jsonl"
@@ -260,6 +386,11 @@ class NetworkTraceTest(LauncherTest):
         self.assertEqual(stdout.count(request), 2)
         self.assertIn(f"{request} 4 kB 0.2s", stdout)
         self.assertIn("proxy/https CONNECT evil.test:443 DENIED 300 B", stdout)
+        coloured = self.launch(
+            "--trace", FAKE_ACCESS_LOG=str(self.access_log), FORCE_COLOR="1"
+        ).stdout
+        self.assertIn(f"\x1b[36m{request} 4 kB 0.2s", coloured)
+        self.assertIn("\x1b[1;31msandbox  net       proxy/https CONNECT evil", coloured)
         # Between the two prompts, 10 seconds apart
         first, second = (m.start() for m in re.finditer("user     prompt", stdout))
         self.assertTrue(first < stdout.index(request) < second)

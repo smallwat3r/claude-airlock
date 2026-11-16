@@ -9,13 +9,16 @@ from pathlib import Path
 
 from .capture import capture_name, collect_ended_captures, session_captured
 from .docker import docker_ok
-from .image import PLUGIN_DIR, build_image, prepare_image
+from .follow import follow
+from .image import PLUGIN_DIR, Image, build_image, prepare_image
 from .network import (
     net_log,
     network_args,
+    prepare_network,
     session_address_recorded,
     socket_proxy_args,
     start_egress_proxy,
+    start_socket_proxy,
 )
 from .session import (
     ExtraDir,
@@ -33,7 +36,7 @@ from .session import (
     shadow_args,
     ssh_agent_args,
 )
-from .settings import Fatal, Host, detect_host, load_settings
+from .settings import Fatal, Host, Settings, detect_host, load_settings
 from .tamper import (
     host_exec_fingerprint,
     report_tampering,
@@ -43,14 +46,14 @@ from .tamper import (
 from .trace import trace
 
 
-def parse_args(
-    argv: list[str], dirs: list[ExtraDir], host: Host
-) -> tuple[str, list[str]]:
-    """Take the launcher's own options out of argv, adding the directories
-    they name to dirs. Returns the action (run, shell, rebuild, dockerfile,
-    net-log, net-reload or trace) and the arguments left for claude."""
+def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]:
+    """Take the launcher's own options out of argv. Returns the action
+    (run, shell, rebuild, dockerfile, net-log, net-reload or trace), the
+    arguments left for claude, and the directories asked for with
+    --add-dir and --add-dir-ro, each with whether it is read-only."""
     action = "run"
     claude_args: list[str] = []
+    added: list[tuple[str, bool]] = []
     actions = (
         "--rebuild",
         "--dockerfile",
@@ -70,23 +73,24 @@ def parse_args(
                 if following is None:
                     raise Fatal(f"{option} requires a path")
                 value = following
-            add_extra_dir(dirs, value, host, read_only=option == "--add-dir-ro")
+            added.append((value, option == "--add-dir-ro"))
         else:
             claude_args.append(arg)
-    return action, claude_args
+    return action, claude_args, added
 
 
 def main(argv: list[str]) -> int:
     env = os.environ
     host = detect_host(env)
     settings = load_settings(env, os.path.join(host.user_conf, "config"))
-    dirs = configured_extra_dirs(settings, host)
-    action, claude_args = parse_args(argv, dirs, host)
+    action, claude_args, added = parse_args(argv)
 
+    # What needs neither the image nor the directories of a session
     if action == "net-log":
         return net_log()
     if action == "trace":
-        return trace(host, claude_args)
+        following = "--follow" in claude_args
+        return (follow if following else trace)(host, claude_args)
     if action == "net-reload":
         start_egress_proxy()
         return 0
@@ -98,6 +102,23 @@ def main(argv: list[str]) -> int:
     if action == "rebuild":
         return build_image(image, host, "--no-cache")
 
+    dirs = configured_extra_dirs(settings, host)
+    for raw, read_only in added:
+        add_extra_dir(dirs, raw, host, read_only)
+    return session(settings, host, image, action, dirs, claude_args)
+
+
+def session(
+    settings: Settings,
+    host: Host,
+    image: Image,
+    action: str,
+    dirs: list[ExtraDir],
+    claude_args: list[str],
+) -> int:
+    """One session from start to finish: claude, or bash for the shell
+    action, in a container of the image. Returns its exit status."""
+    env = os.environ
     refuse_unsafe_dir(host.project_dir, host)
     if not docker_ok("image", "inspect", image.tag):
         status = build_image(image, host)
@@ -108,6 +129,9 @@ def main(argv: list[str]) -> int:
     # With a capture, the session's network namespace is its sidecar's
     capture = capture_name(name) if settings.net_log else ""
     prepare_claude_dir(settings, host)
+    # The sidecars a session leans on, before the arguments that name them
+    prepare_network(settings)
+    start_socket_proxy(settings)
     run_args = [
         *base_args(settings, host, name),
         *session_args(action, env),
@@ -134,11 +158,16 @@ def main(argv: list[str]) -> int:
     before = host_exec_fingerprint(watched, host.claude_dir)
     save_pending_check(pending, watched, host.claude_dir, before)
     collect_ended_captures(host)
-    # The capture first, a filtered session's address is its sidecar's
-    # Nested, joining them in brackets takes Python 3.10
-    with session_captured(settings, host, name, image.tag):  # noqa: SIM117
-        with session_address_recorded(settings, host, name, capture or name):
-            status = run_session(run_args, image, claude_args)
+    try:
+        # The capture first, a filtered session's address is its sidecar's
+        # Nested, joining them in brackets takes Python 3.10
+        with session_captured(settings, host, name, image.tag):  # noqa: SIM117
+            with session_address_recorded(settings, host, name, capture or name):
+                status = run_session(run_args, image, claude_args)
+    except Fatal:
+        # The session did not start, there is nothing of it to check
+        pending.unlink(missing_ok=True)
+        raise
     report_tampering(before, host_exec_fingerprint(watched, host.claude_dir))
     pending.unlink(missing_ok=True)
     return status
@@ -146,9 +175,17 @@ def main(argv: list[str]) -> int:
 
 def cli() -> int:
     try:
-        return main(sys.argv[1:])
+        status = main(sys.argv[1:])
+        # Here, where a reader that left can still be told from a failure
+        sys.stdout.flush()
+        return status
     except Fatal as err:
         print(err, file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:
+        # The reader left (a trace piped into head): nothing more to
+        # write, at exit either
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0

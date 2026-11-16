@@ -45,13 +45,15 @@ claude-docker --trace               # what the latest session here did
 claude-docker --trace list          # this project's sessions, latest first
 claude-docker --trace 3fa9 --full > trace.txt   # one session, in full
 claude-docker --trace --json | jq 'select(.what == "net")'   # as JSON Lines
+claude-docker --trace --follow      # what the sessions here do, as they do it
 claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
 
 Any other argument is forwarded to `claude`. Since the container is the
 sandbox, it is common to run with `--dangerously-skip-permissions`.
 
-The settings, each shown with an example value:
+The settings. The on and off switches are shown at their default, the
+others with an example value:
 
 - `CLAUDE_DOCKER_EXTRA_DIRS=a:b` (default: none)
 
@@ -81,11 +83,11 @@ The settings, each shown with an example value:
 
   If on, forwards your SSH agent, so git over SSH and `ssh` work with your keys. If off, the session has no SSH keys
 
-- `CLAUDE_DOCKER_SOCKET=1` (default: `0`)
+- `CLAUDE_DOCKER_SOCKET=0` (the default)
 
-  If on, `docker ps` and `docker logs` work against the host daemon, `full` adds `inspect`, `stats` and `top`. If off, the session cannot reach Docker at all
+  If `1`, `docker ps` and `docker logs` work against the host daemon, `full` adds `inspect`, `stats` and `top`. If off, the session cannot reach Docker at all
 
-- `CLAUDE_DOCKER_RW_CONFIG=1` (default: `0`)
+- `CLAUDE_DOCKER_RW_CONFIG=0` (the default)
 
   If on, `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` are writable from the session. If off, they are read-only there
 
@@ -101,7 +103,7 @@ The settings, each shown with an example value:
 
   Container process limit
 
-- `CLAUDE_DOCKER_CACHE=0` (default: `1`)
+- `CLAUDE_DOCKER_CACHE=1` (the default)
 
   If on, `~/.cache` is a per-project volume that persists between sessions. If off, it is a 2g tmpfs that is gone when the session ends
 
@@ -268,8 +270,16 @@ file or searched, every line starts with when, who and what:
 - `who` is `user`, `claude`, `agent` (a subagent) or `sandbox`, the
   container as a whole: a connection is known by its container, not by the
   command that opened it. Its place in time says which that probably was.
-- `what` is `prompt`, `reply`, the tool (`bash`, `edit`, `write`, `read`,
-  ...), `net` or `dns`.
+- `what` is `prompt`, `reply`, `step`, the tool (`bash`, `edit`, `write`,
+  `read`, ...), `net` or `dns`.
+- A `step` line comes ahead of what one answer of the model did (what it
+  said and the tools it called before it was given their results) and says
+  what that answer used: `1.4k tokens out (300 thinking), 182.0k in (2.0k
+  new)`. Out is what the model wrote. In is what it read, the whole
+  conversation so far, and new is the part of it added since the step
+  before, so what the results of the calls before it and your prompt took.
+  The API counts by step, not by tool call: calls issued together share
+  one line. The header sums the steps up (`tokens`).
 - A command comes with the reason Claude gave for it (`why:`), its working
   directory when that is not the project (`cwd:`) and how it ended. Calls
   that failed say `FAILED`, files written outside the project `OUTSIDE
@@ -278,6 +288,14 @@ file or searched, every line starts with when, who and what:
   a call is only shown when it failed, `--full` shows everything.
 - `--trace list` lists the project's sessions, and the start of an id picks
   one. On a terminal the result goes through your pager.
+- On a terminal the lines are coloured by what they are, so that what the
+  session did out of your sight stands out: commands yellow, files it wrote
+  magenta, the network cyan, the pages it fetched or searched for with its
+  tools blue, and in bold red what went wrong (a failed call,
+  a write outside the project, a refused request). The conversation, which
+  you saw anyway, is dimmed. A file or a pipe gets plain text, `NO_COLOR=1`
+  switches the colours off and `FORCE_COLOR=1` on wherever the output goes,
+  for an Emacs shell buffer say.
 
 `--json` gives the same events as JSON Lines, one object each, nothing
 shortened, for `jq` or to load into a database:
@@ -288,10 +306,18 @@ shortened, for `jq` or to load into a database:
 ```
 
 Every object has `session`, `time`, `who` and `what`. A prompt or reply
-adds `text`, a tool call `tool`, `input`, `cwd`, `failed`, `seconds` and
-`output` (and `outside_project` for a file it wrote), a connection
-`protocol`, `address`, `port` and `name`, a proxy request `protocol`,
-`method`, `url`, `port`, `denied`, `bytes` and `seconds`, a lookup `name`.
+adds `text`, a step `output_tokens`, `thinking_tokens`, `input_tokens`,
+`cache_creation_input_tokens` and `cache_read_input_tokens` as the API names
+them (the three input counts add up to what the step read), a tool call
+`tool`, `id`, `input`, `cwd`, `failed`, `seconds` and `output` (and
+`outside_project` for a file it wrote), a connection `protocol`, `address`,
+`port`, `source_port` and `name`, with `outcome` (`closed`, `open`,
+`refused` or `no answer`) when the capture tells and for a closed one
+`seconds`, `bytes_out` and `bytes_in`, a plain HTTP request `protocol`,
+`method`, `url`, `address` and `port`, a proxy request `protocol`, `method`,
+`url`, `port`, `denied`, `bytes` and `seconds`, a lookup `name`, `type`,
+`addresses` and `error`. What happened on the network also has `during`,
+the ids of the tool calls running at that time.
 
 The network lines need a record the launcher keeps, of which there are two:
 
@@ -303,13 +329,41 @@ The network lines need a record the launcher keeps, of which there are two:
 - Unless `CLAUDE_DOCKER_NET_LOG=0`, every TCP connection the session opened,
   whatever the protocol, and with `--full` every name it looked up. The
   session's route out is not changed, a sidecar that owns its network
-  namespace captures the packets that say where a connection goes: its
-  start, the DNS answers and the TLS hello. The name of a destination comes
-  from those, a connection to a bare address shows as the address. The
-  address is what was reached, the name is what the session looked up or
-  asked for, so trust the address where the two matter. It works
-  with the filter too, where it shows what a session tried to reach around
-  the proxy. Not recorded: UDP other than DNS, IPv6, and what was sent.
+  namespace captures the packets that say where a connection goes and how
+  it went: its start, the answer to it and its end, the DNS answers, the
+  TLS hello and the request line of plain HTTP. The name of a destination
+  comes from those, a connection to a bare address shows as the address.
+  The address is what was reached, the name is what the session looked up
+  or asked for, so trust the address where the two matter. It works with
+  the filter too, where it shows what a session tried to reach around the
+  proxy. Not recorded: UDP other than DNS, IPv6, and what was sent, so of
+  HTTPS neither the URL nor the content.
+
+A line of the network says more than where to:
+
+```
+sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
+sandbox  net       tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
+sandbox  net       http GET http://deb.debian.org/debian/InRelease  during: $ apt-get update
+sandbox  net       tcp/https api.anthropic.com (160.79.104.10):443  left open  (no call running)
+sandbox  dns       lookup registry.npmjs.org A -> 104.16.3.35, 104.16.0.35
+sandbox  dns       lookup nope.internal A FAILED: no such name
+```
+
+- How a connection went: `closed after` how long, with the bytes each way
+  (from where its sequence numbers stood when it closed, nothing of what
+  was sent is kept), `left open` when the capture ends before it does,
+  `REFUSED`, or `NO ANSWER` when the first attempt had to be sent again. A
+  capture made before this was recorded says none of it.
+- `during:` names the tool call that was running when the connection was
+  made, the innermost when there are several. That is by the clock, not
+  proof: a connection is known by its container and not by the command
+  that opened it. `(no call running)` is Claude Code itself (the API, its
+  telemetry) or something a command left running.
+- A request over plain HTTP shows with its method and URL, it is the one
+  kind that can be read.
+- A lookup shows the kind of record asked for and the addresses that came
+  back, or what the resolver said went wrong.
 
 Neither can be forged or edited by the session: the address and the capture
 are taken outside of it. The transcript is another matter, it is written
@@ -329,11 +383,56 @@ What is kept, all of it under `~/.local/state/claude-sandbox` unless noted:
 - The captures, a few kB each as a rule, the latest 100. One stops at
   100,000 packets, about 100 MB at the very worst, and the trace says so
   when that happened.
-- `net-sessions.jsonl`, a line per recorded session.
+- `net-sessions.jsonl`, a line per recorded session, the latest 1000.
 
 A capture is copied out when the launcher returns. The sidecar of a session
 that ended without it (a killed Emacs buffer) is collected by the next
 `claude-docker` launch.
+
+### Following a session
+
+`claude-docker --trace --follow`, run on the host in a second terminal, shows
+the same lines while the sessions of the project run, until you interrupt
+it:
+
+```
+# following   /home/me/code/api, until interrupted
+# time                 who      what      details
+# network     following the capture of claude-api
+# 41 earlier events, see claude-docker --trace
+# session     3fa9c0de-...  Fix the build
+2026-01-02 10:02:41  claude   bash      $ npm ci
+2026-01-02 10:02:41  claude   bash      why: Install the dependencies
+2026-01-02 10:02:42  sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443
+2026-01-02 10:02:49  claude   bash      result: ok, 8.2s
+```
+
+- It starts with the last 10 events of the latest session, then follows
+  every session of the project that does something: one you start, resume
+  or clear later is picked up, a `# session` line says whose lines come
+  next. The start of a session id follows that session alone.
+- A tool call shows when it is issued and its result when that comes, on a
+  line of its own. When something else of the session came between the two,
+  the result names its call (`of: $ npm ci`).
+- The network lines are read from the capture as it grows, out of the
+  sidecar of each running session of the project, and for a filtered
+  session from the proxy's log. A connection shows with the name known when
+  it was made, and what became of it shows on a line of its own when it
+  does (in `--json` with `stage` set to `open`, then `outcome`). A tunnel through the proxy is logged when it closes, so it
+  shows then, at the time it began, a refused request shows at once.
+- Of a prompt or a reply only the first line is shown, with `--full` too:
+  you are after what the session does, what it says is on its own screen.
+- `--full` and `--json` work as above. With `--json` a prompt or reply is
+  there whole, and a call and its result
+  are two objects that share an `id`, with `stage` set to `call` or
+  `result`, and a connection carries the id of the session that wrote last:
+
+```
+claude-docker --trace --follow --json | jq -c 'select(.denied or .failed)'
+```
+
+It needs nothing from the session and changes nothing about it, so it can be
+started and stopped at any time, before the session too.
 
 ## The image
 

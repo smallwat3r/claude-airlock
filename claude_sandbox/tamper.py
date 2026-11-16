@@ -12,7 +12,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from .docker import session_alive
+from .docker import Launcher, session_alive
 from .settings import private_dir
 
 # What Claude follows or starts in a project, on the host as in a session:
@@ -296,8 +296,10 @@ def save_pending_check(
     closed window, a crash) never gets to compare, the next launch finds
     this file and does it instead (see report_unchecked_sessions)."""
     private_dir(str(file.parent))
+    launcher = Launcher.current()
     pending = {
-        "pid": os.getpid(),
+        "pid": launcher.pid,
+        "launched": launcher.started,
         "watched": watched,
         "claude_dir": claude_dir,
         "before": before,
@@ -311,10 +313,11 @@ def report_unchecked_sessions(directory: Path) -> None:
     for file in sorted(directory.glob("*.json")):
         try:
             pending = json.loads(file.read_text(encoding="utf-8"))
-            pid, watched, claude_dir, before = (
-                int(pending["pid"]),
+            launcher, watched, claude_dir, before = (
+                # Neither its start nor claude_dir are in a check saved
+                # by an earlier version
+                Launcher(int(pending["pid"]), str(pending.get("launched", ""))),
                 [str(watched_dir) for watched_dir in pending["watched"]],
-                # Not in a check saved by an earlier version
                 str(pending.get("claude_dir", "")),
                 {str(k): str(v) for k, v in pending["before"].items()},
             )
@@ -326,7 +329,7 @@ def report_unchecked_sessions(directory: Path) -> None:
             )
             file.unlink(missing_ok=True)
             continue
-        if session_alive(pid, file.stem):
+        if session_alive(launcher, file.stem):
             continue
         after = host_exec_fingerprint(watched, claude_dir)
         report_tampering(before, after, unchecked=file.stem)

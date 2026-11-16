@@ -29,9 +29,6 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 if args[1:2] == ["inspect"] and "IPAddress" in args[2] and "FAKE_IP" in os.environ:
     print(os.environ["FAKE_IP"])
     sys.exit(0)
-if args[1:2] == ["inspect"] and "claude-sandbox.capture" in args[2]:
-    print(os.environ.get("FAKE_LABEL", ""))
-    sys.exit(0)
 if args[1:2] == ["inspect"] and "Running" in args[2] and args[3].endswith(".capture"):
     print("true")
     sys.exit(0)
@@ -44,6 +41,15 @@ if args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
 if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
+if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.environ:
+    with open(os.environ["FAKE_CAPTURE"], "rb") as captured:
+        sys.stdout.buffer.write(captured.read()[int(args[4]) - 1 :])
+if args[0] == "exec" and "stat -c" in args[4] and "FAKE_ACCESS_LOG" in os.environ:
+    with open(os.environ["FAKE_ACCESS_LOG"], "rb") as access_log:
+        logged = access_log.read()
+    start = int(args[7]) if len(args) > 7 else len(logged)
+    start = 0 if len(logged) < start else start
+    sys.stdout.buffer.write(str(start).encode() + b"\\n" + logged[start:])
 if args[0] == "build":
     shutil.copytree(args[-1], os.environ["FAKE_OUT"], dirs_exist_ok=True)
 if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
@@ -52,9 +58,10 @@ if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
 
 
 sys.path.insert(0, str(ROOT))
-capture, image, network, settings = (
+MODULES = ("capture", "docker", "follow", "image", "network", "pcap", "records")
+capture, docker, follow, image, network, pcap, records, settings, transcript = (
     importlib.import_module(f"claude_sandbox.{name}")
-    for name in ("capture", "image", "network", "settings")
+    for name in (*MODULES, "settings", "transcript")
 )
 
 

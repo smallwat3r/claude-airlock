@@ -13,6 +13,7 @@ from pathlib import Path
 
 from harness import (
     LauncherTest,
+    docker,
 )
 
 
@@ -138,9 +139,8 @@ class UncheckedSessionTest(LauncherTest):
         # This test's own process stands in for a launcher still running
         self.launch(session=self.KILL_LAUNCHER)
         (file,) = self.pending()
-        file.write_text(
-            json.dumps({**json.loads(file.read_text()), "pid": os.getpid()})
-        )
+        mine = {"pid": os.getpid(), "launched": docker.process_started(os.getpid())}
+        file.write_text(json.dumps({**json.loads(file.read_text()), **mine}))
         (self.project / ".git" / "hooks" / "pre-commit").write_text("x")
         self.assertNotIn(self.LATE, self.launch(CLAUDE_BUFFER_NAME="*c:proj:b*").stderr)
         self.assertIn(file, self.pending())
