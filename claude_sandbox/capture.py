@@ -12,6 +12,7 @@ capture, which stays in the sidecar until the launcher copies it out."""
 
 from __future__ import annotations
 
+import enum
 import json
 import os
 import socket
@@ -61,8 +62,50 @@ PCAP_FORMATS = {
     b"\xa1\xb2\xc3\xd4": (">", 1e6),
     b"\xa1\xb2\x3c\x4d": (">", 1e9),
 }
+PCAP_HEADER = 24
+PCAP_RECORD_HEADER = 16
+# The longest frame tcpdump writes, a longer one means a damaged file
+PCAP_LONGEST_FRAME = 262144
+# In a cooked frame, the packet type of one the machine sent
+COOKED_SENT = 4
+ETHERTYPE_IPV4 = 0x0800
+UDP_HEADER = 8
+DNS_IS_RESPONSE = 0x8000
+# The two top bits of a length that is a pointer to the rest of a name
+DNS_POINTER = 0xC0
+DNS_ADDRESS_RECORD = 1
+# A name cannot have more labels than this, a longer walk is a loop
+DNS_MOST_LABELS = 127
+TLS_HANDSHAKE = 0x16
+TLS_CLIENT_HELLO = 0x01
+TLS_SERVER_NAME = 0
 # Retransmitted connection attempts closer than this count as one
 RETRY_SECONDS = 5.0
+
+
+class LinkType(enum.IntEnum):
+    """What the frames of a capture file are, as its header says
+    (tcpdump.org/linktypes). tcpdump's "any" device gives Linux cooked
+    frames, version 1 or 2 depending on its age: both carry whether the
+    machine sent the packet, at a different place."""
+
+    ETHERNET = 1
+    COOKED = 113
+    COOKED_2 = 276
+
+
+class Protocol(enum.IntEnum):
+    """The protocols over IPv4 that are read, by their number there."""
+
+    TCP = 6
+    UDP = 17
+
+
+class TcpFlag(enum.IntFlag):
+    """The flags of a TCP packet that tell how a connection starts."""
+
+    SYN = 0x02
+    ACK = 0x10
 
 
 def capture_name(session: str) -> str:
@@ -183,6 +226,63 @@ def session_captured(
         collect_capture(host, capture_name(session), about)
 
 
+class NotThis(Exception):
+    """The bytes are not the kind of message they were read as."""
+
+
+class Cursor:
+    """Reads a message front to back, in network byte order. Reading past
+    its end raises NotThis: a truncated or foreign message ends the read
+    of that message, nothing more."""
+
+    def __init__(self, data: bytes, at: int = 0) -> None:
+        self.data = data
+        self.at = at
+
+    def take(self, count: int) -> bytes:
+        taken = self.data[self.at : self.at + count]
+        if count < 0 or len(taken) < count:
+            raise NotThis
+        self.at += count
+        return taken
+
+    def number(self, size: int) -> int:
+        return int.from_bytes(self.take(size), "big")
+
+    def skip(self, count: int) -> None:
+        self.take(count)
+
+    def rest(self) -> bytes:
+        return self.data[self.at :]
+
+
+@dataclass(frozen=True)
+class Packet:
+    """A captured TCP or UDP packet over IPv4."""
+
+    when: float
+    # By the session, as opposed to received by it
+    sent: bool
+    protocol: Protocol
+    source: str
+    destination: str
+    source_port: int
+    port: int
+    # None of them for UDP
+    tcp_flags: TcpFlag
+    payload: bytes
+
+    @property
+    def opens_connection(self) -> bool:
+        """The first packet of a TCP connection: SYN without ACK, the
+        reply to one carries both."""
+        return (
+            self.protocol is Protocol.TCP
+            and TcpFlag.SYN in self.tcp_flags
+            and TcpFlag.ACK not in self.tcp_flags
+        )
+
+
 @dataclass
 class Capture:
     """What a capture says a session reached."""
@@ -196,159 +296,206 @@ class Capture:
     # When and for which name it asked the resolver, answered or not
     lookups: list[tuple[float, str]] = field(default_factory=list)
     packets: int = 0
+    # When each connection (source port, address, port) was last attempted
+    _attempts: dict[tuple[int, str, int], float] = field(
+        default_factory=dict, repr=False
+    )
 
     @property
     def cut_short(self) -> bool:
         return self.packets >= PACKET_LIMIT
 
+    def add(self, packet: Packet) -> None:
+        """Take in what one packet tells."""
+        if packet.protocol is Protocol.UDP:
+            self._add_dns_answer(packet)
+        elif packet.sent and not is_loopback(packet.destination):
+            # Not what the session does within itself, nor what comes in
+            if packet.opens_connection:
+                self._add_connection(packet)
+            else:
+                self._add_server_name(packet)
 
-class NotThis(Exception):
-    """The bytes are not the kind of message they were read as."""
+    def _add_dns_answer(self, packet: Packet) -> None:
+        # An answer comes in, or from the resolver on loopback. What the
+        # session sends out in the shape of one is not an answer to it.
+        if packet.sent and not is_loopback(packet.source):
+            return
+        try:
+            name, addresses = dns_answer(packet.payload)
+        except NotThis:
+            return
+        self.lookups.append((packet.when, name))
+        self.names.update(dict.fromkeys(addresses, name))
+
+    def _add_connection(self, packet: Packet) -> None:
+        attempt = (packet.source_port, packet.destination, packet.port)
+        last = self._attempts.get(attempt)
+        if last is None or packet.when - last >= RETRY_SECONDS:
+            self.connections.append((packet.when, packet.destination, packet.port))
+        self._attempts[attempt] = packet.when
+
+    def _add_server_name(self, packet: Packet) -> None:
+        name = tls_server_name(packet.payload)
+        if name:
+            # What the resolver said, if anything, comes first
+            self.names.setdefault(packet.destination, name)
 
 
-def dns_name(message: bytes, offset: int) -> tuple[str, int]:
-    """A name in a DNS message and the offset after it, following the
-    pointers names are compressed with."""
+def is_loopback(address: str) -> bool:
+    return address.startswith("127.")
+
+
+def dns_name(message: bytes, at: Cursor) -> str:
+    """The name at a cursor in a DNS message, the cursor left after it.
+    A name can end in a pointer to the rest of it, elsewhere in the
+    message, which is followed without moving the cursor further."""
     labels: list[str] = []
-    after = None
-    for _ in range(64):
-        length = message[offset]
-        if length & 0xC0 == 0xC0:
-            if after is None:
-                after = offset + 2
-            offset = (length & 0x3F) << 8 | message[offset + 1]
-            continue
-        offset += 1
-        if length == 0:
-            return ".".join(labels), offset if after is None else after
-        labels.append(message[offset : offset + length].decode("ascii", "replace"))
-        offset += length
+    reader = at
+    for _ in range(DNS_MOST_LABELS):
+        length = reader.number(1)
+        if length & DNS_POINTER == DNS_POINTER:
+            target = (length & ~DNS_POINTER) << 8 | reader.number(1)
+            reader = Cursor(message, target)
+        elif length == 0:
+            return ".".join(labels)
+        else:
+            labels.append(reader.take(length).decode("ascii", "replace"))
     raise NotThis
 
 
 def dns_answer(message: bytes) -> tuple[str, list[str]]:
-    """The name a DNS response is about and the IPv4 addresses it gives."""
-    try:
-        _, flags, questions, answers = struct.unpack_from("!HHHH", message)
-        if not flags & 0x8000 or questions != 1:
-            raise NotThis
-        name, offset = dns_name(message, 12)
-        offset += 4
-        addresses = []
-        for _ in range(answers):
-            _, offset = dns_name(message, offset)
-            kind, _, _, length = struct.unpack_from("!HHIH", message, offset)
-            offset += 10
-            if kind == 1 and length == 4:
-                addresses.append(socket.inet_ntoa(message[offset : offset + 4]))
-            offset += length
-    except (IndexError, struct.error):
-        raise NotThis from None
+    """The name a DNS response is about and the IPv4 addresses it gives.
+    Raises NotThis for anything else."""
+    reader = Cursor(message)
+    reader.skip(2)  # the id of the query
+    flags, questions, answers = (reader.number(2) for _ in range(3))
+    reader.skip(4)  # the counts of the two other sections
+    if not flags & DNS_IS_RESPONSE or questions != 1:
+        raise NotThis
+    name = dns_name(message, reader)
+    reader.skip(4)  # the type and class asked for
+    addresses = []
+    for _ in range(answers):
+        dns_name(message, reader)
+        kind = reader.number(2)
+        reader.skip(6)  # class, time to live
+        data = reader.take(reader.number(2))
+        if kind == DNS_ADDRESS_RECORD and len(data) == 4:
+            addresses.append(socket.inet_ntoa(data))
     if not name:
         raise NotThis
     return name, addresses
 
 
 def tls_server_name(record: bytes) -> str:
-    """The server name a TLS client hello asks for, empty without one, as
-    when the hello is longer than what was captured of it."""
+    """The server name a TLS client hello asks for. Empty for anything
+    else, and for a hello without one or longer than what was captured."""
     try:
-        if record[0] != 0x16 or record[5] != 0x01:
+        hello = Cursor(record)
+        if hello.number(1) != TLS_HANDSHAKE:
             return ""
-        # Record and handshake headers, version, random, then three
-        # length-prefixed fields before the extensions
-        offset = 5 + 4 + 2 + 32
-        offset += 1 + record[offset]
-        offset += 2 + struct.unpack_from("!H", record, offset)[0]
-        offset += 1 + record[offset]
-        offset += 2
+        hello.skip(4)  # record version and length
+        if hello.number(1) != TLS_CLIENT_HELLO:
+            return ""
+        hello.skip(3 + 2 + 32)  # handshake length, version, random
+        hello.skip(hello.number(1))  # session id
+        hello.skip(hello.number(2))  # cipher suites
+        hello.skip(hello.number(1))  # compression methods
+        hello.skip(2)  # length of the extensions
         while True:
-            kind, length = struct.unpack_from("!HH", record, offset)
-            offset += 4
-            if kind == 0:
-                (name_length,) = struct.unpack_from("!H", record, offset + 3)
-                name = record[offset + 5 : offset + 5 + name_length]
-                return name.decode("ascii", "replace")
-            offset += length
-    except (IndexError, struct.error):
+            kind, length = hello.number(2), hello.number(2)
+            if kind == TLS_SERVER_NAME:
+                hello.skip(3)  # list length, name type
+                return hello.take(hello.number(2)).decode("ascii", "replace")
+            hello.skip(length)
+    except NotThis:
         return ""
 
 
-def ip_packet(link_type: int, frame: bytes) -> tuple[bytes, bool]:
-    """The IPv4 packet in a captured frame, empty if it holds none, and
-    whether the session sent it. tcpdump's "any" device gives Linux cooked
-    frames, version 1 or 2 depending on its age, both of which say so."""
+def ipv4_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool]:
+    """The IPv4 packet a captured frame carries and whether the session
+    sent it. Raises NotThis for a frame that carries something else. An
+    Ethernet frame does not say who sent it, it counts as sent."""
+    reader = Cursor(frame)
+    if link_type == LinkType.COOKED_2:
+        ethertype = reader.number(2)
+        reader.skip(8)  # reserved, interface, hardware type
+        sent = reader.number(1) == COOKED_SENT
+        reader.skip(9)  # address length and address
+    elif link_type == LinkType.COOKED:
+        sent = reader.number(2) == COOKED_SENT
+        reader.skip(12)  # hardware type, address length and address
+        ethertype = reader.number(2)
+    elif link_type == LinkType.ETHERNET:
+        reader.skip(12)  # the two addresses
+        ethertype, sent = reader.number(2), True
+    else:
+        raise NotThis
+    if ethertype != ETHERTYPE_IPV4:
+        raise NotThis
+    return reader.rest(), sent
+
+
+def parse_packet(when: float, link_type: int, frame: bytes) -> Packet:
+    """A captured frame as a packet. Raises NotThis unless it is TCP or
+    UDP over IPv4, whole as far as its headers go."""
+    datagram, sent = ipv4_in_frame(link_type, frame)
+    ip = Cursor(datagram)
+    header_length = (ip.number(1) & 0x0F) * 4
+    ip.skip(8)  # service, lengths, fragment, time to live
     try:
-        if link_type == 276:
-            protocol, sent, header = frame[0:2], frame[10] == 4, 20
-        elif link_type == 113:
-            protocol, sent, header = frame[14:16], frame[0:2] == b"\x00\x04", 16
-        elif link_type == 1:
-            protocol, sent, header = frame[12:14], True, 14
-        else:
-            return b"", False
-    except IndexError:
-        return b"", False
-    return (frame[header:] if protocol == b"\x08\x00" else b""), sent
+        protocol = Protocol(ip.number(1))
+    except ValueError:
+        raise NotThis from None
+    ip.skip(2)  # checksum
+    source, destination = (socket.inet_ntoa(ip.take(4)) for _ in range(2))
+
+    transport = Cursor(datagram, header_length)
+    source_port, port = transport.number(2), transport.number(2)
+    tcp_flags = TcpFlag(0)
+    if protocol is Protocol.TCP:
+        transport.skip(8)  # sequence and acknowledgement numbers
+        tcp_header_length = (transport.number(1) >> 4) * 4
+        tcp_flags = TcpFlag(transport.number(1))
+        payload = datagram[header_length + tcp_header_length :]
+    else:
+        payload = datagram[header_length + UDP_HEADER :]
+    return Packet(
+        when, sent, protocol, source, destination, source_port, port, tcp_flags, payload
+    )
 
 
-def read_packet(
-    capture: Capture, when: float, packet: bytes, sent: bool, seen: dict
-) -> None:
-    """Add what one IPv4 packet tells to the capture. seen holds when each
-    connection was last attempted."""
-    header = (packet[0] & 0x0F) * 4
-    protocol, body = packet[9], packet[header:]
-    source, destination = (socket.inet_ntoa(packet[at : at + 4]) for at in (12, 16))
-    source_port, port = struct.unpack_from("!HH", body)
-    if protocol == 17:
-        # An answer comes in, or from the resolver on loopback. What the
-        # session sends out in the shape of one is not an answer to it.
-        if sent and not source.startswith("127."):
+def pcap_frames(path: Path) -> Iterator[tuple[float, int, bytes]]:
+    """The frames of a capture file (pcap, as tcpdump writes it): when
+    each was captured, the link type of the file and the frame. Ends at
+    the first thing that is not as it should be, as a file cut off by a
+    stopped tcpdump is. Raises OSError when the file cannot be read."""
+    with open(path, "rb") as file:
+        start = file.read(PCAP_HEADER)
+        if len(start) < PCAP_HEADER or start[:4] not in PCAP_FORMATS:
             return
-        try:
-            name, addresses = dns_answer(body[8:])
-        except NotThis:
-            return
-        capture.lookups.append((when, name))
-        capture.names.update(dict.fromkeys(addresses, name))
-    elif protocol == 6 and sent and not destination.startswith("127."):
-        flags = body[13]
-        if flags & 0x12 == 0x02:
-            attempt = (source_port, destination, port)
-            if when - seen.get(attempt, -RETRY_SECONDS) >= RETRY_SECONDS:
-                capture.connections.append((when, destination, port))
-            seen[attempt] = when
-        else:
-            name = tls_server_name(body[(body[12] >> 4) * 4 :])
-            if name:
-                capture.names.setdefault(destination, name)
+        byte_order, per_second = PCAP_FORMATS[start[:4]]
+        (link_type,) = struct.unpack_from(byte_order + "I", start, 20)
+        while True:
+            record = file.read(PCAP_RECORD_HEADER)
+            if len(record) < PCAP_RECORD_HEADER:
+                return
+            seconds, fraction, length, _ = struct.unpack(byte_order + "IIII", record)
+            if length > PCAP_LONGEST_FRAME:
+                return
+            yield seconds + fraction / per_second, link_type, file.read(length)
 
 
 def read_capture(path: Path) -> Capture:
-    """Read a capture file (pcap, as tcpdump writes it), skipping what it
-    cannot make sense of. Raises OSError when the file cannot be read."""
+    """What a capture file says a session reached. A packet that cannot be
+    made sense of is counted and passed over. Raises OSError when the file
+    cannot be read."""
     capture = Capture()
-    seen: dict[tuple[int, str, int], float] = {}
-    with open(path, "rb") as file:
-        start = file.read(24)
-        if len(start) < 24 or start[:4] not in PCAP_FORMATS:
-            return capture
-        order, fraction = PCAP_FORMATS[start[:4]]
-        (link_type,) = struct.unpack(order + "I", start[20:24])
-        while True:
-            record = file.read(16)
-            if len(record) < 16:
-                break
-            seconds, part, length, _ = struct.unpack(order + "IIII", record)
-            if length > 0x40000:
-                break
-            frame = file.read(length)
-            capture.packets += 1
-            packet, sent = ip_packet(link_type, frame)
-            try:
-                if packet:
-                    read_packet(capture, seconds + part / fraction, packet, sent, seen)
-            except (IndexError, struct.error):
-                continue
+    for when, link_type, frame in pcap_frames(path):
+        capture.packets += 1
+        try:
+            capture.add(parse_packet(when, link_type, frame))
+        except NotThis:
+            continue
     return capture
