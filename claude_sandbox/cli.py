@@ -58,13 +58,14 @@ from .trace import trace
 
 def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]:
     """Take the launcher's own options out of argv. Returns the action
-    (run, shell, rebuild, prune, dockerfile, net-log, net-reload or trace), the
+    (run, help, shell, rebuild, prune, dockerfile, net-log, net-reload or trace), the
     arguments left for claude, and the directories asked for with
     --add-dir and --add-dir-ro, each with whether it is read-only."""
     action = "run"
     claude_args: list[str] = []
     added: list[tuple[str, bool]] = []
     actions = (
+        "--help",
         "--rebuild",
         "--prune",
         "--dockerfile",
@@ -76,7 +77,9 @@ def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]
     args = iter(argv)
     for arg in args:
         option, has_value, value = arg.partition("=")
-        if arg in actions:
+        if arg == "-h":
+            action = "help"
+        elif arg in actions:
             action = arg[2:]
         elif option in ("--add-dir", "--add-dir-ro"):
             if not has_value:
@@ -90,11 +93,16 @@ def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]
     return action, claude_args, added
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], usage: str = "") -> int:
+    action, claude_args, added = parse_args(argv)
+    if action == "help":
+        # Ahead of the settings: a config file that is refused is one of
+        # the things the text is asked about
+        print(usage.strip())
+        return 0
     env = os.environ
     host = detect_host(env)
     settings = load_settings(env, os.path.join(host.user_conf, "config"))
-    action, claude_args, added = parse_args(argv)
 
     # What needs neither the image nor the directories of a session
     if action == "net-log":
@@ -229,9 +237,11 @@ def named_session(
     return status
 
 
-def cli() -> int:
+def cli(usage: str = "") -> int:
+    """Run the launcher on the arguments of the command line. usage is
+    the text --help prints, the docstring of bin/claude-docker."""
     try:
-        status = main(sys.argv[1:])
+        status = main(sys.argv[1:], usage)
         # Here, where a reader that left can still be told from a failure
         sys.stdout.flush()
         return status

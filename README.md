@@ -42,6 +42,7 @@ claude-docker --dockerfile          # print the generated Dockerfile, then exit
 claude-docker --shell               # bash in the same sandbox, to look around
 claude-docker --net-log             # domains the egress filter denied
 claude-docker --net-reload          # restart the egress filter
+claude-docker --help                # the launcher's options and settings
 claude-docker --trace               # what the latest session here did
 claude-docker --trace list          # this project's sessions, latest first
 claude-docker --trace 3fa9 --verbose > trace.txt   # one session, in detail

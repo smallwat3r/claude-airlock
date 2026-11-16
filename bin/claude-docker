@@ -22,6 +22,8 @@ with the project directory mounted read-write and ~/.claude persisted.
                                  the kinds of event named (bash, net),
                                  --failed what went wrong
   claude-docker --worktree [NAME]   second session on its own checkout
+  claude-docker --help, -h       this text, then exit. For claude's own:
+                                 claude-docker --shell -c "claude --help"
 
 --worktree is claude's own flag, forwarded like any other claude arg: it
 creates a git worktree and branch under .claude/worktrees/ in the project,
@@ -60,18 +62,15 @@ Environment, all optional:
                             empty for none
 
 To override a default for every session, put NAME=value lines in
-~/.config/claude-sandbox/config, the environment still wins.
-
-The code is the claude_sandbox package next to this directory: settings.py
-(the settings and their defaults), docker.py, image.py, session.py,
-network.py, history.py, tamper.py, launcher.py and cli.py for a session,
-sidecar.py, capture.py, pcap.py, reader.py, processes.py, procwatch.py,
-doors.py, recorder.py, records.py and background.py for the records of
-what it did, events.py, transcript.py, shown.py, trace.py, follow.py and
-digest.py for --trace and the lines said when a session ends. Standard
-library only, and no syntax newer than Python 3.9, the version macOS
-ships.
+~/.config/claude-sandbox/config, the environment still wins. What is
+hidden (SHADOW) and what is protected (PROTECT) are the lists of both.
 """
+
+# The text above is what --help prints. The code is the claude_sandbox
+# package next to this directory, each module says what it is for in its
+# first lines: cli.py is where a session starts and ends, settings.py has
+# the settings and their defaults. Standard library only, and no syntax
+# newer than Python 3.9, the version macOS ships.
 
 import os
 import sys
@@ -83,7 +82,7 @@ def main() -> int:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     from claude_sandbox.cli import cli
 
-    return cli()
+    return cli(__doc__ or "")
 
 
 if __name__ == "__main__":

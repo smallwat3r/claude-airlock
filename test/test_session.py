@@ -695,6 +695,16 @@ class InstallTest(LauncherTest):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertRegex(process.stdout, r"(?m)^ENTRYPOINT")
 
+    def test_help_is_the_launchers_own(self):
+        # Also with a config file it would refuse, and without docker
+        self.write_config("CLAUDE_DOCKER_NET_FILTR=1")
+        for option in ("--help", "-h"):
+            result = self.launch(option)
+            self.assertEqual(result.status, 0, result.stderr)
+            self.assertIn("claude-docker --trace", result.stdout)
+            self.assertIn("CLAUDE_DOCKER_NET_FILTER", result.stdout)
+            self.assertEqual(result.calls, [])
+
     def test_statusline_is_mounted_at_its_host_path(self):
         self.assertIn(
             f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z", self.launch().flags
