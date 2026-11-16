@@ -463,9 +463,14 @@ class CaptureSessionTest(LauncherTest):
             "--network=claude-docker-open-net",
             "--cap-drop=ALL",
             "--cap-add=NET_RAW",
-            "--entrypoint=tcpdump",
+            "--entrypoint=sh",
         ):
             self.assertIn(flag, sidecar)
+        # It runs tcpdump and outlives it: the session's way out is the
+        # sidecar's, and would go with one that ended at its packet limit
+        script = sidecar[sidecar.index("-c") + 1]
+        self.assertIn('tcpdump "$@" &', script)
+        self.assertIn("sleep infinity", script)
         self.assertLess(
             result.calls.index(sidecar),
             next(

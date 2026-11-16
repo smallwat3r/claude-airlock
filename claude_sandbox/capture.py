@@ -43,6 +43,20 @@ PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
 # Captures are a few kB each as a rule, the oldest go once there are more
 KEPT_CAPTURES = 100
+# What the sidecar runs: tcpdump with the arguments it is given, then
+# nothing, until it is told to stop. The sidecar owns the session's network
+# namespace, and docker takes the session's way out with it when it ends,
+# so it must not end with a tcpdump that stopped at its packet limit or
+# died. One that never got to write its file failed to start, which is
+# said by ending with its status (see start_capture).
+CAPTURE_SCRIPT = f"""tcpdump "$@" &
+capture=$!
+trap 'kill "$capture" 2>/dev/null; wait "$capture"; exit 0' TERM INT
+wait "$capture"
+status=$?
+[ -e {CAPTURE_FILE} ] || exit "$status"
+sleep infinity &
+wait $!"""
 # The embedded resolver at 127.0.0.11 is reached through a port rewrite
 # inside the namespace, so its packets do not show port 53: all UDP on
 # loopback is taken and the reader tells what is DNS.
@@ -99,7 +113,8 @@ def start_capture(
     """Start the sidecar a session is about to join. It runs the sandbox
     image, which has tcpdump, as root with just what tcpdump needs: raw
     sockets, and the two capabilities its start-up change of user (to
-    root, -Z, so that it can write its file) asks for."""
+    root, -Z, so that it can write its file) asks for. It outlives its
+    tcpdump, see CAPTURE_SCRIPT."""
     sidecar = CaptureSidecar.for_session(session, host.project_dir)
     started = docker(
         "run",
@@ -116,16 +131,19 @@ def start_capture(
         "--security-opt=no-new-privileges",
         "--memory=256m",
         "--pids-limit=16",
-        "--entrypoint=tcpdump",
+        "--entrypoint=sh",
         image_tag,
+        # The script, the name it goes by, then the arguments of tcpdump
+        *("-c", CAPTURE_SCRIPT, "sh"),
         *("-i", "any", "-p", "-n", "-U", "-Z", "root"),
         *("-s", str(SNAP_LENGTH), "-c", str(PACKET_LIMIT)),
         *("-w", CAPTURE_FILE, PACKET_FILTER),
         stdout=subprocess.DEVNULL,
     )
-    # tcpdump fails at once when it fails, and the session could not start
-    # in the namespace of a sidecar that is gone. The wait also gives it the
-    # moment it takes to listen, a session is slower to start than that.
+    # tcpdump fails at once when it fails, its sidecar then ends with it,
+    # and the session could not start in the namespace of a sidecar that is
+    # gone. The wait also gives it the moment it takes to listen, a session
+    # is slower to start than that.
     time.sleep(0.3)
     if started.returncode != 0 or not sidecar_running(sidecar.name):
         said = docker(
@@ -142,7 +160,8 @@ def start_capture(
 def collect_capture(host: Host, sidecar: CaptureSidecar) -> None:
     """Stop a sidecar, copy its capture to the host and note which project
     and time it covers, for --trace to find it by."""
-    # tcpdump writes out what it holds when it is asked to stop
+    # The sidecar passes the stop on to tcpdump, which writes out what it
+    # holds when it is asked to
     docker_ok("stop", sidecar.name)
     try:
         target = sidecar.copy_out(CAPTURE_FILE, host.captures_dir, "pcap")
