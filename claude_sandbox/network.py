@@ -15,7 +15,9 @@ import time
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .docker import docker, docker_must, docker_ok, docker_output, env_arg, mount_arg
 from .settings import DOCKERFILE_DIR, Fatal, Host, Settings, private_dir
@@ -233,6 +235,60 @@ def session_address_recorded(
         recorder.join()
 
 
+@dataclass(frozen=True)
+class ProxyRequest:
+    """A line of the egress proxy's log."""
+
+    ended: float
+    seconds: float
+    # Of the container that asked
+    address: str
+    denied: bool
+    method: str
+    url: str
+    size: int
+
+    @property
+    def began(self) -> float:
+        return self.ended - self.seconds
+
+    @property
+    def port(self) -> int:
+        """The port asked for, 0 when the URL does not say."""
+        try:
+            # CONNECT names host:port, the other methods a whole URL
+            target = urlsplit(self.url if "://" in self.url else "//" + self.url)
+            return target.port or (443 if target.scheme == "https" else 80)
+        except ValueError:
+            return 0
+
+
+def parse_proxy_request(line: str) -> ProxyRequest | None:
+    """A line of squid's native log format, none for anything else."""
+    try:
+        ended, milliseconds, address, result, sent, method, url = line.split()[:7]
+        return ProxyRequest(
+            float(ended),
+            float(milliseconds) / 1000,
+            address,
+            "DENIED" in result,
+            method,
+            url,
+            int(sent),
+        )
+    except ValueError:
+        return None
+
+
+def logged_requests(stderr: int | None = None) -> list[ProxyRequest] | None:
+    """Every request in the egress proxy's log, None when the log cannot
+    be read."""
+    log = access_log(stderr)
+    if log is None:
+        return None
+    return [r for r in map(parse_proxy_request, log.splitlines()) if r]
+
+
 def net_log() -> int:
     """Print the domains the egress filter refused, most frequent first. The
     quickest way to find what a project needs added to allowed-domains.txt."""
@@ -241,12 +297,10 @@ def net_log() -> int:
             "the egress proxy is not running "
             "(start a CLAUDE_DOCKER_NET_FILTER=1 session first)"
         )
-    log = access_log()
-    if log is None:
+    requests = logged_requests()
+    if requests is None:
         return 1
-    # Squid's native log: field 4 is the result code, field 7 the URL
-    entries = (line.split() for line in log.splitlines())
-    denied = Counter(f[6] for f in entries if len(f) >= 7 and "DENIED" in f[3])
+    denied = Counter(request.url for request in requests if request.denied)
     for url, count in sorted(denied.items(), key=lambda item: (-item[1], item[0])):
         print(f"{count:7d} {url}")
     return 0

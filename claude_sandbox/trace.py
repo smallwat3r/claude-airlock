@@ -17,6 +17,7 @@ before anything is printed. The network record is the launcher's own."""
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import enum
 import functools
@@ -34,7 +35,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .capture import Capture, read_capture
-from .network import access_log
+from .network import ProxyRequest, logged_requests
 from .settings import Fatal, Host
 
 USAGE = "usage: claude-docker --trace [list | SESSION] [--full | --json]"
@@ -159,6 +160,11 @@ def local_time(entry: dict) -> datetime | None:
         return None
 
 
+def entry_times(entries: list[dict]) -> list[datetime]:
+    """When each entry that says so was written, in order."""
+    return [when for when in map(local_time, entries) if when]
+
+
 def content_blocks(entry: dict) -> list[dict]:
     """The content of a user or assistant entry as blocks, a prompt typed
     as plain text becoming one text block."""
@@ -237,6 +243,11 @@ def outside(path: str, project_dir: str) -> bool:
     return absolute != project_dir and not absolute.startswith(project_dir + os.sep)
 
 
+def outside_flag(path: str, project_dir: str) -> str:
+    """What follows the name of a written file that is not in the project."""
+    return "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
+
+
 def clip(lines: list[str], full: bool, limit: int = PREVIEW_LINES) -> list[str]:
     """Lines as shown: all of them with --full, else the first few."""
     if full:
@@ -295,8 +306,8 @@ def file_details(
         content = clean(tool_input.get("content", "")).splitlines()
         about += f" ({len(content)} lines)"
         changes = ["content: " + line for line in clip(content, full)]
-    if name in FILE_TOOLS and outside(path, project_dir):
-        about += "  OUTSIDE PROJECT"
+    if name in FILE_TOOLS:
+        about += outside_flag(path, project_dir)
     return [about, *changes]
 
 
@@ -421,7 +432,7 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     """The session at a glance, as labelled values: what ran it, when, at
     what cost, how many calls and how many of them failed."""
     calls = tool_calls(entries)
-    times = [when for when in map(local_time, entries) if when]
+    times = entry_times(entries)
     last = {str(e.get("type")): e for e in entries}
     cost = last.get("cost-state", {})
 
@@ -471,8 +482,7 @@ def files_written(entries: list[dict], project_dir: str) -> list[str]:
     )
     lines = ["files written"] if written else []
     for path, count in sorted(written.items()):
-        flag = "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
-        lines.append(f"  {flat(path)} x{count}{flag}")
+        lines.append(f"  {flat(path)} x{count}{outside_flag(path, project_dir)}")
     return lines
 
 
@@ -543,63 +553,19 @@ def over(transport: str, port: int) -> str:
         return transport
 
 
-@dataclass(frozen=True)
-class ProxyRequest:
-    """A line of the egress proxy's log."""
-
-    ended: float
-    seconds: float
-    # Of the container that asked
-    address: str
-    denied: bool
-    method: str
-    url: str
-    size: int
-
-    @property
-    def began(self) -> float:
-        return self.ended - self.seconds
-
-    @property
-    def port(self) -> int:
-        """The port asked for, 0 when the URL does not say."""
-        try:
-            # CONNECT names host:port, the other methods a whole URL
-            target = urlsplit(self.url if "://" in self.url else "//" + self.url)
-            return target.port or (443 if target.scheme == "https" else 80)
-        except ValueError:
-            return 0
-
-    @property
-    def verdict(self) -> str:
-        return "DENIED" if self.denied else "allowed"
-
-    def made_by(self, session: dict, start: float, end: float) -> bool:
-        """Whether a session made it between start and end: it came from
-        the session's address and was open at some point of that time. The
-        proxy logs a tunnel when it closes, which can be much later."""
-        return (
-            session["ip"] == self.address
-            and self.ended >= max(start, session["start"])
-            and self.began <= min(end, session["until"])
-        )
+def verdict(denied: bool) -> str:
+    return "DENIED" if denied else "allowed"
 
 
-def parse_proxy_request(line: str) -> ProxyRequest | None:
-    """A line of squid's native log format, none for anything else."""
-    try:
-        ended, milliseconds, address, result, sent, method, url = line.split()[:7]
-        return ProxyRequest(
-            float(ended),
-            float(milliseconds) / 1000,
-            address,
-            "DENIED" in result,
-            clean(method),
-            clean(url),
-            int(sent),
-        )
-    except ValueError:
-        return None
+def made_by(request: ProxyRequest, session: dict, start: float, end: float) -> bool:
+    """Whether a session made a request between start and end: it came
+    from the session's address and was open at some point of that time.
+    The proxy logs a tunnel when it closes, which can be much later."""
+    return (
+        session["ip"] == request.address
+        and request.ended >= max(start, session["start"])
+        and request.began <= min(end, session["until"])
+    )
 
 
 def proxy_summary(requests: list[ProxyRequest], sessions: list[dict]) -> list[str]:
@@ -617,16 +583,15 @@ def proxy_summary(requests: list[ProxyRequest], sessions: list[dict]) -> list[st
         count[(request.denied, request.url)] += 1
         volume[(request.denied, request.url)] += request.size
     for denied, url in sorted(count, key=lambda to: (not to[0], -count[to], to[1])):
-        verdict = "DENIED " if denied else "allowed"
         total = size(volume[(denied, url)])
-        lines.append(f"  {verdict}  {url} x{count[(denied, url)]}  {total}")
+        lines.append(f"  {verdict(denied):<7}  {url} x{count[(denied, url)]}  {total}")
     return lines
 
 
 def proxy_event(request: ProxyRequest) -> Event:
     protocol = over("proxy", request.port)
     detail = (
-        f"{protocol} {request.method} {request.url} {request.verdict}"
+        f"{protocol} {request.method} {request.url} {verdict(request.denied)}"
         f" {size(request.size)} {request.seconds:.1f}s"
     )
     fields = {
@@ -646,13 +611,14 @@ def proxy_requests(
 ) -> tuple[list[str], list[Event]]:
     """What filtered sessions asked the egress proxy for between start and
     end, as summary lines and as one event per request."""
-    log = access_log(stderr=subprocess.DEVNULL)
-    if log is None:
+    logged = logged_requests(stderr=subprocess.DEVNULL)
+    if logged is None:
         return ["  the egress proxy is not running, its log cannot be read"], []
     requests = [
-        request
-        for request in map(parse_proxy_request, log.splitlines())
-        if request and any(request.made_by(s, start, end) for s in sessions)
+        # What a session asked for is the session's to choose
+        dataclasses.replace(r, method=clean(r.method), url=clean(r.url))
+        for r in logged
+        if any(made_by(r, session, start, end) for session in sessions)
     ]
     return proxy_summary(requests, sessions), [proxy_event(r) for r in requests]
 
@@ -731,7 +697,7 @@ def network(
     """What the session did on the network, from what the launcher kept of
     it: the egress proxy's log for a filtered session, a capture for one
     run without CLAUDE_DOCKER_NET_LOG=0."""
-    times = [when.timestamp() for when in map(local_time, entries) if when]
+    times = [when.timestamp() for when in entry_times(entries)]
     if not times:
         return [], []
     start, end = times[0], times[-1]
@@ -817,7 +783,7 @@ def list_sessions(files: list[Path]) -> str:
     lines = []
     for path in files:
         entries = read_entries(path)
-        times = [when for when in map(local_time, entries) if when]
+        times = entry_times(entries)
         started = f"{times[0]:%Y-%m-%d %H:%M}" if times else " " * 16
         lines.append(
             f"{started}  {flat(path.stem)[:8]}  {len(prompts(entries)):3d} prompts"
