@@ -7,19 +7,20 @@ import contextlib
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from .capture import CaptureSidecar, collect_ended_captures, session_captured
+from .capture import CaptureSidecar, session_captured
 from .digest import report_session
 from .docker import docker_ok
 from .doors import socket_proxy_watched, ssh_agent_door
+from .egress_log import net_log
 from .follow import follow
 from .history import history_args
 from .home import prepare_home, protect_config_args
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
 from .login import login_shared
 from .network import (
-    net_log,
     network_args,
     session_address_recorded,
     session_network,
@@ -27,7 +28,7 @@ from .network import (
     socket_proxy_args,
     start_egress_proxy,
 )
-from .processes import collect_ended_records, processes_recorded
+from .processes import Watcher, processes_recorded
 from .recorder import transcripts_copied
 from .session import (
     Ending,
@@ -48,7 +49,14 @@ from .session import (
     session_args,
     shadow_args,
 )
-from .settings import Fatal, Host, Settings, detect_host, load_settings
+from .settings import (
+    Fatal,
+    Host,
+    Settings,
+    detect_host,
+    load_settings,
+    settings_help,
+)
 from .tamper import (
     host_exec_fingerprint,
     report_tampering,
@@ -100,7 +108,7 @@ def main(argv: list[str], usage: str = "") -> int:
     if action == "help":
         # Ahead of the settings: a config file that is refused is one of
         # the things the text is asked about
-        print(usage.strip())
+        print(usage.strip() + "\n\n" + settings_help())
         return 0
     env = os.environ
     host = detect_host(env)
@@ -130,22 +138,28 @@ def main(argv: list[str], usage: str = "") -> int:
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
     dirs, protected = protected_dirs(dirs, settings, host)
-    return session(settings, host, image, action, dirs, protected, claude_args)
+    return session(Plan(settings, host, image, action, dirs, protected, claude_args))
 
 
-def session(
-    settings: Settings,
-    host: Host,
-    image: Image,
-    action: str,
-    dirs: list[ExtraDir],
-    protected: list[str],
-    claude_args: list[str],
-) -> int:
-    """One session from start to finish: claude, or bash for the shell
-    action, in a container of the image, with the directories mounted next
-    to the project and the paths in what is mounted that are read-only.
-    Returns its exit status."""
+@dataclass(frozen=True)
+class Plan:
+    """What one session is to be: claude, or bash for the shell action, in
+    a container of the image, with the directories mounted next to the
+    project, the paths in what is mounted that are read-only, and the
+    arguments it is given."""
+
+    settings: Settings
+    host: Host
+    image: Image
+    action: str
+    dirs: list[ExtraDir]
+    protected: list[str]
+    claude_args: list[str]
+
+
+def session(plan: Plan) -> int:
+    """One session from start to finish. Returns its exit status."""
+    settings, host, image = plan.settings, plan.host, plan.image
     refuse_unsafe_dir(host.project_dir, host)
     if not docker_ok("image", "inspect", image.tag):
         status = build_image(image, host)
@@ -156,33 +170,17 @@ def session(
     # the arguments that name them
     with container_name(host, os.environ) as name, ending_passed_on(name) as ending:
         with session_network(settings, host):
-            status = named_session(
-                settings,
-                host,
-                image,
-                action,
-                dirs,
-                protected,
-                claude_args,
-                name,
-                ending,
-            )
+            status = named_session(plan, name, ending)
         return ending.status(status)
 
 
-def named_session(
-    settings: Settings,
-    host: Host,
-    image: Image,
-    action: str,
-    dirs: list[ExtraDir],
-    protected: list[str],
-    claude_args: list[str],
-    name: str,
-    ending: Ending,
-) -> int:
-    """A session in the container of a name, with its network there. It
-    is ended when the launcher is told to end, see ending_passed_on."""
+def named_session(plan: Plan, name: str, ending: Ending) -> int:
+    """The session of a plan in the container of a name, with its network
+    there. It is ended when the launcher is told to end, see
+    ending_passed_on."""
+    settings, host, image = plan.settings, plan.host, plan.image
+    action, dirs, protected = plan.action, plan.dirs, plan.protected
+    claude_args = plan.claude_args
     env = os.environ
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
@@ -214,8 +212,9 @@ def named_session(
     report_unchecked_sessions(pending.parent)
     before = host_exec_fingerprint(watched, host.claude_dir)
     save_pending_check(pending, watched, host.claude_dir, before)
-    collect_ended_captures(host)
-    collect_ended_records(host)
+    # What sessions that ended without their launcher left behind
+    CaptureSidecar.collect_left_behind(host)
+    Watcher.collect_left_behind(host)
     # The container whose network namespace the session is in
     owner = capture or name
     started = time.time()
@@ -253,7 +252,8 @@ def named_session(
 
 def cli(usage: str = "") -> int:
     """Run the launcher on the arguments of the command line. usage is
-    the text --help prints, the docstring of bin/claude-docker."""
+    the text --help prints ahead of the settings, the docstring of
+    bin/claude-docker."""
     try:
         status = main(sys.argv[1:], usage)
         # Here, where a reader that left can still be told from a failure

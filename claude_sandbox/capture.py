@@ -19,19 +19,17 @@ launcher copies it out."""
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import ClassVar
 
-from .docker import docker, docker_bytes, docker_ok
+from .docker import docker, docker_bytes
 from .network import namespace_args, sidecar_running
 from .pcap import HTTP_METHODS, Capture
-from .records import NetSession, record_net_session
+from .records import NetSession
 from .settings import Fatal, Host, Settings
-from .sidecar import Sidecar, keep_latest
+from .sidecar import Sidecar
 
 CAPTURE_SUFFIX = ".capture"
 CAPTURE_LABEL = "claude-sandbox.capture"
@@ -101,10 +99,21 @@ PACKET_FILTER = (
 
 class CaptureSidecar(Sidecar):
     """The sidecar that owns the network namespace of one session and
-    captures in it."""
+    captures in it. Told to stop, it passes that on to tcpdump, which
+    writes out what it holds when it is asked to."""
 
     SUFFIX: ClassVar[str] = CAPTURE_SUFFIX
     LABEL: ClassVar[str] = CAPTURE_LABEL
+    RECORD: ClassVar[str] = "capture"
+    FILE: ClassVar[str] = CAPTURE_FILE
+    EXTENSION: ClassVar[str] = "pcap"
+    KEPT: ClassVar[int] = KEPT_CAPTURES
+
+    def directory(self, host: Host) -> str:
+        return host.captures_dir
+
+    def noted(self, file: str, end: float) -> NetSession:
+        return NetSession(self.session, self.project, self.start, capture=file, end=end)
 
 
 def start_capture(
@@ -157,39 +166,6 @@ def start_capture(
     return sidecar
 
 
-def collect_capture(host: Host, sidecar: CaptureSidecar) -> None:
-    """Stop a sidecar, copy its capture to the host and note which project
-    and time it covers, for --trace to find it by."""
-    # The sidecar passes the stop on to tcpdump, which writes out what it
-    # holds when it is asked to
-    docker_ok("stop", sidecar.name)
-    try:
-        target = sidecar.copy_out(CAPTURE_FILE, host.captures_dir, "pcap")
-        if target:
-            session = NetSession(
-                sidecar.session,
-                sidecar.project,
-                sidecar.start,
-                capture=target.name,
-                end=time.time(),
-            )
-            record_net_session(host, session)
-        keep_latest(Path(host.captures_dir), "*.pcap", KEPT_CAPTURES)
-    except OSError as problem:
-        # Said and passed over: this runs as a session ends, and what is
-        # left to do then (the check of tamper.py) matters more
-        print(f"claude-docker: the capture was not kept: {problem}", file=sys.stderr)
-    finally:
-        sidecar.remove()
-
-
-def collect_ended_captures(host: Host) -> None:
-    """Collect what sessions that ended without their launcher left
-    behind: their sidecar is still there, capture included."""
-    for sidecar in CaptureSidecar.left_behind():
-        collect_capture(host, sidecar)
-
-
 @contextmanager
 def session_captured(
     settings: Settings, host: Host, session: str, image_tag: str
@@ -201,7 +177,7 @@ def session_captured(
     try:
         yield
     finally:
-        collect_capture(host, sidecar)
+        sidecar.collect(host)
 
 
 def cut_short(capture: Capture) -> bool:

@@ -34,11 +34,11 @@ from pathlib import Path
 from typing import ClassVar
 
 from .background import in_background
-from .docker import docker, docker_ok, mount_arg
+from .docker import docker, mount_arg
 from .network import sidecar_running
-from .records import NetSession, record_net_session
+from .records import NetSession
 from .settings import Host, Settings
-from .sidecar import Sidecar, keep_latest
+from .sidecar import Sidecar
 
 PROCESSES_SUFFIX = ".procs"
 PROCESSES_LABEL = "claude-sandbox.processes"
@@ -58,10 +58,30 @@ HELD_WITHIN = 5.0
 
 
 class Watcher(Sidecar):
-    """The sidecar that notes the processes of one session."""
+    """The sidecar that notes the processes of one session. It ends with
+    the session, whose process namespace it is in."""
 
     SUFFIX: ClassVar[str] = PROCESSES_SUFFIX
     LABEL: ClassVar[str] = PROCESSES_LABEL
+    RECORD: ClassVar[str] = "process record"
+    FILE: ClassVar[str] = RECORD_FILE
+    EXTENSION: ClassVar[str] = "jsonl"
+    KEPT: ClassVar[int] = KEPT_RECORDS
+    STOP_SECONDS: ClassVar[int | None] = 1
+
+    def directory(self, host: Host) -> str:
+        return host.process_records_dir
+
+    def noted(self, file: str, end: float) -> NetSession:
+        return NetSession(
+            self.session, self.project, self.start, processes=file, end=end
+        )
+
+    def recorded(self, copied: Path) -> bool:
+        return watcher_started(copied)
+
+    def nothing_recorded(self) -> None:
+        say_not_recorded(self)
 
 
 def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watcher:
@@ -95,36 +115,6 @@ def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watch
     return watcher
 
 
-def collect_record(host: Host, watcher: Watcher) -> None:
-    """Copy a watcher's record to the host and note which project and
-    time it covers, for --trace to find it by. The sidecar ends with the
-    session, whose process namespace it is in."""
-    docker_ok("stop", "--time=1", watcher.name)
-    try:
-        target = watcher.copy_out(RECORD_FILE, host.process_records_dir, "jsonl")
-        if target and watcher_started(target):
-            session = NetSession(
-                watcher.session,
-                watcher.project,
-                watcher.start,
-                processes=target.name,
-                end=time.time(),
-            )
-            record_net_session(host, session)
-        else:
-            if target:
-                target.unlink(missing_ok=True)
-            say_not_recorded(watcher)
-        keep_latest(Path(host.process_records_dir), "*.jsonl", KEPT_RECORDS)
-    except OSError as problem:
-        print(
-            f"claude-docker: the process record was not kept: {problem}",
-            file=sys.stderr,
-        )
-    finally:
-        watcher.remove()
-
-
 def watcher_started(record: Path) -> bool:
     """Whether a watcher got as far as to watch: it says so first."""
     try:
@@ -153,13 +143,6 @@ def say_not_recorded(watcher: Watcher) -> None:
         f"{said.stdout.strip()}",
         file=sys.stderr,
     )
-
-
-def collect_ended_records(host: Host) -> None:
-    """Collect what sessions that ended without their launcher left
-    behind, as collect_ended_captures does."""
-    for watcher in Watcher.left_behind():
-        collect_record(host, watcher)
 
 
 def watch_when_up(
@@ -194,7 +177,7 @@ def processes_recorded(
             yield
     finally:
         for watcher in started:
-            collect_record(host, watcher)
+            watcher.collect(host)
 
 
 @dataclass(frozen=True)

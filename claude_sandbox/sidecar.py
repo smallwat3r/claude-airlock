@@ -1,19 +1,24 @@
 """The sidecars of one session: containers the launcher runs next to it,
-which hold what they record until the launcher copies it out. Each kind
-has its own suffix and label, see capture.py and processes.py."""
+which hold what they record until the launcher copies it out and notes
+where it is kept, for --trace to find. Each kind says what it is called,
+which file it writes and where that goes, see capture.py and
+processes.py."""
 
 from __future__ import annotations
 
 import json
 import math
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, TypeVar
 
 from .docker import docker_ok, docker_output
+from .files import json_object, private_dir
 from .launcher import Launcher, session_alive
-from .settings import private_dir
+from .records import NetSession, record_net_session
+from .settings import Host
 
 SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
 
@@ -30,6 +35,16 @@ class Sidecar:
     # refuse.
     SUFFIX: ClassVar[str]
     LABEL: ClassVar[str]
+    # What it records, as it is called when that was not kept, and the
+    # file it is written to in the sidecar
+    RECORD: ClassVar[str]
+    FILE: ClassVar[str]
+    # What the copies of that file are named with, and how many of them
+    # are kept: the oldest go once there are more
+    EXTENSION: ClassVar[str]
+    KEPT: ClassVar[int]
+    # The seconds it is given to stop, docker's own without
+    STOP_SECONDS: ClassVar[int | None] = None
 
     name: str
     project: str
@@ -77,7 +92,7 @@ class Sidecar:
         """The sidecar of a name and a label, none for a container that
         is not one."""
         try:
-            about = json.loads(label)
+            about = json_object(label) or {}
             project, start = str(about["project"]), float(about["start"])
             # Not in the label of an earlier version
             launcher = Launcher(int(about["pid"]), str(about.get("launched", "")))
@@ -120,17 +135,67 @@ class Sidecar:
             if not session_alive(sidecar.launcher, sidecar.session)
         ]
 
-    def copy_out(self, file: str, directory: str, extension: str) -> Path | None:
-        """Copy a file of the sidecar into a directory of the launcher's
+    @classmethod
+    def collect_left_behind(cls, host: Host) -> None:
+        """Collect what sessions that ended without their launcher left
+        behind: their sidecar is still there, with what it recorded."""
+        for sidecar in cls.left_behind():
+            sidecar.collect(host)
+
+    def directory(self, host: Host) -> str:
+        """Where the launcher keeps what sidecars of this kind recorded."""
+        raise NotImplementedError
+
+    def noted(self, file: str, end: float) -> NetSession:
+        """The line of the record that says where what this sidecar
+        recorded is kept, and which project and time it covers."""
+        raise NotImplementedError
+
+    def recorded(self, copied: Path) -> bool:
+        """Whether a file copied out of the sidecar holds a record."""
+        return True
+
+    def nothing_recorded(self) -> None:
+        """Called when there was nothing to keep, while the sidecar is
+        still there to say why."""
+
+    def copy_out(self, directory: str) -> Path | None:
+        """Copy the sidecar's file into a directory of the launcher's
         records, named after the sidecar and its start. None when there
         was nothing to copy. Raises OSError when the directory cannot be
         made."""
         target = Path(
-            private_dir(directory), f"{self.name}-{int(self.start)}.{extension}"
+            private_dir(directory), f"{self.name}-{int(self.start)}.{self.EXTENSION}"
         )
-        if docker_ok("cp", f"{self.name}:{file}", str(target)):
+        if docker_ok("cp", f"{self.name}:{self.FILE}", str(target)):
             return target
         return None
+
+    def collect(self, host: Host) -> None:
+        """Stop the sidecar, copy what it recorded to the host, note
+        which project and time that covers for --trace to find it by, let
+        go of the oldest copies and remove the sidecar."""
+        patience = [] if self.STOP_SECONDS is None else [f"--time={self.STOP_SECONDS}"]
+        docker_ok("stop", *patience, self.name)
+        try:
+            directory = self.directory(host)
+            copied = self.copy_out(directory)
+            if copied and self.recorded(copied):
+                record_net_session(host, self.noted(copied.name, time.time()))
+            else:
+                if copied:
+                    copied.unlink(missing_ok=True)
+                self.nothing_recorded()
+            keep_latest(Path(directory), f"*.{self.EXTENSION}", self.KEPT)
+        except OSError as problem:
+            # Said and passed over: this runs as a session ends, and what
+            # is left to do then (the check of tamper.py) matters more
+            print(
+                f"claude-docker: the {self.RECORD} was not kept: {problem}",
+                file=sys.stderr,
+            )
+        finally:
+            self.remove()
 
     def remove(self) -> None:
         docker_ok("rm", "--force", self.name)
