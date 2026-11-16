@@ -271,7 +271,8 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     empty, which says none (no features, no shared directory). A switch
     or a limit that is set but empty says nothing, and the config file is
     asked next: an empty variable must not switch off a restriction the
-    file switched on."""
+    file switched on. What is hidden and what is protected are the lists of
+    both, for the same reason."""
     file_values = read_config_file(config_file)
     defaults = Settings()
 
@@ -300,8 +301,8 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         return tuple(item for item in (raw(name) or "").split(":") if item)
 
     def both_lists(name: str) -> tuple[str, ...]:
-        # Of the file and of the environment: what one protects, the other
-        # does not take back
+        # Of the file and of the environment: what one hides or protects,
+        # the other does not take back
         key = SETTING_PREFIX + name
         said = f"{file_values.get(key, '')}:{env.get(key, '')}"
         return tuple(dict.fromkeys(item for item in said.split(":") if item))
@@ -316,7 +317,7 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         socket=choice("SOCKET", defaults.socket, ("0", "1", "full")),
         rw_config=flag("RW_CONFIG", defaults.rw_config),
         shared_history=flag("SHARED_HISTORY", defaults.shared_history),
-        shadow=colon_list("SHADOW"),
+        shadow=both_lists("SHADOW"),
         protect=both_lists("PROTECT"),
         memory=text("MEMORY", defaults.memory),
         pids=text("PIDS", defaults.pids),

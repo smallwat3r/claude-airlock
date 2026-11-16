@@ -104,7 +104,7 @@ others with an example value:
 
 - `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` (default: none)
 
-  Extra file name globs to hide, on top of the `.env` family
+  Extra file name globs to hide, on top of the `.env` family. What the config file names and what the environment names both count
 
 - `CLAUDE_DOCKER_PROTECT="~/claude-shared/kit:docs"` (default: none)
 

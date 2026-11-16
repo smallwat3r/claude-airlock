@@ -554,6 +554,18 @@ class ConfigFileTest(LauncherTest):
         flags = self.launch(CLAUDE_DOCKER_NET_FILTER="").flags
         self.assertIn("--network=claude-docker-net", flags)
 
+    def test_what_the_file_hides_the_environment_does_not_show(self):
+        (self.project / "notes.secret").touch()
+        self.write_config("CLAUDE_DOCKER_SHADOW=*.pem")
+        flags = self.launch(CLAUDE_DOCKER_SHADOW="*.secret").flags
+        for name in ("key.pem", "notes.secret"):
+            self.assertIn(f"--volume=/dev/null:{self.project / name}:ro", flags)
+
+    def test_an_empty_list_does_not_undo_the_file(self):
+        self.write_config("CLAUDE_DOCKER_SHADOW=*.pem")
+        flags = self.launch(CLAUDE_DOCKER_SHADOW="").flags
+        self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
+
     def test_rejects_an_unknown_setting(self):
         self.write_config("CLAUDE_DOCKER_NET_FILTR=1")
         self.assert_refused(self.launch(), "not a known setting")
