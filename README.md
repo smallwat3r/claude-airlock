@@ -4,6 +4,10 @@ Run [Claude Code](https://claude.com/claude-code) inside a hardened Docker
 container, with only the current project mounted. Works from any shell, and
 from editors that can launch a custom `claude` program.
 
+![The launcher on the host starts the session container and a capture
+sidecar that share one network namespace, the egress proxy and the Docker
+socket proxy are opt-in](docs/architecture.excalidraw.png)
+
 ## Requirements
 
 - Docker (Linux, or Docker Desktop on macOS)
@@ -134,6 +138,97 @@ there, extra directories belong to one project, not to every session.
 shared between sessions. `CLAUDE_DOCKER_SHARED_DIR` names another directory,
 or none when set empty.
 
+## What the sandbox does
+
+- Mounts the project directory (and any extra directories) read-write at
+  their host paths, plus `~/.claude` so login, settings and history persist.
+  `~/.claude/settings.json` and `~/.claude/hooks` are read-only on top: they
+  hold commands your host `claude` runs, so a session must not be able to
+  plant one. `~/.claude/CLAUDE.md`, `skills` and `agents` are read-only too,
+  they are instructions every later session follows. None of these can be
+  changed inside the sandbox, unless you set `CLAUDE_DOCKER_RW_CONFIG=1`.
+- Refuses to mount the home directory, its parents or the filesystem root.
+- Keeps `~/.cache` (Go modules, uv, npm) in a Docker volume per project, so
+  a session does not download its dependencies again. Per project on
+  purpose, a shared cache would let one session poison another project's
+  dependencies. The volumes have no size cap, list them with
+  `docker volume ls --filter name=claude-cache-` and remove what you no
+  longer need. `CLAUDE_DOCKER_CACHE=0` goes back to a 2g tmpfs.
+- When a session ends, warns if it changed files that run commands on the
+  host, or that Claude follows there. In the project and every extra
+  directory: `.git/config` (branch tracking aside) and git hooks, of
+  submodules too and where `core.hooksPath` moved them (husky and the
+  like), Claude's `.claude/settings.json`, `settings.local.json` and
+  `.mcp.json` with the scripts their commands name, and its instructions,
+  `CLAUDE.md` and the `hooks`, `commands`, `skills`, `agents` and `rules`
+  of `.claude`. In `~/.claude` the same, where it matters for what is not
+  mounted read-only: `commands`, `rules`, and a script `settings.json`
+  names outside `hooks`. They have to stay writable for git and
+  claude to work, so they are checked rather than locked. The warning is
+  printed when the launcher returns, so end a session with `/exit` or
+  Ctrl-D to see it there. A session that ends without it, because its Emacs
+  buffer or terminal was killed, is checked by the next `claude-docker`
+  launch instead, which then also lists what you changed yourself in the
+  meantime.
+- Shadows `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files with
+  `/dev/null`, so secrets stay on the host. Templates such as `.env.example`
+  remain readable, and `CLAUDE_DOCKER_SHADOW` hides more.
+- Runs as your user with a read-only root filesystem, all capabilities
+  dropped, `no-new-privileges`, and PID and memory limits. Writable space is
+  the mounts, the cache volume and a few size-capped tmpfs (`/tmp`,
+  `~/.npm`). Containers still share the host kernel, set
+  `CLAUDE_DOCKER_RUNTIME=runsc` to run under gVisor if you have it.
+- Mounts the git config read-only, including files it pulls in with
+  `include` and `includeIf`. There is no gpg in the image, so commit signing
+  is switched off inside the container, sign the commits on the host before
+  pushing.
+- With `CLAUDE_DOCKER_SSH_AGENT=1`, forwards the SSH agent. It is opt-in
+  because the agent lets the container authenticate as you to every host
+  your keys reach. Loading keys with `ssh-add -c` makes each use ask first.
+- With `CLAUDE_DOCKER_SOCKET=1` (and the `docker` feature for the CLI), lets
+  the session see the host's containers through
+  [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
+  with our own rules (`docker/docker-socket-proxy.cfg`): `docker ps` and
+  `docker logs` work, everything else is denied. `docker inspect` gets a
+  stub answer, enough for the CLI to fetch logs, so container environments
+  stay hidden. Logs of containers started with a TTY cannot be decoded in
+  this mode. `CLAUDE_DOCKER_SOCKET=full` allows every read under
+  `/containers` instead, which adds real `inspect`, `stats` and `top`, and
+  with them the environment of every container on the host, secrets
+  included. Writes are blocked in both modes, since a write to the root
+  daemon would let the container escape. Command lines and logs can still
+  carry secrets, which is why this stays opt-in. The proxy sidecars keep
+  running between sessions, after editing the rules or to switch them off
+  remove them with `docker rm -f claude-docker-ps-proxy claude-docker-proxy`.
+- With `CLAUDE_DOCKER_NET_FILTER=1`, joins an internal network with no route
+  out. Egress goes through a squid sidecar that only allows the listed
+  domains, and external DNS is blackholed. `claude-docker --net-log` lists
+  the domains it refused, most frequent first, which is the quickest way to
+  find what a project needs. An edited allowlist is picked up by the next
+  filtered session, or at once with `claude-docker --net-reload`. Either
+  way the proxy restarts, briefly dropping the connections of other
+  filtered sessions.
+
+## Known limits
+
+The sandbox contains what a session can reach, it does not make a
+read-write project safe to trust blindly afterwards:
+
+- Anything in the project can be changed, including files that run code on
+  the host later: `.git/config` (`core.fsmonitor`, `core.hooksPath`), git
+  hooks, `.claude/settings.json`, Makefiles and scripts. The launcher warns
+  about git's and Claude's own when a session ends (see above), the rest is
+  for you to review in the diff before running things outside the sandbox:
+  build files, package scripts, the configuration of a hook manager such
+  as pre-commit, a `CLAUDE.md` below the top of the project, and a
+  repository planted in a subdirectory.
+- `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
+  plugin's hook scripts are not protected the way `settings.json` is.
+- The egress allowlist includes GitHub, so with a forwarded SSH agent or a
+  `GH_TOKEN` a session can still push data out to a repository or gist.
+- Secrets that are not in a shadowed file (hard-coded, or in git history)
+  are readable.
+
 ## Reviewing a session
 
 `claude-docker --trace` shows what the latest session of the current project
@@ -235,101 +330,6 @@ What is kept, all of it under `~/.local/state/claude-sandbox` unless noted:
 A capture is copied out when the launcher returns. The sidecar of a session
 that ended without it (a killed Emacs buffer) is collected by the next
 `claude-docker` launch.
-
-## What the sandbox does
-
-![The launcher on the host starts the session container and a capture
-sidecar that share one network namespace, the egress proxy and the Docker
-socket proxy are opt-in](docs/architecture.excalidraw.png)
-
-- Mounts the project directory (and any extra directories) read-write at
-  their host paths, plus `~/.claude` so login, settings and history persist.
-  `~/.claude/settings.json` and `~/.claude/hooks` are read-only on top: they
-  hold commands your host `claude` runs, so a session must not be able to
-  plant one. `~/.claude/CLAUDE.md`, `skills` and `agents` are read-only too,
-  they are instructions every later session follows. None of these can be
-  changed inside the sandbox, unless you set `CLAUDE_DOCKER_RW_CONFIG=1`.
-- Refuses to mount the home directory, its parents or the filesystem root.
-- Keeps `~/.cache` (Go modules, uv, npm) in a Docker volume per project, so
-  a session does not download its dependencies again. Per project on
-  purpose, a shared cache would let one session poison another project's
-  dependencies. The volumes have no size cap, list them with
-  `docker volume ls --filter name=claude-cache-` and remove what you no
-  longer need. `CLAUDE_DOCKER_CACHE=0` goes back to a 2g tmpfs.
-- When a session ends, warns if it changed files that run commands on the
-  host, or that Claude follows there. In the project and every extra
-  directory: `.git/config` (branch tracking aside) and git hooks, of
-  submodules too and where `core.hooksPath` moved them (husky and the
-  like), Claude's `.claude/settings.json`, `settings.local.json` and
-  `.mcp.json` with the scripts their commands name, and its instructions,
-  `CLAUDE.md` and the `hooks`, `commands`, `skills`, `agents` and `rules`
-  of `.claude`. In `~/.claude` the same, where it matters for what is not
-  mounted read-only: `commands`, `rules`, and a script `settings.json`
-  names outside `hooks`. They have to stay writable for git and
-  claude to work, so they are checked rather than locked. The warning is
-  printed when the launcher returns, so end a session with `/exit` or
-  Ctrl-D to see it there. A session that ends without it, because its Emacs
-  buffer or terminal was killed, is checked by the next `claude-docker`
-  launch instead, which then also lists what you changed yourself in the
-  meantime.
-- Shadows `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files with
-  `/dev/null`, so secrets stay on the host. Templates such as `.env.example`
-  remain readable, and `CLAUDE_DOCKER_SHADOW` hides more.
-- Runs as your user with a read-only root filesystem, all capabilities
-  dropped, `no-new-privileges`, and PID and memory limits. Writable space is
-  the mounts, the cache volume and a few size-capped tmpfs (`/tmp`,
-  `~/.npm`). Containers still share the host kernel, set
-  `CLAUDE_DOCKER_RUNTIME=runsc` to run under gVisor if you have it.
-- Mounts the git config read-only, including files it pulls in with
-  `include` and `includeIf`. There is no gpg in the image, so commit signing
-  is switched off inside the container, sign the commits on the host before
-  pushing.
-- With `CLAUDE_DOCKER_SSH_AGENT=1`, forwards the SSH agent. It is opt-in
-  because the agent lets the container authenticate as you to every host
-  your keys reach. Loading keys with `ssh-add -c` makes each use ask first.
-- With `CLAUDE_DOCKER_SOCKET=1` (and the `docker` feature for the CLI), lets
-  the session see the host's containers through
-  [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
-  with our own rules (`docker/docker-socket-proxy.cfg`): `docker ps` and
-  `docker logs` work, everything else is denied. `docker inspect` gets a
-  stub answer, enough for the CLI to fetch logs, so container environments
-  stay hidden. Logs of containers started with a TTY cannot be decoded in
-  this mode. `CLAUDE_DOCKER_SOCKET=full` allows every read under
-  `/containers` instead, which adds real `inspect`, `stats` and `top`, and
-  with them the environment of every container on the host, secrets
-  included. Writes are blocked in both modes, since a write to the root
-  daemon would let the container escape. Command lines and logs can still
-  carry secrets, which is why this stays opt-in. The proxy sidecars keep
-  running between sessions, after editing the rules or to switch them off
-  remove them with `docker rm -f claude-docker-ps-proxy claude-docker-proxy`.
-- With `CLAUDE_DOCKER_NET_FILTER=1`, joins an internal network with no route
-  out. Egress goes through a squid sidecar that only allows the listed
-  domains, and external DNS is blackholed. `claude-docker --net-log` lists
-  the domains it refused, most frequent first, which is the quickest way to
-  find what a project needs. An edited allowlist is picked up by the next
-  filtered session, or at once with `claude-docker --net-reload`. Either
-  way the proxy restarts, briefly dropping the connections of other
-  filtered sessions.
-
-## Known limits
-
-The sandbox contains what a session can reach, it does not make a
-read-write project safe to trust blindly afterwards:
-
-- Anything in the project can be changed, including files that run code on
-  the host later: `.git/config` (`core.fsmonitor`, `core.hooksPath`), git
-  hooks, `.claude/settings.json`, Makefiles and scripts. The launcher warns
-  about git's and Claude's own when a session ends (see above), the rest is
-  for you to review in the diff before running things outside the sandbox:
-  build files, package scripts, the configuration of a hook manager such
-  as pre-commit, a `CLAUDE.md` below the top of the project, and a
-  repository planted in a subdirectory.
-- `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
-  plugin's hook scripts are not protected the way `settings.json` is.
-- The egress allowlist includes GitHub, so with a forwarded SSH agent or a
-  `GH_TOKEN` a session can still push data out to a repository or gist.
-- Secrets that are not in a shadowed file (hard-coded, or in git history)
-  are readable.
 
 ## The image
 
