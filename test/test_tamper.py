@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import unittest
 from pathlib import Path
@@ -191,6 +192,41 @@ class UncheckedSessionTest(LauncherTest):
         file.write_text("{")
         self.assertIn("unreadable pending check", self.launch().stderr)
         self.assertEqual(self.pending(), [])
+
+
+class ToldToEndTest(LauncherTest):
+    """The launcher told to end while its session runs: the session is
+    stopped, and the launcher ends as it does after any session."""
+
+    # The fake docker is the shell's parent and the launcher its parent.
+    # The fake session goes on a moment, as a container does until it is
+    # stopped.
+    TELL_LAUNCHER = "kill -{} $(ps -o ppid= -p $PPID); sleep 1"
+
+    def told(self, name: str) -> None:
+        number = getattr(signal, f"SIG{name}")
+        result = self.launch(
+            session=f"echo x > .git/hooks/pre-commit; {self.TELL_LAUNCHER.format(name)}"
+        )
+        self.assertEqual(result.status, 128 + number, result.stderr)
+        self.assertIn(["stop", "claude-proj"], result.calls)
+        # Its check ran, and nothing of it is left for the next launch
+        self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", result.stderr)
+        self.assertEqual(list(self.state.glob("pending-checks/*")), [])
+
+    def test_a_terminated_launcher_ends_its_session_and_checks_it(self):
+        self.told("TERM")
+
+    def test_a_launcher_whose_terminal_is_gone_does_too(self):
+        self.told("HUP")
+
+    def test_the_proxies_no_session_uses_are_removed(self):
+        result = self.launch(
+            session=self.TELL_LAUNCHER.format("TERM"),
+            CLAUDE_DOCKER_NET_FILTER="1",
+            FAKE_PS="claude-egress-proxy",
+        )
+        self.assertIn(["rm", "--force", "claude-egress-proxy"], result.calls)
 
 
 if __name__ == "__main__":

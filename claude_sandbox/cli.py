@@ -30,11 +30,13 @@ from .network import (
 from .processes import collect_ended_records, processes_recorded
 from .recorder import transcripts_copied
 from .session import (
+    Ending,
     ExtraDir,
     add_extra_dir,
     base_args,
     configured_extra_dirs,
     container_name,
+    ending_passed_on,
     extra_dir_args,
     git_config_args,
     interrupts_held,
@@ -152,10 +154,20 @@ def session(
     prepare_home(host)
     # The name, then the network and the proxies a session leans on, before
     # the arguments that name them
-    with container_name(host, os.environ) as name, session_network(settings, host):
-        return named_session(
-            settings, host, image, action, dirs, protected, claude_args, name
-        )
+    with container_name(host, os.environ) as name, ending_passed_on(name) as ending:
+        with session_network(settings, host):
+            status = named_session(
+                settings,
+                host,
+                image,
+                action,
+                dirs,
+                protected,
+                claude_args,
+                name,
+                ending,
+            )
+        return ending.status(status)
 
 
 def named_session(
@@ -167,8 +179,10 @@ def named_session(
     protected: list[str],
     claude_args: list[str],
     name: str,
+    ending: Ending,
 ) -> int:
-    """A session in the container of a name, with its network there."""
+    """A session in the container of a name, with its network there. It
+    is ended when the launcher is told to end, see ending_passed_on."""
     env = os.environ
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
@@ -222,7 +236,7 @@ def named_session(
                     running.enter_context(recording)
                 agent = ssh_agent_door(settings, host, name, env)
                 run_args += running.enter_context(agent)
-                status = run_session(run_args, image, claude_args)
+                status = run_session(run_args, image, claude_args, ending)
         except Fatal:
             # The session did not start, there is nothing of it to check
             pending.unlink(missing_ok=True)

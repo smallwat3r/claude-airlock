@@ -678,8 +678,10 @@ All of it under `~/.local/state/claude-sandbox`, but for the proxy's log:
 - `docker volume rm claude-egress-log` (with the proxy removed) clears the
   proxy's log.
 - A capture and a record of processes are copied out when the launcher
-  returns. The sidecars of a session that ended without it (a killed Emacs
-  buffer) are collected by the next `claude-docker` launch.
+  returns. A launcher that is told to end (a killed Emacs buffer, a closed
+  terminal, `kill`) stops its session first and then returns as after any
+  session. The sidecars of a session that ended without it (`kill -9`, a
+  crash) are collected by the next `claude-docker` launch.
 
 ### Following a session
 

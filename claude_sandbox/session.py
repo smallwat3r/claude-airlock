@@ -12,6 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,6 +33,11 @@ from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings, private_di
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
 SHADOW_PRUNED_DIRS = ("node_modules", ".git")
+# What tells the launcher to end: a kill, and a terminal that is gone (a
+# closed window, a killed Emacs buffer)
+END_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+# Seconds between two tries to stop a session the launcher was told to end
+STOP_EVERY = 0.5
 
 
 @dataclass(frozen=True)
@@ -458,10 +464,73 @@ def interrupts_held() -> Iterator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
-def run_session(run_args: list[str], image: Image, command_args: list[str]) -> int:
+class Ending:
+    """The launcher being told to end while it has a session, see
+    ending_passed_on."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        # The signal that told it, none while none did
+        self.signal: int | None = None
+        self._over = threading.Event()
+
+    def told(self, number: int, _frame: object) -> None:
+        """The handler of the signals: the first one counts."""
+        if self.signal is None:
+            self.signal = number
+            threading.Thread(target=self._stop_session, daemon=True).start()
+
+    def _stop_session(self) -> None:
+        # Until the session is over, not once: its container may not be
+        # there yet, and is then started a moment later
+        while not self._over.is_set():
+            try:
+                docker_ok("stop", self._name)
+            except Fatal:
+                return
+            self._over.wait(STOP_EVERY)
+
+    def session_over(self) -> None:
+        self._over.set()
+
+    def status(self, status: int) -> int:
+        """What the launcher ends with: the session's status, or the way
+        a shell reports the signal that ended it."""
+        return status if self.signal is None else 128 + self.signal
+
+
+@contextmanager
+def ending_passed_on(name: str) -> Iterator[Ending]:
+    """For as long as the block lasts, a signal that would end the
+    launcher (see END_SIGNALS) ends the session of that name instead, and
+    the launcher then ends as it does after any session: it collects what
+    the sidecars recorded, checks what the session left behind and removes
+    the proxies no session uses any more. Ended on the spot it would leave
+    all of that for the next launch, the socket proxy and the host's
+    Docker socket it holds included. A kill that cannot be handled still
+    does, see report_unchecked_sessions and Sidecar.left_behind."""
+    ending = Ending(name)
+    previous = {number: signal.signal(number, ending.told) for number in END_SIGNALS}
+    try:
+        yield ending
+    finally:
+        ending.session_over()
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def run_session(
+    run_args: list[str], image: Image, command_args: list[str], ending: Ending
+) -> int:
     """Run the container and wait for it. Not an exec: the launcher has to
-    outlive the session to check what it left behind, see
-    interrupts_held."""
-    status = docker("run", *run_args, image.tag, *command_args).returncode
+    outlive the session to check what it left behind, see interrupts_held
+    and ending_passed_on. Not at all when the launcher was told to end
+    before it got here."""
+    try:
+        if ending.signal is not None:
+            return 0
+        status = docker("run", *run_args, image.tag, *command_args).returncode
+    finally:
+        ending.session_over()
     # Killed by a signal: report it the way a shell would
     return status if status >= 0 else 128 - status
