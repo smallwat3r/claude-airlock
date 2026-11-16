@@ -33,7 +33,12 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 # ~/.cache is mounted as a named volume (see bin/claude-docker). A new volume
 # takes the owner and mode of the directory it covers, so create it open to
 # whichever host user the container runs as, the way /tmp is.
-RUN mkdir -p /home/node/.cache && chmod 1777 /home/node/.cache
+# The npm installs above ran as root and left their cache there, which the
+# volume would start out with: npm in a session then fails on a cache
+# directory it cannot write.
+RUN mkdir -p /home/node/.cache \
+    && rm -rf /home/node/.cache/npm \
+    && chmod 1777 /home/node/.cache
 
 USER node
 WORKDIR /home/node
