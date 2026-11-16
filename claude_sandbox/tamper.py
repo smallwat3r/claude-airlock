@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .launcher import Launcher, session_alive
-from .settings import private_dir
+from .settings import private_dir, write_whole
 
 # What Claude follows or starts in a project, on the host as in a session:
 # its settings, the servers it is told to run and its instructions. Relative
@@ -69,7 +69,9 @@ def sha256_hex(data: bytes) -> str:
 
 def git_config_hash(file: str) -> str:
     """Hash of a git config without its branch tracking entries, they change
-    on every push -u or checkout and cannot run anything."""
+    on every push -u or checkout and cannot run anything. One that cannot
+    be read says so: the file is the session's, which can take the right
+    to read it away, and the check must not be made to fail."""
     try:
         listing = subprocess.run(
             ["git", "config", "--file", file, "--list"],
@@ -79,7 +81,7 @@ def git_config_hash(file: str) -> str:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         # Unparseable, or no git: fall back to the file as it is
-        listing = Path(file).read_bytes()
+        return file_hash(file)
     kept = [line for line in listing.split(b"\n") if not line.startswith(b"branch.")]
     return sha256_hex(b"\n".join(kept))
 
@@ -353,7 +355,9 @@ def save_pending_check(
     """Keep a session's starting fingerprint on disk until its check has
     run. A launcher that dies with its terminal (a killed Emacs buffer, a
     closed window, a crash) never gets to compare, the next launch finds
-    this file and does it instead (see report_unchecked_sessions)."""
+    this file and does it instead (see report_unchecked_sessions). Written
+    whole: a launcher that starts meanwhile reads the checks that are
+    there, and drops one it cannot read."""
     private_dir(str(file.parent))
     launcher = Launcher.current()
     pending = {
@@ -363,7 +367,7 @@ def save_pending_check(
         "claude_dir": claude_dir,
         "before": before,
     }
-    file.write_text(json.dumps(pending), encoding="utf-8")
+    write_whole(str(file), json.dumps(pending))
 
 
 def report_unchecked_sessions(directory: Path) -> None:

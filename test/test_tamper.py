@@ -14,6 +14,7 @@ from pathlib import Path
 from harness import (
     LauncherTest,
     launcher,
+    settings,
 )
 
 
@@ -118,6 +119,16 @@ class TamperingTest(LauncherTest):
         result = self.launch(session="echo code > main.go")
         self.assertNotIn(self.REPORT, result.stderr)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file whatever its mode")
+    def test_a_git_config_made_unreadable_is_reported(self):
+        config = self.project / ".git" / "config"
+        self.addCleanup(config.chmod, 0o644)
+        result = self.launch(session="chmod 000 .git/config")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.status, 0)
+        self.assertIn(f"  {config}\n", result.stderr)
+        self.assertEqual(list(self.state.glob("pending-checks/*")), [])
+
     def test_the_session_status_is_passed_on(self):
         self.assertEqual(self.launch(session="exit 7").status, 7)
 
@@ -162,6 +173,17 @@ class UncheckedSessionTest(LauncherTest):
         (self.project / ".git" / "hooks" / "pre-commit").write_text("x")
         self.assertNotIn(self.LATE, self.launch(CLAUDE_BUFFER_NAME="*c:proj:b*").stderr)
         self.assertIn(file, self.pending())
+
+    def test_a_pending_check_is_written_whole(self):
+        # Under another name first, which the next launch does not take
+        # for a check: only ever one file a reader would open
+        file = self.state / "pending-checks" / "claude-proj.json"
+        file.parent.mkdir(parents=True)
+        for content in ("{}", '{"pid": 1}'):
+            settings.write_whole(str(file), content)
+            self.assertEqual(file.read_text(), content)
+            self.assertEqual(list(file.parent.iterdir()), [file])
+        self.assertEqual(file.stat().st_mode & 0o777, 0o600)
 
     def test_an_unreadable_pending_check_is_dropped_out_loud(self):
         self.launch(session=self.KILL_LAUNCHER)

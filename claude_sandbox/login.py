@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .background import in_background
-from .settings import Host, private_dir
+from .settings import Host, private_dir, write_whole
 
 LOGIN = ".credentials.json"
 # Seconds between two looks at the two files
@@ -130,15 +130,8 @@ def last_shared(host: Host) -> str | None:
 
 
 def note_shared(host: Host, login: Login) -> None:
-    directory = private_dir(host.state_dir)
-    descriptor, partial = tempfile.mkstemp(dir=directory, prefix="login-synced.")
-    try:
-        with os.fdopen(descriptor, "w", encoding="ascii") as file:
-            file.write(login.noted + "\n")
-        os.replace(partial, host.login_synced_file)
-    except BaseException:
-        Path(partial).unlink(missing_ok=True)
-        raise
+    private_dir(host.state_dir)
+    write_whole(host.login_synced_file, login.noted + "\n")
 
 
 def written_last(one: Login, other: Login) -> Login:

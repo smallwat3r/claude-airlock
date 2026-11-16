@@ -4,6 +4,7 @@ user's config file, and where things are on the host."""
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,22 @@ def private_dir(path: str) -> str:
             # Another launcher was first
             continue
     return path
+
+
+def write_whole(path: str, text: str) -> None:
+    """Write one of the launcher's records whole or not at all, for the
+    user alone: under another name of its directory first, then renamed.
+    Launchers of other sessions read there, none of them finds half a
+    file. The other name ends in what no reader looks for."""
+    directory, name = os.path.split(path)
+    descriptor, partial = tempfile.mkstemp(dir=directory, prefix=name + ".")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            file.write(text)
+        os.replace(partial, path)
+    except BaseException:
+        Path(partial).unlink(missing_ok=True)
+        raise
 
 
 class Fatal(Exception):
