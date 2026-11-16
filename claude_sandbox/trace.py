@@ -18,6 +18,7 @@ before anything is printed. The network record is the launcher's own."""
 from __future__ import annotations
 
 import difflib
+import enum
 import functools
 import json
 import os
@@ -32,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .capture import read_capture
+from .capture import Capture, read_capture
 from .network import access_log
 from .settings import Fatal, Host
 
@@ -63,14 +64,27 @@ _BIDI = "".join(map(chr, [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]))
 _UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f" + _BIDI + "]")
 
 
+class Who(enum.Enum):
+    """Who did something, the value being how the output names them."""
+
+    USER = "user"
+    CLAUDE = "claude"
+    # A subagent of Claude's
+    AGENT = "agent"
+    # The container as a whole: a connection is known by its container,
+    # not by the command that opened it
+    SANDBOX = "sandbox"
+
+
 @dataclass
 class Event:
-    """Something that happened: when (seconds since the epoch), who did it
-    (user, claude, agent for a subagent, sandbox for the container as a
-    whole), what kind of thing, and the lines that describe it."""
+    """Something that happened: when (seconds since the epoch), who did
+    it, what kind of thing (prompt, reply, net, dns, or the name of the
+    tool for a call, which is not a closed set) and the lines that
+    describe it."""
 
     when: float
-    who: str
+    who: Who
     what: str
     details: list[str]
     # The same as named values, for --json
@@ -236,38 +250,65 @@ def clip(lines: list[str], full: bool, limit: int = PREVIEW_LINES) -> list[str]:
     return shown
 
 
+def file_path(tool_input: dict) -> str | None:
+    """The file a tool call is about, for the tools that name one."""
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    return path if isinstance(path, str) else None
+
+
+def bash_details(
+    tool_input: dict, cwd: object, project_dir: str, full: bool
+) -> list[str]:
+    """A command: what ran, why (the reason Claude gave for it) and where,
+    when that is not the project directory."""
+    command = clip(clean(tool_input.get("command", "")).splitlines() or [""], full)
+    details = ["$ " + command[0], *("$   " + line for line in command[1:])]
+    if tool_input.get("description"):
+        details.append("why: " + flat(tool_input["description"]))
+    if isinstance(cwd, str) and cwd != project_dir:
+        details.append("cwd: " + flat(cwd))
+    return details
+
+
+def edit_diff(tool_input: dict) -> list[str]:
+    """What an Edit call changes, as the lines of a unified diff."""
+    diff = difflib.unified_diff(
+        clean(tool_input.get("old_string", "")).splitlines(),
+        clean(tool_input.get("new_string", "")).splitlines(),
+        lineterm="",
+        n=1,
+    )
+    # Without the --- and +++ lines, the file is named with the call
+    return list(diff)[2:]
+
+
+def file_details(
+    name: str, path: str, tool_input: dict, project_dir: str, full: bool
+) -> list[str]:
+    """A call on a file: which one, flagged when it is written outside the
+    project, and what an Edit changes or a Write puts there."""
+    about = "file: " + flat(path)
+    changes: list[str] = []
+    if name == "Edit":
+        changes = ["diff: " + line for line in clip(edit_diff(tool_input), full)]
+    elif name == "Write":
+        content = clean(tool_input.get("content", "")).splitlines()
+        about += f" ({len(content)} lines)"
+        changes = ["content: " + line for line in clip(content, full)]
+    if name in FILE_TOOLS and outside(path, project_dir):
+        about += "  OUTSIDE PROJECT"
+    return [about, *changes]
+
+
 def call_details(
     name: str, tool_input: dict, cwd: object, project_dir: str, full: bool
 ) -> list[str]:
-    """The lines that describe a tool call: what it ran or touched, why
-    (the reason Claude gave for a command) and where, when that is not the
-    project directory."""
-    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    """The lines that describe a tool call."""
+    path = file_path(tool_input)
     if name == "Bash":
-        command = clip(clean(tool_input.get("command", "")).splitlines() or [""], full)
-        details = ["$ " + command[0], *("$   " + line for line in command[1:])]
-        if tool_input.get("description"):
-            details.append("why: " + flat(tool_input["description"]))
-        if isinstance(cwd, str) and cwd != project_dir:
-            details.append("cwd: " + flat(cwd))
-        return details
-    if isinstance(path, str):
-        flag = "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
-        details = [f"file: {flat(path)}{flag if name in FILE_TOOLS else ''}"]
-        if name == "Edit":
-            diff = difflib.unified_diff(
-                clean(tool_input.get("old_string", "")).splitlines(),
-                clean(tool_input.get("new_string", "")).splitlines(),
-                lineterm="",
-                n=1,
-            )
-            # Without the --- and +++ lines, the file is named above
-            details += ["diff: " + line for line in clip(list(diff)[2:], full)]
-        elif name == "Write":
-            content = clean(tool_input.get("content", "")).splitlines()
-            details[0] += f" ({len(content)} lines)"
-            details += ["content: " + line for line in clip(content, full)]
-        return details
+        return bash_details(tool_input, cwd, project_dir, full)
+    if path is not None:
+        return file_details(name, path, tool_input, project_dir, full)
     # Any other tool: its arguments as they are
     return [
         line
@@ -313,11 +354,47 @@ def result_details(ended: dict, full: bool) -> list[str]:
     return details
 
 
+def talk_event(when: float, who: Who, block: dict, full: bool) -> Event | None:
+    """A prompt or a reply, none for one without text."""
+    text = clean(block.get("text", "")).strip().splitlines()
+    if not full:
+        # Paragraph breaks would use up the preview
+        text = [line for line in text if line.strip()]
+    if not text:
+        return None
+    what = "prompt" if who is Who.USER else "reply"
+    return Event(when, who, what, clip(text, full, TALK_LINES), {"text": block["text"]})
+
+
+def call_event(
+    when: float,
+    who: Who,
+    entry: dict,
+    block: dict,
+    result: tuple[dict, dict] | None,
+    project_dir: str,
+    full: bool,
+) -> Event:
+    """A tool call together with how it ended."""
+    name = clean(block.get("name", "?"))
+    tool_input = call_input(block)
+    cwd = entry.get("cwd")
+    ended = outcome(entry, result)
+    details = [
+        *call_details(name, tool_input, cwd, project_dir, full),
+        *result_details(ended, full),
+    ]
+    fields = {"tool": name, "input": tool_input, "cwd": cwd, **ended}
+    path = file_path(tool_input)
+    if name in FILE_TOOLS and path is not None:
+        fields["outside_project"] = outside(path, project_dir)
+    return Event(when, who, name.lower(), details, fields)
+
+
 def transcript_events(entries: list[dict], project_dir: str, full: bool) -> list[Event]:
-    """The transcript as events: each prompt, reply and tool call, a call
-    together with how it ended."""
+    """The transcript as events: each prompt, reply and tool call."""
     results = tool_results(entries)
-    events = []
+    events: list[Event] = []
     # An entry without a time of its own happened with the one before it
     when = 0.0
     for entry in entries:
@@ -326,39 +403,24 @@ def transcript_events(entries: list[dict], project_dir: str, full: bool) -> list
         stamp = local_time(entry)
         when = stamp.timestamp() if stamp else when
         by_claude = entry["type"] == "assistant"
-        who = "agent" if entry.get("isSidechain") else "claude" if by_claude else "user"
+        claude = Who.AGENT if entry.get("isSidechain") else Who.CLAUDE
         for block in content_blocks(entry):
             kind = block.get("type")
             if kind == "text" and (by_claude or is_prompt(entry)):
-                text = clean(block.get("text", "")).strip().splitlines()
-                if not full:
-                    # Paragraph breaks would use up the preview
-                    text = [line for line in text if line.strip()]
-                if text:
-                    what = "reply" if by_claude else "prompt"
-                    shown = clip(text, full, TALK_LINES)
-                    fields = {"text": block.get("text", "")}
-                    events.append(Event(when, who, what, shown, fields))
+                talk = talk_event(when, claude if by_claude else Who.USER, block, full)
+                events += [talk] if talk else []
             elif kind == "tool_use" and by_claude:
-                name = clean(block.get("name", "?"))
-                tool_input = call_input(block)
-                cwd = entry.get("cwd")
-                ended = outcome(entry, results.get(str(block.get("id"))))
-                details = call_details(name, tool_input, cwd, project_dir, full)
-                details += result_details(ended, full)
-                fields = {"tool": name, "input": tool_input, "cwd": cwd, **ended}
-                path = tool_input.get("file_path") or tool_input.get("notebook_path")
-                if name in FILE_TOOLS and isinstance(path, str):
-                    fields["outside_project"] = outside(path, project_dir)
-                events.append(Event(when, who, name.lower(), details, fields))
+                result = results.get(str(block.get("id")))
+                events.append(
+                    call_event(when, claude, entry, block, result, project_dir, full)
+                )
     return events
 
 
-def summary(entries: list[dict], project_dir: str) -> list[str]:
-    """What to know before reading on: when, how much, which files were
-    written and which calls failed."""
+def overview(entries: list[dict]) -> list[tuple[str, str]]:
+    """The session at a glance, as labelled values: what ran it, when, at
+    what cost, how many calls and how many of them failed."""
     calls = tool_calls(entries)
-    results = tool_results(entries)
     times = [when for when in map(local_time, entries) if when]
     last = {str(e.get("type")): e for e in entries}
     cost = last.get("cost-state", {})
@@ -373,7 +435,6 @@ def summary(entries: list[dict], project_dir: str) -> list[str]:
         if e.get("type") == "assistant" and isinstance(e.get("message"), dict)
     }
     rows = [
-        ("project", clean(project_dir)),
         ("branch", seen("gitBranch")),
         ("claude", seen("version")),
         ("model", ", ".join(sorted(models - {"", "<synthetic>"})) or "?"),
@@ -393,29 +454,46 @@ def summary(entries: list[dict], project_dir: str) -> list[str]:
     by_tool = Counter(clean(block.get("name", "?")) for _, block in calls)
     counts = ", ".join(f"{name} {count}" for name, count in by_tool.most_common())
     rows.append(("tool calls", f"{len(calls)} ({counts})" if calls else "0"))
-    failed = sum(1 for _, block in results.values() if block.get("is_error"))
-    rows.append(("failed", str(failed)))
+    results = tool_results(entries).values()
+    rows.append(("failed", str(sum(bool(b.get("is_error")) for _, b in results))))
+    return rows
 
-    written: Counter[str] = Counter()
-    hosts: Counter[str] = Counter()
-    for _, block in calls:
-        tool_input = call_input(block)
-        path = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if block.get("name") in FILE_TOOLS and isinstance(path, str):
-            written[path] += 1
-        if isinstance(tool_input.get("url"), str):
-            hosts[urlsplit(tool_input["url"]).hostname or tool_input["url"]] += 1
 
-    lines = [f"{name.ljust(12)}{value}" for name, value in rows]
-    if written:
-        lines.append("files written")
-        for path, count in sorted(written.items()):
-            flag = "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
-            lines.append(f"  {flat(path)} x{count}{flag}")
-    if hosts:
-        lines.append("pages fetched")
-        lines += [f"  {clean(host)} x{count}" for host, count in sorted(hosts.items())]
+def files_written(entries: list[dict], project_dir: str) -> list[str]:
+    """Each file the session wrote with its tools and how often, flagged
+    when it is outside the project."""
+    written = Counter(
+        path
+        for _, block in tool_calls(entries)
+        if block.get("name") in FILE_TOOLS
+        for path in [file_path(call_input(block))]
+        if path is not None
+    )
+    lines = ["files written"] if written else []
+    for path, count in sorted(written.items()):
+        flag = "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
+        lines.append(f"  {flat(path)} x{count}{flag}")
     return lines
+
+
+def pages_fetched(entries: list[dict]) -> list[str]:
+    """Each host the session fetched a page from with its tools."""
+    urls = [call_input(block).get("url") for _, block in tool_calls(entries)]
+    hosts = Counter(
+        urlsplit(url).hostname or url for url in urls if isinstance(url, str)
+    )
+    lines = ["pages fetched"] if hosts else []
+    return lines + [f"  {flat(host)} x{count}" for host, count in sorted(hosts.items())]
+
+
+def summary(entries: list[dict], project_dir: str) -> list[str]:
+    """What to know before reading on."""
+    rows = [("project", clean(project_dir)), *overview(entries)]
+    return [
+        *(f"{name.ljust(12)}{value}" for name, value in rows),
+        *files_written(entries, project_dir),
+        *pages_fetched(entries),
+    ]
 
 
 def recorded_sessions(host: Host, start: float, end: float) -> list[dict]:
@@ -465,128 +543,186 @@ def over(transport: str, port: int) -> str:
         return transport
 
 
-def proxy_requests(
-    sessions: list[dict], start: float, end: float
-) -> tuple[list[str], list[Event]]:
-    """What filtered sessions asked the egress proxy for, as summary lines
-    (each destination with its number of requests and bytes, the refused
-    ones first) and as one event per request. From the proxy's log, by the
-    address each session's container had and the time the transcript
-    spans."""
-    log = access_log(stderr=subprocess.DEVNULL)
-    if log is None:
-        return ["  the egress proxy is not running, its log cannot be read"], []
+@dataclass(frozen=True)
+class ProxyRequest:
+    """A line of the egress proxy's log."""
 
-    events = []
-    totals: Counter[tuple[bool, str]] = Counter()
-    volume: Counter[tuple[bool, str]] = Counter()
-    for line in log.splitlines():
-        fields = line.split()
-        try:
-            ended, took = float(fields[0]), float(fields[1]) / 1000
-            address, result, sent, method, url = fields[2:7]
-            count = int(sent)
-        except (IndexError, ValueError):
-            continue
-        # A request counts when it was open at some point of the session,
-        # the proxy logs a tunnel when it closes, which can be much later
-        if not any(
-            s["ip"] == address
-            and ended >= max(start, s["start"])
-            and ended - took <= min(end, s["until"])
-            for s in sessions
-        ):
-            continue
-        denied = "DENIED" in result
-        method, url = clean(method), clean(url)
-        totals[(denied, url)] += 1
-        volume[(denied, url)] += count
+    ended: float
+    seconds: float
+    # Of the container that asked
+    address: str
+    denied: bool
+    method: str
+    url: str
+    size: int
+
+    @property
+    def began(self) -> float:
+        return self.ended - self.seconds
+
+    @property
+    def port(self) -> int:
+        """The port asked for, 0 when the URL does not say."""
         try:
             # CONNECT names host:port, the other methods a whole URL
-            target = urlsplit(url if "://" in url else "//" + url)
-            port = target.port or (443 if target.scheme == "https" else 80)
+            target = urlsplit(self.url if "://" in self.url else "//" + self.url)
+            return target.port or (443 if target.scheme == "https" else 80)
         except ValueError:
-            port = 0
-        verdict = "DENIED" if denied else "allowed"
-        detail = f"{over('proxy', port)} {method} {url} {verdict} {size(count)}"
-        values = {
-            "protocol": over("proxy", port),
-            "method": method,
-            "url": url,
-            "port": port,
-            "denied": denied,
-            "bytes": count,
-            "seconds": took,
-        }
-        text = [f"{detail} {took:.1f}s"]
-        events.append(Event(ended - took, "sandbox", "net", text, values))
+            return 0
 
+    @property
+    def verdict(self) -> str:
+        return "DENIED" if self.denied else "allowed"
+
+    def made_by(self, session: dict, start: float, end: float) -> bool:
+        """Whether a session made it between start and end: it came from
+        the session's address and was open at some point of that time. The
+        proxy logs a tunnel when it closes, which can be much later."""
+        return (
+            session["ip"] == self.address
+            and self.ended >= max(start, session["start"])
+            and self.began <= min(end, session["until"])
+        )
+
+
+def parse_proxy_request(line: str) -> ProxyRequest | None:
+    """A line of squid's native log format, none for anything else."""
+    try:
+        ended, milliseconds, address, result, sent, method, url = line.split()[:7]
+        return ProxyRequest(
+            float(ended),
+            float(milliseconds) / 1000,
+            address,
+            "DENIED" in result,
+            clean(method),
+            clean(url),
+            int(sent),
+        )
+    except ValueError:
+        return None
+
+
+def proxy_summary(requests: list[ProxyRequest], sessions: list[dict]) -> list[str]:
+    """Each destination with its number of requests and bytes, the
+    refused ones first, then the busiest."""
     lines = []
     if len(sessions) > 1:
         names = ", ".join(sorted({clean(s.get("name", "?")) for s in sessions}))
         lines.append(f"  from {names}, which ran in this time and are not told apart")
-    if not totals:
+    if not requests:
         lines.append("  no request in the egress proxy's log")
-    # Refused first, then the busiest
-    for (denied, url), number in sorted(
-        totals.items(), key=lambda item: (not item[0][0], -item[1], item[0][1])
-    ):
+    count: Counter[tuple[bool, str]] = Counter()
+    volume: Counter[tuple[bool, str]] = Counter()
+    for request in requests:
+        count[(request.denied, request.url)] += 1
+        volume[(request.denied, request.url)] += request.size
+    for denied, url in sorted(count, key=lambda to: (not to[0], -count[to], to[1])):
         verdict = "DENIED " if denied else "allowed"
-        lines.append(f"  {verdict}  {url} x{number}  {size(volume[(denied, url)])}")
-    return lines, events
+        total = size(volume[(denied, url)])
+        lines.append(f"  {verdict}  {url} x{count[(denied, url)]}  {total}")
+    return lines
 
 
-def captured_connections(
-    host: Host, session: dict, full: bool
+def proxy_event(request: ProxyRequest) -> Event:
+    protocol = over("proxy", request.port)
+    detail = (
+        f"{protocol} {request.method} {request.url} {request.verdict}"
+        f" {size(request.size)} {request.seconds:.1f}s"
+    )
+    fields = {
+        "protocol": protocol,
+        "method": request.method,
+        "url": request.url,
+        "port": request.port,
+        "denied": request.denied,
+        "bytes": request.size,
+        "seconds": request.seconds,
+    }
+    return Event(request.began, Who.SANDBOX, "net", [detail], fields)
+
+
+def proxy_requests(
+    sessions: list[dict], start: float, end: float
 ) -> tuple[list[str], list[Event]]:
-    """What a captured session connected to, as summary lines (each
-    destination, by name where the capture has one, with its number of
-    connections) and as one event per connection, with --full also per
-    name looked up. Of the container's whole stay, a capture is not tied
-    to one transcript."""
-    began = datetime.fromtimestamp(session["start"])
-    ended = datetime.fromtimestamp(session["until"])
-    name = clean(session.get("name", "?"))
-    lines = [f"  captured in {name} from {began:%H:%M:%S} to {ended:%H:%M:%S}"]
-    try:
-        # Only ever a file of the captures directory, whatever the record says
-        file = Path(host.captures_dir, os.path.basename(str(session.get("capture"))))
-        capture = read_capture(file)
-    except OSError:
-        return [*lines, "  its capture is no longer kept"], []
+    """What filtered sessions asked the egress proxy for between start and
+    end, as summary lines and as one event per request."""
+    log = access_log(stderr=subprocess.DEVNULL)
+    if log is None:
+        return ["  the egress proxy is not running, its log cannot be read"], []
+    requests = [
+        request
+        for request in map(parse_proxy_request, log.splitlines())
+        if request and any(request.made_by(s, start, end) for s in sessions)
+    ]
+    return proxy_summary(requests, sessions), [proxy_event(r) for r in requests]
 
-    def destination(address: str, port: int) -> str:
-        known = capture.names.get(address)
-        return clean(f"{known} ({address}):{port}" if known else f"{address}:{port}")
 
+def reached(capture: Capture, address: str, port: int) -> str:
+    """A destination as shown: tcp/https name (address):port, the name
+    left out when the capture has none for the address."""
+    known = capture.names.get(address)
+    where = f"{known} ({address})" if known else address
+    return clean(f"{over('tcp', port)} {where}:{port}")
+
+
+def capture_summary(capture: Capture, full: bool) -> list[str]:
+    """Each destination with its number of connections, the busiest
+    first, and how many names were looked up."""
+    count = Counter(
+        reached(capture, address, port) for _, address, port in capture.connections
+    )
+    lines = [
+        f"  {destination} x{count[destination]}"
+        for destination in sorted(count, key=lambda to: (-count[to], to))
+    ]
+    if not count:
+        lines.append("  no connection")
+    names = {name for _, name in capture.lookups}
+    if names:
+        hint = "" if full else ", each one shown with --full"
+        lines.append(f"  dns {len(names)} names looked up{hint}")
+    if capture.cut_short:
+        lines.append("  STOPPED at its packet limit, what came later is missing")
+    return lines
+
+
+def capture_events(capture: Capture, full: bool) -> list[Event]:
+    """One event per connection, with --full also per name looked up."""
     events = []
-    reached: Counter[str] = Counter()
     for when, address, port in capture.connections:
-        reached[f"{over('tcp', port)} {destination(address, port)}"] += 1
-        detail = f"{over('tcp', port)} {destination(address, port)}"
         fields = {
             "protocol": over("tcp", port),
             "name": capture.names.get(address),
             "address": address,
             "port": port,
         }
-        events.append(Event(when, "sandbox", "net", [detail], fields))
-    for connection, number in sorted(reached.items(), key=lambda i: (-i[1], i[0])):
-        lines.append(f"  {connection} x{number}")
-    if not reached:
-        lines.append("  no connection")
-    looked_up = {lookup for _, lookup in capture.lookups}
-    if looked_up:
-        hint = "" if full else ", each one shown with --full"
-        lines.append(f"  dns {len(looked_up)} names looked up{hint}")
-    if capture.cut_short:
-        lines.append("  STOPPED at its packet limit, what came later is missing")
+        detail = reached(capture, address, port)
+        events.append(Event(when, Who.SANDBOX, "net", [detail], fields))
     if full:
         events += [
-            Event(when, "sandbox", "dns", ["lookup " + clean(lookup)], {"name": lookup})
-            for when, lookup in capture.lookups
+            Event(when, Who.SANDBOX, "dns", ["lookup " + clean(name)], {"name": name})
+            for when, name in capture.lookups
         ]
-    return lines, events
+    return events
+
+
+def captured_connections(
+    host: Host, session: dict, full: bool
+) -> tuple[list[str], list[Event]]:
+    """What a captured session connected to, as summary lines and as
+    events. Of the container's whole stay, a capture is not tied to one
+    transcript."""
+    began = datetime.fromtimestamp(session["start"])
+    ended = datetime.fromtimestamp(session["until"])
+    name = clean(session.get("name", "?"))
+    heading = f"  captured in {name} from {began:%H:%M:%S} to {ended:%H:%M:%S}"
+    try:
+        # Only ever a file of the captures directory, whatever the record says
+        file = Path(host.captures_dir, os.path.basename(str(session.get("capture"))))
+        capture = read_capture(file)
+    except OSError:
+        return [heading, "  its capture is no longer kept"], []
+    return [heading, *capture_summary(capture, full)], capture_events(capture, full)
 
 
 def network(
@@ -604,18 +740,12 @@ def network(
         return [
             "network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
         ], []
-    lines, events = ["network"], []
     filtered = [s for s in sessions if isinstance(s.get("ip"), str)]
-    if filtered:
-        found = proxy_requests(filtered, start, end)
-        lines += found[0]
-        events += found[1]
-    for session in sessions:
-        if isinstance(session.get("capture"), str):
-            found = captured_connections(host, session, full)
-            lines += found[0]
-            events += found[1]
-    return lines, events
+    captured = [s for s in sessions if isinstance(s.get("capture"), str)]
+    found = [proxy_requests(filtered, start, end)] if filtered else []
+    found += [captured_connections(host, session, full) for session in captured]
+    lines = ["network", *(line for some, _ in found for line in some)]
+    return lines, [event for _, events in found for event in events]
 
 
 def session_events(path: Path, host: Host, full: bool) -> tuple[list[str], list[Event]]:
@@ -655,7 +785,9 @@ def render(path: Path, host: Host, full: bool) -> str:
     lines = prefixed("# ", header)
     for event in events:
         clock = f"{datetime.fromtimestamp(event.when):%Y-%m-%d %H:%M:%S}"
-        lines += prefixed(f"{clock}  {event.who:<7}  {event.what:<8}  ", event.details)
+        lines += prefixed(
+            f"{clock}  {event.who.value:<7}  {event.what:<8}  ", event.details
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -672,7 +804,7 @@ def render_json(path: Path, host: Host) -> str:
         about = {
             "session": path.stem,
             "time": when.isoformat(timespec="milliseconds"),
-            "who": event.who,
+            "who": event.who.value,
             "what": event.what,
         }
         lines.append(json.dumps({**about, **event.fields}))
