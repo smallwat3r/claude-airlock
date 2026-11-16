@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .capture import capture_name, collect_ended_captures, session_captured
 from .docker import docker_ok
-from .image import build_image, prepare_image
+from .image import PLUGIN_DIR, build_image, prepare_image
 from .network import (
     net_log,
     network_args,
@@ -124,7 +124,9 @@ def main(argv: list[str]) -> int:
     # bash, which takes no --add-dir.
     if action != "shell":
         add_dirs = [arg for extra in dirs for arg in ("--add-dir", extra.path)]
-        claude_args = add_dirs + claude_args
+        # The language servers of the image, as a plugin for this session
+        plugin = ["--plugin-dir", PLUGIN_DIR] if image.has_language_servers else []
+        claude_args = plugin + add_dirs + claude_args
 
     watched = [host.project_dir] + [extra.path for extra in dirs]
     pending = Path(host.pending_checks_dir, name + ".json")

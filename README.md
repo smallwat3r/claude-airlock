@@ -387,6 +387,16 @@ the build context, as `COPY NAME/file ...`. One that needs another feature
 names it on a `# claude-feat-requires: other` line, and selecting the first then
 builds both.
 
+A fragment that installs a language server declares it on a
+`# claude-feat-lsp:` line, as the `lspServers` of a Claude Code plugin (see
+`docker/features/go.Dockerfile`). The launcher makes one plugin of those
+lines, builds it into the image and starts `claude` with it, so a session
+has go-to-definition and find-references for the languages of its image
+without a plugin being enabled on the host. The `python`, `go`, `cpp` and
+`typescript` features have one. If the host enables the official plugin for
+the same server as well (`gopls-lsp`, `clangd-lsp`, `typescript-lsp`,
+`pyright-lsp`), the sandbox does not need it.
+
 The `# claude-feat-md:` lines of the parts that were built are baked into the
 image as system-level memory, so Claude always knows exactly what is
 installed. They were written `# claude:` before, the launcher stops at a

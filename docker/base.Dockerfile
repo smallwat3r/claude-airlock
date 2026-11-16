@@ -6,8 +6,10 @@
 # collected into the image's /etc/claude-code/CLAUDE.md, so the tool list
 # Claude sees always matches what was built. A feature starts with a header:
 # its name on a "# claude-feat: " line, the features it needs on a
-# "# claude-feat-requires: " line, which are then built with it, and its
-# "# claude-feat-md: " lines.
+# "# claude-feat-requires: " line, which are then built with it, its
+# "# claude-feat-md: " lines, and on a "# claude-feat-lsp: " line the language
+# servers it installs, for the plugin the image is given (see
+# tail.Dockerfile).
 #
 # Every image, download and Python package is pinned, refresh them all with
 # update-pins.py. Debian packages are not: apt drops old versions from its

@@ -4,6 +4,7 @@ assembled from them, and the build."""
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import sys
@@ -20,6 +21,14 @@ IMAGE_NAME = "claude-code-sandbox"
 # fragment cannot do without.
 CLAUDE_MD_MARKER = "# claude-feat-md: "
 REQUIRES_MARKER = "# claude-feat-requires: "
+# One of the third kind declares language servers the part installs, as the
+# "lspServers" of a Claude Code plugin: a JSON object of them by name.
+LSP_MARKER = "# claude-feat-lsp: "
+# Where the plugin made of those is in the build context and in the image.
+# With a dot, which a feature's name cannot have, a feature's directory goes
+# into the context by that name.
+PLUGIN_CONTEXT = "claude.plugin"
+PLUGIN_DIR = "/opt/claude-sandbox-plugin"
 # What the first was called, in fragments written before. Refused, so that a
 # tool does not drop out of what Claude is told without a word.
 FORMER_CLAUDE_MD_MARKER = "# claude: "
@@ -32,6 +41,10 @@ class Image:
     claude_md: str
     # Directories copied into the build context, by their name there
     context_dirs: dict[str, Path]
+    # The manifest of the plugin at PLUGIN_DIR, and whether it has language
+    # servers, without which claude is not given the plugin
+    plugin: str
+    has_language_servers: bool
 
 
 def text_lines(text: str) -> list[str]:
@@ -97,6 +110,25 @@ def with_required(names: list[str], host: Host) -> list[str]:
     return sorted(found)
 
 
+def language_servers(parts: list[Path], texts: list[str]) -> dict:
+    """The language servers the parts declare, by name."""
+    servers: dict = {}
+    for part, text in zip(parts, texts):
+        for line in text_lines(text):
+            if not line.startswith(LSP_MARKER):
+                continue
+            try:
+                declared = json.loads(line[len(LSP_MARKER) :])
+            except ValueError as error:
+                raise Fatal(
+                    f'{part}: a "{LSP_MARKER}" line is not JSON: {error}'
+                ) from error
+            if not isinstance(declared, dict):
+                raise Fatal(f'{part}: a "{LSP_MARKER}" line is not a JSON object')
+            servers.update(declared)
+    return servers
+
+
 def prepare_image(settings: Settings, host: Host) -> Image:
     """Assemble the Dockerfile and the CLAUDE.md baked into the image from
     the base, the selected features and the tail. A feature can come with
@@ -105,7 +137,9 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     tag is a hash of all of it plus the host home (the image symlinks it to
     /home/node), so editing a part, changing the selection or moving home
     rebuilds, with the layer cache, and each feature set keeps its own
-    image."""
+    image. The language servers the parts declare become a plugin in the
+    image, which claude is started with (see cli.py), so that a session has
+    the servers of its image and no other, whatever the host has enabled."""
     features = {
         name: feature_file(name, host)
         for name in with_required(selected_features(settings, host), host)
@@ -145,7 +179,16 @@ def prepare_image(settings: Settings, host: Host) -> Image:
         if line.startswith(marker)
     ]
     claude_md = "\n".join(claude_md_lines).rstrip("\n")
+    servers = language_servers(parts, texts)
+    manifest = {
+        "name": "claude-sandbox-lsp",
+        "description": "The language servers built into this sandbox image",
+        "version": "1.0.0",
+        "lspServers": servers,
+    }
+    plugin = json.dumps(manifest, indent=2)
 
+    # The plugin is made of lines of the Dockerfile, so it is in the tag too
     content = f"{host.home}\n{dockerfile}\n{claude_md}\n"
     digest = hashlib.sha256(content.encode())
     for name, directory in context_dirs.items():
@@ -153,7 +196,7 @@ def prepare_image(settings: Settings, host: Host) -> Image:
             digest.update(f"{name}/{file.relative_to(directory)}\n".encode())
             digest.update(file.read_bytes())
     tag = f"{IMAGE_NAME}:{digest.hexdigest()[:12]}"
-    return Image(tag, dockerfile, claude_md, context_dirs)
+    return Image(tag, dockerfile, claude_md, context_dirs, plugin, bool(servers))
 
 
 def build_image(image: Image, host: Host, *build_options: str) -> int:
@@ -166,6 +209,16 @@ def build_image(image: Image, host: Host, *build_options: str) -> int:
             Path(context, name).write_text(content + "\n", encoding="utf-8")
         for name, directory in image.context_dirs.items():
             shutil.copytree(directory, Path(context, name))
+        manifest = Path(context, PLUGIN_CONTEXT, ".claude-plugin", "plugin.json")
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(image.plugin + "\n", encoding="utf-8")
+        # COPY keeps the modes of the context and the files are root's in
+        # the image. Set here, a strict umask on the host would otherwise
+        # leave them unreadable to the session's user.
+        for directory in (manifest.parent.parent, manifest.parent):
+            directory.chmod(0o755)
+        for file in (manifest, Path(context, "CLAUDE.md")):
+            file.chmod(0o644)
         # Build output goes to stderr, stdout stays clean for the session
         return docker(
             "build",

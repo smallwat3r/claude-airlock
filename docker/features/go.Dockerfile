@@ -1,5 +1,6 @@
 # claude-feat: go
 # claude-feat-md: Go with gopls (GOPATH is ~/.cache/go)
+# claude-feat-lsp: {"gopls": {"command": "gopls", "extensionToLanguage": {".go": "go"}}}
 
 # Official tarball (apt's is outdated), pinned and checksum-verified. The shas
 # are recorded on purpose: fetching them from the same server as the artifact

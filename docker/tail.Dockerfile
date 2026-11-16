@@ -48,6 +48,13 @@ WORKDIR /home/node
 # the "# claude-feat-md: " lines of the parts that went into this image.
 COPY CLAUDE.md /etc/claude-code/CLAUDE.md
 
+# A Claude Code plugin with the language servers this image has, made by the
+# launcher from the "# claude-feat-lsp: " lines of its parts and given to
+# claude with --plugin-dir. So a session can ask a server where a symbol is
+# defined or used without a plugin being enabled on the host, and never has
+# one enabled for a server that is not here.
+COPY claude.plugin /opt/claude-sandbox-plugin
+
 # Rebuilding is the only update path, so disable the in-container auto-updater
 # (it fails anyway: the binary lives on the read-only image layer).
 ENV DISABLE_AUTOUPDATER=1

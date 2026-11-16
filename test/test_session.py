@@ -204,7 +204,9 @@ class ExtraDirsTest(LauncherTest):
         self.shared = self.home / "claude-shared"
 
     def test_read_only_dir(self):
-        result = self.launch("--add-dir-ro", "~/ref", "-p", "hello")
+        result = self.launch(
+            "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_DOCKER_FEATURES=""
+        )
         self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", result.flags)
         # Ahead of the user's arguments, --add-dir is variadic
         self.assertEqual(result.command, ["--add-dir", str(self.ref), "-p", "hello"])
@@ -306,6 +308,25 @@ class ImageTest(LauncherTest):
         self.write_feature("mine", "# claude-feat-requires: nothere")
         result = self.launch(CLAUDE_DOCKER_FEATURES="mine")
         self.assert_refused(result, "unknown feature: nothere")
+
+    def test_claude_gets_the_language_servers_of_the_image(self):
+        result = self.launch("-p", "hello", CLAUDE_DOCKER_FEATURES="go typst")
+        self.assertEqual(result.command[:2], ["--plugin-dir", image.PLUGIN_DIR])
+        manifest = (
+            self.work / "out" / "claude.plugin" / ".claude-plugin" / "plugin.json"
+        )
+        servers = json.loads(manifest.read_text())["lspServers"]
+        self.assertEqual(list(servers), ["gopls"])
+        self.assertEqual(servers["gopls"]["command"], "gopls")
+
+    def test_an_image_without_language_servers_gives_claude_no_plugin(self):
+        result = self.launch(CLAUDE_DOCKER_FEATURES="typst")
+        self.assertNotIn("--plugin-dir", result.command)
+
+    def test_a_language_server_line_that_is_not_json_is_refused(self):
+        self.write_feature("mine", "# claude-feat-lsp: {gopls}")
+        result = self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        self.assert_refused(result, "is not JSON")
 
     def test_the_former_claude_md_marker_is_refused(self):
         self.write_feature("mine", "# claude: My tool")

@@ -1,5 +1,6 @@
 # claude-feat: python
 # claude-feat-md: Python dev tooling: mypy, ruff, black, pytest, ipython, pyright
+# claude-feat-lsp: {"pyright": {"command": "pyright-langserver", "args": ["--stdio"], "extensionToLanguage": {".py": "python", ".pyi": "python"}}}
 
 # Python 3 and uv are already in the base image, other features rely on them,
 # so nothing is installed for the interpreter here, only the dev tooling
