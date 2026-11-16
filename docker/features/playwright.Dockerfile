@@ -1,4 +1,6 @@
-# claude: Playwright (Python) with headless Chromium, for PNG diagram export
+# claude-feat: playwright
+# claude-feat-md: Playwright (Python) with headless Chromium, for PNG diagram export
+
 # The Chromium build follows the pinned playwright version
 RUN uv pip install --system --break-system-packages playwright==1.65.1
 

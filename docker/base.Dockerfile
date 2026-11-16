@@ -2,17 +2,20 @@
 #
 # This is the first of three parts: bin/claude-docker concatenates
 # base.Dockerfile, the selected features/*.Dockerfile and tail.Dockerfile
-# into the Dockerfile it builds. Lines starting with "# claude: " are
+# into the Dockerfile it builds. Lines starting with "# claude-feat-md: " are
 # collected into the image's /etc/claude-code/CLAUDE.md, so the tool list
-# Claude sees always matches what was built.
+# Claude sees always matches what was built. A feature starts with a header:
+# its name on a "# claude-feat: " line, the features it needs on a
+# "# claude-feat-requires: " line, which are then built with it, and its
+# "# claude-feat-md: " lines.
 #
 # Every image, download and Python package is pinned, refresh them all with
 # update-pins.py. Debian packages are not: apt drops old versions from its
 # mirrors, so they follow the pinned base image's release instead.
 #
-# claude: Python 3 with uv
-# claude: Node.js and npm/npx, gcc/g++/make/pkg-config
-# claude: git, gh, ssh, ripgrep, fd, jq, tree
+# claude-feat-md: Python 3 with uv
+# claude-feat-md: Node.js and npm/npx, gcc/g++/make/pkg-config
+# claude-feat-md: git, gh, ssh, ripgrep, fd, jq, tree
 
 # uv comes from its official image, as a named stage so it can be pinned by
 # digest (COPY --from cannot take a digest held in an ARG on the legacy builder)

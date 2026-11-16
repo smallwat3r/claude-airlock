@@ -1,4 +1,6 @@
-# claude: KiCad 9 (kicad-cli, pcbnew Python module, symbol and footprint libraries, no 3D models), headless only
+# claude-feat: kicad
+# claude-feat-md: KiCad 9 (kicad-cli, pcbnew Python module, symbol and footprint libraries, no 3D models), headless only
+
 # Bookworm's own kicad is 6.x without kicad-cli, so take it from backports in
 # its own install so -t does not pull anything else from there. The 3D model
 # package (kicad-packages3d, several GB) is a recommend and deliberately left out.

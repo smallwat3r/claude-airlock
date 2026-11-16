@@ -1,8 +1,10 @@
-# claude: Excalidraw diagrams, offline: excalidraw-export SCENE OUT.png (or .svg) renders a scene with Excalidraw's own code and saves the scene inside the picture, so excalidraw.com opens it for editing. SCENE is an .excalidraw file, a JSON list of element skeletons (rectangle, ellipse, diamond, text, arrow, line with x, y, width, height, a label of {"text": ...}, and for arrows start and end of {"id": ...}), or a PNG or SVG exported that way. To edit an existing picture, take its scene out with excalidraw-export PICTURE scene.excalidraw, change that and render it again. The same scene always gives the same file
-# claude: Excalidraw habits: prefer PNG for a README, a viewer may not load the fonts embedded in an SVG. An arrow's label is wrapped to the arrow's length, in the middle of a word if need be, so put a long label on a short arrow in a text element next to it
+# claude-feat: excalidraw
+# claude-feat-requires: playwright
+# claude-feat-md: Excalidraw diagrams, offline: excalidraw-export SCENE OUT.png (or .svg) renders a scene with Excalidraw's own code and saves the scene inside the picture, so excalidraw.com opens it for editing. SCENE is an .excalidraw file, a JSON list of element skeletons (rectangle, ellipse, diamond, text, arrow, line with x, y, width, height, a label of {"text": ...}, and for arrows start and end of {"id": ...}), or a PNG or SVG exported that way. To edit an existing picture, take its scene out with excalidraw-export PICTURE scene.excalidraw, change that and render it again. The same scene always gives the same file
+# claude-feat-md: Excalidraw habits: prefer PNG for a README, a viewer may not load the fonts embedded in an SVG. An arrow's label is wrapped to the arrow's length, in the middle of a word if need be, so put a long label on a short arrow in a text element next to it
+
 # Excalidraw only runs in a browser, so the export drives the headless
-# Chromium of the playwright feature, which this line brings in
-# requires: playwright
+# Chromium of the playwright feature, hence the requirement above
 
 # The package is made for bundlers and loads its fonts over the network. A
 # session may have neither npm access nor a route out, so it is bundled into

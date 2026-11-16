@@ -1,4 +1,6 @@
-# claude: Go with gopls (GOPATH is ~/.cache/go)
+# claude-feat: go
+# claude-feat-md: Go with gopls (GOPATH is ~/.cache/go)
+
 # Official tarball (apt's is outdated), pinned and checksum-verified. The shas
 # are recorded on purpose: fetching them from the same server as the artifact
 # would verify nothing. Update version and shas from https://go.dev/dl

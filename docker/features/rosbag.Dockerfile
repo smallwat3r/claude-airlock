@@ -1,4 +1,6 @@
-# claude: Rosbag tooling: mcap CLI, sqlite3 CLI, Python rosbags, mcap, mcap-ros1/ros2-support
+# claude-feat: rosbag
+# claude-feat-md: Rosbag tooling: mcap CLI, sqlite3 CLI, Python rosbags, mcap, mcap-ros1/ros2-support
+
 # Reading, writing and conversion (ROS1 + ROS2, sqlite3 + mcap storage)
 RUN uv pip install --system --break-system-packages \
     rosbags==0.11.9 \

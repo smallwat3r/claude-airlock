@@ -1,4 +1,6 @@
-# claude: typst
+# claude-feat: typst
+# claude-feat-md: typst
+
 # Official musl tarball, pinned and checksum-verified. Update from
 # https://github.com/typst/typst/releases (no upstream checksum files, so
 # compute sha256sum on the downloaded tarballs)

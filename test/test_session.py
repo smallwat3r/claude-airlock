@@ -294,16 +294,23 @@ class ImageTest(LauncherTest):
         return directory
 
     def test_a_feature_brings_those_it_requires(self):
-        self.write_feature("mine", "# requires: go", "# claude: My tool")
+        self.write_feature(
+            "mine", "# claude-feat-requires: go", "# claude-feat-md: My tool"
+        )
         self.launch(CLAUDE_DOCKER_FEATURES="mine")
         claude_md = (self.work / "out" / "CLAUDE.md").read_text()
         self.assertRegex(claude_md, r"(?m)^- Go ")
         self.assertRegex(claude_md, r"(?m)^- My tool$")
 
     def test_an_unknown_required_feature_aborts(self):
-        self.write_feature("mine", "# requires: nothere")
+        self.write_feature("mine", "# claude-feat-requires: nothere")
         result = self.launch(CLAUDE_DOCKER_FEATURES="mine")
         self.assert_refused(result, "unknown feature: nothere")
+
+    def test_the_former_claude_md_marker_is_refused(self):
+        self.write_feature("mine", "# claude: My tool")
+        result = self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        self.assert_refused(result, 'are now written "# claude-feat-md: "')
 
     def test_a_feature_brings_its_files_to_the_build(self):
         tool = self.write_feature("mine", "COPY mine/tool /usr/local/bin/") / "mine"

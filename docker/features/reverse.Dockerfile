@@ -1,4 +1,6 @@
-# claude: Reverse engineering: gdb-multiarch, binutils-multiarch (objdump, readelf, nm for foreign architectures such as ARM firmware), strace, ltrace, binwalk, squashfs-tools, file, xxd, unzip, Python capstone, lief, pyelftools
+# claude-feat: reverse
+# claude-feat-md: Reverse engineering: gdb-multiarch, binutils-multiarch (objdump, readelf, nm for foreign architectures such as ARM firmware), strace, ltrace, binwalk, squashfs-tools, file, xxd, unzip, Python capstone, lief, pyelftools
+
 # Static analysis of binaries and firmware, plus tracing of processes started
 # from inside the sandbox. radare2 and rizin are not packaged for bookworm and
 # Ghidra needs a JDK (over 1 GB together), so they are left out.

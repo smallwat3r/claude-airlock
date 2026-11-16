@@ -375,7 +375,8 @@ the base, so `apt-get install` and friends work, and a same-named file
 there overrides a bundled feature:
 
 ```dockerfile
-# claude: sqlite3 CLI
+# claude-feat: sqlite
+# claude-feat-md: sqlite3 CLI
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sqlite3 \
     && rm -rf /var/lib/apt/lists/*
@@ -383,11 +384,13 @@ RUN apt-get update \
 
 A fragment that needs files finds those of a `NAME` directory next to it in
 the build context, as `COPY NAME/file ...`. One that needs another feature
-names it on a `# requires: other` line, and selecting the first then builds
-both.
+names it on a `# claude-feat-requires: other` line, and selecting the first then
+builds both.
 
-The `# claude:` lines of the parts that were built are baked into the image
-as system-level memory, so Claude always knows exactly what is installed.
+The `# claude-feat-md:` lines of the parts that were built are baked into the
+image as system-level memory, so Claude always knows exactly what is
+installed. They were written `# claude:` before, the launcher stops at a
+fragment that still has one and says so.
 
 The image tag is a hash of the generated Dockerfile, so changing the
 selection or editing a part rebuilds on the next start, reusing cached

@@ -1,5 +1,7 @@
-# claude: Font tooling: fontforge (headless, scriptable with -script or the Python fontforge module), fonttools (ttx, pyftsubset, pyftmerge, WOFF2 support), ttfautohint, woff2 (woff2_compress, woff2_decompress), fontconfig (fc-list, fc-scan, fc-query)
-# claude: Ocrab font (system font, usable from Typst and Chromium)
+# claude-feat: font
+# claude-feat-md: Font tooling: fontforge (headless, scriptable with -script or the Python fontforge module), fonttools (ttx, pyftsubset, pyftmerge, WOFF2 support), ttfautohint, woff2 (woff2_compress, woff2_decompress), fontconfig (fc-list, fc-scan, fc-query)
+# claude-feat-md: Ocrab font (system font, usable from Typst and Chromium)
+
 # fontforge-nox is the build without the X11 GUI, the sandbox has no display.
 # python3-fontforge binds to Debian's python3, the interpreter of the base.
 RUN apt-get update \

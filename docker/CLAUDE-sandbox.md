@@ -64,4 +64,4 @@ listed there is off.
 
 ## Tools
 Preinstalled, so do not install them again:
-- _Placeholder: at build time bin/claude-docker replaces this line with one bullet per `# claude:` line of the base and selected feature Dockerfiles._
+- _Placeholder: at build time bin/claude-docker replaces this line with one bullet per `# claude-feat-md:` line of the base and selected feature Dockerfiles._

@@ -1,4 +1,6 @@
-# claude: pandoc, poppler-utils (pdftotext, pdfunite, pdftoppm...), qpdf, gnuplot
+# claude-feat: docs
+# claude-feat-md: pandoc, poppler-utils (pdftotext, pdfunite, pdftoppm...), qpdf, gnuplot
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     pandoc \

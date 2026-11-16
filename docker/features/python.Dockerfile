@@ -1,4 +1,6 @@
-# claude: Python dev tooling: mypy, ruff, black, pytest, ipython, pyright
+# claude-feat: python
+# claude-feat-md: Python dev tooling: mypy, ruff, black, pytest, ipython, pyright
+
 # Python 3 and uv are already in the base image, other features rely on them,
 # so nothing is installed for the interpreter here, only the dev tooling
 RUN uv pip install --system --break-system-packages \

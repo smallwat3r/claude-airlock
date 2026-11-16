@@ -15,8 +15,14 @@ from .docker import docker
 from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 
 IMAGE_NAME = "claude-code-sandbox"
-# A fragment names the features it cannot do without on such a line
-REQUIRES_MARKER = "# requires: "
+# The lines of a part that the launcher reads. One of the first kind is a
+# bullet of the image's CLAUDE.md, one of the second names the features a
+# fragment cannot do without.
+CLAUDE_MD_MARKER = "# claude-feat-md: "
+REQUIRES_MARKER = "# claude-feat-requires: "
+# What the first was called, in fragments written before. Refused, so that a
+# tool does not drop out of what Claude is told without a word.
+FORMER_CLAUDE_MD_MARKER = "# claude: "
 
 
 @dataclass(frozen=True)
@@ -117,11 +123,19 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     texts = [part.read_text(encoding="utf-8") for part in parts]
     dockerfile = "".join(text.rstrip("\n") + "\n\n" for text in texts)
 
+    for part, text in zip(parts, texts):
+        if any(line.startswith(FORMER_CLAUDE_MD_MARKER) for line in text_lines(text)):
+            raise Fatal(
+                f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'
+                f' "{CLAUDE_MD_MARKER}", rename them'
+            )
+
     # The template ends with a placeholder bullet, visible when the file is
     # read on its own, the generated tool list takes its place. The list is
-    # the "# claude: " lines of the parts, so it always matches what is built.
+    # the "# claude-feat-md: " lines of the parts, so it always matches what is
+    # built.
     template = Path(DOCKERFILE_DIR, "CLAUDE-sandbox.md").read_text(encoding="utf-8")
-    marker = "# claude: "
+    marker = CLAUDE_MD_MARKER
     claude_md_lines = [
         line for line in text_lines(template) if not line.startswith("- _Placeholder:")
     ] + [
