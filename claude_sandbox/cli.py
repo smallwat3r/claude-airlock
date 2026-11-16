@@ -150,11 +150,12 @@ def session(
         *git_config_args(host),
         *shadow_args(settings, host, dirs),
     ]
-    # --add-dir is variadic, keep it ahead of the user's args so a trailing
-    # prompt is never swallowed as another directory. A --shell session runs
+    # --add-dir is variadic: written as two arguments it takes what follows
+    # for more directories, a prompt that comes first among the user's
+    # arguments included. With = it takes the one. A --shell session runs
     # bash, which takes no --add-dir.
     if action != "shell":
-        add_dirs = [arg for extra in dirs for arg in ("--add-dir", extra.path)]
+        add_dirs = [f"--add-dir={extra.path}" for extra in dirs]
         # The language servers of the image, as a plugin for this session
         plugin = ["--plugin-dir", PLUGIN_DIR] if image.has_language_servers else []
         claude_args = plugin + add_dirs + claude_args
