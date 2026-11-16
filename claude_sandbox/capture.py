@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .docker import docker, docker_ok, docker_output, session_alive
-from .network import namespace_args, record_net_session
+from .network import namespace_args, record_net_session, sidecar_running
 from .settings import Fatal, Host, Settings, private_dir
 
 # A session's sidecar is named after it. Session names are stepped past
@@ -112,6 +112,10 @@ def capture_name(session: str) -> str:
     return session + CAPTURE_SUFFIX
 
 
+def session_name(sidecar: str) -> str:
+    return sidecar[: -len(CAPTURE_SUFFIX)]
+
+
 def start_capture(settings: Settings, host: Host, session: str, image_tag: str) -> dict:
     """Start the sidecar a session is about to join. It runs the sandbox
     image, which has tcpdump, as root with just what tcpdump needs: raw
@@ -147,10 +151,7 @@ def start_capture(settings: Settings, host: Host, session: str, image_tag: str) 
     # in the namespace of a sidecar that is gone. The wait also gives it the
     # moment it takes to listen, a session is slower to start than that.
     time.sleep(0.3)
-    running = docker_output(
-        "container", "inspect", "--format={{.State.Running}}", sidecar
-    )
-    if started.returncode != 0 or "true" not in running:
+    if started.returncode != 0 or not sidecar_running(sidecar):
         said = docker("logs", sidecar, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         docker_ok("rm", "--force", sidecar)
         raise Fatal(
@@ -170,7 +171,7 @@ def collect_capture(host: Host, sidecar: str, about: dict) -> None:
         target = directory / f"{sidecar}-{int(about['start'])}.pcap"
         if docker_ok("cp", f"{sidecar}:{CAPTURE_FILE}", str(target)):
             session = {
-                "name": sidecar[: -len(CAPTURE_SUFFIX)],
+                "name": session_name(sidecar),
                 "project": about["project"],
                 "start": about["start"],
                 "end": time.time(),
@@ -208,7 +209,7 @@ def collect_ended_captures(host: Host) -> None:
             }
         except (ValueError, KeyError, TypeError, OverflowError):
             continue
-        if not session_alive(launcher, sidecar[: -len(CAPTURE_SUFFIX)]):
+        if not session_alive(launcher, session_name(sidecar)):
             collect_capture(host, sidecar, about)
 
 
