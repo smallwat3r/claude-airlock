@@ -20,13 +20,18 @@ jobs:
       - run: pipx run mypy claude_sandbox bin/claude-docker
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # The oldest the launcher promises to run on, the one macOS ships,
-        # and the latest
-        python: ["3.9", "3.x"]
+        # and the latest. 3.9 is past its end of life and is not built for
+        # runner images after Ubuntu 24.04, so it stays on that one
+        include:
+          - python: "3.9"
+            os: ubuntu-24.04
+          - python: "3.x"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
