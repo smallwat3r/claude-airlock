@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""The check for files a session changed that can run commands on the host,
+at the end of a session and for one that ended without it."""
+
+from __future__ import annotations
+
+import json
+import os
+import unittest
+from pathlib import Path
+
+from harness import (
+    LauncherTest,
+)
+
+
+class TamperingTest(LauncherTest):
+    REPORT = "changed files that can run commands on the host"
+
+    def test_a_new_git_hook_is_reported(self):
+        result = self.launch(session="echo x > .git/hooks/pre-commit")
+        self.assertIn(self.REPORT, result.stderr)
+        self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", result.stderr)
+
+    def test_a_git_config_change_is_reported(self):
+        result = self.launch(
+            session=r'printf "[core]\n\tfsmonitor = evil\n" >> .git/config'
+        )
+        self.assertIn(f"  {self.project}/.git/config\n", result.stderr)
+
+    def test_new_project_claude_settings_are_reported(self):
+        result = self.launch(session='mkdir .claude; echo "{}" > .claude/settings.json')
+        self.assertIn(f"  {self.project}/.claude/settings.json\n", result.stderr)
+
+    def test_branch_tracking_is_not_reported(self):
+        result = self.launch(
+            session=r'printf "[branch \"main\"]\n\tremote = origin\n" >> .git/config'
+        )
+        self.assertNotIn(self.REPORT, result.stderr)
+
+    def test_ordinary_edits_are_not_reported(self):
+        result = self.launch(session="echo code > main.go")
+        self.assertNotIn(self.REPORT, result.stderr)
+
+    def test_the_session_status_is_passed_on(self):
+        self.assertEqual(self.launch(session="exit 7").status, 7)
+
+
+class UncheckedSessionTest(LauncherTest):
+    LATE = "ended without its check"
+    # The fake docker is the shell's parent and the launcher its parent,
+    # killed the way a closed terminal ends it: before it can compare
+    KILL_LAUNCHER = "kill -KILL $(ps -o ppid= -p $PPID)"
+
+    def pending(self) -> list[Path]:
+        state = self.home / ".local" / "state" / "claude-sandbox"
+        return list(state.glob("pending-checks/*.json"))
+
+    def test_a_killed_session_is_checked_by_the_next_launch(self):
+        killed = self.launch(
+            session=f"echo x > .git/hooks/pre-commit; {self.KILL_LAUNCHER}"
+        )
+        self.assertNotIn("pre-commit", killed.stderr)
+        self.assertEqual(len(self.pending()), 1)
+
+        following = self.launch()
+        self.assertIn(self.LATE, following.stderr)
+        self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", following.stderr)
+        self.assertEqual(self.pending(), [])
+        self.assertNotIn(self.LATE, self.launch().stderr)
+
+    def test_a_killed_session_that_changed_nothing_is_not_reported(self):
+        self.launch(session=self.KILL_LAUNCHER)
+        self.assertNotIn(self.LATE, self.launch().stderr)
+        self.assertEqual(self.pending(), [])
+
+    def test_a_checked_session_leaves_nothing_pending(self):
+        self.launch(session="echo x > .git/hooks/pre-commit")
+        self.assertEqual(self.pending(), [])
+
+    def test_a_running_session_is_left_alone(self):
+        # This test's own process stands in for a launcher still running
+        self.launch(session=self.KILL_LAUNCHER)
+        (file,) = self.pending()
+        file.write_text(
+            json.dumps({**json.loads(file.read_text()), "pid": os.getpid()})
+        )
+        (self.project / ".git" / "hooks" / "pre-commit").write_text("x")
+        self.assertNotIn(self.LATE, self.launch(CLAUDE_BUFFER_NAME="*c:proj:b*").stderr)
+        self.assertIn(file, self.pending())
+
+    def test_an_unreadable_pending_check_is_dropped_out_loud(self):
+        self.launch(session=self.KILL_LAUNCHER)
+        (file,) = self.pending()
+        file.write_text("{")
+        self.assertIn("unreadable pending check", self.launch().stderr)
+        self.assertEqual(self.pending(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

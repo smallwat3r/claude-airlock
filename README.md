@@ -344,8 +344,15 @@ It also covers your own fragments and the two sidecar images.
 
 `test/launcher_test.py` checks the launcher's security-relevant behaviour
 without needing Docker: what gets mounted, shadowed and switched off by
-default. It runs the launcher against a fake `docker` that records every
-call. CI runs it together with ruff, shellcheck and a small image build.
+default, the tamper check, the network capture and `--trace`. It runs the
+launcher against a fake `docker` that records every call. CI runs it
+together with ruff, shellcheck and a small image build.
+
+The checks are in `test/test_*.py`, by topic, with what they share in
+`test/harness.py`. They need nothing but Python: `test/launcher_test.py`
+runs them all, `test/launcher_test.py -k trace` those with trace in their
+name, and each file runs on its own. `pytest test` works too if you have
+it.
 
 `test/smoke-test.sh` is the end-to-end check, run by hand on the host against
 a real Docker daemon. It replaces the sidecars, then starts open, filtered
