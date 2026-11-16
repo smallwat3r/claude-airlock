@@ -111,6 +111,17 @@ class RecorderTest(LauncherTest):
             recorder.catch_up(self.transcript, self.copy)
         self.assertEqual(len(recorder.put_aside(self.copy)), recorder.MOST_PUT_ASIDE)
 
+    def test_a_copy_put_aside_meanwhile_is_not_added_to(self):
+        recorder.catch_up(self.transcript, self.copy)
+        with open(self.copy, "ab") as held:
+            self.assertTrue(recorder.still_at(held.fileno(), self.copy))
+            # What the launcher that had the lock did with it
+            aside = self.copy.with_name(self.copy.name + ".1" + recorder.ASIDE_SUFFIX)
+            os.replace(self.copy, aside)
+            self.assertFalse(recorder.still_at(held.fileno(), self.copy))
+            self.copy.write_bytes(b"")
+            self.assertFalse(recorder.still_at(held.fileno(), self.copy))
+
     def test_a_session_is_copied_while_it_runs(self):
         added = json.dumps(prompts_at(time.time())[0])
         self.launch(session=f"echo '{added}' >> '{self.transcript}'")

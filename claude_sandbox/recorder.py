@@ -63,6 +63,16 @@ def put_aside(copy: Path) -> list[Path]:
     return sorted(copy.parent.glob(f"{glob.escape(copy.name)}.*{ASIDE_SUFFIX}"))
 
 
+def still_at(descriptor: int, path: Path) -> bool:
+    """Whether an open file is still the one at a path, and not one that
+    was renamed or removed since it was opened."""
+    try:
+        opened, there = os.fstat(descriptor), os.stat(path)
+    except OSError:
+        return False
+    return (opened.st_dev, opened.st_ino) == (there.st_dev, there.st_ino)
+
+
 def catch_up(transcript: Path, copy: Path) -> None:
     """Add to a copy what its transcript has gained. Under a lock, the
     launchers of other sessions of the project copy it too."""
@@ -73,6 +83,10 @@ def catch_up(transcript: Path, copy: Path) -> None:
     descriptor = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with source, os.fdopen(descriptor, "ab") as kept:
         fcntl.flock(kept, fcntl.LOCK_EX)
+        if not still_at(kept.fileno(), copy):
+            # Put aside by the launcher that had the lock: this is no
+            # longer the copy, the next look opens the one that is
+            return
         have = os.fstat(kept.fileno()).st_size
         if os.fstat(source.fileno()).st_size < have:
             # Rewritten. What it held is kept, and a new copy starts with
