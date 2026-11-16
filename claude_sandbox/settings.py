@@ -22,6 +22,7 @@ CONFIG_FILE_SETTINGS = frozenset(
     {
         "FEATURES",
         "NET_FILTER",
+        "NET_LOG",
         "SSH_AGENT",
         "SOCKET",
         "RW_CONFIG",
@@ -33,6 +34,16 @@ CONFIG_FILE_SETTINGS = frozenset(
         "SHARED_DIR",
     }
 )
+
+
+def private_dir(path: str) -> str:
+    """Create a directory for the launcher's own records, with its parents,
+    for the user alone: what is kept there says which hosts a session
+    reached. Returns the path."""
+    # The mode only goes to the last directory made, so one level at a time
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
 
 
 class Fatal(Exception):
@@ -47,6 +58,7 @@ class Settings:
     # None falls back to features.txt, then to every feature, "" selects none
     features: str | None = None
     net_filter: bool = False
+    net_log: bool = True
     ssh_agent: bool = False
     socket: str = "0"  # 0, 1 or full
     rw_config: bool = False
@@ -68,6 +80,7 @@ class Host:
     home: str
     project_dir: str
     config_home: str  # XDG_CONFIG_HOME, ~/.config by default
+    state_home: str  # XDG_STATE_HOME, ~/.local/state by default
 
     @property
     def user_conf(self) -> str:
@@ -76,6 +89,28 @@ class Host:
     @property
     def claude_dir(self) -> str:
         return os.path.join(self.home, ".claude")
+
+    @property
+    def state_dir(self) -> str:
+        # The launcher's own records. Never mounted into a session, which
+        # could otherwise edit what is kept about it.
+        return os.path.join(self.state_home, "claude-sandbox")
+
+    @property
+    def pending_checks_dir(self) -> str:
+        # A session's starting point for the check of tamper.py
+        return os.path.join(self.state_dir, "pending-checks")
+
+    @property
+    def net_sessions_file(self) -> str:
+        # A line per session with a network record: the address a filtered
+        # one had on the internal network (see network.py), the capture of
+        # any one unless switched off (see capture.py)
+        return os.path.join(self.state_dir, "net-sessions.jsonl")
+
+    @property
+    def captures_dir(self) -> str:
+        return os.path.join(self.state_dir, "captures")
 
     @property
     def feature_dirs(self) -> list[str]:
@@ -106,6 +141,7 @@ def detect_host(env: Mapping[str, str]) -> Host:
         home=home,
         project_dir=logical_cwd(),
         config_home=env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+        state_home=env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
     )
 
 
@@ -167,6 +203,7 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     return Settings(
         features=raw("FEATURES"),
         net_filter=flag("NET_FILTER", defaults.net_filter),
+        net_log=flag("NET_LOG", defaults.net_log),
         ssh_agent=flag("SSH_AGENT", defaults.ssh_agent),
         socket=choice("SOCKET", defaults.socket, ("0", "1", "full")),
         rw_config=flag("RW_CONFIG", defaults.rw_config),

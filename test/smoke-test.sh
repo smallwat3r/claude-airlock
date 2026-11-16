@@ -39,7 +39,7 @@ check() { # description, command...
 session() { # script [VAR=value]...
   local script="$1" output
   shift
-  output="$(cd "${PROJECT}" && env CLAUDE_DOCKER_NET_FILTER=0 \
+  output="$(cd "${PROJECT}" && env CLAUDE_DOCKER_NET_FILTER=0 CLAUDE_DOCKER_NET_LOG=0 \
     CLAUDE_DOCKER_SOCKET=0 CLAUDE_DOCKER_RW_CONFIG=0 CLAUDE_DOCKER_CACHE=1 \
     "$@" "${LAUNCHER}" --shell -c "${script}" 2>"${SESSION_ERR}" </dev/null)" || {
     fail "session exited with an error, see below"
@@ -153,6 +153,49 @@ check "the egress proxy is running" \
   bash -c "docker inspect -f '{{.State.Running}}' claude-egress-proxy | grep -q true"
 check "--net-log lists the blocked domain" \
   bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
+check "the proxy log survives a proxy restart" \
+  bash -c "'${LAUNCHER}' --net-reload && '${LAUNCHER}' --net-log | grep -q example.com"
+# The signal is handled a moment after the command returns
+check "the proxy log rotates on request" \
+  bash -c "docker exec claude-egress-proxy squid -k rotate && sleep 2 &&
+    docker exec claude-egress-proxy test -f /var/log/squid/access.log.0"
+check "--net-log also reads the rotated log" \
+  bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
+
+echo
+echo "Session with the network capture"
+STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-sandbox"
+CAPTURED="${STATE}/captures/claude-$(basename "${PROJECT}").capture-"
+rm -f "${CAPTURED}"*
+# shellcheck disable=SC2016
+session "${INSIDE}"'
+check "egress is still open" curl -fsS -m 15 -o /dev/null https://example.com
+check "a connection that is not HTTP works" bash -c "exec 3<>/dev/tcp/1.1.1.1/53"
+check "holds no capabilities" grep -q "^CapEff:.0000000000000000$" /proc/self/status
+' CLAUDE_DOCKER_NET_LOG=1
+if ! grep -q "network capture" "${SESSION_ERR}"; then
+  # shellcheck disable=SC2016 # expanded by the python below
+  READ_CAPTURE='
+import glob, sys
+sys.path.insert(0, sys.argv[1])
+from claude_sandbox.capture import read_capture
+(file,) = glob.glob(sys.argv[2] + "*")
+found = read_capture(file)
+ports = {(address, port) for _, address, port in found.connections}
+assert ("1.1.1.1", 53) in ports, ports
+assert "example.com" in found.names.values(), found.names
+'
+  check "the capture names what the session reached" \
+    python3 -c "${READ_CAPTURE}" "${ROOT}" "${CAPTURED}"
+  check "the capture sidecar is gone" \
+    bash -c "! docker inspect 'claude-$(basename "${PROJECT}").capture'"
+fi
+# shellcheck disable=SC2016
+session "${INSIDE}"'
+check "an allowed domain is reachable" curl -fsS -m 15 -o /dev/null https://api.github.com
+check_fails "direct connections fail" curl -fsS -m 5 --noproxy "*" -o /dev/null https://1.1.1.1
+' CLAUDE_DOCKER_NET_FILTER=1 CLAUDE_DOCKER_NET_LOG=1
+check "the filtered session was captured too" bash -c "ls '${CAPTURED}'* | wc -l | grep -q 2"
 
 echo
 echo "Session with the socket proxy"

@@ -5,10 +5,18 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
+from .capture import capture_name, collect_ended_captures, session_captured
 from .docker import docker_ok
 from .image import build_image, prepare_image
-from .network import net_log, network_args, socket_proxy_args, start_egress_proxy
+from .network import (
+    net_log,
+    network_args,
+    session_address_recorded,
+    socket_proxy_args,
+    start_egress_proxy,
+)
 from .session import (
     ExtraDir,
     add_extra_dir,
@@ -26,7 +34,13 @@ from .session import (
     ssh_agent_args,
 )
 from .settings import Fatal, Host, detect_host, load_settings
-from .tamper import host_exec_fingerprint, report_tampering
+from .tamper import (
+    host_exec_fingerprint,
+    report_tampering,
+    report_unchecked_sessions,
+    save_pending_check,
+)
+from .trace import trace
 
 
 def parse_args(
@@ -34,10 +48,17 @@ def parse_args(
 ) -> tuple[str, list[str]]:
     """Take the launcher's own options out of argv, adding the directories
     they name to dirs. Returns the action (run, shell, rebuild, dockerfile,
-    net-log or net-reload) and the arguments left for claude."""
+    net-log, net-reload or trace) and the arguments left for claude."""
     action = "run"
     claude_args: list[str] = []
-    actions = ("--rebuild", "--dockerfile", "--shell", "--net-log", "--net-reload")
+    actions = (
+        "--rebuild",
+        "--dockerfile",
+        "--shell",
+        "--net-log",
+        "--net-reload",
+        "--trace",
+    )
     args = iter(argv)
     for arg in args:
         option, has_value, value = arg.partition("=")
@@ -64,6 +85,8 @@ def main(argv: list[str]) -> int:
 
     if action == "net-log":
         return net_log()
+    if action == "trace":
+        return trace(host, claude_args)
     if action == "net-reload":
         start_egress_proxy()
         return 0
@@ -82,13 +105,15 @@ def main(argv: list[str]) -> int:
             return status
 
     name = container_name(host, env)
+    # With a capture, the session's network namespace is its sidecar's
+    capture = capture_name(name) if settings.net_log else ""
     prepare_claude_dir(settings, host)
     run_args = [
         *base_args(settings, host, name),
         *session_args(action, env),
         *protect_config_args(settings, host),
         *extra_dir_args(dirs),
-        *network_args(settings),
+        *network_args(settings, capture),
         *socket_proxy_args(settings),
         *ssh_agent_args(settings, env),
         *git_config_args(host),
@@ -102,9 +127,18 @@ def main(argv: list[str]) -> int:
         claude_args = add_dirs + claude_args
 
     watched = [host.project_dir] + [extra.path for extra in dirs]
+    pending = Path(host.pending_checks_dir, name + ".json")
+    report_unchecked_sessions(pending.parent)
     before = host_exec_fingerprint(watched)
-    status = run_session(run_args, image, claude_args)
+    save_pending_check(pending, watched, before)
+    collect_ended_captures(host)
+    # The capture first, a filtered session's address is its sidecar's
+    # Nested, joining them in brackets takes Python 3.10
+    with session_captured(settings, host, name, image.tag):  # noqa: SIM117
+        with session_address_recorded(settings, host, name, capture or name):
+            status = run_session(run_args, image, claude_args)
     report_tampering(before, host_exec_fingerprint(watched))
+    pending.unlink(missing_ok=True)
     return status
 
 

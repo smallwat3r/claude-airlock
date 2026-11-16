@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 
@@ -28,6 +29,22 @@ def docker_ok(*args: str) -> bool:
     """Whether a docker command succeeds, without showing its output."""
     quiet = subprocess.DEVNULL
     return docker(*args, stdout=quiet, stderr=quiet).returncode == 0
+
+
+def session_alive(launcher: int, container: str) -> bool:
+    """Whether a session is still going: its launcher (by process id) or
+    its container is there. The container can outlive a killed launcher."""
+    try:
+        # Zero and below would ask about process groups, not a process
+        if launcher > 0:
+            os.kill(launcher, 0)
+            return True
+    except ProcessLookupError:
+        pass
+    except OSError:
+        # Not ours to signal, so it exists
+        return True
+    return docker_ok("container", "inspect", container)
 
 
 def docker_output(*args: str) -> str:

@@ -37,6 +37,10 @@ claude-docker --dockerfile          # print the generated Dockerfile, then exit
 claude-docker --shell               # bash in the same sandbox, to look around
 claude-docker --net-log             # domains the egress filter denied
 claude-docker --net-reload          # restart the egress filter
+claude-docker --trace               # what the latest session here did
+claude-docker --trace list          # this project's sessions, latest first
+claude-docker --trace 3fa9 --full > trace.txt   # one session, in full
+claude-docker --trace --json | jq 'select(.what == "net")'   # as JSON Lines
 claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
 
@@ -48,20 +52,21 @@ sandbox, it is common to run with `--dangerously-skip-permissions`.
 | `CLAUDE_DOCKER_EXTRA_DIRS=a:b` | none | Extra directories to mount, same as repeated `--add-dir` |
 | `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` | none | The same read-only, as repeated `--add-dir-ro` |
 | `CLAUDE_DOCKER_FEATURES="go typst"` | `features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
-| `CLAUDE_DOCKER_NET_FILTER=1` | `0` | Restrict egress to `docker/allowed-domains.txt` |
-| `CLAUDE_DOCKER_SSH_AGENT=1` | `0` | Forward the SSH agent, needed for git over SSH |
-| `CLAUDE_DOCKER_SOCKET=1` | `0` | `docker ps` and `docker logs` on the host daemon, `full` adds `inspect` |
-| `CLAUDE_DOCKER_RW_CONFIG=1` | `0` | Leave `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` writable |
+| `CLAUDE_DOCKER_NET_FILTER=1` | `0` | If on, egress goes through a proxy that only allows the domains in `docker/allowed-domains.txt`, and only HTTP, HTTPS and git over SSH get out |
+| `CLAUDE_DOCKER_NET_LOG=0` | `1` | If on, records every TCP connection the session opens and every name it looks up, shown by `--trace`, see [Reviewing a session](#reviewing-a-session) |
+| `CLAUDE_DOCKER_SSH_AGENT=1` | `0` | If on, forwards your SSH agent, so git over SSH and `ssh` work with your keys. If off, the session has no SSH keys |
+| `CLAUDE_DOCKER_SOCKET=1` | `0` | If on, `docker ps` and `docker logs` work against the host daemon, `full` adds `inspect`, `stats` and `top`. If off, the session cannot reach Docker at all |
+| `CLAUDE_DOCKER_RW_CONFIG=1` | `0` | If on, `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` are writable from the session. If off, they are read-only there |
 | `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` | none | Extra file name globs to hide, on top of the `.env` family |
 | `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Container memory limit |
 | `CLAUDE_DOCKER_PIDS=1024` | `512` | Container process limit |
-| `CLAUDE_DOCKER_CACHE=0` | `1` | Keep `~/.cache` on a tmpfs instead of a per-project volume |
+| `CLAUDE_DOCKER_CACHE=0` | `1` | If on, `~/.cache` is a per-project volume that persists between sessions. If off, it is a 2g tmpfs that is gone when the session ends |
 | `CLAUDE_DOCKER_SHARED_DIR=~/scratch` | `~/claude-shared` if it exists | Scratch directory shared between sessions, empty for none |
 | `CLAUDE_DOCKER_RUNTIME=runsc` | Docker's default | Container runtime, e.g. gVisor, must be installed in Docker |
 | `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
-The on and off switches take `0` or `1` (`CLAUDE_DOCKER_SOCKET` also
-`full`). Any other value, such as `true`, stops the launcher instead of
+The on and off switches take `1` for on and `0` for off
+(`CLAUDE_DOCKER_SOCKET` also `full`). Any other value, such as `true`, stops the launcher instead of
 quietly leaving a restriction off.
 
 To change a default for every session, put the same variables in
@@ -85,6 +90,108 @@ there, extra directories belong to one project, not to every session.
 shared between sessions. `CLAUDE_DOCKER_SHARED_DIR` names another directory,
 or none when set empty.
 
+## Reviewing a session
+
+`claude-docker --trace` shows what the latest session of the current project
+did: what it ran, where and why, what it wrote and what it reached on the
+network, in the order it happened. It is plain text made to be kept in a
+file or searched, every line starts with when, who and what:
+
+```
+# session     3fa9c0de-...  Fix the build
+# project     /home/me/code/api
+# permissions bypassPermissions
+# tool calls  12 (Bash 9, Edit 2, Read 1)
+# failed      1
+# files written
+#   /home/me/code/api/Makefile x2
+# network
+#   captured in claude-api from 10:02:11 to 10:31:40
+#   tcp/https registry.npmjs.org (104.16.3.35):443 x4
+#   tcp/postgres 10.0.0.7:5432 x1
+#
+# time                 who      what      details
+2026-01-02 10:02:30  user     prompt    fix the build
+2026-01-02 10:02:41  claude   bash      $ npm ci
+2026-01-02 10:02:41  claude   bash      why: Install the dependencies
+2026-01-02 10:02:41  claude   bash      result: ok, 8.2s
+2026-01-02 10:02:42  sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443
+2026-01-02 10:03:05  claude   edit      file: /home/me/code/api/Makefile
+2026-01-02 10:03:05  claude   edit      diff: -	go build ./..
+2026-01-02 10:03:05  claude   edit      diff: +	go build ./...
+2026-01-02 10:03:05  claude   edit      result: ok, 0.0s
+```
+
+- `who` is `user`, `claude`, `agent` (a subagent) or `sandbox`, the
+  container as a whole: a connection is known by its container, not by the
+  command that opened it. Its place in time says which that probably was.
+- `what` is `prompt`, `reply`, the tool (`bash`, `edit`, `write`, `read`,
+  ...), `net` or `dns`.
+- A command comes with the reason Claude gave for it (`why:`), its working
+  directory when that is not the project (`cwd:`) and how it ended. Calls
+  that failed say `FAILED`, files written outside the project `OUTSIDE
+  PROJECT`, requests the egress filter refused `DENIED`.
+- Long commands, diffs and replies are cut to a few lines and the output of
+  a call is only shown when it failed, `--full` shows everything.
+- `--trace list` lists the project's sessions, and the start of an id picks
+  one. On a terminal the result goes through your pager.
+
+`--json` gives the same events as JSON Lines, one object each, nothing
+shortened, for `jq` or to load into a database:
+
+```
+{"session": "3fa9c0de-...", "time": "2026-01-02T10:02:41.120+01:00", "who": "claude", "what": "bash", "tool": "Bash", "input": {"command": "npm ci", "description": "Install the dependencies"}, "cwd": "/home/me/code/api", "failed": false, "output": "...", "seconds": 8.2}
+{"session": "3fa9c0de-...", "time": "2026-01-02T10:02:42.480+01:00", "who": "sandbox", "what": "net", "protocol": "tcp/https", "name": "registry.npmjs.org", "address": "104.16.3.35", "port": 443}
+```
+
+Every object has `session`, `time`, `who` and `what`. A prompt or reply
+adds `text`, a tool call `tool`, `input`, `cwd`, `failed`, `seconds` and
+`output` (and `outside_project` for a file it wrote), a connection
+`protocol`, `address`, `port` and `name`, a proxy request `protocol`,
+`method`, `url`, `port`, `denied`, `bytes` and `seconds`, a lookup `name`.
+
+The network lines need a record the launcher keeps, of which there are two:
+
+- With `CLAUDE_DOCKER_NET_FILTER=1`, what the session asked the egress
+  proxy for: method, host, allowed or `DENIED`, bytes and duration. HTTPS
+  shows as the host it connected to, not the URL. The proxy's log is shared
+  by all sessions, so the launcher notes the address each session's
+  container had and picks its requests by that.
+- Unless `CLAUDE_DOCKER_NET_LOG=0`, every TCP connection the session opened,
+  whatever the protocol, and with `--full` every name it looked up. The
+  session's route out is not changed, a sidecar that owns its network
+  namespace captures the packets that say where a connection goes: its
+  start, the DNS answers and the TLS hello. The name of a destination comes
+  from those, a connection to a bare address shows as the address. The
+  address is what was reached, the name is what the session looked up or
+  asked for, so trust the address where the two matter. It works
+  with the filter too, where it shows what a session tried to reach around
+  the proxy. Not recorded: UDP other than DNS, IPv6, and what was sent.
+
+Neither can be forged or edited by the session: the address and the capture
+are taken outside of it. The transcript is another matter, it is written
+from inside the sandbox, so treat that part as a convenience and not as an
+audit log, a session could rewrite its own. A tool call is recorded as
+issued, what a command went on to spawn or touch is not. Sessions run
+outside the sandbox in the same directory are listed too, Claude Code keeps
+them in the same place.
+
+What is kept, all of it under `~/.local/state/claude-sandbox` unless noted:
+
+- The proxy's log, in the `claude-egress-log` Docker volume, so it survives
+  a proxy restart. It is rotated once it passes 10 MB, checked when a
+  filtered session starts, and one rotated file is kept, about 20 MB at
+  most. `docker volume rm claude-egress-log` (with the proxy removed)
+  clears it.
+- The captures, a few kB each as a rule, the latest 100. One stops at
+  100,000 packets, about 100 MB at the very worst, and the trace says so
+  when that happened.
+- `net-sessions.jsonl`, a line per recorded session.
+
+A capture is copied out when the launcher returns. The sidecar of a session
+that ended without it (a killed Emacs buffer) is collected by the next
+`claude-docker` launch.
+
 ## What the sandbox does
 
 - Mounts the project directory (and any extra directories) read-write at
@@ -104,7 +211,12 @@ or none when set empty.
 - When a session ends, warns if it changed files that run commands on the
   host: `.git/config` (branch tracking aside), git hooks, and the
   project's `.claude/settings.json`. They have to stay writable for git and
-  claude to work, so they are checked rather than locked.
+  claude to work, so they are checked rather than locked. The warning is
+  printed when the launcher returns, so end a session with `/exit` or
+  Ctrl-D to see it there. A session that ends without it, because its Emacs
+  buffer or terminal was killed, is checked by the next `claude-docker`
+  launch instead, which then also lists what you changed yourself in the
+  meantime.
 - Shadows `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files with
   `/dev/null`, so secrets stay on the host. Templates such as `.env.example`
   remain readable, and `CLAUDE_DOCKER_SHADOW` hides more.

@@ -163,6 +163,14 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # network mode in the Claude UI
         env_arg("CLAUDE_DOCKER_SANDBOX", name),
         env_arg("CLAUDE_DOCKER_NET_FILTER", int(settings.net_filter)),
+        # The session is told its settings, so that Claude can name the one
+        # behind something it could not do (see docker/CLAUDE-sandbox.md).
+        # The other switches are only set when they are on, by the code
+        # that acts on them.
+        env_arg("CLAUDE_DOCKER_NET_LOG", int(settings.net_log)),
+        env_arg("CLAUDE_DOCKER_CACHE", int(settings.cache)),
+        env_arg("CLAUDE_DOCKER_MEMORY", settings.memory),
+        env_arg("CLAUDE_DOCKER_PIDS", settings.pids),
         # No gpg binary (or key) in the image, so a host gitconfig with
         # commit.gpgsign=true would make every commit fail. Sign the
         # sandbox's commits at review time, before pushing.

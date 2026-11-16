@@ -1,5 +1,13 @@
 # Last part of the generated Dockerfile (see base.Dockerfile).
 
+# Run by the capture sidecar of CLAUDE_DOCKER_NET_LOG, which has the
+# capability for it, a session has not (see claude_sandbox/capture.py).
+# Here and not in the base, whose layers every feature builds on: what is
+# added to the tail rebuilds the tail alone.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+
 # Claude Code: exact version from npm
 ARG CLAUDE_CODE_VERSION=2.1.323
 

@@ -4,16 +4,21 @@ Docker socket proxy."""
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
 import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .docker import docker, docker_must, docker_ok, docker_output, env_arg, mount_arg
-from .settings import DOCKERFILE_DIR, Fatal, Settings
+from .settings import DOCKERFILE_DIR, Fatal, Host, Settings, private_dir
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
@@ -23,6 +28,15 @@ SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38c
 EGRESS_PROXY = "claude-egress-proxy"
 EGRESS_PORT = 3128
 EGRESS_CONFIG_LABEL = "claude-sandbox.config"
+# The proxy's log is kept in a volume, so it outlives the proxy's container,
+# as the current file and the one before it (logfile_rotate in squid.conf).
+# The current one is rotated out once it is over the limit, which bounds the
+# volume at about twice that. Squid only rotates when told to, the launcher
+# does so when a filtered session starts: one very long session can
+# overshoot, a cron in the sidecar would be the fix if that ever matters.
+EGRESS_LOG_VOLUME = "claude-egress-log"
+EGRESS_LOG_DIR = "/var/log/squid"
+EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # Filtered mode joins an internal network with no route out, open mode a
 # plain bridge network. Both are user-defined so container names resolve.
 FILTER_NET = "claude-docker-net"
@@ -89,6 +103,7 @@ def start_egress_proxy() -> None:
             f"{squid}/allowed-domains.txt",
             "ro,z",
         ),
+        f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
     ]
     start_sidecar(EGRESS_PROXY, FILTER_NET, options, SQUID_IMAGE)
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
@@ -127,6 +142,97 @@ def egress_proxy_current() -> bool:
     return label.strip() == egress_config_hash()
 
 
+def access_log(stderr: int | None = None) -> str | None:
+    """The egress proxy's log, the rotated file then the current one, None
+    when it cannot be read. Read through the proxy's container, the volume
+    it is in is not reachable from the host otherwise."""
+    current = f"{EGRESS_LOG_DIR}/access.log"
+    log = docker(
+        "exec",
+        EGRESS_PROXY,
+        "sh",
+        "-c",
+        f"cat {current}.0 2>/dev/null; cat {current}",
+        stdout=subprocess.PIPE,
+        stderr=stderr,
+    )
+    return log.stdout if log.returncode == 0 else None
+
+
+def rotate_access_log() -> None:
+    """Rotate the proxy's log out once it is over the limit. Best effort,
+    a session is not held up over its proxy's housekeeping."""
+    over_limit = (
+        f'[ "$(stat -c %s {EGRESS_LOG_DIR}/access.log)" -gt {EGRESS_LOG_LIMIT} ]'
+    )
+    docker_ok("exec", EGRESS_PROXY, "sh", "-c", f"{over_limit} && squid -k rotate")
+
+
+def session_address(name: str) -> str:
+    """The container's address on its network, empty until it has one."""
+    addresses = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
+    found = docker_output("container", "inspect", f"--format={addresses}", name)
+    try:
+        return str(ipaddress.ip_address(found.split()[0]))
+    except (IndexError, ValueError):
+        return ""
+
+
+def record_net_session(host: Host, session: dict) -> None:
+    """Add a line to the launcher's record of sessions whose network use
+    can be traced: the name and project of each, when it started, and its
+    address on the filtered network or the file of its capture."""
+    private_dir(host.state_dir)
+    with open(host.net_sessions_file, "a", encoding="utf-8") as sessions:
+        sessions.write(json.dumps(session) + "\n")
+
+
+def record_address(
+    name: str, owner: str, host: Host, started: float, stop: threading.Event
+) -> None:
+    while True:
+        address = session_address(owner)
+        if address:
+            session = {
+                "name": name,
+                "project": host.project_dir,
+                "ip": address,
+                "start": started,
+            }
+            record_net_session(host, session)
+            return
+        if stop.wait(0.2):
+            return
+
+
+@contextmanager
+def session_address_recorded(
+    settings: Settings, host: Host, name: str, owner: str
+) -> Iterator[None]:
+    """While a filtered session runs, note the address it was given. The
+    proxy logs each request with the address it came from, which a
+    container without capabilities cannot forge, so this is what lets
+    --trace tell the sessions in the shared log apart. The address is only
+    known once the container is up, by when the launcher is waiting on it,
+    hence the thread. owner is the container the address belongs to: the
+    session, or its capture sidecar."""
+    if not settings.net_filter:
+        yield
+        return
+    stop = threading.Event()
+    recorder = threading.Thread(
+        target=record_address,
+        args=(name, owner, host, time.time(), stop),
+        daemon=True,
+    )
+    recorder.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        recorder.join()
+
+
 def net_log() -> int:
     """Print the domains the egress filter refused, most frequent first. The
     quickest way to find what a project needs added to allowed-domains.txt."""
@@ -135,44 +241,55 @@ def net_log() -> int:
             "the egress proxy is not running "
             "(start a CLAUDE_DOCKER_NET_FILTER=1 session first)"
         )
-    log = docker(
-        "exec", EGRESS_PROXY, "cat", "/var/log/squid/access.log", stdout=subprocess.PIPE
-    )
-    if log.returncode != 0:
-        return log.returncode
+    log = access_log()
+    if log is None:
+        return 1
     # Squid's native log: field 4 is the result code, field 7 the URL
-    entries = (line.split() for line in log.stdout.splitlines())
+    entries = (line.split() for line in log.splitlines())
     denied = Counter(f[6] for f in entries if len(f) >= 7 and "DENIED" in f[3])
     for url, count in sorted(denied.items(), key=lambda item: (-item[1], item[0])):
         print(f"{count:7d} {url}")
     return 0
 
 
-def network_args(settings: Settings) -> list[str]:
-    """Network: open egress by default. In filtered mode the container joins
+def namespace_args(settings: Settings) -> list[str]:
+    """What sets up a session's network namespace, given to the container
+    that owns it: the session, or its capture sidecar (see capture.py)."""
+    network = f"--network={network_name(settings)}"
+    if not settings.net_filter:
+        return [network]
+    # Blackhole external DNS: the proxy resolves hostnames (CONNECT
+    # carries the name as a string), and squid only looks up domains
+    # that pass the allowlist, so the container needs no external DNS.
+    # Docker's embedded DNS still answers container names itself and
+    # only forwards unknown names upstream, 127.0.0.1 dies on the host,
+    # so exfiltration via DNS lookups never leaves the machine.
+    return [network, "--dns=127.0.0.1"]
+
+
+def network_args(settings: Settings, capture: str = "") -> list[str]:
+    """Network: open egress by default, in the network namespace of the
+    capture sidecar when one is named (see capture.py). In filtered mode
+    the container joins
     an internal network with no route out, where egress goes through a squid
     sidecar (dual-homed on the internal net and the default bridge) that only
     allows domains listed in docker/allowed-domains.txt.
     Filtering is by the host named in the CONNECT request, so it survives CDN
     IP churn. Creates the network and starts the sidecar as needed."""
-    network = network_name(settings)
-    ensure_network(network)
+    ensure_network(network_name(settings))
+    namespace = (
+        [f"--network=container:{capture}"] if capture else namespace_args(settings)
+    )
     if not settings.net_filter:
-        return [f"--network={network}"]
+        return namespace
 
     if not egress_proxy_current():
         start_egress_proxy()
+    rotate_access_log()
     proxy = f"{EGRESS_PROXY}:{EGRESS_PORT}"
     no_proxy = f"localhost,127.0.0.1,{socket_proxy_name(settings)}"
     return [
-        f"--network={network}",
-        # Blackhole external DNS: the proxy resolves hostnames (CONNECT
-        # carries the name as a string), and squid only looks up domains
-        # that pass the allowlist, so the container needs no external DNS.
-        # Docker's embedded DNS still answers container names itself and
-        # only forwards unknown names upstream, 127.0.0.1 dies on the host,
-        # so exfiltration via DNS lookups never leaves the machine.
-        "--dns=127.0.0.1",
+        *namespace,
         env_arg("HTTP_PROXY", f"http://{proxy}"),
         env_arg("http_proxy", f"http://{proxy}"),
         env_arg("HTTPS_PROXY", f"http://{proxy}"),
