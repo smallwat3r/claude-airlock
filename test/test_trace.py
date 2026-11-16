@@ -19,6 +19,9 @@ from harness import (
     transcript,
 )
 
+from claude_sandbox import trace as tracing
+from claude_sandbox.events import Event, Who
+
 
 class TraceTest(LauncherTest):
     SESSION = "3fa9c0de-0000-4000-8000-000000000000"
@@ -26,24 +29,7 @@ class TraceTest(LauncherTest):
     def setUp(self):
         super().setUp()
 
-        def call(tool_id: str, name: str, **tool_input) -> dict:
-            block = {"type": "tool_use", "id": tool_id, "name": name}
-            return {
-                "type": "assistant",
-                "timestamp": "2026-01-02T10:00:01Z",
-                "message": {"content": [{**block, "input": tool_input}]},
-            }
-
-        def result(tool_id: str, output: str, failed: bool = False) -> dict:
-            block = {"type": "tool_result", "tool_use_id": tool_id}
-            return {
-                "type": "user",
-                "timestamp": "2026-01-02T10:00:03Z",
-                "message": {
-                    "content": [{**block, "content": output, "is_error": failed}]
-                },
-            }
-
+        call, result = self.call, self.result
         entries = [
             {
                 "type": "user",
@@ -54,7 +40,7 @@ class TraceTest(LauncherTest):
                 "t1",
                 "Bash",
                 command="make \x1b]0;owned\x07all",
-                description="Build\n2026-01-02 10:00:09  user     prompt    forged",
+                description="Build\n2026-01-02 10:00:09  user     prompt      forged",
             ),
             result("t1", "Error: Exit code 2\nno rule", failed=True),
             call("t2", "Edit", file_path="/etc/passwd", old_string="a", new_string="b"),
@@ -64,30 +50,56 @@ class TraceTest(LauncherTest):
         file = self.write_transcript(self.SESSION, entries)
         file.write_text(file.read_text() + "{half written")
 
+    @staticmethod
+    def call(tool_id: str, name: str, **tool_input) -> dict:
+        block = {"type": "tool_use", "id": tool_id, "name": name}
+        return {
+            "type": "assistant",
+            "timestamp": "2026-01-02T10:00:01Z",
+            "message": {"content": [{**block, "input": tool_input}]},
+        }
+
+    @staticmethod
+    def result(tool_id: str, output: str, failed: bool = False) -> dict:
+        block = {"type": "tool_result", "tool_use_id": tool_id}
+        return {
+            "type": "user",
+            "timestamp": "2026-01-02T10:00:03Z",
+            "message": {"content": [{**block, "content": output, "is_error": failed}]},
+        }
+
+    def ran(self, command: str, output: str, failed: bool = False) -> None:
+        """A session, 0c, that ran one command."""
+        entries = [
+            self.call("c1", "Bash", command=command),
+            self.result("c1", output, failed),
+        ]
+        self.write_transcript("0c", entries)
+
     def test_the_session_is_shown_without_docker(self):
         result = self.launch("--trace")
         self.assertEqual(result.status, 0, result.stderr)
         self.assertEqual(result.calls, [])
         for expected in (
-            "user     prompt    fix the build",
-            "claude   bash      $ make ]0;ownedall",
-            "claude   bash      why: Build\\n2026-01-02 10:00:09  user     prompt    forged",
-            "claude   bash      result: FAILED, 2.0s",
-            "claude   bash      out: no rule",
-            "claude   edit      diff: -a",
-            "claude   edit      diff: +b",
-            "claude   write     file: main.go (1 lines)",
-            "claude   write     result: none recorded",
+            "user     prompt      fix the build",
+            "claude   bash        $ make ]0;ownedall",
+            "claude   bash        why: Build\\n2026-01-02 10:00:09  user     prompt      forged",
+            "claude   bash        result: FAILED, 2.0s",
+            "claude   bash        out: no rule",
+            "claude   edit        diff: -a",
+            "claude   edit        diff: +b",
+            "claude   write       file: main.go (1 lines)",
+            "claude   write       result: none recorded",
             "# tool calls  3 (Bash 1, Edit 1, Write 1)",
         ):
             self.assertIn(expected, result.stdout)
 
     def test_every_line_says_when_who_and_what(self):
-        for line in self.launch("--trace", "--full").stdout.splitlines():
+        for line in self.launch("--trace", "--verbose").stdout.splitlines():
             self.assertRegex(line, r"^(#|\d{4}-\d\d-\d\d \d\d:\d\d:\d\d  \w+ +\w+ +\S)")
 
     def test_control_characters_never_reach_the_terminal(self):
-        for form in ("--full", "--json"):
+        for form in ("--verbose", "--json"):
             stdout = self.launch("--trace", form).stdout
             self.assertNotRegex(stdout, r"[\x00-\x08\x0b-\x1f\x7f]")
 
@@ -98,13 +110,13 @@ class TraceTest(LauncherTest):
         when = "\x1b[2m2026-01-02 10:00:0"
         for expected in (
             "\x1b[2m# session",
-            "\x1b[2muser     prompt    fix the build\x1b[0m",
-            "\x1b[33mclaude   bash      $ make ]0;ownedall\x1b[0m",
-            "\x1b[1;31mclaude   bash      result: FAILED, 2.0s\x1b[0m",
-            "\x1b[1;31mclaude   bash      out: no rule\x1b[0m",
-            "\x1b[1;31mclaude   edit      file: /etc/passwd  OUTSIDE PROJECT\x1b[0m",
-            "\x1b[35mclaude   edit      result: ok, 2.0s\x1b[0m",
-            "\x1b[35mclaude   write     file: main.go (1 lines)\x1b[0m",
+            "\x1b[2muser     prompt      fix the build\x1b[0m",
+            "\x1b[33mclaude   bash        $ make ]0;ownedall\x1b[0m",
+            "\x1b[1;31mclaude   bash        result: FAILED, 2.0s, 2 lines out\x1b[0m",
+            "\x1b[1;31mclaude   bash        out: no rule\x1b[0m",
+            "\x1b[1;31mclaude   edit        file: /etc/passwd  OUTSIDE PROJECT\x1b[0m",
+            "\x1b[35mclaude   edit        result: ok, 2.0s, 1 line out\x1b[0m",
+            "\x1b[35mclaude   write       file: main.go (1 lines)\x1b[0m",
         ):
             self.assertIn(expected, coloured)
         self.assertEqual(coloured.count(when), plain.count("\n2026-01-02 10:00:0"))
@@ -135,10 +147,13 @@ class TraceTest(LauncherTest):
             said({"type": "text", "text": "done"}, **last),
         ]
         self.write_transcript("0b", entries)
-        stdout = self.launch("--trace", "0b").stdout
-        step = "claude   step      1.4k tokens out (300 thinking), 182.0k in (2.0k new)"
+        self.assertNotIn("  step  ", self.launch("--trace", "0b").stdout)
+        stdout = self.launch("--trace", "0b", "--verbose").stdout
+        step = (
+            "claude   step        1.4k tokens out (300 thinking), 182.0k in (2.0k new)"
+        )
         self.assertEqual(stdout.count(step), 1)
-        self.assertLess(stdout.index(step), stdout.index("claude   reply     done"))
+        self.assertLess(stdout.index(step), stdout.index("claude   reply       done"))
         self.assertIn(
             "# tokens      1.4k out, 182.0k in (180.0k from the cache), over 1 steps",
             stdout,
@@ -174,9 +189,201 @@ class TraceTest(LauncherTest):
         self.assertIn("file: /etc/passwd  OUTSIDE PROJECT", stdout)
         self.assertNotIn("main.go x1  OUTSIDE", stdout)
 
-    def test_output_of_a_successful_call_needs_full(self):
+    def test_output_of_a_successful_call_needs_verbose(self):
         self.assertNotIn("updated", self.launch("--trace").stdout)
-        self.assertIn("updated", self.launch("--trace", "--full").stdout)
+        self.assertIn("updated", self.launch("--trace", "--verbose").stdout)
+
+    def test_a_result_says_how_much_was_put_out(self):
+        self.ran("seq 30", "\n".join(f"line {n}" for n in range(1, 31)))
+        stdout = self.launch("--trace", "0c").stdout
+        self.assertIn("result: ok, 2.0s, 30 lines out\n", stdout)
+        self.assertNotIn("out: ", stdout)
+        self.ran("true", "")
+        self.assertIn("result: ok, 2.0s\n", self.launch("--trace", "0c").stdout)
+
+    def test_of_the_output_of_a_failed_call_the_end_is_shown(self):
+        self.ran("seq 30", "\n".join(f"line {n}" for n in range(1, 31)), failed=True)
+        stdout = self.launch("--trace", "0c").stdout
+        shown = [
+            line.split("out: ")[1] for line in stdout.splitlines() if "out: " in line
+        ]
+        self.assertEqual(
+            shown,
+            [
+                "line 1",
+                "line 2",
+                "... 22 more lines, see --verbose",
+                *(f"line {n}" for n in range(25, 31)),
+            ],
+        )
+
+    def test_verbose_shows_the_start_and_the_end_of_a_long_output(self):
+        self.ran("seq 100", "\n".join(f"line {n}" for n in range(1, 101)))
+        stdout = self.launch("--trace", "0c", "--verbose").stdout
+        for expected in ("line 10\n", "... 80 more lines, see --json\n", "line 91\n"):
+            self.assertIn("out: " + expected, stdout)
+        self.assertNotIn("line 11\n", stdout)
+        self.assertNotIn("line 90\n", stdout)
+        (ran,) = map(
+            json.loads, self.launch("--trace", "0c", "--json").stdout.splitlines()
+        )
+        self.assertEqual(len(ran["output"].splitlines()), 100)
+
+    def test_a_here_document_is_said_to_be_so_many_lines(self):
+        script = "python3 - <<'EOF' && make\nimport os\nprint(1 << 2)\nEOF\nmake test"
+        self.ran(script, "")
+        stdout = self.launch("--trace", "0c").stdout
+        shown = [line.split("bash        ")[1] for line in stdout.splitlines()[-4:]]
+        self.assertEqual(
+            shown,
+            [
+                "$ python3 - <<'EOF' && make",
+                "$   ... here-document of 2 lines, see --verbose",
+                "$   make test",
+                "result: ok, 2.0s",
+            ],
+        )
+        self.assertIn(
+            "$   import os\n", self.launch("--trace", "0c", "--verbose").stdout
+        )
+
+    def test_what_only_looks_like_a_here_document_is_left_as_it_is(self):
+        self.ran("echo $((1 << n))\nmake\ncat <<< here\nls <<-END\n\tx\n\tEND", "")
+        stdout = self.launch("--trace", "0c").stdout
+        for expected in ("$   make\n", "$   cat <<< here\n", "$   ls <<-END\n"):
+            self.assertIn(expected, stdout)
+        self.assertEqual(stdout.count("here-document of 1 lines"), 1)
+
+    def test_only_shows_the_kinds_named(self):
+        stdout = self.launch("--trace", "--only", "edit,WRITE").stdout
+        self.assertIn("# shown       only edit, write\n", stdout)
+        self.assertIn("claude   edit        file: /etc/passwd", stdout)
+        self.assertIn("claude   write       file: main.go", stdout)
+        self.assertNotIn("$ make", stdout)
+        self.assertNotIn("fix the build\n2026", stdout)
+        # The header is of the whole session
+        self.assertIn("# tool calls  3 (Bash 1, Edit 1, Write 1)", stdout)
+        events = self.launch("--trace", "--json", "--only=bash").stdout.splitlines()
+        self.assertEqual([json.loads(event)["what"] for event in events], ["bash"])
+
+    def test_failed_shows_what_went_wrong(self):
+        stdout = self.launch("--trace", "--failed").stdout
+        self.assertIn("# shown       only what went wrong\n", stdout)
+        self.assertIn("claude   bash        $ make", stdout)
+        self.assertIn("claude   edit        file: /etc/passwd  OUTSIDE PROJECT", stdout)
+        self.assertNotIn("main.go (1 lines)", stdout)
+        self.assertNotIn("fix the build\n2026", stdout)
+        both = self.launch("--trace", "--failed", "--only=edit").stdout
+        self.assertIn("# shown       only edit, only what went wrong\n", both)
+        self.assertNotIn("$ make", both)
+
+    def test_only_needs_a_kind(self):
+        for args in (["--only"], ["--only="], ["--only", ","]):
+            result = self.launch("--trace", *args)
+            self.assertNotEqual(result.status, 0)
+            self.assertIn("usage:", result.stderr)
+
+    def test_a_long_tool_name_is_cut_to_its_column(self):
+        entries = [
+            self.call("m1", "mcp__docs__create_document", title="x"),
+            self.call("m2", "NotebookEdit", notebook_path="a.ipynb"),
+        ]
+        self.write_transcript("0c", entries)
+        stdout = self.launch("--trace", "0c").stdout
+        self.assertIn("claude   create_do~  title: x\n", stdout)
+        self.assertIn("claude   notebooke~  file: a.ipynb\n", stdout)
+        self.assertIn(
+            "create_do~", self.launch("--trace", "0c", "--only=create_do~").stdout
+        )
+        named = self.launch("--trace", "0c", "--json").stdout
+        self.assertIn('"what": "mcp__docs__create_document"', named)
+
+    def test_the_same_thing_on_the_network_again_is_said_once(self):
+        def reached(when: float, where: str, **fields: object) -> Event:
+            return Event(when, Who.SANDBOX, "net", [f"tcp/https {where}:443"], fields)
+
+        said = Event(5.0, Who.CLAUDE, "reply", ["done"], {})
+        events = [
+            reached(1.0, "a.test"),
+            reached(2.0, "a.test"),
+            reached(3.0, "a.test"),
+            reached(4.0, "b.test"),
+            said,
+            said,
+            reached(6.0, "a.test"),
+            reached(7.0, "a.test", outcome="refused"),
+        ]
+        shown = tracing.folded(events)
+        self.assertEqual(
+            [(event.when, event.details[0]) for event in shown],
+            [
+                (1.0, "tcp/https a.test:443  x3"),
+                (4.0, "tcp/https b.test:443"),
+                (5.0, "done"),
+                (5.0, "done"),
+                (6.0, "tcp/https a.test:443"),
+                (7.0, "tcp/https a.test:443"),
+            ],
+        )
+        self.assertEqual(events[0].details, ["tcp/https a.test:443"])
+
+    def test_at_a_terminal_an_event_says_when_who_and_what_once(self):
+        day = 24 * 3600.0
+        ran = Event(day, Who.CLAUDE, "bash", ["$ make", "why: Build", ""], {})
+        late = Event(2 * day, Who.USER, "prompt", ["more"], {})
+        layout = tracing.Layout(compact=True)
+        lines = layout.events([ran, ran, late])
+        first, second = (
+            f"{tracing.datetime.fromtimestamp(d):%Y-%m-%d}" for d in (day, 2 * day)
+        )
+        clock = f"{tracing.datetime.fromtimestamp(day):%H:%M:%S}"
+        self.assertEqual(
+            lines,
+            [
+                f"# day         {first}",
+                f"{clock}  claude   bash        $ make",
+                " " * 31 + "why: Build",
+                "",
+                f"{clock}  claude   bash        $ make",
+                " " * 31 + "why: Build",
+                "",
+                f"# day         {second}",
+                f"{clock}  user     prompt      more",
+            ],
+        )
+        self.assertEqual(layout.columns.index("details"), 31)
+        coloured = tracing.Layout(colour=True, compact=True).event(ran)
+        self.assertEqual(
+            coloured[2], " " * 10 + "\x1b[33m" + " " * 21 + "why: Build\x1b[0m"
+        )
+        piped = tracing.Layout().event(ran)
+        self.assertTrue(
+            all(line.startswith(f"{first} {clock}  claude") for line in piped)
+        )
+
+    def test_a_call_is_named_by_its_tool_and_what_it_was_called_on(self):
+        fetch = Event(
+            1.0, Who.CLAUDE, "webfetch", ["url: https://a.test"], {"tool": "WebFetch"}
+        )
+        ran = Event(1.0, Who.CLAUDE, "bash", ["$ make: all"], {"tool": "Bash"}, 7)
+        self.assertEqual(transcript.call_label(fetch), "webfetch https://a.test")
+        self.assertEqual(transcript.call_label(ran), "[7] $ make: all")
+
+    def test_sessions_are_listed_by_when_they_last_did_something(self):
+        # Started first and written last, as a session that goes on is
+        late = self.write_transcript("0d", prompts_at(1_800_000_000, 1_800_009_000))
+        between = self.write_transcript("0e", prompts_at(1_800_005_000))
+        os.utime(late, (1, 1))
+        os.utime(between, (2, 2))
+        listed = [
+            line.split()[2]
+            for line in self.launch("--trace", "list").stdout.splitlines()
+        ]
+        self.assertEqual(listed, ["0d", "0e", "3fa9c0de"])
+        self.assertIn(
+            f"{tracing.datetime.fromtimestamp(1_800_009_000):%Y-%m-%d %H:%M}  0d",
+            self.launch("--trace", "list").stdout,
+        )
 
     def test_sessions_are_listed_and_picked_by_id_prefix(self):
         listed = self.launch("--trace", "list").stdout
@@ -213,7 +420,7 @@ class TraceTest(LauncherTest):
             call(count="HUGE").replace('"HUGE"', "1e999"),
         ]
         file.write_text(file.read_text() + "\n" + "\n".join(hostile) + "\n")
-        for option in ("--full", "--json"):
+        for option in ("--verbose", "--json"):
             result = self.launch("--trace", option)
             self.assertEqual(result.status, 0, result.stderr)
             self.assertEqual(result.stderr, "")
@@ -236,7 +443,7 @@ class TraceTest(LauncherTest):
         file = self.transcripts / f"{self.SESSION}.jsonl"
         file.write_text(file.read_text() * 2000)
         piped = subprocess.run(
-            f'{sys.executable} "{LAUNCHER}" --trace --full | head -n 1',
+            f'{sys.executable} "{LAUNCHER}" --trace --verbose | head -n 1',
             shell=True,
             cwd=self.project,
             env={**self.fake_docker_env(), "HOME": str(self.home)},
@@ -247,8 +454,8 @@ class TraceTest(LauncherTest):
         self.assertIn("# session", piped.stdout)
         self.assertEqual(piped.stderr, "")
 
-    def test_full_and_json_are_not_given_together(self):
-        result = self.launch("--trace", "--full", "--json")
+    def test_verbose_and_json_are_not_given_together(self):
+        result = self.launch("--trace", "--verbose", "--json")
         self.assertNotEqual(result.status, 0)
         self.assertIn("usage:", result.stderr)
 
@@ -266,7 +473,7 @@ class TraceTest(LauncherTest):
         )
         result = self.launch("--trace")
         self.assertEqual(result.status, 0, result.stderr)
-        self.assertIn("prompt    early", result.stdout)
+        self.assertIn("prompt      early", result.stdout)
 
     def test_a_sandboxed_session_is_found_under_the_container_home(self):
         # The host home is a link to /home/node in the image, and Claude
@@ -378,11 +585,11 @@ class NetworkTraceTest(LauncherTest):
 
     def test_logged_urls_cannot_drive_the_terminal(self):
         self.assertIn("[31mesc.test:443", self.trace())
-        self.assertNotIn("\x1b", self.trace("--full"))
+        self.assertNotIn("\x1b", self.trace("--verbose"))
 
     def test_every_request_is_an_event_at_the_time_it_began(self):
         stdout = self.trace()
-        request = "sandbox  net       proxy/https CONNECT good.test:443 allowed"
+        request = "sandbox  net         proxy/https CONNECT good.test:443 allowed"
         self.assertEqual(stdout.count(request), 2)
         self.assertIn(f"{request} 4 kB 0.2s", stdout)
         self.assertIn("proxy/https CONNECT evil.test:443 DENIED 300 B", stdout)
@@ -390,7 +597,9 @@ class NetworkTraceTest(LauncherTest):
             "--trace", FAKE_ACCESS_LOG=str(self.access_log), FORCE_COLOR="1"
         ).stdout
         self.assertIn(f"\x1b[36m{request} 4 kB 0.2s", coloured)
-        self.assertIn("\x1b[1;31msandbox  net       proxy/https CONNECT evil", coloured)
+        self.assertIn(
+            "\x1b[1;31msandbox  net         proxy/https CONNECT evil", coloured
+        )
         # Between the two prompts, 10 seconds apart
         first, second = (m.start() for m in re.finditer("user     prompt", stdout))
         self.assertTrue(first < stdout.index(request) < second)

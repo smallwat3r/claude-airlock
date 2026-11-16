@@ -43,8 +43,10 @@ claude-docker --net-log             # domains the egress filter denied
 claude-docker --net-reload          # restart the egress filter
 claude-docker --trace               # what the latest session here did
 claude-docker --trace list          # this project's sessions, latest first
-claude-docker --trace 3fa9 --full > trace.txt   # one session, in full
+claude-docker --trace 3fa9 --verbose > trace.txt   # one session, in detail
 claude-docker --trace --json | jq 'select(.what == "net")'   # as JSON Lines
+claude-docker --trace --only bash,net   # just the commands and the network
+claude-docker --trace --failed      # just what went wrong
 claude-docker --trace --follow      # what the sessions here do, as they do it
 claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
@@ -240,7 +242,7 @@ read-write project safe to trust blindly afterwards:
 `claude-docker --trace` shows what the latest session of the current project
 did: what it ran, where and why, what it wrote and what it reached on the
 network, in the order it happened. It is plain text made to be kept in a
-file or searched, every line starts with when, who and what:
+file or searched, there every line starts with when, who and what:
 
 ```
 # session     3fa9c0de-...  Fix the build
@@ -255,39 +257,71 @@ file or searched, every line starts with when, who and what:
 #   tcp/https registry.npmjs.org (104.16.3.35):443 x4
 #   tcp/postgres 10.0.0.7:5432 x1
 #
-# time                 who      what      details
-2026-01-02 10:02:30  user     prompt    fix the build
-2026-01-02 10:02:41  claude   bash      $ npm ci
-2026-01-02 10:02:41  claude   bash      why: Install the dependencies
-2026-01-02 10:02:41  claude   bash      result: ok, 8.2s
-2026-01-02 10:02:42  sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443
-2026-01-02 10:03:05  claude   edit      file: /home/me/code/api/Makefile
-2026-01-02 10:03:05  claude   edit      diff: -	go build ./..
-2026-01-02 10:03:05  claude   edit      diff: +	go build ./...
-2026-01-02 10:03:05  claude   edit      result: ok, 0.0s
+# time                 who      what        details
+2026-01-02 10:02:30  user     prompt      fix the build
+2026-01-02 10:02:41  claude   bash        $ npm ci
+2026-01-02 10:02:41  claude   bash        why: Install the dependencies
+2026-01-02 10:02:41  claude   bash        result: ok, 8.2s, 14 lines out
+2026-01-02 10:02:42  sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  x4
+2026-01-02 10:03:05  claude   edit        file: /home/me/code/api/Makefile
+2026-01-02 10:03:05  claude   edit        diff: -	go build ./..
+2026-01-02 10:03:05  claude   edit        diff: +	go build ./...
+2026-01-02 10:03:05  claude   edit        result: ok, 0.0s, 1 line out
+```
+
+On a terminal an event says when, who and what once, on its first line, and
+its other lines are indented under it, so where each event starts is seen at
+a glance. The time is that of the day, the day is on a line of its own
+whenever it changes:
+
+```
+# time      who      what        details
+# day         2026-01-02
+10:02:30  user     prompt      fix the build
+10:02:41  claude   bash        $ npm ci
+                               why: Install the dependencies
+                               result: ok, 8.2s, 14 lines out
+10:02:42  sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  x4
 ```
 
 - `who` is `user`, `claude`, `agent` (a subagent) or `sandbox`, the
   container as a whole: a connection is known by its container, not by the
   command that opened it. Its place in time says which that probably was.
 - `what` is `prompt`, `reply`, `step`, the tool (`bash`, `edit`, `write`,
-  `read`, ...), `net` or `dns`.
-- A `step` line comes ahead of what one answer of the model did (what it
-  said and the tools it called before it was given their results) and says
-  what that answer used: `1.4k tokens out (300 thinking), 182.0k in (2.0k
+  `read`, ...), `net` or `dns`. A tool of an MCP server shows by its own
+  name without the server's, and a name longer than the column is cut
+  (`notebooke~`), `--json` has it whole.
+- With `--verbose` a `step` line comes ahead of what one answer of the model
+  did (what it said and the tools it called before it was given their
+  results) and says what that answer used: `1.4k tokens out (300 thinking), 182.0k in (2.0k
   new)`. Out is what the model wrote. In is what it read, the whole
   conversation so far, and new is the part of it added since the step
   before, so what the results of the calls before it and your prompt took.
   The API counts by step, not by tool call: calls issued together share
   one line. The header sums the steps up (`tokens`).
 - A command comes with the reason Claude gave for it (`why:`), its working
-  directory when that is not the project (`cwd:`) and how it ended. Calls
-  that failed say `FAILED`, files written outside the project `OUTSIDE
-  PROJECT`, requests the egress filter refused `DENIED`.
-- Long commands, diffs and replies are cut to a few lines and the output of
-  a call is only shown when it failed, `--full` shows everything.
-- `--trace list` lists the project's sessions, and the start of an id picks
-  one. On a terminal the result goes through your pager.
+  directory when that is not the project (`cwd:`), how it ended and how
+  many lines it put out. Calls that failed say `FAILED`, files written
+  outside the project `OUTSIDE PROJECT`, requests the egress filter refused
+  `DENIED`.
+- Long commands, diffs and replies are cut to a few lines, and what a
+  command feeds to another through a here-document (`python3 - <<'EOF'`) is
+  said to be so many lines. `--verbose` shows them whole.
+- The output of a call is shown when it failed: its first 2 lines and its
+  last 6, the end is where a command says what went wrong. `--verbose` shows
+  the output of every call, the first and the last 10 lines of it, never
+  all: one `cat` can put out thousands. `--json` has everything.
+- The same thing on the network several times in a row is one line with how
+  often (`x4`), at the time of the first. Claude Code's own connections come
+  by the dozen and would bury the one a command made. `--json` has each.
+- `--only bash,net` shows the events of the kinds named, by what the `what`
+  column says, and `--failed` those that tell of something gone wrong: a
+  failed call, a write outside the project, a refused request, a connection
+  that was refused or not answered. Both work with `--json` and `--follow`.
+  The header stays that of the whole session, and says what is shown.
+- `--trace list` lists the project's sessions with when each last did
+  something, the latest first, and the start of an id picks one. On a
+  terminal the result goes through your pager.
 - On a terminal the lines are coloured by what they are, so that what the
   session did out of your sight stands out: commands yellow, files it wrote
   magenta, the network cyan, the pages it fetched or searched for with its
@@ -327,7 +361,7 @@ The network lines need a record the launcher keeps, of which there are two:
   by all sessions, so the launcher notes the address each session's
   container had and picks its requests by that.
 - Unless `CLAUDE_DOCKER_NET_LOG=0`, every TCP connection the session opened,
-  whatever the protocol, and with `--full` every name it looked up. The
+  whatever the protocol, and with `--verbose` every name it looked up. The
   session's route out is not changed, a sidecar that owns its network
   namespace captures the packets that say where a connection goes and how
   it went: its start, the answer to it and its end, the DNS answers, the
@@ -342,12 +376,12 @@ The network lines need a record the launcher keeps, of which there are two:
 A line of the network says more than where to:
 
 ```
-sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
-sandbox  net       tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
-sandbox  net       http GET http://deb.debian.org/debian/InRelease  during: $ apt-get update
-sandbox  net       tcp/https api.anthropic.com (160.79.104.10):443  left open  (no call running)
-sandbox  dns       lookup registry.npmjs.org A -> 104.16.3.35, 104.16.0.35
-sandbox  dns       lookup nope.internal A FAILED: no such name
+sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
+sandbox  net         tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
+sandbox  net         http GET http://deb.debian.org/debian/InRelease  during: $ apt-get update
+sandbox  net         tcp/https api.anthropic.com (160.79.104.10):443  left open  (no call running)
+sandbox  dns         lookup registry.npmjs.org A -> 104.16.3.35, 104.16.0.35
+sandbox  dns         lookup nope.internal A FAILED: no such name
 ```
 
 - How a connection went: `closed after` how long, with the bytes each way
@@ -397,14 +431,14 @@ it:
 
 ```
 # following   /home/me/code/api, until interrupted
-# time                 who      what      details
+# time                 who      what        details
 # network     following the capture of claude-api
 # 41 earlier events, see claude-docker --trace
 # session     3fa9c0de-...  Fix the build
-2026-01-02 10:02:41  claude   bash      $ npm ci
-2026-01-02 10:02:41  claude   bash      why: Install the dependencies
-2026-01-02 10:02:42  sandbox  net       tcp/https registry.npmjs.org (104.16.3.35):443
-2026-01-02 10:02:49  claude   bash      result: ok, 8.2s
+2026-01-02 10:02:41  claude   bash        [7] $ npm ci
+2026-01-02 10:02:41  claude   bash        why: Install the dependencies
+2026-01-02 10:02:42  sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  during: [7] $ npm ci
+2026-01-02 10:02:49  claude   bash        [7] result: ok, 8.2s, 14 lines out
 ```
 
 - It starts with the last 10 events of the latest session, then follows
@@ -412,17 +446,20 @@ it:
   or clear later is picked up, a `# session` line says whose lines come
   next. The start of a session id follows that session alone.
 - A tool call shows when it is issued and its result when that comes, on a
-  line of its own. When something else of the session came between the two,
-  the result names its call (`of: $ npm ci`).
+  line of its own. The two have the same number (`[7]`), counted from the
+  first call that was followed, which tells apart the results of calls that
+  ran together. When something else of the session came between the two,
+  the result also names its call (`of: $ npm ci`), and always with `--only`
+  or `--failed`, where the call itself may not be shown.
 - The network lines are read from the capture as it grows, out of the
   sidecar of each running session of the project, and for a filtered
   session from the proxy's log. A connection shows with the name known when
   it was made, and what became of it shows on a line of its own when it
   does (in `--json` with `stage` set to `open`, then `outcome`). A tunnel through the proxy is logged when it closes, so it
   shows then, at the time it began, a refused request shows at once.
-- Of a prompt or a reply only the first line is shown, with `--full` too:
+- Of a prompt or a reply only the first line is shown, with `--verbose` too:
   you are after what the session does, what it says is on its own screen.
-- `--full` and `--json` work as above. With `--json` a prompt or reply is
+- `--verbose`, `--json`, `--only` and `--failed` work as above. With `--json` a prompt or reply is
   there whole, and a call and its result
   are two objects that share an `id`, with `stage` set to `call` or
   `result`, and a connection carries the id of the session that wrote last:

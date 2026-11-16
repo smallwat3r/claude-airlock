@@ -117,11 +117,13 @@ class FollowTest(LauncherTest):
         self.assertIn("# session     3fa9c0de-0000-4000-8000-000000000000", shown)
         add(self.file, call("t1", "Bash", command="make", description="Build"))
         shown = following.until("why: Build")
-        self.assertIn("claude   bash      $ make", shown)
+        self.assertIn("claude   bash        [1] $ make", shown)
         self.assertNotIn("result:", shown)
         add(self.file, result("t1", "no rule", failed=True))
         shown = following.until("out: no rule")
-        self.assertIn("claude   bash      result: FAILED, 2.0s", shown)
+        self.assertIn(
+            "claude   bash        [1] result: FAILED, 2.0s, 1 line out", shown
+        )
         self.assertNotIn("of: ", shown)
         self.assertEqual(following.stop(), 0)
 
@@ -136,9 +138,40 @@ class FollowTest(LauncherTest):
             prompt(DONE, 4),
         )
         shown = following.until(DONE)
-        self.assertIn("claude   bash      of: $ make\n", shown)
-        self.assertIn("claude   bash      result: ok, 2.0s", shown)
+        self.assertIn("claude   read        [2] file: go.mod\n", shown)
+        self.assertIn("claude   bash        [1] of: $ make\n", shown)
+        self.assertIn("claude   bash        result: ok, 2.0s, 1 line out\n", shown)
         self.assertEqual(shown.count("result:"), 1)
+
+    def test_failed_shows_what_went_wrong_and_names_its_call(self):
+        following = Following(self, "--failed")
+        add(
+            self.file,
+            call("t1", "Bash", command="make"),
+            result("t1", "no rule", failed=True),
+            call("t2", "Bash", command="ls"),
+            result("t2", "go.mod"),
+            call("t3", "Write", 4, file_path="/etc/motd", content="hi"),
+        )
+        shown = following.until("OUTSIDE PROJECT")
+        self.assertIn("# shown       only what went wrong\n", shown)
+        self.assertIn("claude   bash        [1] of: $ make\n", shown)
+        self.assertIn("claude   bash        result: FAILED, 2.0s, 1 line out\n", shown)
+        self.assertNotIn("$ ls", shown)
+        self.assertNotIn("prompt      fix the build", shown)
+
+    def test_only_shows_the_kinds_named(self):
+        following = Following(self, "--only=read", "--json")
+        add(
+            self.file,
+            call("t1", "Bash", command="make"),
+            call("t2", "Read", file_path="go.mod"),
+            result("t2", "module x"),
+        )
+        shown = following.until('"stage": "result"')
+        self.assertEqual(
+            [json.loads(line)["what"] for line in shown.splitlines()], ["read", "read"]
+        )
 
     def test_only_the_latest_of_what_came_before_is_shown(self):
         add(self.file, *(prompt(f"number {n}", n) for n in range(1, 21)))
@@ -157,7 +190,7 @@ class FollowTest(LauncherTest):
         shown = following.until("resumed")
         self.assertIn("# session     0b  a new session", shown)
         self.assertIn("# session     0a  long ago", shown)
-        self.assertNotIn("prompt    long ago", shown)
+        self.assertNotIn("prompt      long ago", shown)
 
     def test_a_named_session_is_followed_alone(self):
         other = self.write_transcript("0a", [prompt("the other one")])
@@ -186,14 +219,14 @@ class FollowTest(LauncherTest):
         shown = following.until(DONE)
         self.assertIn("$ make ]0;ownedall", shown)
         self.assertNotRegex(shown, r"[\x00-\x08\x0b-\x1f\x7f]")
-        self.assertIn("claude   bash      $   forged line", shown)
+        self.assertIn("claude   bash        $   forged line", shown)
 
     def test_of_what_is_said_only_the_first_line_is_shown(self):
-        for form in ((), ("--full",)):
+        for form in ((), ("--verbose",)):
             following = Following(self, *form)
             add(self.file, prompt("\n  \none\n\nand more\nlines", 4), prompt(DONE, 5))
             shown = following.until(DONE)
-            self.assertIn("prompt    one\n", shown)
+            self.assertIn("prompt      one\n", shown)
             self.assertNotIn("and more", shown)
             following.stop()
 
@@ -203,8 +236,8 @@ class FollowTest(LauncherTest):
         said = [json.loads(line) for line in following.until(DONE).splitlines()]
         self.assertEqual(said[1]["text"], "one\n\ntwo")
 
-    def test_a_step_of_the_model_says_what_it_used_once(self):
-        following = Following(self)
+    def test_a_step_of_the_model_says_what_it_used_once_with_verbose(self):
+        following = Following(self, "--verbose")
         usage = {"input_tokens": 500, "output_tokens": 90, "cache_read_input_tokens": 1}
         entries = [call("t1", "Bash", command="make"), call("t2", "Bash", command="ls")]
         for entry in entries:
@@ -212,19 +245,24 @@ class FollowTest(LauncherTest):
         add(self.file, *entries, prompt(DONE, 4))
         shown = following.until(DONE)
         self.assertEqual(
-            shown.count("claude   step      90 tokens out, 501 in (500 new)"), 1
+            shown.count("claude   step        90 tokens out, 501 in (500 new)"), 1
         )
-        self.assertLess(shown.index("step      90"), shown.index("$ make"))
+        self.assertLess(shown.index("step        90"), shown.index("$ make"))
+        entries[0]["message"]["id"] = entries[1]["message"]["id"] = "msg_2"
+        add(self.file, *entries, prompt("once more", 5))
+        self.assertNotIn("step", Following(self).until("once more"))
 
     def test_colour_marks_what_a_line_is(self):
         following = Following(self, FORCE_COLOR="1")
         fetch = call("t2", "WebFetch", url="https://good.test")
         add(self.file, call("t1", "Bash", command="make"), fetch, prompt(DONE, 4))
         shown = following.until(DONE)
-        self.assertIn("\x1b[34mclaude   webfetch  url: https://good.test\x1b[0m", shown)
+        self.assertIn(
+            "\x1b[34mclaude   webfetch    [2] url: https://good.test\x1b[0m", shown
+        )
         self.assertIn("\x1b[2m# session", shown)
-        self.assertIn("\x1b[33mclaude   bash      $ make\x1b[0m", shown)
-        self.assertIn("\x1b[2muser     prompt    fix the build\x1b[0m", shown)
+        self.assertIn("\x1b[33mclaude   bash        [1] $ make\x1b[0m", shown)
+        self.assertIn("\x1b[2muser     prompt      fix the build\x1b[0m", shown)
 
     def test_without_a_session_it_waits_for_one(self):
         self.file.unlink()
@@ -267,7 +305,7 @@ class FollowNetworkTest(LauncherTest):
         shown = following.until("203.0.113.9")
         self.assertIn("# network     following the capture of claude-proj", shown)
         self.assertIn(
-            "sandbox  net       tcp/https good.test (198.51.100.7):443", shown
+            "sandbox  net         tcp/https good.test (198.51.100.7):443", shown
         )
         self.assertNotIn("lookup", shown)
         more = pcap_file([(self.now + 9, tcp("192.0.2.44", 6379), True)])
@@ -280,7 +318,9 @@ class FollowNetworkTest(LauncherTest):
             growing.write(more[-10:])
         add(self.file, self.last)
         shown = following.until(DONE)
-        self.assertEqual(shown.count("sandbox  net       tcp/redis 192.0.2.44:6379"), 1)
+        self.assertEqual(
+            shown.count("sandbox  net         tcp/redis 192.0.2.44:6379"), 1
+        )
         self.assertNotIn("198.51.100.7", shown)
         tails = [c for c in self.calls() if c[:1] == ["exec"]]
         self.assertEqual(
@@ -325,16 +365,16 @@ class FollowNetworkTest(LauncherTest):
                 pcap_file([(time.time(), tcp("198.51.100.7", 443), True)])[24:]
             )
         shown = following.until("198.51.100.7")
-        self.assertIn("198.51.100.7:443  during: $ curl good.test\n", shown)
+        self.assertIn("198.51.100.7:443  during: [1] $ curl good.test\n", shown)
 
-    def test_full_adds_the_lookups(self):
+    def test_verbose_adds_the_lookups(self):
         captured = self.work / "capture.pcap"
         captured.write_bytes(sample_capture(self.now))
         following = Following(
-            self, "--full", FAKE_PS=self.ps, FAKE_CAPTURE=str(captured)
+            self, "--verbose", FAKE_PS=self.ps, FAKE_CAPTURE=str(captured)
         )
         shown = following.until("203.0.113.9")
-        self.assertIn("sandbox  dns       lookup good.test", shown)
+        self.assertIn("sandbox  dns         lookup good.test", shown)
 
     def test_the_requests_of_a_filtered_session_show_as_they_are_logged(self):
         mine, other = "172.20.0.5", "172.20.0.9"
@@ -364,7 +404,7 @@ class FollowNetworkTest(LauncherTest):
             )
         add(self.file, self.last)
         shown = following.until(DONE)
-        self.assertIn("net       proxy CONNECT [31mevil.test:443 DENIED 300 B", shown)
+        self.assertIn("net         proxy CONNECT [31mevil.test:443 DENIED 300 B", shown)
         for absent in ("before.test", "theirs.test", "half", "\x1b"):
             self.assertNotIn(absent, shown)
 
@@ -380,7 +420,7 @@ class TranscriptTailTest(unittest.TestCase):
         return [event.details[0] for event in tail.poll()]
 
     def test_a_line_is_read_once_it_is_whole(self):
-        tail = follow.TranscriptTail(self.file, "/proj", full=False)
+        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
         whole = json.dumps(prompt("hello")) + "\n"
         self.file.write_text(whole[:20])
         self.assertEqual(self.said(tail), [])
@@ -389,7 +429,7 @@ class TranscriptTailTest(unittest.TestCase):
         self.assertEqual(self.said(tail), [])
 
     def test_a_line_too_long_to_hold_is_dropped(self):
-        tail = follow.TranscriptTail(self.file, "/proj", full=False)
+        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
         with mock.patch.object(follow, "LINE_LIMIT", 100):
             add(self.file, prompt("x" * 500))
             # Still without its end, which the next look finds
@@ -402,7 +442,7 @@ class TranscriptTailTest(unittest.TestCase):
             self.assertEqual(self.said(tail), ["after"])
 
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
-        tail = follow.TranscriptTail(self.file, "/proj", full=False)
+        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
         add(self.file, prompt("one"), prompt("two"))
         self.assertEqual(self.said(tail), ["one", "two"])
         self.file.write_text(json.dumps(prompt("anew")) + "\n")
@@ -415,7 +455,7 @@ class TranscriptTailTest(unittest.TestCase):
         secret.write_text(json.dumps(prompt("a secret")) + "\n")
         self.file.unlink()
         self.file.symlink_to(secret)
-        tail = follow.TranscriptTail(self.file, "/proj", full=False)
+        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
         self.assertEqual(self.said(tail), [])
         self.file.unlink()
         os.mkfifo(self.file)

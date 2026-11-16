@@ -43,6 +43,9 @@ class Event:
     details: list[str]
     # The same as named values, for --json
     fields: dict
+    # Of a tool call that is followed as it runs, and of its result: the
+    # number the two are matched by, in the order the calls were issued
+    number: int | None = None
 
 
 def clean(value: object) -> str:

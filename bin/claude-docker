@@ -10,12 +10,15 @@ with the project directory mounted read-write and ~/.claude persisted.
   claude-docker --dockerfile     print the generated Dockerfile, then exit
   claude-docker --net-log        domains the egress filter denied, then exit
   claude-docker --net-reload     restart the egress filter, then exit
-  claude-docker --trace [list | SESSION] [--follow] [--full | --json]
+  claude-docker --trace [list | SESSION] [--follow] [--verbose | --json]
+                [--only KIND,...] [--failed]
                                  what the latest session of this project
                                  did, or the one whose id starts with
                                  SESSION, list lists them, --json gives
                                  JSON Lines, --follow shows what the
-                                 sessions do as they do it
+                                 sessions do as they do it, --only shows
+                                 the kinds of event named (bash, net),
+                                 --failed what went wrong
   claude-docker --worktree [NAME]   second session on its own checkout
 
 --worktree is claude's own flag, forwarded like any other claude arg: it

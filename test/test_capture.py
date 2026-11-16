@@ -25,6 +25,21 @@ from harness import (
 )
 
 
+def unnamed_port() -> int:
+    """A port this host has no name for: which ones have is the host's
+    services file to say, 8443 is pcsync-https to some."""
+    for port in range(8443, 65536):
+        try:
+            socket.getservbyport(port, "tcp")
+        except OSError:
+            return port
+    raise AssertionError("every port has a name here")
+
+
+# A port without a known use, a connection to it shows as plain tcp
+UNNAMED = unnamed_port()
+
+
 def ipv4(protocol: int, source: str, destination: str, payload: bytes) -> bytes:
     addresses = socket.inet_aton(source) + socket.inet_aton(destination)
     length = 20 + len(payload)
@@ -116,8 +131,12 @@ def sample_capture(now: float, link_type: int = 276) -> bytes:
             (now + 3, tcp("198.51.100.7", 443), True),
             (now + 3, answer("198.51.100.7", 443), False),
             (now + 4, tcp("10.0.0.7", 5432), True),
-            (now + 5, tcp("203.0.113.9", 8443), True),
-            (now + 5, tcp("203.0.113.9", 8443, 0x18, client_hello("sni.test")), True),
+            (now + 5, tcp("203.0.113.9", UNNAMED), True),
+            (
+                now + 5,
+                tcp("203.0.113.9", UNNAMED, 0x18, client_hello("sni.test")),
+                True,
+            ),
             # Within the session, and someone else connecting to it
             (now + 6, tcp("127.0.0.1", 8000), True),
             (now + 6, tcp("172.20.0.5", 9000), False),
@@ -142,7 +161,7 @@ class CaptureFileTest(unittest.TestCase):
                 [
                     (1002.0, "198.51.100.7", 443),
                     (1004.0, "10.0.0.7", 5432),
-                    (1005.0, "203.0.113.9", 8443),
+                    (1005.0, "203.0.113.9", UNNAMED),
                 ],
             )
             self.assertEqual(
@@ -406,18 +425,18 @@ class CaptureSessionTest(LauncherTest):
             "#   captured in claude-proj from ",
             "#   tcp/https good.test (198.51.100.7):443 x1",
             "#   tcp/postgres 10.0.0.7:5432 x1",
-            "#   tcp sni.test (203.0.113.9):8443 x1",
+            f"#   tcp sni.test (203.0.113.9):{UNNAMED} x1",
             "#   dns 1 names looked up",
-            "sandbox  net       tcp/postgres 10.0.0.7:5432",
+            "sandbox  net         tcp/postgres 10.0.0.7:5432",
         ):
             self.assertIn(expected, stdout)
         self.assertNotIn(":8000", stdout)
         self.assertNotIn(":9000", stdout)
         self.assertNotIn("lookup", stdout)
 
-    def test_full_adds_the_lookups(self):
-        looked_up = "sandbox  dns       lookup good.test A -> 198.51.100.7"
-        self.assertIn(looked_up, self.trace("--full"))
+    def test_verbose_adds_the_lookups(self):
+        looked_up = "sandbox  dns         lookup good.test A -> 198.51.100.7"
+        self.assertIn(looked_up, self.trace("--verbose"))
 
     def detailed(self, *args: str, **env: str) -> str:
         """The trace of a session that ran curl, with what the capture
@@ -451,24 +470,26 @@ class CaptureSessionTest(LauncherTest):
         return traced.stdout
 
     def test_a_connection_says_how_it_went_and_during_which_call(self):
-        stdout = self.detailed("--full")
+        stdout = self.detailed("--verbose")
         during = "  during: $ curl plain.test/a\n"
         for expected in (
             "tcp/http 198.51.100.7:80  closed after 1.0s, 2 kB out, 20 kB in" + during,
-            "net       http GET http://plain.test/a" + during,
+            "net         http GET http://plain.test/a" + during,
             "tcp/https 198.51.100.8:443  REFUSED" + during,
             "tcp/ssh 198.51.100.7:22  (no call running)\n",
-            "dns       lookup nope.test A FAILED: no such name\n",
+            "dns         lookup nope.test A FAILED: no such name\n",
             "#   1 connections REFUSED or without an answer",
             "#   http 1 requests in the clear",
         ):
             self.assertIn(expected, stdout)
 
     def test_what_went_wrong_on_the_network_stands_out(self):
-        coloured = self.detailed("--full", FORCE_COLOR="1")
+        coloured = self.detailed("--verbose", FORCE_COLOR="1")
         alert = "\x1b[1;31msandbox  "
-        self.assertIn(alert + "net       tcp/https 198.51.100.8:443  REFUSED", coloured)
-        self.assertIn(alert + "dns       lookup nope.test", coloured)
+        self.assertIn(
+            alert + "net         tcp/https 198.51.100.8:443  REFUSED", coloured
+        )
+        self.assertIn(alert + "dns         lookup nope.test", coloured)
 
     def test_json_has_how_a_connection_went(self):
         events = [json.loads(line) for line in self.detailed("--json").splitlines()]
@@ -493,7 +514,7 @@ class CaptureSessionTest(LauncherTest):
             [
                 ("tcp/https", "good.test", "198.51.100.7", 443),
                 ("tcp/postgres", None, "10.0.0.7", 5432),
-                ("tcp", "sni.test", "203.0.113.9", 8443),
+                ("tcp", "sni.test", "203.0.113.9", UNNAMED),
             ],
         )
         (lookup,) = (e for e in events if e["what"] == "dns")

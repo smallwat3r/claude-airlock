@@ -9,7 +9,7 @@ session the egress proxy's log.
 
 Three things differ from the trace of a session that is over. A tool call
 is shown when it is issued and its result when that comes, as an event of
-its own. Of a prompt or a reply only the first line is shown, whoever
+its own, the two having the same number. Of a prompt or a reply only the first line is shown, whoever
 follows is after what the session does, what it says is on its own screen.
 And a connection is shown with the name known when it was made: one
 that only its TLS hello gives, to an address that was not looked up, comes
@@ -36,17 +36,16 @@ from .pcap import Capture, PcapReader, take_frames
 from .records import recorded_sessions
 from .settings import Fatal, Host
 from .trace import (
-    COLUMNS,
+    EVERYTHING,
     USAGE,
+    Filter,
+    Layout,
     Timeline,
     capture_events,
     event_json,
-    event_lines,
-    header_lines,
     picked_session,
     proxy_event,
     trace_options,
-    use_colour,
 )
 from .transcript import (
     Walk,
@@ -75,13 +74,20 @@ LINE_LIMIT = 32 * READ_SIZE
 class TranscriptTail:
     """A transcript read as it grows, from a place in it onward."""
 
-    def __init__(self, path: Path, project_dir: str, full: bool, offset: int = 0):
+    def __init__(
+        self,
+        path: Path,
+        project_dir: str,
+        verbose: bool,
+        offset: int = 0,
+        name_results: bool = False,
+    ):
         self.path = path
         self._offset = offset
         # The start of a line whose end is not written yet
         self._partial = b""
         self._dropping = False
-        self._walk = Walk(project_dir, full, live=True)
+        self._walk = Walk(project_dir, verbose, live=True, name_results=name_results)
         self._title: str | None = None
 
     @property
@@ -134,9 +140,9 @@ class TranscriptTail:
 class CaptureTail:
     """The capture of a running session, read as it grows."""
 
-    def __init__(self, sidecar: str, full: bool):
+    def __init__(self, sidecar: str, verbose: bool):
         self.sidecar = sidecar
-        self._full = full
+        self._verbose = verbose
         self._offset = 0
         self._reader = PcapReader()
         self._capture = Capture()
@@ -145,7 +151,7 @@ class CaptureTail:
     def poll(self) -> list[Event]:
         """What the capture has since the last time: the connections that
         opened, what became of the open ones, the plain HTTP requests, and
-        with --full the lookups. Nothing while it cannot be read: it can
+        with --verbose the lookups. Nothing while it cannot be read: it can
         again later, or its session has ended."""
         data = captured_since(self.sidecar, self._offset)
         if not data:
@@ -153,7 +159,7 @@ class CaptureTail:
         self._offset += len(data)
         past = self._capture.marks()
         take_frames(self._capture, self._reader.feed(data))
-        return capture_events(self._capture, self._full, past)
+        return capture_events(self._capture, self._verbose, past)
 
     def newly_cut_short(self) -> bool:
         """Whether the capture ran into its packet limit, once."""
@@ -193,12 +199,19 @@ class Round:
 
 class Follower:
     """Follows the sessions of a project, or just the one of a transcript
-    when only names it."""
+    when only names it, and gives of what they do the events chosen."""
 
-    def __init__(self, host: Host, full: bool, only: Path | None = None):
+    def __init__(
+        self,
+        host: Host,
+        verbose: bool,
+        only: Path | None = None,
+        chosen: Filter = EVERYTHING,
+    ):
         self._host = host
-        self._full = full
+        self._verbose = verbose
         self._only = only
+        self._chosen = chosen
         self._tails: dict[Path, TranscriptTail] = {}
         # How long each transcript without a tail was when last looked at
         self._sizes: dict[Path, int] = {}
@@ -225,6 +238,7 @@ class Follower:
         found.events.sort(key=lambda shown: shown[1].when)
         for _, event in found.events:
             self._timeline.take(event)
+        found.events = [shown for shown in found.events if self._chosen.wants(shown[1])]
         if self._rounds == 0:
             self._keep_latest(found)
         self._rounds += 1
@@ -232,7 +246,10 @@ class Follower:
 
     def _tail(self, path: Path, offset: int = 0) -> None:
         project_dir = project_root(path, self._host)
-        self._tails[path] = TranscriptTail(path, project_dir, self._full, offset)
+        # With events left out a result may come without its call
+        self._tails[path] = TranscriptTail(
+            path, project_dir, self._verbose, offset, name_results=bool(self._chosen)
+        )
         self._sizes.pop(path, None)
 
     def _look_for_transcripts(self, found: Round) -> None:
@@ -279,7 +296,7 @@ class Follower:
             return
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
-                self._captures[(sidecar, started)] = CaptureTail(sidecar, self._full)
+                self._captures[(sidecar, started)] = CaptureTail(sidecar, self._verbose)
                 name = clean(session_name(sidecar))
                 found.notes.append(f"network     following the capture of {name}")
         for key in set(self._captures) - set(running):
@@ -332,38 +349,46 @@ class Follower:
 class Output:
     """Writes what is found, as the lines of --trace or as JSON Lines."""
 
-    def __init__(self, follower: Follower, as_json: bool, colour: bool = False):
+    def __init__(self, follower: Follower, layout: Layout | None):
         self._follower = follower
-        self._as_json = as_json
-        self._colour = colour
+        # None for JSON Lines
+        self._layout = layout
         # The transcript of the event written last
         self._session: Path | None = None
 
-    def start(self, project_dir: str) -> None:
-        self._say([f"following   {flat(project_dir)}, until interrupted", COLUMNS])
+    def start(self, project_dir: str, chosen: Filter) -> None:
+        if self._layout:
+            about = f"following   {flat(project_dir)}, until interrupted"
+            self._say([about, *chosen.header(), self._layout.columns])
 
     def write(self, found: Round) -> None:
         self._say(found.notes)
         lines: list[str] = []
+        # The events since the last line about their session
+        together: list[Event] = []
         for path, event in found.events:
             if path and path != self._session:
                 self._session = path
+                lines += self._shown(together)
+                together = []
                 about = f"session     {flat(path.stem)}  {self._follower.title(path)}"
-                lines += [] if self._as_json else header_lines([about], self._colour)
-            if self._as_json:
-                # An event of the network is put with the session that
-                # wrote last, as good a guess as the trace makes
-                session = self._session.stem if self._session else ""
-                lines.append(event_json(session, event))
-            else:
-                lines += event_lines(event, self._colour)
-        self._put(lines)
+                lines += self._layout.header([about]) if self._layout else []
+            together.append(event)
+        self._put(lines + self._shown(together))
+
+    def _shown(self, events: list[Event]) -> list[str]:
+        if self._layout:
+            return self._layout.events(events)
+        # An event of the network is put with the session that wrote
+        # last, as good a guess as the trace makes
+        session = self._session.stem if self._session else ""
+        return [event_json(session, event) for event in events]
 
     def _say(self, notes: list[str]) -> None:
         """Lines about the following itself, which JSON Lines has no
         place for."""
-        if not self._as_json:
-            self._put(header_lines(notes, self._colour))
+        if self._layout:
+            self._put(self._layout.header(notes))
 
     @staticmethod
     def _put(lines: list[str]) -> None:
@@ -375,16 +400,17 @@ class Output:
 def follow(host: Host, args: list[str]) -> int:
     """Show what the sessions of this project do, as they do it and until
     interrupted. With the start of a session id only that session, with
-    --json as JSON Lines."""
-    options, names = trace_options(args, ("--follow", "--full", "--json"))
+    --json as JSON Lines, with --only and --failed the events they
+    choose."""
+    options, names, chosen = trace_options(args, ("--follow", "--verbose", "--json"))
     if names == ["list"]:
         raise Fatal(USAGE)
     as_json = "--json" in options
     only = picked_session(session_files(host), names[0]) if names else None
-    follower = Follower(host, as_json or "--full" in options, only)
-    output = Output(follower, as_json, not as_json and use_colour(os.environ))
+    follower = Follower(host, as_json or "--verbose" in options, only, chosen)
+    output = Output(follower, None if as_json else Layout.for_output(os.environ))
     try:
-        output.start(host.project_dir)
+        output.start(host.project_dir, chosen)
         while True:
             output.write(follower.poll())
             time.sleep(INTERVAL)

@@ -9,6 +9,7 @@ can be given stops the reading."""
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import json
 import os
@@ -30,11 +31,19 @@ from .settings import Fatal, Host
 MOST_REMEMBERED = 10_000
 # Of the call a result is named after, when other things came between
 LABEL_WIDTH = 100
-# Lines of one command, diff or output shown without --full, and of one
+# Lines of one command, diff or output shown without --verbose, and of one
 # prompt or reply: the conversation is context, what ran is the point
 PREVIEW_LINES = 8
 TALK_LINES = 3
 PREVIEW_WIDTH = 200
+# Of the output of a call, how many lines of its start and of its end are
+# shown: when it failed, and with --verbose. The end comes first in worth, it
+# is where a command says what went wrong. All of it is in --json.
+FAILED_OUTPUT = (2, 6)
+VERBOSE_OUTPUT = (10, 10)
+# What starts a here-document in a command: << or <<-, then the word that
+# ends it, quoted or not. Not <<<, which is a here-string.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
 # What a step of the model read, as the API counts it: not cached, newly
 # put in the cache, and read from it
@@ -259,16 +268,56 @@ def outside_flag(path: str, project_dir: str) -> str:
     return "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
 
 
-def clip(lines: list[str], full: bool, limit: int = PREVIEW_LINES) -> list[str]:
-    """Lines as shown: all of them with --full, else the first few."""
-    if full:
+def shortened(line: str) -> str:
+    """A line cut to the width of a preview."""
+    return line if len(line) <= PREVIEW_WIDTH else line[:PREVIEW_WIDTH] + "..."
+
+
+def clip(lines: list[str], verbose: bool, limit: int = PREVIEW_LINES) -> list[str]:
+    """Lines as shown: all of them with --verbose, else the first few."""
+    if verbose:
         return lines
-    shown = [
-        line if len(line) <= PREVIEW_WIDTH else line[:PREVIEW_WIDTH] + "..."
-        for line in lines[:limit]
-    ]
+    shown = [shortened(line) for line in lines[:limit]]
     if len(lines) > limit:
-        shown.append(f"... {len(lines) - limit} more lines, see --full")
+        shown.append(f"... {len(lines) - limit} more lines, see --verbose")
+    return shown
+
+
+def clip_ends(lines: list[str], head: int, tail: int, hint: str) -> list[str]:
+    """Lines of which both ends matter: the first and the last few, with
+    how many were left out between them and where those are to be seen."""
+    left_out = len(lines) - head - tail
+    if left_out <= 0:
+        return lines
+    return [*lines[:head], f"... {left_out} more lines, {hint}", *lines[-tail:]]
+
+
+def without_heredocs(lines: list[str]) -> list[str]:
+    """The lines of a command without what its here-documents hold, each
+    said to be so many lines instead: a script fed to an interpreter is
+    as a rule most of the command, and the line that starts it tells what
+    it is given to. One whose end is not found is left as it is."""
+    # Where each line is, as it is and without the tabs <<- lets the word
+    # that ends a here-document be indented with: a command is the
+    # session's to write, its end is not looked for a line at a time
+    plain: dict[str, list[int]] = {}
+    tabbed: dict[str, list[int]] = {}
+    for at, line in enumerate(lines):
+        plain.setdefault(line, []).append(at)
+        tabbed.setdefault(line.lstrip("\t"), []).append(at)
+    shown: list[str] = []
+    index = 0
+    while index < len(lines):
+        shown.append(lines[index])
+        starts = _HEREDOC.findall(lines[index])
+        index += 1
+        for dash, _, word in starts:
+            found = (tabbed if dash else plain).get(word, [])
+            later = bisect.bisect_left(found, index)
+            if later < len(found):
+                body = found[later] - index
+                shown.append(f"... here-document of {body} lines, see --verbose")
+                index = found[later] + 1
     return shown
 
 
@@ -279,11 +328,12 @@ def file_path(tool_input: dict) -> str | None:
 
 
 def bash_details(
-    tool_input: dict, cwd: object, project_dir: str, full: bool
+    tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
     """A command: what ran, why (the reason Claude gave for it) and where,
     when that is not the project directory."""
-    command = clip(clean(tool_input.get("command", "")).splitlines() or [""], full)
+    lines = clean(tool_input.get("command", "")).splitlines() or [""]
+    command = clip(lines if verbose else without_heredocs(lines), verbose)
     details = ["$ " + command[0], *("$   " + line for line in command[1:])]
     if tool_input.get("description"):
         details.append("why: " + flat(tool_input["description"]))
@@ -305,37 +355,37 @@ def edit_diff(tool_input: dict) -> list[str]:
 
 
 def file_details(
-    name: str, path: str, tool_input: dict, project_dir: str, full: bool
+    name: str, path: str, tool_input: dict, project_dir: str, verbose: bool
 ) -> list[str]:
     """A call on a file: which one, flagged when it is written outside the
     project, and what an Edit changes or a Write puts there."""
     about = "file: " + flat(path)
     changes: list[str] = []
     if name == "Edit":
-        changes = ["diff: " + line for line in clip(edit_diff(tool_input), full)]
+        changes = ["diff: " + line for line in clip(edit_diff(tool_input), verbose)]
     elif name == "Write":
         content = clean(tool_input.get("content", "")).splitlines()
         about += f" ({len(content)} lines)"
-        changes = ["content: " + line for line in clip(content, full)]
+        changes = ["content: " + line for line in clip(content, verbose)]
     if name in FILE_TOOLS:
         about += outside_flag(path, project_dir)
     return [about, *changes]
 
 
 def call_details(
-    name: str, tool_input: dict, cwd: object, project_dir: str, full: bool
+    name: str, tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
     """The lines that describe a tool call."""
     path = file_path(tool_input)
     if name == "Bash":
-        return bash_details(tool_input, cwd, project_dir, full)
+        return bash_details(tool_input, cwd, project_dir, verbose)
     if path is not None:
-        return file_details(name, path, tool_input, project_dir, full)
+        return file_details(name, path, tool_input, project_dir, verbose)
     # Any other tool: its arguments as they are
     return [
         line
         for key, value in tool_input.items()
-        for line in clip(f"{clean(key)}: {clean(value)}".splitlines(), full)
+        for line in clip(f"{clean(key)}: {clean(value)}".splitlines(), verbose)
     ]
 
 
@@ -359,9 +409,10 @@ def outcome(call: dict, result: tuple[dict, dict] | None) -> dict:
     return ended
 
 
-def result_details(ended: dict, full: bool) -> list[str]:
-    """The lines for how a tool call ended, its output among them when it
-    failed or with --full."""
+def result_details(ended: dict, verbose: bool) -> list[str]:
+    """The lines for how a tool call ended and how much it put out. Of
+    the output itself the start and the end, when the call failed or with
+    --verbose: never all of it, a command can put out thousands of lines."""
     if not ended:
         return ["result: none recorded (interrupted or still running)"]
     notes = ["FAILED" if ended["failed"] else "ok"]
@@ -369,33 +420,40 @@ def result_details(ended: dict, full: bool) -> list[str]:
         notes.append(f"{ended['seconds']:.1f}s")
     if "permission" in ended:
         notes.append("permission " + clean(ended["permission"]))
-    details = ["result: " + ", ".join(notes)]
-    if ended["failed"] or full:
-        output = clean(ended["output"]).splitlines()
-        details += ["out: " + line for line in clip(output, full)]
-    return details
+    output = clean(ended["output"]).splitlines()
+    if output:
+        notes.append(f"{len(output)} line{'s' if len(output) > 1 else ''} out")
+    shown: list[str] = []
+    if verbose:
+        shown = clip_ends(output, *VERBOSE_OUTPUT, "see --json")
+    elif ended["failed"]:
+        ends = clip_ends(output, *FAILED_OUTPUT, "see --verbose")
+        shown = [shortened(line) for line in ends]
+    return ["result: " + ", ".join(notes), *("out: " + line for line in shown)]
 
 
-def talk_event(when: float, who: Who, block: dict, full: bool) -> Event | None:
+def talk_event(when: float, who: Who, block: dict, verbose: bool) -> Event | None:
     """A prompt or a reply, none for one without text."""
     text = clean(block.get("text", "")).strip().splitlines()
-    if not full:
+    if not verbose:
         # Paragraph breaks would use up the preview
         text = [line for line in text if line.strip()]
     if not text:
         return None
     what = "prompt" if who is Who.USER else "reply"
-    return Event(when, who, what, clip(text, full, TALK_LINES), {"text": block["text"]})
+    return Event(
+        when, who, what, clip(text, verbose, TALK_LINES), {"text": block["text"]}
+    )
 
 
 def call_event(
-    when: float, who: Who, entry: dict, block: dict, project_dir: str, full: bool
+    when: float, who: Who, entry: dict, block: dict, project_dir: str, verbose: bool
 ) -> Event:
     """A tool call as it was issued, how it ended is added by the walk
     that finds its result."""
     name = clean(block.get("name", "?"))
     tool_input = call_input(block)
-    details = call_details(name, tool_input, entry.get("cwd"), project_dir, full)
+    details = call_details(name, tool_input, entry.get("cwd"), project_dir, verbose)
     fields = {
         "tool": name,
         "id": str(block.get("id")),
@@ -406,6 +464,17 @@ def call_event(
     if name in FILE_TOOLS and path is not None:
         fields["outside_project"] = outside(path, project_dir)
     return Event(when, who, name.lower(), details, fields)
+
+
+def call_label(event: Event) -> str:
+    """What a call is named by next to something else, its result that
+    comes later or a connection made while it ran: its command, or the
+    tool and what it was called on."""
+    first = event.details[0] if event.details else ""
+    if event.fields.get("tool") != "Bash":
+        _, found, value = first.partition(": ")
+        first = f"{event.what} {value if found else first}".rstrip()
+    return f"[{event.number}] {first}" if event.number is not None else first
 
 
 def step_usage(entry: dict) -> tuple[str, dict] | None:
@@ -483,6 +552,8 @@ class OpenCall:
     # Its event, to add the result to. None in a live walk, where the
     # result is an event of its own.
     event: Event | None
+    # Its number in a live walk, see Event
+    number: int | None = None
 
 
 class Walk:
@@ -495,20 +566,29 @@ class Walk:
     call when it is found, and end marks the calls left without one. Live,
     over a transcript as it is written, events are shown as they come and
     cannot change later: a result is an event of its own, named after its
-    call when something else came between the two, and both carry the id
-    of the call. Of what is said only the first line is shown. What a live
-    walk remembers is bounded, the transcript is the session's to write."""
+    call when something else came between the two (always with
+    name_results, for when not every event is shown), and both carry the
+    id of the call and its number. Of what is said only the first line is
+    shown. What a live walk remembers is bounded, the transcript is the
+    session's to write.
+
+    What a step used is only told when verbose: it is the cost of the
+    session, not what it did, and the header of a trace sums it up."""
 
     def __init__(
         self,
         project_dir: str,
-        full: bool,
+        verbose: bool,
         live: bool = False,
         usage: dict[str, dict] | None = None,
+        name_results: bool = False,
     ):
         self._project_dir = project_dir
-        self._full = full
+        self._verbose = verbose
         self._live = live
+        self._name_results = name_results
+        # How many calls a live walk has seen
+        self._calls = 0
         # What each step used when that is known ahead, else the entry
         # that starts a step is taken at its word
         self._usage = usage or {}
@@ -544,7 +624,7 @@ class Walk:
         """Mark the calls that were left without a result."""
         for call in self._open.values():
             if call.event:
-                call.event.details += result_details({}, self._full)
+                call.event.details += result_details({}, self._verbose)
         self._open.clear()
 
     def _remember(self, kept: dict) -> None:
@@ -555,7 +635,7 @@ class Walk:
     def _step(self, who: Who, entry: dict) -> list[Event]:
         """What the step an entry starts used, nothing for a later entry
         of the same step."""
-        step = step_usage(entry)
+        step = step_usage(entry) if self._verbose else None
         if not step or step[0] in self._steps:
             return []
         self._steps[step[0]] = None
@@ -564,9 +644,9 @@ class Walk:
         return [used] if used else []
 
     def _talk(self, who: Who, block: dict) -> list[Event]:
-        # Live just its first line, in full too: whoever follows is after
+        # Live just its first line, when verbose too: whoever follows is after
         # what the session does, what it says is on its own screen
-        talk = talk_event(self._when, who, block, self._full and not self._live)
+        talk = talk_event(self._when, who, block, self._verbose and not self._live)
         if not talk:
             return []
         if self._live:
@@ -575,17 +655,22 @@ class Walk:
         return [talk]
 
     def _call(self, who: Who, entry: dict, block: dict) -> Event:
-        event = call_event(self._when, who, entry, block, self._project_dir, self._full)
+        event = call_event(
+            self._when, who, entry, block, self._project_dir, self._verbose
+        )
         call = str(block.get("id"))
         name = event.fields["tool"]
-        label = (event.details[0] if event.details else name)[:LABEL_WIDTH]
+        # Before the event has its number: a result shows that itself
+        label = (call_label(event) or name)[:LABEL_WIDTH]
         started = {"timestamp": entry.get("timestamp")}
+        if self._live:
+            self._calls += 1
+            event.number = self._calls
+            event.fields = {"stage": "call", **event.fields}
         kept = None if self._live else event
-        self._open[call] = OpenCall(who, name, started, label, kept)
+        self._open[call] = OpenCall(who, name, started, label, kept, event.number)
         self._remember(self._open)
         self._last_call = call
-        if self._live:
-            event.fields = {"stage": "call", **event.fields}
         return event
 
     def _result(self, entry: dict, block: dict) -> list[Event]:
@@ -596,7 +681,7 @@ class Walk:
         if issued is None:
             return []
         ended = outcome(issued.started, (entry, block))
-        lines = result_details(ended, self._full)
+        lines = result_details(ended, self._verbose)
         if issued.event:
             issued.event.details += lines
             # Whether it wrote outside the project stays the last value
@@ -607,18 +692,21 @@ class Walk:
             }
             issued.event.fields.update(ended, **flag)
             return []
-        if self._last_call != call:
+        if self._name_results or self._last_call != call:
             lines.insert(0, "of: " + issued.label)
         self._last_call = None
         fields = {"stage": "result", "tool": issued.name, "id": call, **ended}
-        return [Event(self._when, issued.who, issued.name.lower(), lines, fields)]
+        what = issued.name.lower()
+        return [Event(self._when, issued.who, what, lines, fields, issued.number)]
 
 
-def transcript_events(entries: list[dict], project_dir: str, full: bool) -> list[Event]:
+def transcript_events(
+    entries: list[dict], project_dir: str, verbose: bool
+) -> list[Event]:
     """The events of a transcript that is all there."""
     # As the last entry of a step has it, should an earlier one be short
     usage = dict(found for found in map(step_usage, entries) if found)
-    walk = Walk(project_dir, full, usage=usage)
+    walk = Walk(project_dir, verbose, usage=usage)
     events = [event for entry in entries for event in walk.take(entry)]
     walk.end()
     return events
