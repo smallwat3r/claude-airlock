@@ -36,6 +36,7 @@ from urllib.parse import urlsplit
 
 from .capture import Capture, read_capture
 from .network import ProxyRequest, logged_requests
+from .session import CONTAINER_HOME
 from .settings import Fatal, Host
 
 USAGE = "usage: claude-docker --trace [list | SESSION] [--full | --json]"
@@ -103,26 +104,58 @@ def flat(value: object) -> str:
     return "\\n".join(clean(value).splitlines())
 
 
-def transcript_dir(host: Host) -> Path:
-    """Where Claude Code keeps the project's transcripts. The project is
-    mounted at its host path, so the name is the same in and out of the
-    sandbox: the path with everything but letters and digits dashed."""
-    name = re.sub(r"[^A-Za-z0-9]", "-", host.project_dir)
-    return Path(host.claude_dir, "projects", name)
+def project_roots(host: Host) -> list[str]:
+    """The project directory as a session may have known it: its host
+    path, and for a project under the user's home the same place under the
+    container's. The image links the host home to the container's and
+    Claude Code resolves the link, so a sandboxed session records the
+    second, one run on the host the first."""
+    roots = [host.project_dir]
+    home = host.home.rstrip(os.sep)
+    if host.project_dir == home or host.project_dir.startswith(home + os.sep):
+        sandboxed = CONTAINER_HOME + host.project_dir[len(home) :]
+        if sandboxed != host.project_dir:
+            roots.append(sandboxed)
+    return roots
+
+
+def transcript_dir(host: Host, root: str) -> Path:
+    """Where Claude Code keeps the transcripts of the sessions that knew
+    the project as root: named after the path, everything but letters and
+    digits dashed."""
+    return Path(host.claude_dir, "projects", re.sub(r"[^A-Za-z0-9]", "-", root))
+
+
+def project_root(path: Path, host: Host) -> str:
+    """The project directory as the session of this transcript knew it,
+    what the paths it recorded are to be compared with."""
+    for root in project_roots(host):
+        if transcript_dir(host, root) == path.parent:
+            return root
+    return host.project_dir
 
 
 def session_files(host: Host) -> list[Path]:
     """The project's transcripts, the latest session first."""
-    directory = transcript_dir(host)
-    # The directory is writable from inside the sandbox: only plain files,
-    # not a link to something else on the host or a pipe that never ends
+    directories = dict.fromkeys(
+        transcript_dir(host, root) for root in project_roots(host)
+    )
+    # The directories are writable from inside the sandbox: only plain
+    # files, not a link to something else on the host or a pipe that never
+    # ends
     files = sorted(
-        (f for f in directory.glob("*.jsonl") if f.is_file() and not f.is_symlink()),
+        (
+            f
+            for directory in directories
+            for f in directory.glob("*.jsonl")
+            if f.is_file() and not f.is_symlink()
+        ),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
     if not files:
-        raise Fatal(f"no session recorded for this project (looked in {directory})")
+        looked = ", ".join(map(str, directories))
+        raise Fatal(f"no session recorded for this project (looked in {looked})")
     return files
 
 
@@ -719,15 +752,16 @@ def session_events(path: Path, host: Host, full: bool) -> tuple[list[str], list[
     transcript and of the network record together, in the order they
     happened."""
     entries = read_entries(path)
+    project_dir = project_root(path, host)
     net_lines, net_events = network(host, entries, full)
     header = [
         f"session     {flat(path.stem)}  {title(entries)}",
-        *summary(entries, host.project_dir),
+        *summary(entries, project_dir),
         *net_lines,
     ]
     # Stable, so what the transcript has at the same time keeps its order
     events = sorted(
-        transcript_events(entries, host.project_dir, full) + net_events,
+        transcript_events(entries, project_dir, full) + net_events,
         key=lambda event: event.when,
     )
     return header, events

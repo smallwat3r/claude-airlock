@@ -142,6 +142,48 @@ class TraceTest(LauncherTest):
         self.assertEqual(result.status, 0, result.stderr)
         self.assertIn("prompt    early", result.stdout)
 
+    def test_a_sandboxed_session_is_found_under_the_container_home(self):
+        # The host home is a link to /home/node in the image, and Claude
+        # Code records the project by its resolved path
+        seen = "/home/node/proj"
+        entry = {
+            "type": "assistant",
+            "timestamp": "2026-01-03T10:00:00Z",
+            "cwd": seen,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "s1",
+                        "name": "Write",
+                        "input": {"file_path": f"{seen}/in.go", "content": "x\n"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "s2",
+                        "name": "Write",
+                        "input": {"file_path": "/home/node/out.go", "content": "x\n"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "s3",
+                        "name": "Bash",
+                        "input": {"command": "make"},
+                    },
+                ]
+            },
+        }
+        self.transcripts = self.transcripts.with_name("-home-node-proj")
+        self.write_transcript("5a9d0000-0000-4000-8000-000000000000", [entry])
+        listed = self.launch("--trace", "list").stdout
+        self.assertIn("5a9d0000", listed)
+        self.assertIn("3fa9c0de", listed)
+        result = self.launch("--trace", "5a9d")
+        self.assertEqual(result.status, 0, result.stderr)
+        self.assertIn("/home/node/out.go x1  OUTSIDE PROJECT", result.stdout)
+        self.assertNotIn("in.go x1  OUTSIDE", result.stdout)
+        self.assertNotIn("cwd:", result.stdout)
+
     def test_a_project_without_sessions_is_an_error(self):
         result = self.launch("--trace", cwd=self.home / "ref")
         self.assertNotEqual(result.status, 0)
