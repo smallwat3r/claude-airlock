@@ -357,6 +357,7 @@ directory of the same name holding files the fragment copies in:
 | `reverse` | gdb-multiarch, binutils-multiarch, strace, ltrace, binwalk and the Python capstone, lief, pyelftools libraries |
 | `rosbag` | mcap CLI, sqlite3 CLI and the Python rosbag libraries |
 | `shell` | shellcheck, shfmt |
+| `typescript` | typescript-language-server, `tsc` |
 | `typst` | Typst |
 
 With no selection every feature is built, which is large. Select a subset

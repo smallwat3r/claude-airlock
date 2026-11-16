@@ -197,6 +197,12 @@ def pin_pyright(pins: Pins) -> None:
     print("pyright", version)
 
 
+def pin_typescript_language_server(pins: Pins) -> None:
+    version = npm_latest("typescript-language-server")
+    pins.set_arg("TYPESCRIPT_LANGUAGE_SERVER_VERSION", version)
+    print("typescript-language-server", version)
+
+
 def pin_excalidraw(pins: Pins) -> None:
     for name, package in (
         ("EXCALIDRAW_VERSION", "@excalidraw/excalidraw"),
@@ -245,6 +251,10 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"(?m)^ARG CLAUDE_CODE_VERSION=", pin_claude_code),
     (r"(?m)^ARG PYRIGHT_VERSION=", pin_pyright),
     (r"(?m)^ARG EXCALIDRAW_VERSION=", pin_excalidraw),
+    (
+        r"(?m)^ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION=",
+        pin_typescript_language_server,
+    ),
     (r"(?m)^ARG GOPLS_VERSION=", pin_gopls),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),
