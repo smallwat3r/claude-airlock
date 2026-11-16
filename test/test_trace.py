@@ -166,14 +166,23 @@ class TraceTest(LauncherTest):
         self.assertNotIn("step", self.launch("--trace", "3fa9").stdout)
 
     def test_json_is_written_whatever_shape_an_event_was_given(self):
-        # What is not a number JSON has, nested as deep as can be read
-        deep: object = float("nan")
-        for _ in range(600):
-            deep = [deep]
-        entry = json.loads(json.dumps({"x": deep}))
-        event = Event(0.0, Who.CLAUDE, "bash", ["x"], {"input": entry})
-        written = json.loads(tracing.event_json("0a", event))
-        self.assertEqual((written["session"], written["unreadable"]), ("0a", True))
+        def nested(depth: int) -> object:
+            deep: object = float("nan")
+            for _ in range(depth):
+                deep = [deep]
+            return deep
+
+        def written(depth: int) -> dict:
+            event = Event(0.0, Who.CLAUDE, "bash", ["x"], {"input": nested(depth)})
+            return json.loads(tracing.event_json("0a", event))
+
+        # What is not a number JSON has is written as null
+        self.assertEqual(written(3), {**written(3), "input": [[[None]]]})
+        # Nested deeper than can be written out, which is not the same depth
+        # from one version of Python to the next: well past any of them
+        deep = written(100_000)
+        self.assertEqual((deep["session"], deep["unreadable"]), ("0a", True))
+        self.assertNotIn("input", deep)
 
     def test_json_gives_an_object_per_event_with_its_values(self):
         result = self.launch("--trace", "--json")
