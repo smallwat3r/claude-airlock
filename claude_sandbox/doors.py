@@ -4,9 +4,13 @@ sandbox: the SSH agent (CLAUDE_DOCKER_SSH_AGENT=1) and the Docker socket
 
 The agent signs as the user towards every host their keys reach, and says
 nothing of it. So the session is not given the agent's socket but one of
-the launcher's own, which passes every request on and notes it: which key
-was asked to sign, and what for. It lives as long as the launcher does, a
-session that outlives its launcher is left without an agent.
+the launcher's own, which notes every request: which key was asked to
+sign, and what for. It passes on the two a session has a use for, to list
+the keys and to sign with one, and answers the rest itself with a refusal:
+an agent can also be asked to add a key, to remove them all or to lock
+itself, none of which is a session's to ask. It lives as long as the
+launcher does, a session that outlives its launcher is left without an
+agent.
 
 The socket proxy logs every call it is asked for, with the address it came
 from. While a session runs, the launcher reads that log and notes the
@@ -58,9 +62,12 @@ AGENT_REQUESTS = {
     25: "asked to add a key",
     26: "asked to add a smartcard key",
 }
-# An extension, which is how ssh tells the agent which host it signs for.
-# Not a use of a key, and not noted.
+# An extension, by its name. The one that is passed on is how ssh tells the
+# agent which host it signs for: not a use of a key, and not noted.
 AGENT_EXTENSION = 27
+SESSION_BIND = b"session-bind@openssh.com"
+# Who refused a request, when that was not the agent
+BY_LAUNCHER = "launcher"
 # In what is signed to log in, the message that asks for it
 USERAUTH_REQUEST = 50
 # Where the session finds the agent
@@ -142,10 +149,27 @@ def signed_for(data: bytes) -> str:
         return "a signature"
 
 
+def passed_on(request: bytes) -> bool:
+    """Whether a request is one the agent is asked on a session's behalf:
+    to list the keys, to sign, and the extension that goes with signing.
+    Anything else would change the agent for the user and everything else
+    that uses it."""
+    kind = request[:1]
+    if kind in (bytes([AGENT_LIST]), bytes([AGENT_SIGN])):
+        return True
+    if kind != bytes([AGENT_EXTENSION]):
+        return False
+    try:
+        return text(Cursor(request, 1)) == SESSION_BIND
+    except NotThis:
+        return False
+
+
 class AgentDoor:
-    """A socket that passes what it is asked on to the SSH agent and notes
-    each request. One connection at a time is one request at a time: the
-    agent answers each before it reads the next."""
+    """A socket that passes what it may (see passed_on) on to the SSH agent,
+    refuses the rest and notes each request. One connection at a time is
+    one request at a time: the agent answers each before it reads the
+    next."""
 
     def __init__(self, host: Host, session: str, agent: str) -> None:
         self._host = host
@@ -191,6 +215,11 @@ class AgentDoor:
                     request = read_message(client)
                     if request is None:
                         return
+                    if not passed_on(request):
+                        refusal = bytes([AGENT_FAILURE])
+                        self._note(request, refusal, refused_by=BY_LAUNCHER)
+                        client.sendall(len(refusal).to_bytes(4, "big") + refusal)
+                        continue
                     agent.sendall(len(request).to_bytes(4, "big") + request)
                     answer = read_message(agent)
                     if answer is None:
@@ -200,13 +229,16 @@ class AgentDoor:
             except OSError:
                 return
 
-    def _note(self, request: bytes, answer: bytes) -> None:
-        """Note a request and how the agent answered it. What a session
-        sends is the session's to choose: one that is not what it says it
-        is is noted as that."""
+    def _note(self, request: bytes, answer: bytes, refused_by: str = "") -> None:
+        """Note a request and how it was answered, by the agent unless
+        refused_by names who refused it instead. What a session sends is
+        the session's to choose: one that is not what it says it is is
+        noted as that."""
         kind = request[:1]
         refused = answer[:1] == bytes([AGENT_FAILURE])
         said: dict[str, object] = {"refused": True} if refused else {}
+        if refused_by:
+            said["by"] = refused_by
         try:
             if kind == bytes([AGENT_SIGN]):
                 reader = Cursor(request, 1)
@@ -220,7 +252,9 @@ class AgentDoor:
             elif kind == bytes([AGENT_LIST]):
                 said.update(did="list", keys=self._listed(answer))
             elif kind == bytes([AGENT_EXTENSION]):
-                return
+                if not refused_by:
+                    return
+                said.update(did="other", what="asked for an extension")
             else:
                 number = kind[0] if kind else 0
                 said.update(
@@ -293,7 +327,8 @@ def ssh_agent_door(
     as you to every host your keys reach, not only the git remote. Loading
     keys with ssh-add -c makes each use ask first. Gives the options the
     session is run with. What the session is given is a socket of the
-    launcher's that notes each request, the agent's own where that is not
+    launcher's that notes each request and refuses those that are not a
+    session's to make (see passed_on), the agent's own where that is not
     possible, which is then said."""
     found = agent_socket(env) if settings.ssh_agent else None
     if found is None:
@@ -440,8 +475,9 @@ def use_event(said: dict) -> Event | None:
             if key in said
         }
         if refused:
-            detail += "  REFUSED by the agent"
-            fields["error"] = "refused by the agent"
+            by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
+            detail += f"  REFUSED by the {by}"
+            fields["error"] = f"refused by the {by}"
         return Event(when, Who.SANDBOX, "ssh-agent", [clean(detail)], fields)
     if door == "docker":
         status = said.get("status")

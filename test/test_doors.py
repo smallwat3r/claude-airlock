@@ -61,6 +61,8 @@ class FakeAgent:
     def __init__(self, directory: str, refuse: bool = False):
         self.path = os.path.join(directory, "agent.sock")
         self.refuse = refuse
+        # The kind of each request that reached it
+        self.asked: list[bytes] = []
         self._listener = socket.socket(socket.AF_UNIX)
         self._listener.bind(self.path)
         self._listener.listen(4)
@@ -77,6 +79,7 @@ class FakeAgent:
                 return
             with client:
                 while (request := doors.read_message(client)) is not None:
+                    self.asked.append(request[:1])
                     if request[:1] == b"\x0b":
                         answer = b"\x0c" + struct.pack("!I", 1)
                         answer += string(KEY) + string(b"me@laptop")
@@ -104,7 +107,7 @@ class AgentDoorTest(LauncherTest):
     def through_the_door(self, *requests: bytes, refuse: bool = False) -> list[bytes]:
         """What the agent answers to requests sent through a door, one
         connection for them all."""
-        agent = FakeAgent(self.directory, refuse)
+        agent = self.agent = FakeAgent(self.directory, refuse)
         self.addCleanup(agent.close)
         short = settings.Host(
             self.host.home, self.host.project_dir, self.host.config_home, self.directory
@@ -151,11 +154,44 @@ class AgentDoorTest(LauncherTest):
         self.assertTrue(event.fields["error"])
 
     def test_a_request_that_is_not_what_it_says_is_noted_as_that(self):
-        self.through_the_door(b"\x0d\x00\x00", b"\x11" + string(b"key"), b"\x1b")
-        self.assertEqual(
-            [use["what"] for use in self.uses()],
-            ["sent a request that could not be read", "asked to add a key"],
+        self.through_the_door(b"\x0d\x00\x00")
+        (use,) = self.uses()
+        self.assertEqual(use["what"], "sent a request that could not be read")
+
+    def test_what_would_change_the_agent_is_refused_and_never_reaches_it(self):
+        bind = b"\x1b" + string(b"session-bind@openssh.com") + b"rest"
+        answers = self.through_the_door(
+            b"\x11" + string(b"key"),  # add a key
+            b"\x13",  # remove every key
+            b"\x16" + string(b"passphrase"),  # lock the agent
+            b"\x1b" + string(b"other@example.com"),
+            b"\x1b",
+            bind,
+            b"\x0b",
         )
+        # The agent of these tests answers a list alone with the keys
+        self.assertEqual([answer[:1] for answer in answers[:5]], [b"\x05"] * 5)
+        self.assertEqual(answers[6][:1], b"\x0c")
+        self.assertEqual(self.agent.asked, [b"\x1b", b"\x0b"])
+        uses = self.uses()
+        self.assertEqual(
+            [(use["what"], use["refused"], use["by"]) for use in uses[:5]],
+            [
+                (what, True, "launcher")
+                for what in (
+                    "asked to add a key",
+                    "asked to remove every key",
+                    "asked to lock the agent",
+                    "asked for an extension",
+                    "asked for an extension",
+                )
+            ],
+        )
+        # The extension ssh signs with is passed on and not noted
+        self.assertEqual([use["did"] for use in uses[5:]], ["list"])
+        event = doors.use_event(uses[0])
+        self.assertIn("REFUSED by the launcher", event.details[0])
+        self.assertEqual(event.fields["error"], "refused by the launcher")
 
     def test_the_door_is_the_users_alone_and_gone_with_the_session(self):
         flags = self.launch(
