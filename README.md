@@ -889,6 +889,16 @@ runs them all, `test/launcher_test.py -k trace` those with trace in their
 name, and each file runs on its own. `pytest test` works too if you have
 it.
 
+The `Makefile` has a shortcut for each of these and for the upkeep of the
+image, `make` lists them:
+
+```
+make check          # ruff, shellcheck, mypy and the tests, as CI runs them
+make test K=trace   # the tests with trace in their name
+make smoke          # test/smoke-test.sh
+make upgrade        # refresh the pins, then rebuild the image
+```
+
 `test/smoke-test.sh` is the end-to-end check, run by hand on the host against
 a real Docker daemon. It replaces the sidecars, then starts open, filtered
 and socket-proxy sessions in a throwaway project and checks the sandbox from
