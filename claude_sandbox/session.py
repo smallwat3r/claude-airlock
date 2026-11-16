@@ -3,6 +3,7 @@ options and the run itself."""
 
 from __future__ import annotations
 
+import fcntl
 import fnmatch
 import json
 import os
@@ -25,12 +26,18 @@ from .docker import (
     project_slug,
 )
 from .image import Image
-from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings
+from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings, private_dir
 from .tamper import CONFIG_FILES, CONFIG_TREES
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
 SHADOW_PRUNED_DIRS = ("node_modules", ".git")
+# What the config seeded from the host's leaves out, see seed_config
+SEED_LEFT_OUT = ("projects", "mcpServers")
+# What Claude Code keeps in ~/.claude for one session and reads back into
+# its shell: a snapshot of the shell's setup, and what its hooks export. A
+# session is given its own of each, empty, see session_state_args.
+SESSION_STATE = ("shell-snapshots", "session-env")
 
 
 @dataclass(frozen=True)
@@ -54,15 +61,21 @@ def refuse_unsafe_dir(path: str, host: Host) -> None:
             raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
 
 
-def resolve_dir(raw: str, host: Host) -> str:
-    """Absolute path of an existing directory, expanding a leading ~ (the
-    shell does not expand it in the --add-dir=~/x form)."""
+def absolute_path(raw: str, host: Host) -> str:
+    """A path as written by the user made absolute, expanding a leading ~
+    (the shell does not expand it in the --add-dir=~/x form, nor is it
+    expanded in the config file)."""
     expanded = raw
     if raw == "~":
         expanded = host.home
     elif raw.startswith("~/"):
         expanded = host.home + raw[1:]
-    path = os.path.normpath(os.path.join(host.project_dir, expanded))
+    return os.path.normpath(os.path.join(host.project_dir, expanded))
+
+
+def resolve_dir(raw: str, host: Host) -> str:
+    """Absolute path of an existing directory."""
+    path = absolute_path(raw, host)
     if not os.path.isdir(path):
         raise Fatal(f"not a directory: {raw}")
     return path
@@ -99,9 +112,77 @@ def configured_extra_dirs(settings: Settings, host: Host) -> list[ExtraDir]:
     return dirs
 
 
-def container_name(host: Host, env: Mapping[str, str]) -> str:
+def claim_name(directory: str, name: str) -> int | None:
+    """Claim a name among the launchers, none when another has it: the
+    lock held on a file of that name, which is let go of with the launcher
+    however it ends. The file stays, one that is removed could be locked
+    by two."""
+    descriptor = os.open(os.path.join(directory, name), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def within(path: str, root: str) -> str | None:
+    """Where a path is under a directory as that directory is mounted,
+    none when it is not under it. By where the two lead, either can be
+    reached through a link."""
+    real_path, real_root = os.path.realpath(path), os.path.realpath(root)
+    if real_path != real_root and not real_path.startswith(real_root + os.sep):
+        return None
+    return os.path.normpath(os.path.join(root, os.path.relpath(real_path, real_root)))
+
+
+def protected_dirs(
+    dirs: list[ExtraDir], settings: Settings, host: Host
+) -> tuple[list[ExtraDir], list[str]]:
+    """What CLAUDE_DOCKER_PROTECT makes of a session's mounts: the
+    directories to mount, those it names read-only, and the paths inside
+    one of them (or the project) to mount read-only on top, each as it is
+    found there. For what a session must be able to read and must not
+    change, wherever it is mounted from: the host's claude may follow
+    files that are in a directory every session can write, a kit of
+    skills in the shared directory for one. A path that is in no mounted
+    directory is not in the session at all, and passed over."""
+    dirs = list(dirs)
+    inside: list[str] = []
+    for raw in settings.protect:
+        path = absolute_path(raw, host)
+        if within(host.project_dir, path):
+            raise Fatal(
+                f"cannot protect {raw}: the project is in it, --add-dir-ro"
+                " mounts a directory read-only"
+            )
+        roots = [host.project_dir, *(extra.path for extra in dirs)]
+        found = [mounted for mounted in (within(path, r) for r in roots) if mounted]
+        if not found:
+            continue
+        if not os.path.lexists(path):
+            # It could be made from inside the session, as anything
+            raise Fatal(f"cannot protect {raw}: it does not exist")
+        for at, extra in enumerate(dirs):
+            if extra.path in found:
+                dirs[at] = ExtraDir(extra.path, read_only=True)
+        inside += [m for m in found if m not in roots and m not in inside]
+    return dirs, inside
+
+
+def protect_args(inside: list[str]) -> list[str]:
+    """The read-only mounts of protected_dirs, on top of what they are
+    in."""
+    return [mount_arg(path, path, "ro,z") for path in inside]
+
+
+@contextmanager
+def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
     """claude-{project}[-{instance}], the instance taken from the Emacs
-    buffer name (*claude:dir:instance*) so parallel sessions never clash."""
+    buffer name (*claude:dir:instance*) so parallel sessions never clash.
+    Claimed for as long as the block lasts: a container only takes its
+    name when it starts, and two launchers started together would both
+    find the same one free."""
     name = "claude-" + os.path.basename(host.project_dir)
     buffer_name = env.get("CLAUDE_BUFFER_NAME")
     if buffer_name:
@@ -112,11 +193,20 @@ def container_name(host: Host, env: Mapping[str, str]) -> str:
     # plain shell) on the same project asks for a name that is already
     # taken. Step past it rather than fail, the other session is still live.
     base = name.removesuffix("-")
+    directory = private_dir(host.names_dir)
     candidate, number = base, 2
-    while docker_ok("container", "inspect", candidate):
+    while True:
+        claim = claim_name(directory, candidate)
+        if claim is not None:
+            if not docker_ok("container", "inspect", candidate):
+                break
+            os.close(claim)
         candidate = f"{base}-{number}"
         number += 1
-    return candidate
+    try:
+        yield candidate
+    finally:
+        os.close(claim)
 
 
 def seed_config(host: Host) -> None:
@@ -130,7 +220,11 @@ def seed_config(host: Host) -> None:
     onboarding, theme and account carry over. Not what it holds of each
     project (its path, its settings and the servers set up for it alone):
     a session has no use for those of another project, see history.py.
-    The config the sessions then share still gains an entry for each
+    Nor the servers set up for every project: each comes with what it is
+    started with, a token as often as not, which every session could then
+    read, and with a command that the image need not have. One wanted in
+    here is added in here (claude mcp add). The config the sessions then
+    share still gains an entry for each
     project that is run in here."""
     seeded = os.path.join(host.claude_dir, ".claude.json")
     if os.path.exists(seeded):
@@ -143,7 +237,8 @@ def seed_config(host: Host) -> None:
         return
     if not isinstance(config, dict):
         return
-    config.pop("projects", None)
+    for left_out in SEED_LEFT_OUT:
+        config.pop(left_out, None)
     try:
         descriptor = os.open(seeded, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -157,6 +252,9 @@ def prepare_claude_dir(settings: Settings, host: Host) -> None:
     """Create what the mounts below expect to find in the host's ~/.claude."""
     os.makedirs(host.claude_dir, exist_ok=True)
     os.makedirs(host.claude_state_dir, exist_ok=True)
+    # Docker would make what a tmpfs goes over as root
+    for name in SESSION_STATE:
+        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
     seed_config(host)
     if settings.rw_config:
         return
@@ -235,6 +333,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # keep it self-contained.
         mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
         *statusline_args(host),
+        *session_state_args(),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--read-only",
@@ -251,6 +350,23 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # A stronger runtime when asked for, e.g. runsc (gVisor), which keeps
         # the container off the host kernel. It must be installed in the daemon.
         *([f"--runtime={settings.runtime}"] if settings.runtime else []),
+    ]
+
+
+def session_state_args() -> list[str]:
+    """Claude Code runs every command of a session through what it keeps
+    for that session in ~/.claude: it sources the snapshot of the shell,
+    and what the session's hooks exported. Those of the sessions run on the
+    host are there too, and one written to from in here would run its
+    additions on the host with that session's next command, outside the
+    sandbox. So a session is given a tmpfs in place of each: its own are
+    made there and gone with it, and it neither sees nor reaches those of
+    another session. Whatever CLAUDE_DOCKER_RW_CONFIG says, that is about
+    the config and this is not config. The session's user's alone: a tmpfs
+    is root's unless told otherwise."""
+    options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
+    return [
+        f"--tmpfs={CONTAINER_HOME}/.claude/{name}:{options}" for name in SESSION_STATE
     ]
 
 
@@ -329,8 +445,8 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     that are missing were made empty by prepare_claude_dir, so that none
     can be created either. The cost: none of these can be changed from
     inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out. Plugins stay
-    writable (claude updates them itself), their hook scripts are the
-    remaining gap."""
+    writable (claude updates them itself): what a session changes of them
+    is not prevented, it is said when the session ends, see tamper.py."""
     if settings.rw_config:
         # Shown by bin/claude-statusline
         return [env_arg("CLAUDE_DOCKER_RW_CONFIG", 1)]
@@ -353,6 +469,12 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
         shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
         args.append(env_arg("CLAUDE_DOCKER_DIRS", shown))
     return args
+
+
+def protect_env_args(inside: list[str]) -> list[str]:
+    """The session is told what it cannot change of what it has mounted,
+    see docker/CLAUDE-sandbox.md."""
+    return [env_arg("CLAUDE_DOCKER_PROTECT", ":".join(inside))] if inside else []
 
 
 def git_include_paths() -> list[str]:

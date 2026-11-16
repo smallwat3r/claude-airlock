@@ -37,6 +37,7 @@ claude-docker --add-dir ~/code/api  # mount a second project read-write
 claude-docker --add-dir-ro ~/code/lib   # mount reference code read-only
 claude-docker --worktree feature-x  # second session on its own git worktree
 claude-docker --rebuild             # clean image rebuild, then exit
+claude-docker --prune               # remove the images of before, then exit
 claude-docker --dockerfile          # print the generated Dockerfile, then exit
 claude-docker --shell               # bash in the same sandbox, to look around
 claude-docker --net-log             # domains the egress filter denied
@@ -104,6 +105,10 @@ others with an example value:
 - `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` (default: none)
 
   Extra file name globs to hide, on top of the `.env` family
+
+- `CLAUDE_DOCKER_PROTECT="~/claude-shared/kit:docs"` (default: none)
+
+  Paths that are read-only in every session that has them mounted, inside the project or a directory mounted next to it. What the config file names and what the environment names both count
 
 - `CLAUDE_DOCKER_MEMORY=32g` (default: `16g`)
 
@@ -184,6 +189,15 @@ or none when set empty.
   session must not be able to plant either, so they are read-only, and the
   ones you do not have are made empty so that none can be created.
   `CLAUDE_DOCKER_RW_CONFIG=1` makes them writable.
+- **What you name.** `CLAUDE_DOCKER_PROTECT` makes a path read-only inside
+  whatever mounts it. For what a session has to read and must not change:
+  a kit of skills in the shared directory that your host `claude` follows,
+  say. A path that is in nothing mounted is not brought in, and one that is
+  missing where a session could create it stops the launch.
+- **What Claude Code keeps for one session.** `~/.claude/shell-snapshots`
+  and `session-env` are sourced by every command of the session they are
+  of, those of your host sessions too. A sandboxed session gets an empty
+  tmpfs in place of each, so it can neither read nor add to them.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty (`/dev/null` is mounted over them). Templates such as
   `.env.example` stay readable, `CLAUDE_DOCKER_SHADOW` hides more.
@@ -223,6 +237,7 @@ rather than locked: the launcher warns when a session changed one.
 | | `.claude/settings.json`, `settings.local.json` and `.mcp.json`, with the scripts their commands name |
 | | `CLAUDE.md` and the `hooks`, `commands`, `skills`, `agents` and `rules` of `.claude` |
 | `~/.claude` | What is not mounted read-only: a script `settings.json` names outside `hooks`, and with `CLAUDE_DOCKER_RW_CONFIG=1` all of `settings.json`, `CLAUDE.md`, `hooks`, `commands`, `skills`, `agents` and `rules` |
+| | The plugins, which stay writable: those installed (`plugins/cache`), where they are installed from (`plugins/marketplaces`) and the two files that list them. A changed plugin is named by its directory, with how many of its files changed. By each file's size and times, not its content: an update by Claude Code itself shows too |
 
 - The warning is printed when the launcher returns. Ctrl-C does not end
   the launcher before it, only the session.
@@ -240,6 +255,9 @@ rather than locked: the launcher warns when a session changed one.
 - The session is not given the agent's socket but one of the launcher's in
   front of it, which notes every request for `--trace`: which key signed,
   and what for. It is there for as long as the launcher runs.
+- That socket passes on what a session has a use for, listing the keys and
+  signing with one. A request to add a key, to remove them or to lock the
+  agent is refused there and never reaches your agent.
 - On macOS the agent comes from inside Docker Desktop's machine, where the
   launcher cannot listen, and its use is not noted.
 
@@ -261,10 +279,10 @@ for the CLI), through
 - A session only shares a network with the proxy of its own mode, so one
   started without the setting has no way to a proxy another session was
   given.
-- The proxy sidecars keep running between sessions. Edited rules or a new
-  pinned image are picked up by the next session of that mode, which
-  replaces the proxy. To switch them off: `docker rm -f
-  claude-docker-ps-proxy claude-docker-proxy`.
+- A proxy sidecar is started by the first session that needs it and
+  removed with the last one, so the host's Docker socket is not held open
+  for no one. Edited rules or a new pinned image are picked up by the next
+  session of that mode, which replaces the proxy.
 
 **The egress filter**, with `CLAUDE_DOCKER_NET_FILTER=1`:
 
@@ -272,6 +290,12 @@ for the CLI), through
   launcher refuses a network of that name that has one. Egress goes
   through a squid sidecar that only allows the domains in
   `docker/allowed-domains.txt`, and external DNS is blackholed.
+- The host is kept off that network too (Docker 28 and later): its bridge
+  is given no address there, so what the host listens on is not a way
+  around the filter. A network made before this is made anew by the first
+  filtered session started while none is on it.
+- The proxy is removed with the last filtered session. Its log is in a
+  volume and stays, `--net-log` and `--trace` read it either way.
 - `claude-docker --net-log` lists the domains it refused, most frequent
   first, the quickest way to find what a project needs.
 - An edited allowlist is picked up by the next filtered session, or at once
@@ -290,12 +314,17 @@ read-write project safe to trust blindly afterwards:
   configuration of a hook manager such as pre-commit, a `CLAUDE.md` below
   the top of the project, and a repository planted in a subdirectory.
 - `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
-  plugin's hook scripts are not protected the way `settings.json` is.
+  plugin's hook scripts are not protected the way `settings.json` is. A
+  change to them is reported when the session ends, not prevented.
+- With the network open, a session reaches whatever the host listens on,
+  like the rest of your network. Only the egress filter keeps it off.
+- The MCP servers you set up for every project on the host are not in the
+  sandbox: the config it starts from leaves them out, they come with
+  tokens. Add the ones you want there from inside a session.
 - Of the history of other projects, some is still there to read: the
   transcripts of a project first used after the session started, the paths
   of all your projects (in `~/.claude/.claude.json`), and what Claude Code
-  keeps by session rather than by project (`session-env`, `jobs`, its
-  debug log).
+  keeps by session rather than by project (`jobs`, its debug log).
 - The egress allowlist includes GitHub, so with a forwarded SSH agent or a
   `GH_TOKEN` a session can still push data out to a repository or gist.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
@@ -626,6 +655,7 @@ All of it under `~/.local/state/claude-sandbox`, but for the proxy's log:
 | `processes` | What ran in each session | A few hundred kB each as a rule and 20 MB at most, the latest 100 |
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
 | `destinations.json` | What each project is known to reach | 2000 destinations per project |
+| `names`, `proxies`, `sidecars.lock` | Not records: what the running launchers hold a lock on, so that two do not take the same container name, start the same proxy at once or remove one another still uses | Empty files |
 | `history` | Not a record: what the sessions of each project remember, see [What is read-only or hidden](#what-is-read-only-or-hidden). The one part mounted into a session | As much as Claude Code writes |
 
 - `docker volume rm claude-egress-log` (with the proxy removed) clears the
@@ -781,8 +811,11 @@ without a plugin being enabled on the host.
 - The image tag is a hash of the generated Dockerfile. Changing the
   selection or editing a part rebuilds on the next start, reusing cached
   layers, and each feature set keeps its own image.
-- Old images pile up: `docker images claude-code-sandbox` lists them,
-  remove what you no longer use.
+- Old images pile up, several GB each. `claude-docker --prune` removes
+  them all but the one your settings ask for now, and any a container
+  still uses. Another feature set's image is built again from the layer
+  cache when it is next asked for. The build cache itself is docker's:
+  `docker builder prune`.
 - Images, downloads and Python packages are pinned by digest, checksum or
   version. Debian packages follow the pinned base image.
 - Claude Code's auto-updater is off, so upgrading means refreshing the

@@ -145,7 +145,7 @@ def proxy_requests(
     end, as summary lines and as one event per request."""
     logged = logged_requests(stderr=subprocess.DEVNULL)
     if logged is None:
-        return ["  the egress proxy is not running, its log cannot be read"], []
+        return ["  the egress proxy's log cannot be read"], []
     requests = [
         request
         for request in logged

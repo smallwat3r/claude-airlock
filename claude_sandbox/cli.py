@@ -15,15 +15,15 @@ from .docker import docker_ok
 from .doors import socket_proxy_watched, ssh_agent_door
 from .follow import follow
 from .history import history_args
-from .image import PLUGIN_DIR, Image, build_image, prepare_image
+from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
 from .network import (
     net_log,
     network_args,
-    prepare_network,
     session_address_recorded,
+    session_network,
+    sidecars_locked,
     socket_proxy_args,
     start_egress_proxy,
-    start_socket_proxy,
 )
 from .processes import collect_ended_records, processes_recorded
 from .recorder import transcripts_copied
@@ -37,7 +37,10 @@ from .session import (
     git_config_args,
     interrupts_held,
     prepare_claude_dir,
+    protect_args,
     protect_config_args,
+    protect_env_args,
+    protected_dirs,
     refuse_unsafe_dir,
     run_session,
     session_args,
@@ -55,7 +58,7 @@ from .trace import trace
 
 def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]:
     """Take the launcher's own options out of argv. Returns the action
-    (run, shell, rebuild, dockerfile, net-log, net-reload or trace), the
+    (run, shell, rebuild, prune, dockerfile, net-log, net-reload or trace), the
     arguments left for claude, and the directories asked for with
     --add-dir and --add-dir-ro, each with whether it is read-only."""
     action = "run"
@@ -63,6 +66,7 @@ def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]
     added: list[tuple[str, bool]] = []
     actions = (
         "--rebuild",
+        "--prune",
         "--dockerfile",
         "--shell",
         "--net-log",
@@ -99,7 +103,8 @@ def main(argv: list[str]) -> int:
         following = "--follow" in claude_args
         return (follow if following else trace)(host, claude_args)
     if action == "net-reload":
-        start_egress_proxy()
+        with sidecars_locked(host):
+            start_egress_proxy()
         return 0
 
     image = prepare_image(settings, host)
@@ -108,11 +113,14 @@ def main(argv: list[str]) -> int:
         return 0
     if action == "rebuild":
         return build_image(image, host, "--no-cache")
+    if action == "prune":
+        return prune_images(image.tag)
 
     dirs = configured_extra_dirs(settings, host)
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
-    return session(settings, host, image, action, dirs, claude_args)
+    dirs, protected = protected_dirs(dirs, settings, host)
+    return session(settings, host, image, action, dirs, protected, claude_args)
 
 
 def session(
@@ -121,30 +129,49 @@ def session(
     image: Image,
     action: str,
     dirs: list[ExtraDir],
+    protected: list[str],
     claude_args: list[str],
 ) -> int:
     """One session from start to finish: claude, or bash for the shell
-    action, in a container of the image. Returns its exit status."""
-    env = os.environ
+    action, in a container of the image, with the directories mounted next
+    to the project and the paths in what is mounted that are read-only.
+    Returns its exit status."""
     refuse_unsafe_dir(host.project_dir, host)
     if not docker_ok("image", "inspect", image.tag):
         status = build_image(image, host)
         if status != 0:
             return status
+    prepare_claude_dir(settings, host)
+    # The name, then the network and the proxies a session leans on, before
+    # the arguments that name them
+    with container_name(host, os.environ) as name, session_network(settings, host):
+        return named_session(
+            settings, host, image, action, dirs, protected, claude_args, name
+        )
 
-    name = container_name(host, env)
+
+def named_session(
+    settings: Settings,
+    host: Host,
+    image: Image,
+    action: str,
+    dirs: list[ExtraDir],
+    protected: list[str],
+    claude_args: list[str],
+    name: str,
+) -> int:
+    """A session in the container of a name, with its network there."""
+    env = os.environ
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
-    prepare_claude_dir(settings, host)
-    # The sidecars a session leans on, before the arguments that name them
-    prepare_network(settings)
-    start_socket_proxy(settings)
     run_args = [
         *base_args(settings, host, name),
         *session_args(action, env),
         *protect_config_args(settings, host),
         *history_args(settings, host),
         *extra_dir_args(dirs),
+        *protect_args(protected),
+        *protect_env_args(protected),
         *network_args(settings, capture),
         *socket_proxy_args(settings),
         *git_config_args(host),
@@ -196,7 +223,7 @@ def session(
         finally:
             # Whatever became of the digest: this check matters more
             after = host_exec_fingerprint(watched, host.claude_dir)
-            report_tampering(before, after)
+            report_tampering(before, after, claude_dir=host.claude_dir)
             pending.unlink(missing_ok=True)
     return status
 

@@ -38,7 +38,9 @@ listed there is off.
   bug, do not go looking for them elsewhere. If on, all of it is here.
 - CLAUDE_DOCKER_SSH_AGENT (off unless 1). If on, the user's SSH agent is
   forwarded, git over SSH and ssh work with their keys, and each use of a
-  key is recorded for the user to review. If off, there are
+  key is recorded for the user to review. Only listing the keys and signing
+  work: adding or removing a key and locking the agent are refused, do not
+  try another way. If off, there are
   no SSH keys here: a push or fetch over SSH ends in "Permission denied
   (publickey)". If the user set it and it is still not listed, no agent was
   running on the host.
@@ -64,6 +66,13 @@ listed there is off.
 - CLAUDE_DOCKER_DIRS, the directories mounted next to the project. One
   marked (ro) is read-only, the user mounts it writable with --add-dir. Any
   other path of the host is not here at all, that takes --add-dir too.
+- CLAUDE_DOCKER_PROTECT, paths inside the project or a mounted directory
+  that are read-only: a change to one fails with "Read-only file system".
+  Ask the user to make it on the host.
+- ~/.claude/shell-snapshots and ~/.claude/session-env are this session's
+  own and start empty, those of other sessions are not here.
+- MCP servers the user set up on the host for every project are not here.
+  One you need is added with `claude mcp add`, ask the user first.
 - CLAUDE_DOCKER_SHADOW (not listed in the environment). Files named .env,
   .env.*, .envrc, .netrc and .pypirc, and what the user added with this
   setting, read as empty: the secrets stay on the host. That is not a bug,

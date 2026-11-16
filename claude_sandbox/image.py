@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .docker import docker
+from .docker import docker, docker_ok, docker_output
 from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 
 IMAGE_NAME = "claude-code-sandbox"
@@ -228,3 +228,29 @@ def build_image(image: Image, host: Host, *build_options: str) -> int:
             context,
             stdout=sys.stderr,
         ).returncode
+
+
+def prune_images(current: str) -> int:
+    """Remove the sandbox images that are not the one the settings ask for
+    now, current being its tag. Every edit of a part, change of the
+    selection or refreshed pin makes a new image and leaves the one
+    before, several GB each. One that
+    a container still uses is kept, docker refuses to remove it. Another
+    project's image, of other features, goes too: it is built again from
+    the layers the build cache has, the next time it is asked for."""
+    listed = docker_output(
+        "images", "--format={{.Repository}}:{{.Tag}}", IMAGE_NAME
+    ).split()
+    removed = 0
+    for tag in sorted(set(listed).difference([current])):
+        if docker_ok("rmi", tag):
+            removed += 1
+            print(f"removed  {tag}")
+        else:
+            print(f"kept     {tag}, a container uses it")
+    print(f"{removed} images removed, kept as current: {current}")
+    print(
+        "What the builds left in docker's cache is not the launcher's alone"
+        " to remove: docker builder prune"
+    )
+    return 0

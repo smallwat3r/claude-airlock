@@ -1,8 +1,15 @@
 """The session's network and the two sidecars: the egress filter and the
-Docker socket proxy."""
+Docker socket proxy.
+
+The networks and the proxies are shared by every session, of every project,
+so what is done to them is done by one launcher at a time (see
+sidecars_locked). A proxy is started by the first session that needs it and
+removed with the last one (see session_network): the socket proxy holds the
+host's Docker socket, which is not left open for no one."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import ipaddress
 import os
@@ -28,9 +35,17 @@ from .docker import (
     docker_output,
     env_arg,
     mount_arg,
+    running_containers,
 )
 from .records import NetSession, record_net_session
-from .settings import DOCKERFILE_DIR, EGRESS_PORT, Fatal, Host, Settings
+from .settings import (
+    DOCKERFILE_DIR,
+    EGRESS_PORT,
+    Fatal,
+    Host,
+    Settings,
+    private_dir,
+)
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
@@ -61,6 +76,27 @@ SOCKET_NET_SUFFIXES = {"1": "-ps", "full": "-full"}
 FILTER_NETS = (FILTER_NET, *(FILTER_NET + s for s in SOCKET_NET_SUFFIXES.values()))
 SOCKET_PROXIES = {"1": "claude-docker-ps-proxy", "full": "claude-docker-proxy"}
 DOCKER_SOCK = "/var/run/docker.sock"
+# The networks each proxy can be on, by its name: where a session that uses
+# it would be found
+PROXY_NETWORKS = {
+    EGRESS_PROXY: FILTER_NETS,
+    **{
+        proxy: (OPEN_NET + suffix, FILTER_NET + suffix)
+        for proxy, suffix in (
+            (SOCKET_PROXIES[mode], SOCKET_NET_SUFFIXES[mode]) for mode in SOCKET_PROXIES
+        )
+    },
+}
+# An internal network has no route out, but docker still gives its bridge
+# an address on it, the gateway, which is the host: whatever the host
+# listens on everywhere is reached through it, around the filter. In this
+# mode (Docker 28 and later) the bridge is given none.
+GATEWAY_MODES = (
+    "com.docker.network.bridge.gateway_mode_ipv4",
+    "com.docker.network.bridge.gateway_mode_ipv6",
+)
+ISOLATED = "isolated"
+ISOLATED_SINCE = 28
 
 
 def network_name(settings: Settings) -> str:
@@ -79,16 +115,79 @@ def socket_proxy_name(settings: Settings) -> str:
     return SOCKET_PROXIES["full" if settings.socket == "full" else "1"]
 
 
-def network_state(name: str) -> tuple[bool, set[str]] | None:
-    """Whether a network is internal and the containers on it, none for
-    one that is not there."""
+@dataclass(frozen=True)
+class NetworkState:
+    """A network as docker has it: whether it is internal, whether the
+    host is kept off it (see GATEWAY_MODES), and the containers on it."""
+
+    internal: bool
+    isolated: bool
+    containers: frozenset[str]
+
+    @property
+    def sessions(self) -> frozenset[str]:
+        """The containers on it that are not a proxy: the sessions, each
+        by the container that owns its network namespace."""
+        return self.containers - PROXY_NETWORKS.keys()
+
+
+def network_state(name: str) -> NetworkState | None:
+    """A network as docker has it, none for one that is not there."""
+    mode = f'{{{{index .Options "{GATEWAY_MODES[0]}"}}}}'
     said = docker_output(
         "network",
         "inspect",
-        "--format={{.Internal}} {{range .Containers}}{{.Name}} {{end}}",
+        # The mode with a mark, it is empty on a network without one. No
+        # name of a container holds the mark.
+        f"--format={{{{.Internal}}}} mode={mode}"
+        " {{range .Containers}}{{.Name}} {{end}}",
         name,
     ).split()
-    return (said[0] == "true", set(said[1:])) if said else None
+    if not said:
+        return None
+    containers = frozenset(word for word in said[1:] if not word.startswith("mode="))
+    return NetworkState(said[0] == "true", f"mode={ISOLATED}" in said, containers)
+
+
+def create_network(name: str, internal: bool) -> bool:
+    """Create a network, an internal one with the host kept off it where
+    docker can (see GATEWAY_MODES), as it is without where it cannot."""
+    if not internal:
+        return docker_ok("network", "create", name)
+    isolated = [f"--opt={mode}={ISOLATED}" for mode in GATEWAY_MODES]
+    return docker_ok("network", "create", "--internal", *isolated, name) or docker_ok(
+        "network", "create", "--internal", name
+    )
+
+
+def can_isolate() -> bool:
+    """Whether the docker daemon can keep the host off a network."""
+    version = docker_output("version", "--format={{.Server.Version}}")
+    major = version.strip().split(".")[0]
+    return major.isdigit() and int(major) >= ISOLATED_SINCE
+
+
+def isolate_network(name: str, state: NetworkState) -> NetworkState:
+    """Make an internal network from before the host was kept off it anew,
+    once no session is on it: docker sets this when a network is made. With
+    a session on it, it is left as it is and that is said, and so it is
+    without a word where docker cannot do this. The proxies on it are put
+    back by those who start them."""
+    if not can_isolate():
+        return state
+    if state.sessions:
+        print(
+            f"claude-docker: the docker network {name} lets a session reach what"
+            " the host listens on. It is made anew, without that, by the first"
+            " session started once none is on it.",
+            file=sys.stderr,
+        )
+        return state
+    for proxy in state.containers:
+        docker_ok("network", "disconnect", "--force", name, proxy)
+    if docker_ok("network", "rm", name) and not create_network(name, True):
+        raise Fatal(f"claude-docker: the docker network {name} was not created")
+    return network_state(name) or state
 
 
 def ensure_network(name: str, internal: bool = False) -> set[str]:
@@ -97,22 +196,23 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
     on a network with a route out would not be filtered."""
     state = network_state(name)
     if state is None:
-        created = docker_ok(
-            "network", "create", *(["--internal"] if internal else []), name
-        )
+        created = create_network(name, internal)
         # Another launcher may have been first
         state = network_state(name)
         if state is None and not created:
             raise Fatal(f"claude-docker: the docker network {name} was not created")
         if state is None:
             return set()
-    if state[0] != internal:
+        return set(state.containers)
+    if state.internal != internal:
         raise Fatal(
             f"the docker network {name} is {'not ' if internal else ''}internal,"
             f" which it has to be. Remove it once no session is on it, the"
             f" next one makes it anew: docker network rm {name}"
         )
-    return state[1]
+    if internal and not state.isolated:
+        state = isolate_network(name, state)
+    return set(state.containers)
 
 
 def sidecar_running(name: str) -> bool:
@@ -138,7 +238,9 @@ def start_sidecar(
         "--detach",
         f"--name={name}",
         f"--network={network}",
-        "--restart=unless-stopped",
+        # Should it die under its sessions. Not for longer than those: it
+        # is removed with the last of them, see session_network.
+        "--restart=on-failure",
         f"--label={SIDECAR_CONFIG_LABEL}={config}",
         *options,
         image,
@@ -211,14 +313,26 @@ def egress_proxy_current() -> bool:
 def access_log(stderr: int | None = None) -> str | None:
     """The egress proxy's log, the rotated file then the current one, None
     when it cannot be read. Read through the proxy's container, the volume
-    it is in is not reachable from the host otherwise."""
+    it is in is not reachable from the host otherwise, and when the proxy
+    is not running (no filtered session is) through one made for it."""
     current = f"{EGRESS_LOG_DIR}/access.log"
+    read = ("sh", "-c", f"cat {current}.0 2>/dev/null; cat {current}")
     log = docker(
-        "exec",
-        EGRESS_PROXY,
-        "sh",
-        "-c",
-        f"cat {current}.0 2>/dev/null; cat {current}",
+        "exec", EGRESS_PROXY, *read, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    if log.returncode == 0:
+        return log.stdout
+    # Not asked of a volume that is not there, docker would make it
+    if not docker_ok("volume", "inspect", EGRESS_LOG_VOLUME):
+        return None
+    log = docker(
+        "run",
+        "--rm",
+        "--network=none",
+        f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}:ro",
+        f"--entrypoint={read[0]}",
+        SQUID_IMAGE,
+        *read[1:],
         stdout=subprocess.PIPE,
         stderr=stderr,
     )
@@ -372,14 +486,12 @@ def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
 def net_log() -> int:
     """Print the domains the egress filter refused, most frequent first. The
     quickest way to find what a project needs added to allowed-domains.txt."""
-    if not sidecar_running(EGRESS_PROXY):
+    requests = logged_requests(stderr=subprocess.DEVNULL)
+    if requests is None:
         raise Fatal(
-            "the egress proxy is not running "
+            "the egress filter has no log yet "
             "(start a CLAUDE_DOCKER_NET_FILTER=1 session first)"
         )
-    requests = logged_requests()
-    if requests is None:
-        return 1
     denied = Counter(request.url for request in requests if request.denied)
     for url, count in sorted(denied.items(), key=lambda item: (-item[1], item[0])):
         print(f"{count:7d} {url}")
@@ -417,10 +529,92 @@ def prepare_network(settings: Settings) -> None:
         return
     if not egress_proxy_current():
         start_egress_proxy()
-    if network != FILTER_NET:
-        # Made since the proxy started, already joined otherwise
-        docker_ok("network", "connect", network, EGRESS_PROXY)
+    # Not yet when the network was made since the proxy started, or made
+    # anew (see isolate_network). Refused when it has joined already.
+    docker_ok("network", "connect", network, EGRESS_PROXY)
     rotate_access_log()
+
+
+@contextmanager
+def sidecars_locked(host: Host) -> Iterator[None]:
+    """One launcher at a time for what is done to the networks and the
+    proxies, which the sessions of every project share: two that start
+    together would each remove and start the same proxy, and one of them
+    fail."""
+    private_dir(host.state_dir)
+    descriptor = os.open(
+        os.path.join(host.state_dir, "sidecars.lock"), os.O_RDWR | os.O_CREAT, 0o600
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def session_proxies(settings: Settings) -> list[str]:
+    """The proxies a session with these settings goes through."""
+    proxies = [EGRESS_PROXY] if settings.net_filter else []
+    if socket_proxy_options(settings) is not None:
+        proxies.append(socket_proxy_name(settings))
+    return proxies
+
+
+def proxy_use_file(host: Host, proxy: str) -> int:
+    """The file a launcher holds a lock on for as long as a session of its
+    uses a proxy, opened. The lock is let go of with the launcher, however
+    it ends."""
+    directory = private_dir(os.path.join(host.state_dir, "proxies"))
+    return os.open(os.path.join(directory, proxy), os.O_RDWR | os.O_CREAT, 0o600)
+
+
+def proxy_in_use(host: Host, proxy: str) -> bool:
+    """Whether a session uses a proxy: a launcher says so (it is starting
+    one, whose container is not there yet, or has one running), or a
+    session is on one of the proxy's networks, which one that outlived
+    its launcher still is."""
+    descriptor = proxy_use_file(host, proxy)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(descriptor)
+    states = (network_state(network) for network in PROXY_NETWORKS[proxy])
+    return any(state.sessions for state in states if state)
+
+
+def remove_idle_proxies(host: Host) -> None:
+    """Remove each proxy that no session uses any more, whichever session
+    started it: one left behind by a launcher that was killed too. To be
+    called by the one launcher that may (see sidecars_locked)."""
+    for proxy in sorted(running_containers().intersection(PROXY_NETWORKS)):
+        if not proxy_in_use(host, proxy):
+            docker_ok("rm", "--force", proxy)
+
+
+@contextmanager
+def session_network(settings: Settings, host: Host) -> Iterator[None]:
+    """For as long as a session lasts: its network, made as needed, and
+    the proxies it goes through, started as needed and said to be in use.
+    When it is over, the proxies no session uses any more are removed."""
+    with sidecars_locked(host):
+        prepare_network(settings)
+        start_socket_proxy(settings)
+        uses = [proxy_use_file(host, proxy) for proxy in session_proxies(settings)]
+        for use in uses:
+            fcntl.flock(use, fcntl.LOCK_SH)
+    try:
+        yield
+    finally:
+        for use in uses:
+            os.close(use)
+        try:
+            with sidecars_locked(host):
+                remove_idle_proxies(host)
+        except (OSError, Fatal):
+            # Left for the next session to remove
+            pass
 
 
 def network_args(settings: Settings, capture: str = "") -> list[str]:

@@ -21,8 +21,8 @@ LAUNCHER = ROOT / "bin" / "claude-docker"
 # Records its arguments, fails the "does it exist" queries so everything gets
 # created (but says the containers named in FAKE_RUNNING are up, and of every
 # network what FAKE_NETWORK says: whether it is internal, then who is on it), keeps what
-# a build was given, and runs FAKE_SESSION (a shell snippet) in place of the
-# container
+# a build was given, says it is the docker of FAKE_VERSION, and runs FAKE_SESSION
+# (a shell snippet) in place of the container
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, shutil, subprocess, sys
 args = sys.argv[1:]
@@ -43,6 +43,12 @@ if args[1:2] == ["inspect"]:
     sys.exit(1)
 if args[0] == "ps":
     print(os.environ.get("FAKE_PS", ""))
+if args[0] == "images":
+    print(os.environ.get("FAKE_IMAGES", ""))
+if args[0] == "rmi" and args[1] in os.environ.get("FAKE_RUNNING_IMAGES", ""):
+    sys.exit(1)
+if args[0] == "version":
+    print(os.environ.get("FAKE_VERSION", ""))
 if args[0] == "cp" and ".procs:" in args[1]:
     if "FAKE_PROCESSES" not in os.environ:
         sys.exit(1)

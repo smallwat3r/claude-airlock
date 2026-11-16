@@ -4,6 +4,7 @@ socket proxy, the config file, the image and an installed launcher."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from harness import (
     LAUNCHER,
     ROOT,
     LauncherTest,
+    Result,
     image,
     network,
     settings,
@@ -51,6 +53,13 @@ class DefaultSessionTest(LauncherTest):
                 f"--volume={claude / item}:/home/node/.claude/{item}:ro,z", self.flags
             )
 
+    def test_what_claude_keeps_for_one_session_is_the_sessions_own(self):
+        # Sourced by every command of the session it is of, on the host too
+        for name in ("shell-snapshots", "session-env"):
+            options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
+            self.assertIn(f"--tmpfs=/home/node/.claude/{name}:{options}", self.flags)
+            self.assertTrue((self.home / ".claude" / name).is_dir())
+
     def test_container_is_hardened(self):
         for flag in (
             "--cap-drop=ALL",
@@ -75,8 +84,8 @@ class DefaultSessionTest(LauncherTest):
         for flag in off:
             self.assertIn(flag, self.flags)
         # The second session of this test, after the one of setUp
-        allowed = self.launch(CLAUDE_DOCKER_TELEMETRY="1").calls[-1]
-        self.assertEqual(allowed[0], "run")
+        calls = self.launch(CLAUDE_DOCKER_TELEMETRY="1").calls
+        allowed = [call for call in calls if call[0] == "run"][-1]
         for flag in off:
             self.assertNotIn(flag, allowed)
 
@@ -146,8 +155,14 @@ class OptionsTest(LauncherTest):
         self.assertIn("--network=claude-docker-net", result.flags)
         self.assertIn("--dns=127.0.0.1", result.flags)
         self.assertIn("--env=HTTPS_PROXY=http://claude-egress-proxy:3128", result.flags)
+        # Without the host on it, which would be a way around the filter
+        isolated = [
+            f"--opt=com.docker.network.bridge.gateway_mode_ipv{version}=isolated"
+            for version in (4, 6)
+        ]
         self.assertIn(
-            ["network", "create", "--internal", "claude-docker-net"], result.calls
+            ["network", "create", "--internal", *isolated, "claude-docker-net"],
+            result.calls,
         )
         # Waited for, a session must not start ahead of its proxy
         self.assertTrue(
@@ -181,6 +196,57 @@ class OptionsTest(LauncherTest):
             ],
         )
 
+    def test_a_filter_network_the_host_is_on_is_made_anew_once_free(self):
+        made_anew = ["network", "rm", "claude-docker-net"]
+        # From before the host was kept off it, with its proxy alone on it
+        old = "true mode= claude-egress-proxy"
+
+        def filtered(network: str, version: str) -> Result:
+            (self.work / "log").unlink(missing_ok=True)
+            result = self.launch(
+                CLAUDE_DOCKER_NET_FILTER="1", FAKE_NETWORK=network, FAKE_VERSION=version
+            )
+            self.assertEqual(result.status, 0, result.stderr)
+            return result
+
+        calls = filtered(old, "29.1.0").calls
+        self.assertIn(made_anew, calls)
+        off = ["network", "disconnect", "--force", "claude-docker-net"]
+        self.assertIn([*off, "claude-egress-proxy"], calls)
+        # Not under a session, which is said
+        busy = filtered(old + " claude-other.capture", "29.1.0")
+        self.assertNotIn(made_anew, busy.calls)
+        self.assertIn("lets a session reach what the host listens on", busy.stderr)
+        # Not where docker cannot, and not when it is so already
+        self.assertNotIn(made_anew, filtered(old, "27.5.1").calls)
+        self.assertNotIn(made_anew, filtered("true mode=isolated", "29.1.0").calls)
+
+    def test_a_proxy_is_removed_with_the_last_session_that_uses_it(self):
+        proxies = "claude-docker-ps-proxy\nclaude-egress-proxy\nclaude-other"
+
+        def removed(**env: str) -> list[str]:
+            (self.work / "log").unlink(missing_ok=True)
+            calls = self.launch(FAKE_PS=proxies, **env).calls
+            return [call[-1] for call in calls if call[:2] == ["rm", "--force"]]
+
+        # Whichever session started them, and nothing that is not a proxy
+        self.assertEqual(removed(), ["claude-docker-ps-proxy", "claude-egress-proxy"])
+        # Not under a session on a network of theirs
+        self.assertEqual(removed(FAKE_NETWORK="false claude-other.capture"), [])
+        # Nor while another launcher says it uses one, its session yet to start
+        in_use = self.state / "proxies" / "claude-egress-proxy"
+        with open(in_use, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_SH)
+            self.assertEqual(removed(), ["claude-docker-ps-proxy"])
+
+    def test_two_launchers_do_not_take_the_same_name(self):
+        self.assertIn("--name=claude-proj", self.launch().flags)
+        (self.work / "log").unlink()
+        # Another launcher has the name, its container is yet to start
+        with open(self.state / "names" / "claude-proj", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertIn("--name=claude-proj-2", self.launch().flags)
+
     def test_what_claude_follows_cannot_be_written_or_created(self):
         flags = self.launch().flags
         claude = self.home / ".claude"
@@ -196,7 +262,12 @@ class OptionsTest(LauncherTest):
             )
 
     def test_the_seeded_config_leaves_the_other_projects_out(self):
-        config = {"theme": "dark", "projects": {"/home/me/other": {"mcpServers": {}}}}
+        config = {
+            "theme": "dark",
+            "projects": {"/home/me/other": {"mcpServers": {}}},
+            # With what they are started with, a token as often as not
+            "mcpServers": {"tracker": {"command": "x", "env": {"TOKEN": "secret"}}},
+        }
         (self.home / ".claude.json").write_text(json.dumps(config))
         self.launch()
         seeded = self.home / ".claude" / ".claude.json"
@@ -308,6 +379,33 @@ class ExtraDirsTest(LauncherTest):
         self.assertIn(f"--volume={self.ref}:{self.ref}:z", flags)
         self.assertIn(f"--volume=/dev/null:{self.ref / '.env'}:ro", flags)
 
+    def test_a_protected_path_is_read_only_inside_what_is_mounted(self):
+        kit = self.shared / "kit"
+        kit.mkdir(parents=True)
+        (self.project / "docs").mkdir()
+        self.write_config(f"CLAUDE_DOCKER_PROTECT=~/claude-shared/kit:{self.ref}")
+        flags = self.launch(
+            "--add-dir", "~/ref", CLAUDE_DOCKER_PROTECT="docs:~/not-mounted"
+        ).flags
+        # In the shared directory and in the project, on top of them
+        self.assertIn(f"--volume={self.shared}:{self.shared}:z", flags)
+        for inside in (kit, self.project / "docs"):
+            self.assertIn(f"--volume={inside}:{inside}:ro,z", flags)
+        # A mounted directory itself is mounted read-only, once
+        self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", flags)
+        self.assertNotIn(f"--volume={self.ref}:{self.ref}:z", flags)
+        # What is not mounted is not brought in
+        self.assertFalse([flag for flag in flags if "not-mounted" in flag])
+        self.assertIn(
+            f"--env=CLAUDE_DOCKER_PROTECT={kit}:{self.project / 'docs'}", flags
+        )
+
+    def test_a_protected_path_that_could_be_made_inside_is_refused(self):
+        result = self.launch(CLAUDE_DOCKER_PROTECT="docs")
+        self.assert_refused(result, "cannot protect docs: it does not exist")
+        result = self.launch(CLAUDE_DOCKER_PROTECT=str(self.home / "proj"))
+        self.assert_refused(result, "the project is in it")
+
     def test_home_directory_is_refused(self):
         result = self.launch(cwd=self.home)
         self.assert_refused(result, "it would defeat the sandbox")
@@ -387,6 +485,22 @@ class ConfigFileTest(LauncherTest):
 
 
 class ImageTest(LauncherTest):
+    def test_prune_removes_the_images_of_before(self):
+        current = self.launch().image
+        old, used = "claude-code-sandbox:0ld", "claude-code-sandbox:u5ed"
+        result = self.launch(
+            "--prune",
+            FAKE_IMAGES=f"{old}\n{current}\n{used}",
+            FAKE_RUNNING_IMAGES=used,
+        )
+        self.assertEqual(result.status, 0, result.stderr)
+        removed = [call[1] for call in result.calls if call[0] == "rmi"]
+        # Never the one the settings ask for now, never by force
+        self.assertEqual(removed, [old, used])
+        self.assertIn(f"removed  {old}", result.stdout)
+        self.assertIn(f"kept     {used}, a container uses it", result.stdout)
+        self.assertIn(f"1 images removed, kept as current: {current}", result.stdout)
+
     def test_feature_names_cannot_escape_the_directory(self):
         result = self.launch(CLAUDE_DOCKER_FEATURES="../../etc/passwd")
         self.assert_refused(result, "invalid feature name")

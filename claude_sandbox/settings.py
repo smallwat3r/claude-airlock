@@ -35,6 +35,7 @@ CONFIG_FILE_SETTINGS = frozenset(
         "RW_CONFIG",
         "SHARED_HISTORY",
         "SHADOW",
+        "PROTECT",
         "MEMORY",
         "PIDS",
         "CACHE",
@@ -83,6 +84,8 @@ class Settings:
     rw_config: bool = False
     shared_history: bool = False
     shadow: tuple[str, ...] = ()
+    # Paths that are read-only in every session that has them mounted
+    protect: tuple[str, ...] = ()
     memory: str = "16g"
     pids: str = "512"
     cache: bool = True
@@ -157,6 +160,12 @@ class Host:
     def pending_checks_dir(self) -> str:
         # A session's starting point for the check of tamper.py
         return os.path.join(self.state_dir, "pending-checks")
+
+    @property
+    def names_dir(self) -> str:
+        # The names the running launchers have claimed for their sessions,
+        # see container_name in session.py
+        return os.path.join(self.state_dir, "names")
 
     @property
     def net_sessions_file(self) -> str:
@@ -260,6 +269,13 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     def colon_list(name: str) -> tuple[str, ...]:
         return tuple(item for item in (raw(name) or "").split(":") if item)
 
+    def both_lists(name: str) -> tuple[str, ...]:
+        # Of the file and of the environment: what one protects, the other
+        # does not take back
+        key = SETTING_PREFIX + name
+        said = f"{file_values.get(key, '')}:{env.get(key, '')}"
+        return tuple(dict.fromkeys(item for item in said.split(":") if item))
+
     return Settings(
         features=raw("FEATURES"),
         net_filter=flag("NET_FILTER", defaults.net_filter),
@@ -271,6 +287,7 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         rw_config=flag("RW_CONFIG", defaults.rw_config),
         shared_history=flag("SHARED_HISTORY", defaults.shared_history),
         shadow=colon_list("SHADOW"),
+        protect=both_lists("PROTECT"),
         memory=text("MEMORY", defaults.memory),
         pids=text("PIDS", defaults.pids),
         cache=flag("CACHE", defaults.cache),

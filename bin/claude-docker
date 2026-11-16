@@ -7,6 +7,7 @@ with the project directory mounted read-write and ~/.claude persisted.
   claude-docker [--add-dir DIR]... [--add-dir-ro DIR]... [claude args]...
   claude-docker --shell [bash args]   bash in the same sandbox, not claude
   claude-docker --rebuild        force a clean image rebuild, then exit
+  claude-docker --prune          remove the sandbox images of before, then exit
   claude-docker --dockerfile     print the generated Dockerfile, then exit
   claude-docker --net-log        domains the egress filter denied, then exit
   claude-docker --net-reload     restart the egress filter, then exit
@@ -48,6 +49,8 @@ Environment, all optional:
   CLAUDE_DOCKER_SHARED_HISTORY  1 lets a session see what Claude Code
                             remembers of other projects
   CLAUDE_DOCKER_SHADOW      extra file name globs to hide, colon separated
+  CLAUDE_DOCKER_PROTECT     paths that are read-only wherever they are
+                            mounted, colon separated
   CLAUDE_DOCKER_MEMORY      memory limit
   CLAUDE_DOCKER_PIDS        process limit
   CLAUDE_DOCKER_CACHE       0 keeps ~/.cache on a tmpfs, nothing persists
