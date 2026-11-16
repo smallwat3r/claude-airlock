@@ -238,6 +238,10 @@ that ended without it (a killed Emacs buffer) is collected by the next
 
 ## What the sandbox does
 
+![The launcher on the host starts the session container and a capture
+sidecar that share one network namespace, the egress proxy and the Docker
+socket proxy are opt-in](docs/architecture.excalidraw.png)
+
 - Mounts the project directory (and any extra directories) read-write at
   their host paths, plus `~/.claude` so login, settings and history persist.
   `~/.claude/settings.json` and `~/.claude/hooks` are read-only on top: they
@@ -342,11 +346,11 @@ directory of the same name holding files the fragment copies in:
 | `cpp` | cmake, clangd |
 | `docker` | Docker CLI, for `CLAUDE_DOCKER_SOCKET` |
 | `docs` | pandoc, poppler-utils, qpdf, gnuplot |
+| `excalidraw` | `excalidraw-export`, renders an [Excalidraw](https://excalidraw.com) scene to PNG or SVG offline, and takes the scene back out of one. Brings in `playwright` for its headless Chromium |
 | `font` | fontforge, fonttools, ttfautohint, woff2, fontconfig and the Ocrab font |
 | `go` | Go, gopls |
 | `kicad` | KiCad 9 with `kicad-cli` |
 | `loadtest` | wrk, hey, for HTTP load testing |
-| `excalidraw` | `excalidraw-export`, renders an [Excalidraw](https://excalidraw.com) scene to PNG or SVG offline, and takes the scene back out of one. Brings in `playwright` for its headless Chromium |
 | `media` | ffmpeg, ImageMagick, webp |
 | `playwright` | Playwright (Python) with headless Chromium |
 | `python` | mypy, ruff, black, pytest, ipython, pyright (Python 3 and uv are already in the base) |
@@ -377,16 +381,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 ```
 
-The `# claude:` lines of the parts that were built are baked into the image
-as system-level memory, so Claude always knows exactly what is installed.
-
-The image tag is a hash of the generated Dockerfile, so changing the
-selection or editing a part rebuilds on the next start, reusing cached
 A fragment that needs files finds those of a `NAME` directory next to it in
 the build context, as `COPY NAME/file ...`. One that needs another feature
 names it on a `# requires: other` line, and selecting the first then builds
 both.
 
+The `# claude:` lines of the parts that were built are baked into the image
+as system-level memory, so Claude always knows exactly what is installed.
+
+The image tag is a hash of the generated Dockerfile, so changing the
+selection or editing a part rebuilds on the next start, reusing cached
 layers, and each feature set keeps its own image. Old ones pile up, list
 them with `docker images claude-code-sandbox` and remove what you no longer
 use.
