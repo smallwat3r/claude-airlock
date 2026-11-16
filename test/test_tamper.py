@@ -71,6 +71,24 @@ class TamperingTest(LauncherTest):
         ):
             self.assertIn(f"  {path}\n", result.stderr)
 
+    def test_a_changed_plugin_is_reported_by_its_directory(self):
+        # Plugins stay writable, Claude Code updates them itself
+        plugin = self.home / ".claude" / "plugins" / "cache" / "market" / "tool"
+        (plugin / "1.0" / "hooks").mkdir(parents=True)
+        (plugin / "1.0" / "hooks" / "hooks.json").write_text("{}")
+        (self.home / ".claude" / "plugins" / "installed_plugins.json").write_text("{}")
+        result = self.launch(
+            session=f'echo x > "{plugin}/1.0/hooks/hooks.json";'
+            f' echo x > "{plugin}/1.0/hooks/run.sh";'
+            ' echo x > "$HOME/.claude/plugins/installed_plugins.json"'
+        )
+        self.assertIn(self.REPORT, result.stderr)
+        self.assertIn(f"  {plugin}/ (2 files)\n", result.stderr)
+        self.assertIn(
+            f"  {self.home}/.claude/plugins/installed_plugins.json\n", result.stderr
+        )
+        self.assertNotIn("hooks.json", result.stderr)
+
     def test_a_link_to_a_directory_is_reported_and_not_followed(self):
         result = self.launch(session="mkdir .claude; ln -s / .claude/skills")
         self.assertIn(f"  {self.project}/.claude/skills\n", result.stderr)

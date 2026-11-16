@@ -37,6 +37,22 @@ PROJECT_TREES = (
 # unless CLAUDE_DOCKER_RW_CONFIG=1 leaves it writable.
 CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
+# What is watched there and cannot be protected: Claude Code updates its
+# plugins itself, so they stay writable, and a plugin brings hooks, servers
+# and instructions that the host's claude runs and follows too. The
+# plugins as installed, where they are installed from, and the two files
+# that say which those are. Not the rest of plugins, which is what Claude
+# Code notes for itself and rewrites in every session.
+CONFIG_WATCHED_TREES = ("plugins/cache", "plugins/marketplaces")
+CONFIG_WATCHED_FILES = (
+    "plugins/installed_plugins.json",
+    "plugins/known_marketplaces.json",
+)
+# A plugin is many files, and an update changes most of them: the changed
+# files under a watched tree are named by their directory this far down,
+# with how many they are. That is the plugin: where it is from, then its
+# name.
+WATCHED_TREE_DEPTH = 2
 # The files whose commands are followed to the scripts they name
 COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
 # No more of a file than this is read. Which files are hashed is partly up
@@ -87,6 +103,19 @@ def file_hash(path: str) -> str:
     except OSError:
         return "unreadable"
     return digest.hexdigest()
+
+
+def file_stamp(path: str) -> str:
+    """What tells a file from one written since, without reading it: where
+    it is, how long, and when it and what is known of it last changed. The
+    last of those is the system's to set, a session cannot put it back. For
+    the trees with too much in them to hash at every start and end of a
+    session."""
+    try:
+        about = os.lstat(path)
+    except OSError:
+        return "unreadable"
+    return f"{about.st_ino}:{about.st_size}:{about.st_mtime_ns}:{about.st_ctime_ns}"
 
 
 def tree_files(root: str) -> list[str]:
@@ -227,7 +256,8 @@ def host_exec_fingerprint(
     mounted directory: the git config and hooks, of its submodules too,
     Claude's settings and the scripts they name, and its instructions
     (CLAUDE.md, skills, agents, commands, rules). In ~/.claude the same,
-    most of which is read-only in a session. They have to stay writable for
+    most of which is read-only in a session, and the plugins, which are
+    not and are told apart by file_stamp. They have to stay writable for
     git and claude to work, so instead of locking them the launcher compares
     this before and after a session (see report_tampering). Not seen: a
     CLAUDE.md below the top of a project, and what a script goes on to
@@ -246,25 +276,54 @@ def host_exec_fingerprint(
             watched += tree_files(moved)
         watched += claude_files(directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES)
     if claude_dir:
-        watched += claude_files(
-            claude_dir, CONFIG_FILES, CONFIG_TREES, ("settings.json",)
-        )
+        files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
+        watched += claude_files(claude_dir, files, CONFIG_TREES, ("settings.json",))
     for path in watched:
         if os.path.isfile(path) or os.path.islink(path):
             fingerprint[path] = file_hash(path)
+    for name in CONFIG_WATCHED_TREES if claude_dir else ():
+        for path in tree_files(os.path.join(claude_dir, name)):
+            fingerprint[path] = file_stamp(path)
     return fingerprint
 
 
+def named_changes(changed: list[str], claude_dir: str) -> list[str]:
+    """The changed files as they are named in the report: each by its
+    path, those under a watched tree of ~/.claude by their directory
+    WATCHED_TREE_DEPTH down, with how many of them changed there."""
+    roots = [
+        os.path.join(claude_dir, name) + os.sep
+        for name in (CONFIG_WATCHED_TREES if claude_dir else ())
+    ]
+    named: dict[str, int] = {}
+    for path in changed:
+        root = next((root for root in roots if path.startswith(root)), "")
+        parts = path[len(root) :].split(os.sep) if root else []
+        if len(parts) > WATCHED_TREE_DEPTH:
+            path = root + os.sep.join(parts[:WATCHED_TREE_DEPTH]) + os.sep
+        named[path] = named.get(path, 0) + 1
+    return [
+        f"{path} ({count} files)" if path.endswith(os.sep) else path
+        for path, count in named.items()
+    ]
+
+
 def report_tampering(
-    before: dict[str, str], after: dict[str, str], unchecked: str = ""
+    before: dict[str, str],
+    after: dict[str, str],
+    unchecked: str = "",
+    claude_dir: str = "",
 ) -> None:
-    """Name the files that differ. unchecked is the name of an earlier
-    session that ended without this check, when the report is the late one
-    for it."""
-    changed = sorted(
-        path
-        for path in before.keys() | after.keys()
-        if before.get(path) != after.get(path)
+    """Name the files that differ, see named_changes for how. unchecked
+    is the name of an earlier session that ended without this check, when
+    the report is the late one for it."""
+    changed = named_changes(
+        sorted(
+            path
+            for path in before.keys() | after.keys()
+            if before.get(path) != after.get(path)
+        ),
+        claude_dir,
     )
     if not changed:
         return
@@ -332,5 +391,5 @@ def report_unchecked_sessions(directory: Path) -> None:
         if session_alive(launcher, file.stem):
             continue
         after = host_exec_fingerprint(watched, claude_dir)
-        report_tampering(before, after, unchecked=file.stem)
+        report_tampering(before, after, unchecked=file.stem, claude_dir=claude_dir)
         file.unlink(missing_ok=True)
