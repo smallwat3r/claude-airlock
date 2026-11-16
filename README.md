@@ -37,7 +37,7 @@ claude-docker --add-dir ~/code/api  # mount a second project read-write
 claude-docker --add-dir-ro ~/code/lib   # mount reference code read-only
 claude-docker --worktree feature-x  # second session on its own git worktree
 claude-docker --rebuild             # clean image rebuild, then exit
-claude-docker --prune               # remove the images of before, then exit
+claude-docker --prune               # delete all sandbox images but the current one
 claude-docker --dockerfile          # print the generated Dockerfile, then exit
 claude-docker --shell               # bash in the same sandbox, to look around
 claude-docker --net-log             # domains the egress filter denied
