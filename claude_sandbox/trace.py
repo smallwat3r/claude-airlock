@@ -13,10 +13,12 @@ all. On a terminal an event says so once, on its first line, see Layout.
 The header lines start with a #. With --json it is JSON Lines instead, an
 object per event, for jq or a database.
 
-The transcript is written from inside the sandbox, so it is a convenience
-for review and not an audit log, a session could rewrite its own. For the
-same reason nothing in it is trusted here: control characters are dropped
-before anything is printed. The network record is the launcher's own."""
+The transcript is written from inside the sandbox, a session could rewrite
+its own. The launcher copies it as it is written (see recorder.py), and
+what the copy has that the transcript no longer does is shown as removed.
+Nothing in a transcript is trusted here: control characters are dropped
+before anything is printed. The network record, the record of processes
+and that of the SSH agent and Docker socket are the launcher's own."""
 
 from __future__ import annotations
 
@@ -37,9 +39,12 @@ from pathlib import Path
 from typing import Any
 
 from .capture import cut_short
+from .doors import door_events
 from .events import Event, Who, clean, flat
 from .network import ProxyRequest, logged_requests
-from .pcap import Capture, Connection, Lookup, Request, read_capture
+from .pcap import Capture, Connection, Flow, Lookup, Request, read_capture
+from .processes import ProcessRecord, read_record, shown_lineage
+from .recorder import compare
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
 from .transcript import (
@@ -67,6 +72,8 @@ DURING_WIDTH = 60
 TIMELINE_SLACK = 30.0
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
+# Of the command line of a process seen to run
+PROCESS_WIDTH = 200
 PORT_USES = {
     22: "ssh",
     53: "dns",
@@ -119,7 +126,8 @@ def over(transport: str, port: int) -> str:
     if port in PORT_USES:
         return f"{transport}/{PORT_USES[port]}"
     try:
-        return f"{transport}/{socket.getservbyport(port, 'tcp')}"
+        named_for = "udp" if transport == "udp" else "tcp"
+        return f"{transport}/{socket.getservbyport(port, named_for)}"
     except (OSError, OverflowError):
         return transport
 
@@ -202,12 +210,17 @@ def proxy_requests(
     return proxy_summary(requests, sessions), [proxy_event(r) for r in requests]
 
 
-def reached(capture: Capture, address: str, port: int) -> str:
+def reached(capture: Capture, address: str, port: int, transport: str = "tcp") -> str:
     """A destination as shown: tcp/https name (address):port, the name
-    left out when the capture has none for the address."""
+    left out when the capture has none for the address, the port for a
+    protocol without ports. An IPv6 address is in brackets ahead of one."""
     known = capture.names.get(address)
-    where = f"{known} ({address})" if known else address
-    return clean(f"{over('tcp', port)} {where}:{port}")
+    if port:
+        literal = f"[{address}]" if ":" in address else address
+        where = f"{known} ({address}):{port}" if known else f"{literal}:{port}"
+    else:
+        where = f"{known} ({address})" if known else address
+    return clean(f"{over(transport, port)} {where}")
 
 
 def how_it_went(connection: Connection, outcome: str) -> str:
@@ -255,6 +268,38 @@ def connection_event(
     return Event(when, Who.SANDBOX, "net", [detail], fields)
 
 
+def flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
+    """What was sent to one place by another protocol than TCP, as an
+    event at the time of the first packet. Of a capture that is all there
+    it says how much went out, live just that it started."""
+    protocol = over(flow.transport, flow.port)
+    fields: dict = {
+        "protocol": protocol,
+        "name": capture.names.get(flow.address),
+        "address": flow.address,
+        "port": flow.port,
+    }
+    detail = reached(capture, flow.address, flow.port, flow.transport)
+    if live:
+        fields["stage"] = "open"
+    else:
+        fields.update(packets=flow.packets, bytes_out=flow.sent)
+        detail += f"  {sent_by(flow)}"
+    return Event(flow.when, Who.SANDBOX, "net", [detail], fields)
+
+
+def sent_by(flow: Flow) -> str:
+    packets = f"{flow.packets} packet{'s' if flow.packets > 1 else ''}"
+    return f"{packets}, {size(flow.sent)} out"
+
+
+def flag_event(why: str, lookup: Lookup) -> Event:
+    """A lookup that stands out, see pcap.py for what makes one."""
+    fields = {"name": lookup.name, "type": lookup.kind, "flagged": why}
+    detail = clean(f"lookup {lookup.name} {lookup.kind} FLAGGED: {why}")
+    return Event(lookup.when, Who.SANDBOX, "dns", [detail], fields)
+
+
 def request_event(request: Request) -> Event:
     """A plain HTTP request, which unlike one over TLS can be read."""
     fields = {
@@ -293,7 +338,12 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         f"  {destination} x{count[destination]}"
         for destination in sorted(count, key=lambda to: (-count[to], to))
     ]
-    if not count:
+    lines += [
+        f"  {reached(capture, flow.address, flow.port, flow.transport)}"
+        f"  {sent_by(flow)}"
+        for flow in sorted(capture.flows, key=lambda flow: -flow.sent)
+    ]
+    if not count and not capture.flows:
         lines.append("  no connection")
     failed = sum(connection.failed for connection in capture.connections)
     if failed:
@@ -304,21 +354,27 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
     if names:
         hint = "" if verbose else ", each one shown with --verbose"
         lines.append(f"  dns {len(names)} names looked up{hint}")
+    if capture.flagged:
+        lines.append(f"  dns {len(capture.flagged)} lookups FLAGGED, see --failed")
     if cut_short(capture):
         lines.append("  STOPPED at its packet limit, what came later is missing")
     return lines
 
 
 def capture_events(
-    capture: Capture, verbose: bool, past: tuple[int, int, int, int] | None = None
+    capture: Capture,
+    verbose: bool,
+    past: tuple[int, int, int, int, int, int] | None = None,
 ) -> list[Event]:
-    """One event per connection and per plain HTTP request, with --verbose
-    also per answer of the resolver. Of a capture that is all there, a
-    connection says how it went. Of one read as it grows, past being its
-    marks at the last reading, only what came since: a connection when it
-    starts, and what became of it as an event of its own."""
+    """One event per connection, per place something was sent to by
+    another protocol, per plain HTTP request and per lookup that stands
+    out, with --verbose also per answer of the resolver. Of a capture that
+    is all there, a connection says how it went. Of one read as it grows,
+    past being its marks at the last reading, only what came since: a
+    connection when it starts, and what became of it as an event of its
+    own."""
     live = past is not None
-    started, ended, looked_up, asked = past or (0, 0, 0, 0)
+    started, ended, looked_up, asked, sent, flagged = past or (0, 0, 0, 0, 0, 0)
     events = [
         connection_event(capture, connection, live)
         for connection in capture.connections[started:]
@@ -329,17 +385,92 @@ def capture_events(
             for when, what, connection in capture.endings[ended:]
         ]
     events += [request_event(request) for request in capture.requests[asked:]]
+    events += [flow_event(capture, flow, live) for flow in capture.flows[sent:]]
+    events += [flag_event(why, lookup) for why, lookup in capture.flagged[flagged:]]
     if verbose:
         events += [lookup_event(lookup) for lookup in capture.lookups[looked_up:]]
     return events
 
 
+def processes_of(
+    host: Host, session: NetSession, watched: list[NetSession]
+) -> ProcessRecord | None:
+    """The record of the processes of a session, none when there is no
+    such record or it is no longer kept: the one of the same container
+    that ran at the same time."""
+    for noted in watched:
+        if (
+            noted.name == session.name
+            and noted.start <= session.until
+            and noted.until >= session.start
+        ):
+            try:
+                return read_record(Path(host.process_records_dir, noted.processes))
+            except OSError:
+                return None
+    return None
+
+
+def name_processes(events: list[Event], record: ProcessRecord) -> None:
+    """Say of each connection which process made it, where one was noted
+    to hold it: by its ports, so this is not a guess by the clock."""
+    for event in events:
+        fields = event.fields
+        if event.what != "net" or "source_port" not in fields:
+            continue
+        lineage = record.holder(
+            fields["source_port"], fields["address"], fields["port"], event.when
+        )
+        if not lineage:
+            continue
+        made_it = lineage[0]
+        fields["process"] = {
+            "pid": made_it.pid,
+            "exe": made_it.program,
+            "argv": list(made_it.argv),
+            "parents": [parent.name for parent in lineage[1:]],
+        }
+        event.details[0] += f"  by: {clean(shown_lineage(lineage))}"
+
+
+def process_events(record: ProcessRecord) -> list[Event]:
+    """One event per process that was seen to run, or to become another
+    program. What a process says it is, is its own to choose."""
+    events = []
+    for process in record.processes:
+        parent = record.process(process.parent, process.when)
+        details = [flat(f"[{process.pid}] {process.command}")[:PROCESS_WIDTH]]
+        if process.program:
+            details.append("exe: " + flat(process.program))
+        if parent:
+            details.append(flat(f"parent: [{parent.pid}] {parent.name}"))
+        fields = {
+            "pid": process.pid,
+            "ppid": process.parent,
+            "exe": process.program,
+            "argv": list(process.argv),
+        }
+        events.append(Event(process.when, Who.SANDBOX, "exec", details, fields))
+    return events
+
+
+def process_summary(record: ProcessRecord, verbose: bool) -> list[str]:
+    hint = "" if verbose else ", each one shown with --verbose"
+    lines = [f"  processes {len(record.processes)} seen to run{hint}"]
+    if record.full:
+        lines.append("  the record of them STOPPED at its size limit")
+    if record.unreadable:
+        lines.append("  which process made a connection could not be seen")
+    return lines
+
+
 def captured_connections(
-    host: Host, session: NetSession, verbose: bool
+    host: Host, session: NetSession, verbose: bool, record: ProcessRecord | None
 ) -> tuple[list[str], list[Event]]:
     """What a captured session connected to, as summary lines and as
-    events. Of the container's whole stay, a capture is not tied to one
-    transcript."""
+    events, each connection with the process that made it when a record
+    of the session's processes tells. Of the container's whole stay, a
+    capture is not tied to one transcript."""
     began = datetime.fromtimestamp(session.start)
     ended = datetime.fromtimestamp(session.until)
     name = clean(session.name)
@@ -348,38 +479,54 @@ def captured_connections(
         capture = read_capture(Path(host.captures_dir, session.capture))
     except OSError:
         return [heading, "  its capture is no longer kept"], []
-    return [heading, *capture_summary(capture, verbose)], capture_events(
-        capture, verbose
-    )
+    events = capture_events(capture, verbose)
+    if record:
+        name_processes(events, record)
+    return [heading, *capture_summary(capture, verbose)], events
 
 
 def network(
     host: Host, entries: list[dict], verbose: bool
 ) -> tuple[list[str], list[Event]]:
-    """What the session did on the network, from what the launcher kept of
-    it: the egress proxy's log for a filtered session, a capture for one
-    run without CLAUDE_DOCKER_NET_LOG=0."""
+    """What the session did on the network and what ran in it, from what
+    the launcher kept: the egress proxy's log for a filtered session, a
+    capture for one run without CLAUDE_DOCKER_NET_LOG=0, and the record
+    of its processes for one run without CLAUDE_DOCKER_PROC_LOG=0."""
     times = [when.timestamp() for when in entry_times(entries)]
     if not times:
         return [], []
     start, end = times[0], times[-1]
     sessions = recorded_sessions(host, start, end)
-    if not sessions:
-        return [
-            "network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
-        ], []
     filtered = [session for session in sessions if session.ip]
     captured = [session for session in sessions if session.capture]
+    watched = [session for session in sessions if session.processes]
     found = [proxy_requests(filtered, start, end)] if filtered else []
-    found += [captured_connections(host, session, verbose) for session in captured]
-    lines = ["network", *(line for some, _ in found for line in some)]
-    return lines, [event for _, events in found for event in events]
+    found += [
+        captured_connections(
+            host, session, verbose, processes_of(host, session, watched)
+        )
+        for session in captured
+    ]
+    lines = (
+        ["network", *(line for some, _ in found for line in some)]
+        if found
+        else ["network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"]
+    )
+    events = [event for _, events in found for event in events]
+    for session in watched:
+        record = processes_of(host, session, [session])
+        if record:
+            lines += process_summary(record, verbose)
+            events += process_events(record) if verbose else []
+    return lines, events
 
 
 def went_wrong(event: Event) -> bool:
     """Whether an event tells of something gone wrong: a call that failed,
     a write outside the project, a request the filter refused, a
-    connection that was refused or not answered, a lookup that failed."""
+    connection that was refused or not answered, a lookup that failed or
+    that stands out, a use of the SSH agent it refused, and what was taken
+    out of the transcript."""
     fields = event.fields
     return bool(
         fields.get("failed")
@@ -387,6 +534,8 @@ def went_wrong(event: Event) -> bool:
         or fields.get("denied")
         or fields.get("outcome") in ("refused", "no answer")
         or fields.get("error")
+        or fields.get("flagged")
+        or fields.get("removed")
     )
 
 
@@ -401,6 +550,8 @@ def alerting(event: Event, line: str) -> bool:
         or fields.get("denied")
         or fields.get("outcome") in ("refused", "no answer")
         or fields.get("error")
+        or fields.get("flagged")
+        or fields.get("removed")
     )
 
 
@@ -542,6 +693,16 @@ class Timeline:
         event.details[0] += f"  during: {latest.label}{more}"
 
 
+def removed_events(gone: list[dict], project_dir: str, verbose: bool) -> list[Event]:
+    """The events of the entries the launcher copied and the transcript
+    no longer has, each said to have been removed."""
+    events = transcript_events(gone, project_dir, verbose)
+    for event in events:
+        event.details[0] += "  REMOVED FROM THE TRANSCRIPT"
+        event.fields["removed"] = True
+    return events
+
+
 def session_events(
     path: Path, host: Host, verbose: bool, chosen: Filter = EVERYTHING
 ) -> tuple[list[str], list[Event]]:
@@ -551,16 +712,26 @@ def session_events(
     chosen ones."""
     entries = read_entries(path)
     project_dir = project_root(path, host)
+    compared = compare(host, path)
     net_lines, net_events = network(host, entries, verbose)
+    times = [when.timestamp() for when in entry_times(entries)]
+    door_lines, door_uses = (
+        door_events(host, times[0], times[-1]) if times else ([], [])
+    )
     header = [
         f"session     {flat(path.stem)}  {title(entries)}",
+        *compared.header(),
         *summary(entries, project_dir),
         *net_lines,
+        *door_lines,
         *chosen.header(),
     ]
     # Stable, so what the transcript has at the same time keeps its order
     events = sorted(
-        transcript_events(entries, project_dir, verbose) + net_events,
+        transcript_events(entries, project_dir, verbose)
+        + removed_events(compared.gone, project_dir, verbose)
+        + net_events
+        + door_uses,
         key=lambda event: event.when,
     )
     timeline = Timeline()

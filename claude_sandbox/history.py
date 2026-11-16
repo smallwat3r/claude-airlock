@@ -1,0 +1,146 @@
+"""Keeping what Claude Code remembers of other projects out of a session.
+
+~/.claude is mounted whole, Claude Code needs its login, settings and the
+project's own past there. It also holds the past of every other project:
+their transcripts (every prompt, command output and file that was read),
+the prompts typed anywhere, what was pasted, and the copies of edited files
+that rewinding uses. A session has no use for those of another project, and
+one that went wrong could read them all, so unless
+CLAUDE_DOCKER_SHARED_HISTORY=1 they are left out:
+
+- In projects, the directory of every other project is covered by an empty
+  one. The project's own stay, with those of its worktrees. Covered and not
+  left out, so that a directory Claude Code makes while the session runs
+  (for a new worktree) is a real one on the host. The cost is that a
+  project first used after the session started is not covered in it.
+- The prompt history, the paste cache and the file history are kept per
+  project by the launcher and mounted in place of the shared ones, the
+  prompt history starting from the project's own lines of the shared one.
+  Sandboxed sessions of a project share them, the host's claude does not
+  see them: it cannot rewind the files of a session run in here.
+
+Directories mounted next to the project (--add-dir) do not bring their
+history along: a directory holds what is in it now, its history also what
+was typed, pasted and read there."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+
+from .docker import docker_safe_name, env_arg, mount_arg
+from .session import CONTAINER_HOME
+from .settings import Host, Settings, private_dir
+from .transcript import project_roots, transcript_dirs
+
+# What Claude Code names the transcripts of a worktree after: the project's
+# own name, then its path below the project (.claude/worktrees/NAME) dashed
+WORKTREE_MARK = "--claude-worktrees-"
+# Kept per project, as directories
+PER_PROJECT_DIRS = ("file-history", "paste-cache")
+# The prompts typed in every project, a line each that names its project.
+# Claude Code adds to it in place, so one file can be mounted over it.
+PROMPT_HISTORY = "history.jsonl"
+# A name that can be spelled in a mount. Claude Code's own are, another is
+# something a session put there, which holds nothing of another project.
+_MOUNTABLE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def own_names(host: Host) -> set[str]:
+    """The names of the project's transcript directories."""
+    return {directory.name for directory in transcript_dirs(host)}
+
+
+def is_own(name: str, own: set[str]) -> bool:
+    """Whether a directory of projects is the project's, or a worktree's
+    of it."""
+    return any(name == mine or name.startswith(mine + WORKTREE_MARK) for mine in own)
+
+
+def other_projects(host: Host) -> list[str]:
+    """The directories of projects that are another project's, by name."""
+    projects = Path(host.claude_dir, "projects")
+    own = own_names(host)
+    try:
+        entries = sorted(os.scandir(projects), key=lambda entry: entry.name)
+    except OSError:
+        return []
+    return [
+        entry.name
+        for entry in entries
+        if entry.is_dir(follow_symlinks=False)
+        and _MOUNTABLE.fullmatch(entry.name)
+        and not is_own(entry.name, own)
+    ]
+
+
+def project_store(host: Host) -> Path:
+    """Where the launcher keeps what a project's sessions remember, named
+    like the project's cache volume."""
+    project = docker_safe_name(os.path.basename(host.project_dir))
+    suffix = hashlib.sha256(host.project_dir.encode()).hexdigest()[:8]
+    return Path(private_dir(os.path.join(host.history_dir, f"{project}-{suffix}")))
+
+
+def own_prompts(host: Host) -> list[str]:
+    """The lines of the shared prompt history that are this project's."""
+    roots = set(project_roots(host))
+    kept = []
+    try:
+        with open(
+            Path(host.claude_dir, PROMPT_HISTORY), encoding="utf-8", errors="replace"
+        ) as history:
+            for line in history:
+                try:
+                    said = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(said, dict) and said.get("project") in roots:
+                    kept.append(line if line.endswith("\n") else line + "\n")
+    except OSError:
+        pass
+    return kept
+
+
+def prepare_store(host: Host) -> Path:
+    """The project's store with what is mounted from it in place, and in
+    ~/.claude what each is mounted over: docker would make a missing one
+    as root, and a directory where the prompt history goes."""
+    store = project_store(host)
+    for name in PER_PROJECT_DIRS:
+        (store / name).mkdir(mode=0o700, exist_ok=True)
+        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
+    prompts = store / PROMPT_HISTORY
+    if not prompts.exists():
+        descriptor = os.open(prompts, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as seeded:
+            seeded.writelines(own_prompts(host))
+    shared = Path(host.claude_dir, PROMPT_HISTORY)
+    if not shared.exists():
+        shared.touch(mode=0o600)
+    return store
+
+
+def history_args(settings: Settings, host: Host) -> list[str]:
+    """The mounts that keep the history of other projects out of the
+    session, on top of the one of ~/.claude."""
+    if settings.shared_history:
+        # Shown by bin/claude-statusline, and said in docker/CLAUDE-sandbox.md
+        return [env_arg("CLAUDE_DOCKER_SHARED_HISTORY", 1)]
+    claude = f"{CONTAINER_HOME}/.claude"
+    others = other_projects(host)
+    args = []
+    if others:
+        empty = private_dir(os.path.join(host.history_dir, "empty"))
+        args += [
+            mount_arg(empty, f"{claude}/projects/{name}", "ro,z") for name in others
+        ]
+    store = prepare_store(host)
+    args += [
+        mount_arg(str(store / name), f"{claude}/{name}", "z")
+        for name in (*PER_PROJECT_DIRS, PROMPT_HISTORY)
+    ]
+    return args

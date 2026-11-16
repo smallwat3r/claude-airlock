@@ -179,6 +179,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # The other switches are only set when they are on, by the code
         # that acts on them.
         env_arg("CLAUDE_DOCKER_NET_LOG", int(settings.net_log)),
+        env_arg("CLAUDE_DOCKER_PROC_LOG", int(settings.proc_log)),
         env_arg("CLAUDE_DOCKER_CACHE", int(settings.cache)),
         env_arg("CLAUDE_DOCKER_MEMORY", settings.memory),
         env_arg("CLAUDE_DOCKER_PIDS", settings.pids),
@@ -315,30 +316,6 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
         shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
         args.append(env_arg("CLAUDE_DOCKER_DIRS", shown))
     return args
-
-
-def ssh_agent_args(settings: Settings, env: Mapping[str, str]) -> list[str]:
-    """Forward the SSH agent, opt-in with CLAUDE_DOCKER_SSH_AGENT=1: the
-    agent lets the container authenticate as you to every host your keys
-    reach, not only the git remote. Loading keys with ssh-add -c makes each
-    use ask first. Docker Desktop on macOS exposes the host agent at a fixed
-    path, the host SSH_AUTH_SOCK is not mountable there."""
-    if not settings.ssh_agent:
-        return []
-    target = "/tmp/ssh-agent.sock"
-    macos_sock = "/run/host-services/ssh-auth.sock"
-    if sys.platform == "darwin" and os.path.exists(macos_sock):
-        agent_mount = mount_arg(macos_sock, target)
-    elif env.get("SSH_AUTH_SOCK"):
-        agent_mount = mount_arg(env["SSH_AUTH_SOCK"], target, "z")
-    else:
-        return []
-    return [
-        agent_mount,
-        env_arg("SSH_AUTH_SOCK", target),
-        # Shown by bin/claude-statusline
-        env_arg("CLAUDE_DOCKER_SSH_AGENT", 1),
-    ]
 
 
 def git_include_paths() -> list[str]:

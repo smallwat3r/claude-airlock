@@ -1,11 +1,14 @@
 """Watching sessions as they run (--trace --follow): the lines of --trace,
 written as things happen and until interrupted.
 
-Three records are read as they grow. The transcripts Claude Code keeps of
+Four records are read as they grow. The transcripts Claude Code keeps of
 the project's sessions, every one that is written to, so a session started,
 resumed or cleared while following is picked up. The capture of each of the
-project's running sessions, read out of its sidecar. And for a filtered
-session the egress proxy's log.
+project's running sessions, read out of its sidecar. For a filtered
+session the egress proxy's log. And what the launcher notes of the use of
+the SSH agent and the Docker socket (see doors.py). Not the record of the
+processes: which process made a connection is told by --trace of a
+session that is over.
 
 Three things differ from the trace of a session that is over. A tool call
 is shown when it is issued and its result when that comes, as an event of
@@ -30,6 +33,7 @@ from pathlib import Path
 
 from .capture import captured_since, cut_short, running_captures, session_name
 from .docker import running_containers
+from .doors import read_uses, use_event
 from .events import Event, clean, flat
 from .network import logged_since
 from .pcap import Capture, PcapReader, take_frames
@@ -222,6 +226,8 @@ class Follower:
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
+        # The uses of the SSH agent and the Docker socket are shown from now
+        self._doors_since = time.time()
 
     def title(self, path: Path) -> str:
         return self._tails[path].title
@@ -234,6 +240,7 @@ class Follower:
         for tail in self._tails.values():
             found.events += [(tail.path, event) for event in tail.poll()]
         self._poll_network(found)
+        self._poll_doors(found)
         # Stable, so what a transcript has at the same time keeps its order
         found.events.sort(key=lambda shown: shown[1].when)
         for _, event in found.events:
@@ -336,6 +343,18 @@ class Follower:
         if self._addresses:
             requests = self._proxy.poll(self._addresses)
             found.events += [(None, event) for event in requests]
+
+    def _poll_doors(self, found: Round) -> None:
+        """The uses of the SSH agent and the Docker socket that the
+        launchers of the project's sessions noted since the last time."""
+        for use in read_uses(self._host, self._doors_since, float("inf")):
+            when = float(use["t"])
+            if when <= self._doors_since:
+                continue
+            self._doors_since = when
+            event = use_event(use)
+            if event:
+                found.events.append((None, event))
 
     @staticmethod
     def _keep_latest(found: Round) -> None:

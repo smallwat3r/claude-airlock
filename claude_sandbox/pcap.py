@@ -1,6 +1,7 @@
 """Reading a capture (pcap, as tcpdump writes it) for what it says a
-session reached: each TCP connection and how it went, the answers of the
-resolver, the server name of a TLS hello and the request of plain HTTP.
+session reached: each TCP connection and how it went, what it sent by
+anything else (UDP, a ping), the answers of the resolver, the server name
+of a TLS hello and the request of plain HTTP. Over IPv4 and IPv6.
 
 Nothing here runs docker, see capture.py for the sidecar that writes the
 file. What is read is what a session put on the wire, so none of it is
@@ -36,7 +37,36 @@ PCAP_LONGEST_FRAME = 262144
 # In a cooked frame, the packet type of one the machine sent
 COOKED_SENT = 4
 ETHERTYPE_IPV4 = 0x0800
+ETHERTYPE_IPV6 = 0x86DD
+# The part of an IPv4 header's fragment field that says where in the
+# datagram a fragment goes: other than 0, it has no transport header
+IPV4_FRAGMENT_OFFSET = 0x1FFF
+IPV6_HEADER = 40
+# The headers that can come between the IPv6 header and the transport's:
+# hop-by-hop options, routing and destination options, which say their
+# own length, and the fragment header, which says where a fragment goes
+IPV6_OPTION_HEADERS = (0, 43, 60)
+IPV6_FRAGMENT_HEADER = 44
+IPV6_FRAGMENT_OFFSET = 0xFFF8
+# A packet cannot have more of them than this, a longer walk is not one
+IPV6_MOST_HEADERS = 8
 UDP_HEADER = 8
+# What is not TCP is named by its number over IP, the usual ones by name
+TRANSPORT_NAMES = {
+    1: "icmp",
+    17: "udp",
+    33: "dccp",
+    47: "gre",
+    58: "icmp6",
+    132: "sctp",
+    136: "udplite",
+}
+# Of those, the ones that start with the two ports
+PORTED_TRANSPORTS = (17, 33, 132, 136)
+# The type of an echo request, by the ICMP it is of: the one message of
+# either a session without capabilities can send (a ping), the others are
+# the kernel's own
+ICMP_ECHO = {1: 8, 58: 128}
 DNS_IS_RESPONSE = 0x8000
 DNS_ERROR_CODE = 0x000F
 # The two top bits of a length that is a pointer to the rest of a name
@@ -63,6 +93,13 @@ DNS_ERRORS = {
 }
 # A name cannot have more labels than this, a longer walk is a loop
 DNS_MOST_LABELS = 127
+# What a lookup is flagged for: a name or one label of it longer than
+# names are, or this many different names under one parent. Data can be
+# carried out in the names asked for, a resolver passes them on, and it
+# takes long names or many of them.
+DNS_LONG_NAME = 100
+DNS_LONG_LABEL = 40
+DNS_MANY_NAMES = 30
 TLS_HANDSHAKE = 0x16
 TLS_CLIENT_HELLO = 0x01
 TLS_SERVER_NAME = 0
@@ -82,7 +119,8 @@ class LinkType(enum.IntEnum):
 
 
 class Protocol(enum.IntEnum):
-    """The protocols over IPv4 that are read, by their number there."""
+    """The protocols over IP that are read into, by their number there.
+    Of any other just where it went and how much."""
 
     TCP = 6
     UDP = 17
@@ -130,24 +168,29 @@ class Cursor:
 
 @dataclass(frozen=True)
 class Packet:
-    """A captured TCP or UDP packet over IPv4."""
+    """A captured packet over IPv4 or IPv6."""
 
     when: float
     # By the session, as opposed to received by it
     sent: bool
-    protocol: Protocol
+    # Its number over IP, see Protocol and TRANSPORT_NAMES
+    protocol: int
     source: str
     destination: str
+    # Both 0 for a protocol without ports, and for a fragment that is not
+    # the first of its datagram
     source_port: int
     port: int
-    # None of them for UDP
+    # None of them unless TCP
     tcp_flags: TcpFlag
-    # As far as it was captured
+    # As far as it was captured: of TCP and UDP what they carry, of
+    # another protocol all that IP carries
     payload: bytes
-    # Of a TCP packet: its sequence and acknowledgement numbers, and how
-    # long its payload was, captured or not
+    # Of a TCP packet: its sequence and acknowledgement numbers
     sequence: int = 0
     acknowledgement: int = 0
+    # How long it was, captured or not: of TCP its payload, of another
+    # protocol what IP carried
     length: int = 0
 
 
@@ -198,6 +241,26 @@ class Connection:
     def seconds(self) -> float | None:
         """How long it was open, once it has ended."""
         return None if self.ended is None else round(self.ended - self.when, 3)
+
+
+@dataclass
+class Flow:
+    """What the session sent to one place by something other than TCP:
+    UDP, a ping, any other protocol over IP. Nothing there says where a
+    conversation starts or ends, so it is one per destination, with how
+    much went out to it."""
+
+    when: float
+    protocol: int
+    address: str
+    # 0 for a protocol without ports
+    port: int
+    packets: int = 0
+    sent: int = 0
+
+    @property
+    def transport(self) -> str:
+        return TRANSPORT_NAMES.get(self.protocol, f"ip-{self.protocol}")
 
 
 @dataclass(frozen=True)
@@ -255,15 +318,23 @@ class Capture:
     names: dict[str, str] = field(default_factory=dict)
     # Each answer of the resolver
     lookups: list[Lookup] = field(default_factory=list)
+    # The lookups that stand out, each with what for, see DNS_MANY_NAMES
+    flagged: list[tuple[str, Lookup]] = field(default_factory=list)
     # Each plain HTTP request
     requests: list[Request] = field(default_factory=list)
+    # Each place something was sent to by another protocol than TCP
+    flows: list[Flow] = field(default_factory=list)
     packets: int = 0
     # The connections that have not ended, by source port, address and port
     _open: dict[tuple[int, str, int], Connection] = field(
         default_factory=dict, repr=False
     )
+    _flows: dict[tuple[int, str, int], Flow] = field(default_factory=dict, repr=False)
+    # The names that were looked up, and how many under each parent
+    _looked_up: set[str] = field(default_factory=set, repr=False)
+    _under: dict[str, int] = field(default_factory=dict, repr=False)
 
-    def marks(self) -> tuple[int, int, int, int]:
+    def marks(self) -> tuple[int, int, int, int, int, int]:
         """How much of each kind there is, for a reader that follows to
         tell what came since."""
         return (
@@ -271,12 +342,16 @@ class Capture:
             len(self.endings),
             len(self.lookups),
             len(self.requests),
+            len(self.flows),
+            len(self.flagged),
         )
 
     def add(self, packet: Packet) -> None:
         """Take in what one packet tells."""
-        if packet.protocol is Protocol.UDP:
-            self._add_dns_answer(packet)
+        if packet.protocol != Protocol.TCP:
+            if packet.protocol == Protocol.UDP:
+                self._add_dns_answer(packet)
+            self._add_to_flow(packet)
             return
         # A connection is known by the session's port and the other end
         if packet.sent:
@@ -314,8 +389,46 @@ class Capture:
         except NotThis:
             return
         self.lookups.append(lookup)
-        if lookup.kind == "A":
+        self._flag(lookup)
+        if lookup.kind in ("A", "AAAA"):
             self.names.update(dict.fromkeys(lookup.addresses, lookup.name))
+
+    def _flag(self, lookup: Lookup) -> None:
+        """Note a lookup that stands out, a name once however often it is
+        asked for: one longer than names are, and the one that makes it
+        DNS_MANY_NAMES under the same parent."""
+        name = lookup.name.lower().rstrip(".")
+        if name in self._looked_up:
+            return
+        self._looked_up.add(name)
+        labels = name.split(".")
+        if len(name) > DNS_LONG_NAME or max(map(len, labels)) > DNS_LONG_LABEL:
+            self.flagged.append(("an unusually long name", lookup))
+        # Under a parent of two labels or more, not under com
+        if len(labels) < 3:
+            return
+        parent = ".".join(labels[1:])
+        count = self._under[parent] = self._under.get(parent, 0) + 1
+        if count == DNS_MANY_NAMES:
+            self.flagged.append((f"{count} names looked up under {parent}", lookup))
+
+    def _add_to_flow(self, packet: Packet) -> None:
+        """Count a packet that is not TCP towards where the session sent
+        it. Not what it sent to itself, and of ICMP only a ping: the rest
+        is the kernel's, and says nothing the session chose."""
+        if not packet.sent or is_loopback(packet.destination):
+            return
+        echo = ICMP_ECHO.get(packet.protocol)
+        if echo is not None and packet.payload[:1] != bytes([echo]):
+            return
+        key = (packet.protocol, packet.destination, packet.port)
+        flow = self._flows.get(key)
+        if flow is None:
+            flow = Flow(packet.when, *key)
+            self._flows[key] = flow
+            self.flows.append(flow)
+        flow.packets += 1
+        flow.sent += packet.length
 
     def _add_connection(self, packet: Packet, key: tuple[int, str, int]) -> None:
         known = self._open.get(key)
@@ -381,7 +494,7 @@ class Capture:
 
 
 def is_loopback(address: str) -> bool:
-    return address.startswith("127.")
+    return address.startswith("127.") or address == "::1"
 
 
 def dns_name(message: bytes, at: Cursor) -> str:
@@ -479,10 +592,11 @@ def tls_server_name(record: bytes) -> str:
         return ""
 
 
-def ipv4_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool]:
-    """The IPv4 packet a captured frame carries and whether the session
-    sent it. Raises NotThis for a frame that carries something else. An
-    Ethernet frame does not say who sent it, it counts as sent."""
+def ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
+    """The IP packet a captured frame carries, whether the session sent it
+    and the version of IP it is, 4 or 6. Raises NotThis for a frame that
+    carries something else. An Ethernet frame does not say who sent it, it
+    counts as sent."""
     reader = Cursor(frame)
     if link_type == LinkType.COOKED_2:
         ethertype = reader.number(2)
@@ -498,49 +612,115 @@ def ipv4_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool]:
         ethertype, sent = reader.number(2), True
     else:
         raise NotThis
-    if ethertype != ETHERTYPE_IPV4:
-        raise NotThis
-    return reader.rest(), sent
+    if ethertype == ETHERTYPE_IPV4:
+        return reader.rest(), sent, 4
+    if ethertype == ETHERTYPE_IPV6:
+        return reader.rest(), sent, 6
+    raise NotThis
 
 
-def parse_packet(when: float, link_type: int, frame: bytes) -> Packet:
-    """A captured frame as a packet. Raises NotThis unless it is TCP or
-    UDP over IPv4, whole as far as its headers go."""
-    datagram, sent = ipv4_in_frame(link_type, frame)
+@dataclass(frozen=True)
+class IpHeader:
+    """What the IP header of a packet says, of either version."""
+
+    protocol: int
+    source: str
+    destination: str
+    # Where in the packet what IP carries starts
+    transport_at: int
+    # How long that is, captured or not, None when the header does not
+    # say: a packet the kernel has yet to split says 0 there
+    length: int | None
+    # A fragment that is not the first of its datagram, which has no
+    # transport header
+    later_fragment: bool
+
+
+def ipv4_header(datagram: bytes) -> IpHeader:
     ip = Cursor(datagram)
     header_length = (ip.number(1) & 0x0F) * 4
     ip.skip(1)  # service
     total_length = ip.number(2)
-    ip.skip(5)  # id, fragment, time to live
-    try:
-        protocol = Protocol(ip.number(1))
-    except ValueError:
-        raise NotThis from None
+    ip.skip(2)  # id
+    later = bool(ip.number(2) & IPV4_FRAGMENT_OFFSET)
+    ip.skip(1)  # time to live
+    protocol = ip.number(1)
     ip.skip(2)  # checksum
     source, destination = (socket.inet_ntoa(ip.take(4)) for _ in range(2))
+    length = max(total_length - header_length, 0) if total_length else None
+    return IpHeader(protocol, source, destination, header_length, length, later)
 
-    transport = Cursor(datagram, header_length)
-    source_port, port = transport.number(2), transport.number(2)
+
+def ipv6_header(datagram: bytes) -> IpHeader:
+    """The IPv6 header, and the headers after it that come ahead of the
+    transport's: a session can put those there, and what it sends must
+    not go unread for it."""
+    ip = Cursor(datagram)
+    ip.skip(4)  # version, class, flow
+    payload_length = ip.number(2)
+    protocol = ip.number(1)
+    ip.skip(1)  # hop limit
+    source, destination = (
+        socket.inet_ntop(socket.AF_INET6, ip.take(16)) for _ in range(2)
+    )
+    at, later = IPV6_HEADER, False
+    for _ in range(IPV6_MOST_HEADERS):
+        extension = Cursor(datagram, at)
+        if protocol in IPV6_OPTION_HEADERS:
+            protocol = extension.number(1)
+            at += (extension.number(1) + 1) * 8
+        elif protocol == IPV6_FRAGMENT_HEADER:
+            protocol = extension.number(1)
+            extension.skip(1)  # reserved
+            later = bool(extension.number(2) & IPV6_FRAGMENT_OFFSET)
+            at += 8
+        else:
+            break
+        if later:
+            break
+    else:
+        raise NotThis
+    carried = payload_length - (at - IPV6_HEADER)
+    length = max(carried, 0) if payload_length else None
+    return IpHeader(protocol, source, destination, at, length, later)
+
+
+def parse_packet(when: float, link_type: int, frame: bytes) -> Packet:
+    """A captured frame as a packet. Raises NotThis unless it is IPv4 or
+    IPv6, whole as far as its headers go."""
+    datagram, sent, version = ip_in_frame(link_type, frame)
+    ip = ipv4_header(datagram) if version == 4 else ipv6_header(datagram)
+    carried = datagram[ip.transport_at :]
+    length = len(carried) if ip.length is None else ip.length
+    source_port = port = sequence = acknowledgement = 0
     tcp_flags = TcpFlag(0)
-    sequence = acknowledgement = length = 0
-    if protocol is Protocol.TCP:
+    payload = carried
+    transport = Cursor(carried)
+    if ip.protocol == Protocol.TCP:
+        if ip.later_fragment:
+            raise NotThis
+        source_port, port = transport.number(2), transport.number(2)
         sequence, acknowledgement = transport.number(4), transport.number(4)
         tcp_header_length = (transport.number(1) >> 4) * 4
         # The flags that are not read are dropped
         tcp_flags = TcpFlag(transport.number(1) & sum(TcpFlag))
-        payload = datagram[header_length + tcp_header_length :]
-        # As the IP header has it, the capture cuts a long payload short.
-        # A packet the kernel has yet to split says 0 there.
-        headers = header_length + tcp_header_length
-        length = max(total_length - headers, 0) if total_length else len(payload)
-    else:
-        payload = datagram[header_length + UDP_HEADER :]
+        payload = carried[tcp_header_length:]
+        # As the IP header has it, the capture cuts a long payload short
+        length = (
+            len(payload) if ip.length is None else max(length - tcp_header_length, 0)
+        )
+    elif ip.later_fragment:
+        payload = b""
+    elif ip.protocol in PORTED_TRANSPORTS:
+        source_port, port = transport.number(2), transport.number(2)
+        if ip.protocol == Protocol.UDP:
+            payload = carried[UDP_HEADER:]
     return Packet(
         when,
         sent,
-        protocol,
-        source,
-        destination,
+        ip.protocol,
+        ip.source,
+        ip.destination,
         source_port,
         port,
         tcp_flags,

@@ -4,9 +4,9 @@ Run [Claude Code](https://claude.com/claude-code) inside a hardened Docker
 container, with only the current project mounted. Works from any shell, and
 from editors that can launch a custom `claude` program.
 
-![The launcher on the host starts the session container and a capture
-sidecar that share one network namespace, the egress proxy and the Docker
-socket proxy are opt-in](docs/architecture.excalidraw.png)
+![The launcher on the host starts the session container, a capture sidecar
+and a process sidecar that share one network namespace, the egress proxy,
+the Docker socket proxy and the SSH agent are opt-in](docs/architecture.excalidraw.png)
 
 ## Requirements
 
@@ -75,7 +75,11 @@ others with an example value:
 
 - `CLAUDE_DOCKER_NET_LOG=1` (the default)
 
-  If on, records every TCP connection the session opens and every name it looks up, shown by `--trace`, see [Reviewing a session](#reviewing-a-session). If off, nothing is captured, and `--trace` only has the network use of a filtered session, from the proxy's log
+  If on, records every TCP connection the session opens, what it sends by anything else (UDP, a ping) and every name it looks up, over IPv4 and IPv6, shown by `--trace`, see [Reviewing a session](#reviewing-a-session). If off, nothing is captured, and `--trace` only has the network use of a filtered session, from the proxy's log
+
+- `CLAUDE_DOCKER_PROC_LOG=1` (the default)
+
+  If on, records the processes that run in the session and which of them made each connection, shown by `--trace`. If off, a connection is only known by the tool call that ran at its time
 
 - `CLAUDE_DOCKER_TELEMETRY=0` (the default)
 
@@ -92,6 +96,10 @@ others with an example value:
 - `CLAUDE_DOCKER_RW_CONFIG=0` (the default)
 
   If on, `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` are writable from the session. If off, they are read-only there
+
+- `CLAUDE_DOCKER_SHARED_HISTORY=0` (the default)
+
+  If off, a session sees what Claude Code remembers of its own project alone: the transcripts, prompt history, pastes and file history of other projects are left out. If on, it sees those of every project
 
 - `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` (default: none)
 
@@ -155,6 +163,17 @@ or none when set empty.
   plant one. `~/.claude/CLAUDE.md`, `skills` and `agents` are read-only too,
   they are instructions every later session follows. None of these can be
   changed inside the sandbox, unless you set `CLAUDE_DOCKER_RW_CONFIG=1`.
+- Leaves what Claude Code remembers of other projects out of `~/.claude`:
+  a session could otherwise read every prompt, command output and file of
+  all of them. Under `projects`, the directory of each other project is
+  covered by an empty one, the project's own and those of its worktrees
+  stay. The prompt history, the paste cache and the file history are kept
+  per project under `~/.local/state/claude-sandbox/history` and mounted in
+  place of the shared ones, the prompt history starting from the project's
+  own lines. So the up-arrow history of a sandboxed session is its
+  project's, and `claude` on the host cannot rewind the files of a session
+  run in the sandbox. A directory mounted with `--add-dir` does not bring
+  its history along. `CLAUDE_DOCKER_SHARED_HISTORY=1` shares it all again.
 - Refuses to mount the home directory, its parents or the filesystem root.
 - Keeps `~/.cache` (Go modules, uv, npm) in a Docker volume per project, so
   a session does not download its dependencies again. Per project on
@@ -193,6 +212,11 @@ or none when set empty.
 - With `CLAUDE_DOCKER_SSH_AGENT=1`, forwards the SSH agent. It is opt-in
   because the agent lets the container authenticate as you to every host
   your keys reach. Loading keys with `ssh-add -c` makes each use ask first.
+  The session is not given the agent's socket but one of the launcher's
+  in front of it, which notes every request for `--trace`: which key
+  signed, and what for. It is there for as long as the launcher runs. On
+  macOS the agent comes from inside Docker Desktop's machine, where the
+  launcher cannot listen, and its use is not noted.
 - With `CLAUDE_DOCKER_SOCKET=1` (and the `docker` feature for the CLI), lets
   the session see the host's containers through
   [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy)
@@ -205,7 +229,8 @@ or none when set empty.
   with them the environment of every container on the host, secrets
   included. Writes are blocked in both modes, since a write to the root
   daemon would let the container escape. Command lines and logs can still
-  carry secrets, which is why this stays opt-in. The proxy sidecars keep
+  carry secrets, which is why this stays opt-in. Every call a session
+  makes is noted for `--trace`, the denied ones too. The proxy sidecars keep
   running between sessions, after editing the rules or to switch them off
   remove them with `docker rm -f claude-docker-ps-proxy claude-docker-proxy`.
 - With `CLAUDE_DOCKER_NET_FILTER=1`, joins an internal network with no route
@@ -232,6 +257,11 @@ read-write project safe to trust blindly afterwards:
   repository planted in a subdirectory.
 - `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
   plugin's hook scripts are not protected the way `settings.json` is.
+- Of the history of other projects, some is still there to read: the
+  transcripts of a project first used after the session started, the paths
+  of all your projects (in `~/.claude/.claude.json`), and what Claude Code
+  keeps by session rather than by project (`session-env`, `jobs`, its
+  debug log).
 - The egress allowlist includes GitHub, so with a forwarded SSH agent or a
   `GH_TOKEN` a session can still push data out to a repository or gist.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
@@ -246,6 +276,7 @@ file or searched, there every line starts with when, who and what:
 
 ```
 # session     3fa9c0de-...  Fix the build
+# transcript  as the launcher copied it (212 lines)
 # project     /home/me/code/api
 # permissions bypassPermissions
 # tool calls  12 (Bash 9, Edit 2, Read 1)
@@ -285,10 +316,11 @@ whenever it changes:
 ```
 
 - `who` is `user`, `claude`, `agent` (a subagent) or `sandbox`, the
-  container as a whole: a connection is known by its container, not by the
-  command that opened it. Its place in time says which that probably was.
+  container as a whole: what the launcher recorded of it from outside, not
+  what the transcript says.
 - `what` is `prompt`, `reply`, `step`, the tool (`bash`, `edit`, `write`,
-  `read`, ...), `net` or `dns`. A tool of an MCP server shows by its own
+  `read`, ...), `net`, `dns`, `exec` (a process, with `--verbose`),
+  `ssh-agent` or `docker`. A tool of an MCP server shows by its own
   name without the server's, and a name longer than the column is cut
   (`notebooke~`), `--json` has it whole.
 - With `--verbose` a `step` line comes ahead of what one answer of the model
@@ -317,7 +349,9 @@ whenever it changes:
 - `--only bash,net` shows the events of the kinds named, by what the `what`
   column says, and `--failed` those that tell of something gone wrong: a
   failed call, a write outside the project, a refused request, a connection
-  that was refused or not answered. Both work with `--json` and `--follow`.
+  that was refused or not answered, a lookup that stands out, a signature
+  the SSH agent refused, and what was taken out of the transcript. Both
+  work with `--json` and `--follow`.
   The header stays that of the whole session, and says what is shown.
 - `--trace list` lists the project's sessions with when each last did
   something, the latest first, and the start of an id picks one. On a
@@ -347,11 +381,18 @@ them (the three input counts add up to what the step read), a tool call
 `outside_project` for a file it wrote), a connection `protocol`, `address`,
 `port`, `source_port` and `name`, with `outcome` (`closed`, `open`,
 `refused` or `no answer`) when the capture tells and for a closed one
-`seconds`, `bytes_out` and `bytes_in`, a plain HTTP request `protocol`,
+`seconds`, `bytes_out` and `bytes_in`, and `process` (`pid`, `exe`, `argv`
+and `parents`) when the process that made it was seen, what was sent by
+another protocol `protocol`, `address`, `port`, `name`, `packets` and
+`bytes_out`, a plain HTTP request `protocol`,
 `method`, `url`, `address` and `port`, a proxy request `protocol`, `method`,
 `url`, `port`, `denied`, `bytes` and `seconds`, a lookup `name`, `type`,
-`addresses` and `error`. What happened on the network also has `during`,
-the ids of the tool calls running at that time.
+`addresses` and `error`, and `flagged` when it stands out, a process `pid`,
+`ppid`, `exe` and `argv`, a use of the SSH agent `did` (`sign`, `list` or
+`other`), `key`, `comment` and `what`, a call through the Docker socket
+`method`, `path`, `status` and `denied`. What happened on the network also
+has `during`, the ids of the tool calls running at that time, and an entry
+that was taken out of the transcript `removed`.
 
 The network lines need a record the launcher keeps, of which there are two:
 
@@ -361,7 +402,8 @@ The network lines need a record the launcher keeps, of which there are two:
   by all sessions, so the launcher notes the address each session's
   container had and picks its requests by that.
 - Unless `CLAUDE_DOCKER_NET_LOG=0`, every TCP connection the session opened,
-  whatever the protocol, and with `--verbose` every name it looked up. The
+  whatever the protocol, what it sent by anything but TCP, and with
+  `--verbose` every name it looked up. The
   session's route out is not changed, a sidecar that owns its network
   namespace captures the packets that say where a connection goes and how
   it went: its start, the answer to it and its end, the DNS answers, the
@@ -370,8 +412,12 @@ The network lines need a record the launcher keeps, of which there are two:
   The address is what was reached, the name is what the session looked up
   or asked for, so trust the address where the two matter. It works with
   the filter too, where it shows what a session tried to reach around the
-  proxy. Not recorded: UDP other than DNS, IPv6, and what was sent, so of
-  HTTPS neither the URL nor the content.
+  proxy. Over IPv4 and IPv6. Of what goes out by UDP or another protocol
+  every packet is taken, there a conversation has no start to pick out,
+  and read for where it went and how long it was: one line per
+  destination. Not recorded: what was sent, so of HTTPS neither the URL
+  nor the content, and what comes in other than by TCP or as an answer of
+  the resolver.
 
 A line of the network says more than where to:
 
@@ -380,8 +426,11 @@ sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  closed afte
 sandbox  net         tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
 sandbox  net         http GET http://deb.debian.org/debian/InRelease  during: $ apt-get update
 sandbox  net         tcp/https api.anthropic.com (160.79.104.10):443  left open  (no call running)
+sandbox  net         udp/https www.google.com (142.250.74.4):443  212 packets, 31 kB out
+sandbox  net         icmp 10.0.0.7  3 packets, 252 B out
 sandbox  dns         lookup registry.npmjs.org A -> 104.16.3.35, 104.16.0.35
 sandbox  dns         lookup nope.internal A FAILED: no such name
+sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually long name
 ```
 
 - How a connection went: `closed after` how long, with the bytes each way
@@ -391,21 +440,118 @@ sandbox  dns         lookup nope.internal A FAILED: no such name
   capture made before this was recorded says none of it.
 - `during:` names the tool call that was running when the connection was
   made, the innermost when there are several. That is by the clock, not
-  proof: a connection is known by its container and not by the command
-  that opened it. `(no call running)` is Claude Code itself (the API, its
+  proof. `(no call running)` is Claude Code itself (the API, its
   telemetry) or something a command left running.
+- `by:` names the process that made the connection, with those it comes
+  from, see [What ran](#what-ran). That is not by the clock: the process
+  was seen to hold the connection's socket.
+- What went out by UDP, as a ping or by any other protocol is one line per
+  destination, at the time of the first packet, with how much was sent.
+  QUIC shows this way, as `udp/https`.
+- A lookup is `FLAGGED`, and shown without `--verbose`, when its name is
+  longer than names are (over 100 characters, or 40 in one label) or when
+  it is the 30th different name under one parent. Data can be carried out
+  in the names a session asks a resolver for, which takes long names or
+  many of them. Some services do this on their own, it is a prompt to
+  look.
 - A request over plain HTTP shows with its method and URL, it is the one
   kind that can be read.
 - A lookup shows the kind of record asked for and the addresses that came
   back, or what the resolver said went wrong.
 
 Neither can be forged or edited by the session: the address and the capture
-are taken outside of it. The transcript is another matter, it is written
-from inside the sandbox, so treat that part as a convenience and not as an
-audit log, a session could rewrite its own. A tool call is recorded as
-issued, what a command went on to spawn or touch is not. Sessions run
-outside the sandbox in the same directory are listed too, Claude Code keeps
-them in the same place.
+are taken outside of it. Sessions run outside the sandbox in the same
+directory are listed too, Claude Code keeps them in the same place.
+
+### The transcript
+
+The transcript is another matter, it is written from inside the sandbox,
+and a session could rewrite its own. So while a session runs, the launcher
+copies what the project's transcripts gain to its state directory, half a
+second or so after it is written, and `--trace` compares the two. The
+`transcript` line of the header says what came of it:
+
+```
+# transcript  as the launcher copied it (212 lines)
+# transcript  CHANGED: 3 lines the launcher copied are gone or altered, they are shown as REMOVED
+# transcript  as it is now, the launcher has no copy of it to compare
+```
+
+What the copy has and the transcript no longer does is shown where it
+happened, marked `REMOVED FROM THE TRANSCRIPT`, and `--failed` picks it
+out. The last line is that of a session run outside the sandbox, or before
+copies were kept. Still out of reach: a line a session takes back within
+the moment before it is copied, and the transcript says what a tool call
+was, not what the command it ran went on to do, which is the next part.
+
+### What ran
+
+Unless `CLAUDE_DOCKER_PROC_LOG=0`, a second sidecar joins the session's
+process and network namespaces once it is up and notes, from `/proc`, each
+process it sees and the processes that hold each TCP connection. `--trace`
+ties a connection of the capture to its process by its ports:
+
+```
+sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
+```
+
+With `--verbose` every process is a line of its own (`exec`), with its
+program and its parent. The program is named as it really is (`exe`), what
+a process calls itself is its own to choose.
+
+The sidecar looks 25 times a second, it is not told: nothing short of
+privileges it should not have reports every start of a process. What lived
+shorter than that can be missed, a connection without a `by:` falls back on
+`during:`. It comes up a moment after the session, and it does not tie what
+goes out by UDP to a process. It runs as root without capabilities, the
+session can neither stop it nor reach its record, and costs a few percent
+of one core.
+
+### The SSH agent and the Docker socket
+
+A session started with `CLAUDE_DOCKER_SSH_AGENT=1` or `CLAUDE_DOCKER_SOCKET`
+has each use of them noted by the launcher:
+
+```
+sandbox  ssh-agent   listed the keys, 2 of them
+sandbox  ssh-agent   signed a login as git with SHA256:Xk3... (me@laptop)
+sandbox  ssh-agent   asked for a signature for git with SHA256:Xk3... (me@laptop)  REFUSED by the agent
+sandbox  docker      GET /v1.47/containers/json 200
+sandbox  docker      POST /v1.47/containers/create 403  DENIED
+```
+
+A signature says which key was asked and what for, as far as what was
+signed tells: a login says as whom, to which host is the connection next
+to it. The header counts both.
+
+### When a session ends
+
+The launcher says what is worth a look, next to its check of the files
+that can run commands on the host:
+
+```
+claude-docker: of this session, claude-docker --trace has the rest:
+  reached for the first time from this project:
+    tcp/https transfer.example (203.0.113.9):443
+  sent 14 MB to tcp/https gist.github.com (140.82.121.4):443
+  refused by the egress filter:
+    example.org:443 x3
+  lookups that stand out:
+    4a6f...3d.x.example.com: an unusually long name
+  written outside the project:
+    /home/me/.bashrc
+  the transcript of 3fa9c0de was changed: 3 lines the launcher copied are gone or altered
+  ssh agent 4 requests, 2 signatures
+```
+
+It is silent when there is nothing of this, and about the first recorded
+session of a project, whose destinations are all new. A destination is
+known by its name where it has one, addresses change too often to go by,
+and the name is the session's own word: a session that wants to pass for a
+known name can, the trace has the address. An upload is said from 10 MB to
+one destination on, but for the model's API, told by Anthropic's published
+addresses and not by name, and not for a filtered session, where everything
+goes to the proxy.
 
 What is kept, all of it under `~/.local/state/claude-sandbox` unless noted:
 
@@ -418,10 +564,21 @@ What is kept, all of it under `~/.local/state/claude-sandbox` unless noted:
   100,000 packets, about 100 MB at the very worst, and the trace says so
   when that happened.
 - `net-sessions.jsonl`, a line per recorded session, the latest 1000.
+- `transcripts`, the launcher's copy of each transcript a sandboxed session
+  wrote to, for 30 days, which is how long Claude Code keeps its own by
+  default. As large as the transcripts are, each up to 512 MB.
+- `processes`, what ran in each session, a few hundred kB each as a rule
+  and 20 MB at most, the latest 100.
+- `door-use.jsonl`, a line per use of the SSH agent and the Docker socket,
+  the latest 5000.
+- `destinations.json`, what each project is known to reach.
+- `history`, which is not a record but what the sessions of each project
+  remember, see [What the sandbox does](#what-the-sandbox-does). It is the
+  one part mounted into a session.
 
-A capture is copied out when the launcher returns. The sidecar of a session
-that ended without it (a killed Emacs buffer) is collected by the next
-`claude-docker` launch.
+A capture and a record of processes are copied out when the launcher
+returns. The sidecars of a session that ended without it (a killed Emacs
+buffer) are collected by the next `claude-docker` launch.
 
 ### Following a session
 
@@ -457,6 +614,9 @@ it:
   it was made, and what became of it shows on a line of its own when it
   does (in `--json` with `stage` set to `open`, then `outcome`). A tunnel through the proxy is logged when it closes, so it
   shows then, at the time it began, a refused request shows at once.
+- The uses of the SSH agent and of the Docker socket show as they are
+  noted. Which process made a connection does not, that is told by
+  `--trace` once the session is over.
 - Of a prompt or a reply only the first line is shown, with `--verbose` too:
   you are after what the session does, what it says is on its own screen.
 - `--verbose`, `--json`, `--only` and `--failed` work as above. With `--json` a prompt or reply is
@@ -563,7 +723,8 @@ It also covers your own fragments and the two sidecar images.
 
 `test/launcher_test.py` checks the launcher's security-relevant behaviour
 without needing Docker: what gets mounted, shadowed and switched off by
-default, the tamper check, the network capture and `--trace`. It runs the
+default, the tamper check, the network capture, the records the launcher
+keeps of a session and `--trace`. It runs the
 launcher against a fake `docker` that records every call. CI runs it
 together with ruff, shellcheck and a small image build.
 

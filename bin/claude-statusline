@@ -56,6 +56,9 @@ if [ -n "${CLAUDE_DOCKER_SANDBOX:-}" ]; then
   if [ "${CLAUDE_DOCKER_RW_CONFIG:-0}" = "1" ]; then
     parts+=("$(printf '\033[33mconfig:rw\033[0m')")
   fi
+  if [ "${CLAUDE_DOCKER_SHARED_HISTORY:-0}" = "1" ]; then
+    parts+=("$(printf '\033[33mhistory:all\033[0m')")
+  fi
   if [ -n "${CLAUDE_DOCKER_DIRS:-}" ]; then
     dirs="${CLAUDE_DOCKER_DIRS//:/ }"
     dirs="${dirs//${HOME}/\~}"

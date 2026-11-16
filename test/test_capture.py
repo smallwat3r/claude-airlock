@@ -107,16 +107,42 @@ def client_hello(name: str) -> bytes:
     return b"\x16\x03\x01" + struct.pack("!H", len(handshake)) + handshake
 
 
+def ipv6(protocol: int, source: str, destination: str, payload: bytes) -> bytes:
+    addresses = socket.inet_pton(socket.AF_INET6, source) + socket.inet_pton(
+        socket.AF_INET6, destination
+    )
+    return struct.pack("!IHBB", 6 << 28, len(payload), protocol, 64) + (
+        addresses + payload
+    )
+
+
+def udp(port: int, payload: bytes = b"x" * 100) -> bytes:
+    """A datagram to a port, without the IP header."""
+    return struct.pack("!HHHH", 50000, port, 8 + len(payload), 0) + payload
+
+
+def tcp_header(port: int, flags: int, source_port: int = 0) -> bytes:
+    ports = (source_port or 40000 + port, port)
+    return struct.pack("!HHIIBBHHH", *ports, 0, 0, 0x50, flags, 0, 0, 0)
+
+
+def lookups_under(parent: str, count: int) -> list[bytes]:
+    return [
+        dns_response(f"n{number}.{parent}", "198.51.100.7") for number in range(count)
+    ]
+
+
 def pcap_file(packets: list[tuple[float, bytes, bool]], link_type: int = 276) -> bytes:
     """A capture file as tcpdump writes it for its "any" device: packets
-    given as when, the IPv4 packet and whether the session sent it."""
+    given as when, the IP packet and whether the session sent it."""
     data = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, link_type)
     for when, packet, sent in packets:
         kind = 4 if sent else 0
+        carries = 0x86DD if packet[:1] and packet[0] >> 4 == 6 else 0x0800
         if link_type == 276:
-            frame = struct.pack("!HHIHBB8s", 0x0800, 0, 2, 1, kind, 6, b"") + packet
+            frame = struct.pack("!HHIHBB8s", carries, 0, 2, 1, kind, 6, b"") + packet
         else:
-            frame = struct.pack("!HHH8sH", kind, 1, 6, b"", 0x0800) + packet
+            frame = struct.pack("!HHH8sH", kind, 1, 6, b"", carries) + packet
         seconds, micros = int(when), int(when % 1 * 1e6)
         data += struct.pack("<IIII", seconds, micros, len(frame), len(frame)) + frame
     return data
@@ -282,6 +308,112 @@ class CaptureFileTest(unittest.TestCase):
             pcap.dns_answer(0.0, loop)
 
 
+class OtherTrafficTest(unittest.TestCase):
+    """What is not TCP over IPv4: IPv6, and what a session sends by UDP or
+    as a ping."""
+
+    ME, THEM = "2001:db8::5", "2001:db8::9"
+
+    def read(self, packets: list[tuple[float, bytes, bool]]):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory, "capture.pcap")
+            file.write_bytes(pcap_file(packets))
+            return pcap.read_capture(file)
+
+    def test_a_connection_over_ipv6_is_read(self):
+        hello = tcp_header(443, 0x18) + client_hello("six.test")
+        found = self.read(
+            [
+                (1.0, ipv6(6, self.ME, self.THEM, tcp_header(443, 0x02)), True),
+                (1.1, ipv6(6, self.THEM, self.ME, tcp_header(40443, 0x12, 443)), False),
+                (1.2, ipv6(6, self.ME, self.THEM, hello), True),
+                # Within the session
+                (2.0, ipv6(6, "::1", "::1", tcp_header(8000, 0x02)), True),
+            ]
+        )
+        (connection,) = found.connections
+        self.assertEqual((connection.address, connection.port), (self.THEM, 443))
+        self.assertEqual(connection.outcome, "open")
+        self.assertEqual(found.names, {self.THEM: "six.test"})
+
+    def test_headers_ahead_of_the_transport_do_not_hide_it(self):
+        options = bytes([6, 0, 1, 4, 0, 0, 0, 0])
+        behind = ipv6(60, self.ME, self.THEM, options + tcp_header(443, 0x02))
+        (connection,) = self.read([(1.0, behind, True)]).connections
+        self.assertEqual((connection.address, connection.port), (self.THEM, 443))
+        # A chain of them without an end is not followed for ever
+        looped = ipv6(0, self.ME, self.THEM, bytes([0, 0, 1, 4, 0, 0, 0, 0]) * 20)
+        self.assertEqual(self.read([(1.0, looped, True)]).flows, [])
+
+    def test_what_is_sent_by_udp_is_one_flow_per_destination(self):
+        quic = ipv4(17, "172.20.0.5", "198.51.100.7", udp(443))
+        found = self.read(
+            [
+                (1.0, quic, True),
+                (2.0, quic, True),
+                (2.5, ipv6(17, self.ME, self.THEM, udp(443)), True),
+                # Received, and within the session
+                (3.0, ipv4(17, "198.51.100.7", "172.20.0.5", udp(50000)), False),
+                (3.0, ipv4(17, "127.0.0.1", "127.0.0.1", udp(9999)), True),
+            ]
+        )
+        self.assertEqual(
+            [
+                (f.when, f.transport, f.address, f.port, f.packets, f.sent)
+                for f in found.flows
+            ],
+            [
+                (1.0, "udp", "198.51.100.7", 443, 2, 216),
+                (2.5, "udp", self.THEM, 443, 1, 108),
+            ],
+        )
+        self.assertEqual(found.connections, [])
+
+    def test_a_ping_is_a_flow_and_the_kernels_own_icmp_is_not(self):
+        echo = ipv4(1, "172.20.0.5", "198.51.100.7", b"\x08\x00" + bytes(62))
+        unreachable = ipv4(1, "172.20.0.5", "198.51.100.7", b"\x03\x01" + bytes(30))
+        neighbour = ipv6(58, self.ME, "ff02::1", b"\x87\x00" + bytes(22))
+        (flow,) = self.read(
+            [(1.0, echo, True), (2.0, unreachable, True), (3.0, neighbour, True)]
+        ).flows
+        self.assertEqual((flow.transport, flow.port, flow.sent), ("icmp", 0, 64))
+
+    def test_a_later_fragment_is_counted_without_ports(self):
+        later = bytearray(ipv4(17, "172.20.0.5", "198.51.100.7", b"y" * 40))
+        later[6:8] = struct.pack("!H", 185)
+        (flow,) = self.read([(1.0, bytes(later), True)]).flows
+        self.assertEqual((flow.port, flow.sent), (0, 40))
+
+    def test_another_protocol_is_named_by_its_number(self):
+        (flow,) = self.read(
+            [(1.0, ipv4(99, "172.20.0.5", "198.51.100.7", b"z" * 10), True)]
+        ).flows
+        self.assertEqual((flow.transport, flow.port), ("ip-99", 0))
+
+    def test_a_long_name_is_flagged_once(self):
+        name = "a" * 50 + ".t.test"
+        packets = [(float(at), dns_failure(name), False) for at in range(3)]
+        found = self.read([*packets, (5.0, dns_failure("fine.t.test"), False)])
+        self.assertEqual(
+            [(why, lookup.name) for why, lookup in found.flagged],
+            [("an unusually long name", name)],
+        )
+
+    def test_many_names_under_one_parent_are_flagged(self):
+        count = pcap.DNS_MANY_NAMES
+        few = [(1.0, packet, False) for packet in lookups_under("cdn.test", count - 1)]
+        self.assertEqual(self.read(few).flagged, [])
+        many = [(1.0, packet, False) for packet in lookups_under("t.test", count + 5)]
+        # Not under a parent of one label, every name is under com
+        many += [
+            (2.0, dns_response(f"site{n}.test", "198.51.100.7"), False)
+            for n in range(count + 5)
+        ]
+        ((why, lookup),) = self.read(many).flagged
+        self.assertEqual(why, f"{count} names looked up under t.test")
+        self.assertEqual(lookup.name, f"n{count - 1}.t.test")
+
+
 class CaptureSessionTest(LauncherTest):
     SIDECAR = "claude-proj.capture"
 
@@ -433,6 +565,40 @@ class CaptureSessionTest(LauncherTest):
         self.assertNotIn(":8000", stdout)
         self.assertNotIn(":9000", stdout)
         self.assertNotIn("lookup", stdout)
+
+    def test_the_trace_shows_what_was_sent_other_than_by_tcp(self):
+        tunnel = "a" * 50 + ".t.test"
+        self.capture_file.write_bytes(
+            pcap_file(
+                [
+                    (self.now + 1, dns_response("quic.test", "198.51.100.8"), False),
+                    (
+                        self.now + 2,
+                        ipv4(17, "172.20.0.5", "198.51.100.8", udp(443)),
+                        True,
+                    ),
+                    (
+                        self.now + 3,
+                        ipv6(6, "2001:db8::5", "2001:db8::9", tcp_header(443, 0x02)),
+                        True,
+                    ),
+                    (self.now + 4, dns_failure(tunnel), False),
+                ]
+            )
+        )
+        stdout = self.trace()
+        for expected in (
+            "#   udp/https quic.test (198.51.100.8):443  1 packet, 108 B out",
+            "#   tcp/https [2001:db8::9]:443 x1",
+            "#   dns 1 lookups FLAGGED, see --failed",
+            "sandbox  net         udp/https quic.test (198.51.100.8):443  1 packet, 108 B out",
+            "sandbox  net         tcp/https [2001:db8::9]:443",
+            f"sandbox  dns         lookup {tunnel} A FLAGGED: an unusually long name",
+        ):
+            self.assertIn(expected, stdout)
+        failed = self.launch("--trace", "--failed").stdout
+        self.assertIn("FLAGGED", failed)
+        self.assertNotIn("quic.test", failed.split("# time")[1])
 
     def test_verbose_adds_the_lookups(self):
         looked_up = "sandbox  dns         lookup good.test A -> 198.51.100.7"

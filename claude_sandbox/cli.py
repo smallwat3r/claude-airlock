@@ -3,13 +3,18 @@ start to finish."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+import time
 from pathlib import Path
 
 from .capture import capture_name, collect_ended_captures, session_captured
+from .digest import report_session
 from .docker import docker_ok
+from .doors import socket_proxy_watched, ssh_agent_door
 from .follow import follow
+from .history import history_args
 from .image import PLUGIN_DIR, Image, build_image, prepare_image
 from .network import (
     net_log,
@@ -20,6 +25,8 @@ from .network import (
     start_egress_proxy,
     start_socket_proxy,
 )
+from .processes import collect_ended_records, processes_recorded
+from .recorder import transcripts_copied
 from .session import (
     ExtraDir,
     add_extra_dir,
@@ -34,7 +41,6 @@ from .session import (
     run_session,
     session_args,
     shadow_args,
-    ssh_agent_args,
 )
 from .settings import Fatal, Host, Settings, detect_host, load_settings
 from .tamper import (
@@ -136,10 +142,10 @@ def session(
         *base_args(settings, host, name),
         *session_args(action, env),
         *protect_config_args(settings, host),
+        *history_args(settings, host),
         *extra_dir_args(dirs),
         *network_args(settings, capture),
         *socket_proxy_args(settings),
-        *ssh_agent_args(settings, env),
         *git_config_args(host),
         *shadow_args(settings, host, dirs),
     ]
@@ -158,16 +164,27 @@ def session(
     before = host_exec_fingerprint(watched, host.claude_dir)
     save_pending_check(pending, watched, host.claude_dir, before)
     collect_ended_captures(host)
+    collect_ended_records(host)
+    # The container whose network namespace the session is in
+    owner = capture or name
+    started = time.time()
     try:
-        # The capture first, a filtered session's address is its sidecar's
-        # Nested, joining them in brackets takes Python 3.10
-        with session_captured(settings, host, name, image.tag):  # noqa: SIM117
-            with session_address_recorded(settings, host, name, capture or name):
-                status = run_session(run_args, image, claude_args)
+        with contextlib.ExitStack() as running:
+            # The capture first, a filtered session's address is its sidecar's
+            running.enter_context(session_captured(settings, host, name, image.tag))
+            running.enter_context(session_address_recorded(settings, host, name, owner))
+            running.enter_context(socket_proxy_watched(settings, host, name, owner))
+            running.enter_context(
+                processes_recorded(settings, host, name, owner, image.tag)
+            )
+            running.enter_context(transcripts_copied(host))
+            run_args += running.enter_context(ssh_agent_door(settings, host, name, env))
+            status = run_session(run_args, image, claude_args)
     except Fatal:
         # The session did not start, there is nothing of it to check
         pending.unlink(missing_ok=True)
         raise
+    report_session(host, name, started)
     report_tampering(before, host_exec_fingerprint(watched, host.claude_dir))
     pending.unlink(missing_ok=True)
     return status

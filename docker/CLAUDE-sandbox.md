@@ -24,17 +24,28 @@ listed there is off.
   database, say) fail. A 403 from the proxy means the domain is blocked,
   tell the user which domain to add to docker/allowed-domains.txt of their
   claude-sandbox checkout. If off, the network is open.
-- CLAUDE_DOCKER_NET_LOG (on unless 0). If on, every connection you open
-  and every name you look up is recorded for the user to review. It blocks
-  nothing.
+- CLAUDE_DOCKER_NET_LOG (on unless 0). If on, every connection you open,
+  whatever you send by UDP or as a ping and every name you look up is
+  recorded for the user to review. It blocks nothing.
+- CLAUDE_DOCKER_PROC_LOG (on unless 0). If on, the processes that run here
+  and the one behind each connection are recorded for the user to review.
+  The root-owned python3 process you can see is that recorder, it is not
+  yours to stop. It blocks nothing.
+- CLAUDE_DOCKER_SHARED_HISTORY (off unless 1). If off, what Claude Code
+  remembers of other projects is not here: their directories under
+  ~/.claude/projects are empty and read-only, and the prompt history, the
+  paste cache and the file history are this project's own. That is not a
+  bug, do not go looking for them elsewhere. If on, all of it is here.
 - CLAUDE_DOCKER_SSH_AGENT (off unless 1). If on, the user's SSH agent is
-  forwarded, git over SSH and ssh work with their keys. If off, there are
+  forwarded, git over SSH and ssh work with their keys, and each use of a
+  key is recorded for the user to review. If off, there are
   no SSH keys here: a push or fetch over SSH ends in "Permission denied
   (publickey)". If the user set it and it is still not listed, no agent was
   running on the host.
 - CLAUDE_DOCKER_SOCKET (off unless 1 or full). If 1, docker ps and docker
   logs work against the host's daemon, full adds inspect, stats and top.
-  Every other docker call is denied in both, never run or build. If off,
+  Every other docker call is denied in both, never run or build, and every
+  call is recorded for the user to review. If off,
   no Docker daemon can be reached at all. The docker CLI itself comes with
   the docker feature of the image.
 - CLAUDE_DOCKER_RW_CONFIG (off unless 1). ~/.claude is shared with the

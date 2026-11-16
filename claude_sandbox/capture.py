@@ -7,7 +7,10 @@ is cut off. A sidecar owns the session's network namespace instead and runs
 tcpdump in it, on the few packets that say where a connection goes and how
 it went: the start, the answer and the end of each TCP connection, the DNS
 answers, the TLS hello with the server's name and the request of plain
-HTTP. Never what is sent beyond those. The session joins that namespace,
+HTTP. Of TCP never what is sent beyond those. Of anything else the session
+sends (UDP, a ping) every packet, there is no telling the first of a
+conversation from the rest: the start of each is in the file, and only
+where it went and how long it was is read. The session joins that namespace,
 so the capture is running before its first packet. It holds no capabilities
 and is in another process namespace, so it can neither capture itself nor
 see, stop or edit the capture, which stays in the sidecar until the
@@ -24,6 +27,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar, TypeVar
 
 from .docker import (
     Launcher,
@@ -51,26 +55,45 @@ PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
 # Captures are a few kB each as a rule, the oldest go once there are more
 KEPT_CAPTURES = 100
-# IPv4 only, like Docker's networks unless set up otherwise. The embedded
-# resolver at 127.0.0.11 is reached through a port rewrite inside the
-# namespace, so its packets do not show port 53: all UDP on loopback is
-# taken and the reader tells what is DNS.
-# Where the payload of a TCP packet starts, for the filter
+# The embedded resolver at 127.0.0.11 is reached through a port rewrite
+# inside the namespace, so its packets do not show port 53: all UDP on
+# loopback is taken and the reader tells what is DNS.
+# Where the payload of a TCP packet starts, for the filter. The filter's
+# tcp[] is of IPv4 alone, over IPv6 the same is spelled by where things
+# are in a packet without headers between the two. One with such headers
+# is taken whole when the session sends it, see the reader.
 _PAYLOAD = "((tcp[12:1] & 0xf0) >> 2)"
+_PAYLOAD6 = "(40 + ((ip6[52:1] & 0xf0) >> 2))"
+_TCP6 = "ip6[6:1] = 6"
+
+
+def _http_methods(load: str) -> str:
+    """The part of the filter for a payload that starts with a method of
+    HTTP, load being how its first four bytes are read."""
+    return "".join(
+        f" or {load} = {int.from_bytes(method.ljust(4).encode()[:4], 'big'):#x}"
+        for method in HTTP_METHODS
+    )
+
+
 PACKET_FILTER = (
     # What starts, answers or ends a connection, but for the session's
     # own within itself
     "(tcp[tcpflags] & (tcp-syn|tcp-fin|tcp-rst) != 0"
     " and not dst net 127.0.0.0/8)"
+    f" or ({_TCP6} and ip6[53:1] & 0x07 != 0 and not dst host ::1)"
     " or (udp and net 127.0.0.0/8)"
     " or port 53"
+    # Whatever the session sends that is not TCP: UDP, a ping, anything
+    # else over IP. There a connection has no start to pick out.
+    " or (outbound and ip and not tcp and not dst net 127.0.0.0/8)"
+    f" or (outbound and ip6 and not {_TCP6} and not dst host ::1)"
     # A TLS handshake record holding a client hello
     f" or (tcp[{_PAYLOAD}:1] = 0x16 and tcp[{_PAYLOAD} + 5:1] = 0x01)"
     # Last, a packet without that much payload ends the filter there
-    + "".join(
-        f" or tcp[{_PAYLOAD}:4] = {int.from_bytes(method.ljust(4).encode()[:4], 'big'):#x}"
-        for method in HTTP_METHODS
-    )
+    + _http_methods(f"tcp[{_PAYLOAD}:4]")
+    + f" or ({_TCP6} and ip6[{_PAYLOAD6}:1] = 0x16 and ip6[{_PAYLOAD6} + 5:1] = 0x01)"
+    + f" or ({_TCP6} and ({_http_methods(f'ip6[{_PAYLOAD6}:4]')[4:]}))"
 )
 
 
@@ -82,11 +105,20 @@ def session_name(sidecar: str) -> str:
     return sidecar[: -len(CAPTURE_SUFFIX)]
 
 
+SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
+
+
 @dataclass(frozen=True)
 class Sidecar:
-    """A capture sidecar as its label tells of it: the project and the
-    start of its session, and the launcher that started it. The label is
-    the launcher's, a session cannot set its own."""
+    """A sidecar of one session as its label tells of it: the project and
+    the start of its session, and the launcher that started it. The label
+    is the launcher's, a session cannot set its own. This one is the
+    capture's, another kind has its own suffix and label (see
+    processes.py)."""
+
+    # What the sidecar's name adds to its session's, and its label
+    SUFFIX: ClassVar[str] = CAPTURE_SUFFIX
+    LABEL: ClassVar[str] = CAPTURE_LABEL
 
     name: str
     project: str
@@ -95,7 +127,7 @@ class Sidecar:
 
     @property
     def session(self) -> str:
-        return session_name(self.name)
+        return self.name[: -len(self.SUFFIX)]
 
     @property
     def label(self) -> str:
@@ -108,7 +140,9 @@ class Sidecar:
         return json.dumps(about)
 
     @classmethod
-    def from_label(cls, name: str, label: str) -> Sidecar | None:
+    def from_label(  # noqa: PYI019, Self takes Python 3.11
+        cls: type[SidecarKind], name: str, label: str
+    ) -> SidecarKind | None:
         """The sidecar of a name and a label, none for a container that
         is not one."""
         try:
@@ -118,27 +152,35 @@ class Sidecar:
             launcher = Launcher(int(about["pid"]), str(about.get("launched", "")))
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
             return None
-        if not name.endswith(CAPTURE_SUFFIX) or not math.isfinite(start):
+        if not name.endswith(cls.SUFFIX) or not math.isfinite(start):
             return None
         return cls(name, project, start, launcher)
+
+    @classmethod
+    def listed(  # noqa: PYI019
+        cls: type[SidecarKind], ended_too: bool = False
+    ) -> list[SidecarKind]:
+        """The sidecars of this kind that are running, of every project,
+        with those that have stopped when asked for."""
+        listed = docker_output(
+            "ps",
+            *(["--all"] if ended_too else []),
+            f"--filter=label={cls.LABEL}",
+            f'--format={{{{.Names}}}}\t{{{{.Label "{cls.LABEL}"}}}}',
+        )
+        found = []
+        for line in listed.splitlines():
+            name, _, label = line.partition("\t")
+            sidecar = cls.from_label(name, label)
+            if sidecar:
+                found.append(sidecar)
+        return found
 
 
 def sidecars(ended_too: bool = False) -> list[Sidecar]:
     """The capture sidecars that are running, of every project, with
     those that have stopped when asked for."""
-    listed = docker_output(
-        "ps",
-        *(["--all"] if ended_too else []),
-        f"--filter=label={CAPTURE_LABEL}",
-        f'--format={{{{.Names}}}}\t{{{{.Label "{CAPTURE_LABEL}"}}}}',
-    )
-    found = []
-    for line in listed.splitlines():
-        name, _, label = line.partition("\t")
-        sidecar = Sidecar.from_label(name, label)
-        if sidecar:
-            found.append(sidecar)
-    return found
+    return Sidecar.listed(ended_too)
 
 
 def start_capture(

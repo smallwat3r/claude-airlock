@@ -23,10 +23,12 @@ CONFIG_FILE_SETTINGS = frozenset(
         "FEATURES",
         "NET_FILTER",
         "NET_LOG",
+        "PROC_LOG",
         "TELEMETRY",
         "SSH_AGENT",
         "SOCKET",
         "RW_CONFIG",
+        "SHARED_HISTORY",
         "SHADOW",
         "MEMORY",
         "PIDS",
@@ -41,9 +43,18 @@ def private_dir(path: str) -> str:
     """Create a directory for the launcher's own records, with its parents,
     for the user alone: what is kept there says which hosts a session
     reached. Returns the path."""
-    # The mode only goes to the last directory made, so one level at a time
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    os.makedirs(path, mode=0o700, exist_ok=True)
+    # One level at a time, makedirs gives its mode to the last one alone
+    missing = []
+    directory = path
+    while directory and not os.path.isdir(directory):
+        missing.append(directory)
+        directory = os.path.dirname(directory)
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            # Another launcher was first
+            continue
     return path
 
 
@@ -60,10 +71,12 @@ class Settings:
     features: str | None = None
     net_filter: bool = False
     net_log: bool = True
+    proc_log: bool = True
     telemetry: bool = False
     ssh_agent: bool = False
     socket: str = "0"  # 0, 1 or full
     rw_config: bool = False
+    shared_history: bool = False
     shadow: tuple[str, ...] = ()
     memory: str = "16g"
     pids: str = "512"
@@ -95,8 +108,40 @@ class Host:
     @property
     def state_dir(self) -> str:
         # The launcher's own records. Never mounted into a session, which
-        # could otherwise edit what is kept about it.
+        # could otherwise edit what is kept about it, but for history_dir.
         return os.path.join(self.state_home, "claude-sandbox")
+
+    @property
+    def history_dir(self) -> str:
+        # What the sessions of each project remember, see history.py. The
+        # one part of the state directory that is mounted into a session,
+        # a project's own store into its sessions.
+        return os.path.join(self.state_dir, "history")
+
+    @property
+    def transcript_copies_dir(self) -> str:
+        # The launcher's copy of each transcript, see recorder.py
+        return os.path.join(self.state_dir, "transcripts")
+
+    @property
+    def process_records_dir(self) -> str:
+        # What ran in each session, see processes.py
+        return os.path.join(self.state_dir, "processes")
+
+    @property
+    def doors_file(self) -> str:
+        # Each use of the SSH agent and of the Docker socket, see doors.py
+        return os.path.join(self.state_dir, "door-use.jsonl")
+
+    @property
+    def agent_sockets_dir(self) -> str:
+        # Where the sessions' way to the SSH agent listens, see doors.py
+        return os.path.join(self.state_dir, "agents")
+
+    @property
+    def destinations_file(self) -> str:
+        # What each project is known to reach, see digest.py
+        return os.path.join(self.state_dir, "destinations.json")
 
     @property
     def pending_checks_dir(self) -> str:
@@ -204,10 +249,12 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         features=raw("FEATURES"),
         net_filter=flag("NET_FILTER", defaults.net_filter),
         net_log=flag("NET_LOG", defaults.net_log),
+        proc_log=flag("PROC_LOG", defaults.proc_log),
         telemetry=flag("TELEMETRY", defaults.telemetry),
         ssh_agent=flag("SSH_AGENT", defaults.ssh_agent),
         socket=choice("SOCKET", defaults.socket, ("0", "1", "full")),
         rw_config=flag("RW_CONFIG", defaults.rw_config),
+        shared_history=flag("SHARED_HISTORY", defaults.shared_history),
         shadow=colon_list("SHADOW"),
         memory=text("MEMORY", defaults.memory),
         pids=text("PIDS", defaults.pids),

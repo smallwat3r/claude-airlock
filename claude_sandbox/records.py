@@ -1,7 +1,8 @@
 """The launcher's record of the sessions whose network use can be traced:
 a line per session in its state directory, with the address a filtered one
-had on the internal network (see network.py) or the file of its capture
-(see capture.py). Written as a session runs and ends, read by --trace.
+had on the internal network (see network.py), the file of its capture
+(see capture.py) or the file of its processes (see processes.py). Written
+as a session runs and ends, read by --trace.
 
 The file is the launcher's own, never mounted into a session. It is still
 read with care, a line that does not hold up is passed over: it is written
@@ -43,7 +44,8 @@ def _moment(value: object) -> float | None:
 class NetSession:
     """A session with a network record: its container's name, its project
     and when it started, with its address for a filtered one, and for a
-    captured one the file of its capture and when it ended."""
+    captured one the file of its capture and when it ended. A line of its
+    own has the file of its processes."""
 
     name: str
     project: str
@@ -52,6 +54,8 @@ class NetSession:
     ip: str = ""
     # A file of the captures directory, empty without a capture
     capture: str = ""
+    # A file of the process records directory, empty without one
+    processes: str = ""
     # Not known of a filtered session, whose line is written as it starts
     end: float | None = None
     # Until when it ran as far as the record tells, see recorded_sessions
@@ -64,6 +68,8 @@ class NetSession:
             kept["ip"] = self.ip
         if self.capture:
             kept["capture"] = self.capture
+        if self.processes:
+            kept["processes"] = self.processes
         if self.end is not None:
             kept["end"] = self.end
         return json.dumps(kept) + "\n"
@@ -81,21 +87,23 @@ class NetSession:
             return None
         name, project = said.get("name"), said.get("project")
         ip, capture = said.get("ip", ""), said.get("capture", "")
+        processes = said.get("processes", "")
         start, end = _moment(said.get("start")), _moment(said.get("end"))
         if start is None or not (
             isinstance(name, str)
             and isinstance(project, str)
             and isinstance(ip, str)
             and isinstance(capture, str)
+            and isinstance(processes, str)
         ):
             return None
-        # Only ever a file of the captures directory, whatever the line says
-        capture = os.path.basename(capture)
-        if capture and end is None:
+        # Only ever a file of its directory, whatever the line says
+        capture, processes = os.path.basename(capture), os.path.basename(processes)
+        if (capture or processes) and end is None:
             return None
-        if not ip and not capture:
+        if not ip and not capture and not processes:
             return None
-        return cls(name, project, start, ip, capture, end)
+        return cls(name, project, start, ip, capture, processes, end)
 
 
 def record_net_session(host: Host, session: NetSession) -> None:

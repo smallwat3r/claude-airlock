@@ -19,8 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-docker"
 
 # Records its arguments, fails the "does it exist" queries so everything gets
-# created, keeps what a build was given, and runs FAKE_SESSION (a shell
-# snippet) in place of the container
+# created (but says the containers named in FAKE_RUNNING are up), keeps what
+# a build was given, and runs FAKE_SESSION (a shell snippet) in place of the
+# container
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, shutil, subprocess, sys
 args = sys.argv[1:]
@@ -29,15 +30,24 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 if args[1:2] == ["inspect"] and "IPAddress" in args[2] and "FAKE_IP" in os.environ:
     print(os.environ["FAKE_IP"])
     sys.exit(0)
-if args[1:2] == ["inspect"] and "Running" in args[2] and args[3].endswith(".capture"):
-    print("true")
-    sys.exit(0)
+up = os.environ.get("FAKE_RUNNING", "").split()
+if args[1:2] == ["inspect"] and "Running" in args[2]:
+    if args[3].endswith(".capture") or args[3] in up:
+        print("true")
+        sys.exit(0)
 if args[1:2] == ["inspect"]:
     sys.exit(1)
 if args[0] == "ps":
     print(os.environ.get("FAKE_PS", ""))
-if args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
+if args[0] == "cp" and ".procs:" in args[1]:
+    if "FAKE_PROCESSES" not in os.environ:
+        sys.exit(1)
+    shutil.copy(os.environ["FAKE_PROCESSES"], args[-1])
+elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
     shutil.copy(os.environ["FAKE_CAPTURE"], args[-1])
+if args[0] == "logs" and "FAKE_PROXY_LOG" in os.environ:
+    with open(os.environ["FAKE_PROXY_LOG"]) as proxy_log:
+        sys.stdout.write(proxy_log.read())
 if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
@@ -168,12 +178,14 @@ class LauncherTest(unittest.TestCase):
         self, *args: str, cwd: Path | None = None, session: str = "", **env: str
     ):
         """Run the launcher. Keyword arguments are its environment. Without
-        the network capture unless asked for, which is on by default and
-        would give every session here a sidecar."""
+        the network capture and the record of processes unless asked for,
+        which are on by default and would give every session here its
+        sidecars."""
         environment = {
             **self.fake_docker_env(),
             "HOME": str(self.home),
             "CLAUDE_DOCKER_NET_LOG": "0",
+            "CLAUDE_DOCKER_PROC_LOG": "0",
             **env,
         }
         if session:

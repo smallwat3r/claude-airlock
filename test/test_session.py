@@ -63,6 +63,7 @@ class DefaultSessionTest(LauncherTest):
         for flag in (
             "--env=CLAUDE_DOCKER_NET_FILTER=0",
             "--env=CLAUDE_DOCKER_NET_LOG=0",
+            "--env=CLAUDE_DOCKER_PROC_LOG=0",
             "--env=CLAUDE_DOCKER_CACHE=1",
             "--env=CLAUDE_DOCKER_MEMORY=16g",
             "--env=CLAUDE_DOCKER_PIDS=512",
@@ -121,7 +122,9 @@ class OptionsTest(LauncherTest):
             CLAUDE_DOCKER_RUNTIME="runsc",
         ).flags
         self.assertIn("--env=SSH_AUTH_SOCK=/tmp/ssh-agent.sock", flags)
-        self.assertIn("--volume=/tmp/agent.sock:/tmp/ssh-agent.sock:z", flags)
+        # Not the agent's own socket, one of the launcher's in front of it
+        (agent,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
+        self.assertIn(f"--volume={self.state / 'agents'}/", agent)
         self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
         self.assertFalse(
             [flag for flag in flags if "/.claude/" in flag and flag.endswith(":ro,z")]
