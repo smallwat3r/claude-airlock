@@ -21,11 +21,11 @@
 
 # uv comes from its official image, as a named stage so it can be pinned by
 # digest (COPY --from cannot take a digest held in an ARG on the legacy builder)
-FROM ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
 
 # The Debian release is part of the tag on purpose, a new Node major must not
 # silently move the image to another release
-FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \

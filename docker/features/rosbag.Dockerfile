@@ -16,9 +16,9 @@ RUN apt-get update \
 # mcap CLI (inspect/filter/recover .mcap rosbags), pinned and checksum-verified.
 # Update from https://github.com/foxglove/mcap/releases (no upstream checksum
 # files, so compute sha256sum on the downloaded binaries)
-ARG MCAP_VERSION=v0.3.0
-ARG MCAP_SHA256_AMD64=5d4100573fab880f1c6400952466275bb3b32c3d230a54f7c380ee0d08e59eef
-ARG MCAP_SHA256_ARM64=be9734ef63ada9d0cc7a3aa41378ab65fd482601e5f5b3b52098d8e6553deabf
+ARG MCAP_VERSION=v0.4.0
+ARG MCAP_SHA256_AMD64=3ace13bc8f0273c69742f25695f7f2df84aed57ddd7c36d5f9a59561dc719fb1
+ARG MCAP_SHA256_ARM64=94fd84e40ed1593205caf9b9ccee863181256a2fe1ad051ee55d31b4d1b4aca7
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "${ARCH}" in \
     amd64) MCAP_SHA256="${MCAP_SHA256_AMD64}" ;; \

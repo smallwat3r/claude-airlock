@@ -11,7 +11,7 @@
 # one script here and the fonts are kept next to it. React is a peer
 # dependency the export never renders with, it follows the major Excalidraw
 # was built for and is not refreshed by update-pins.py.
-ARG EXCALIDRAW_VERSION=0.18.0
+ARG EXCALIDRAW_VERSION=0.18.1
 ARG EXCALIDRAW_ESBUILD_VERSION=0.28.2
 RUN mkdir -p /opt/excalidraw /tmp/excalidraw-build \
     && cd /tmp/excalidraw-build \

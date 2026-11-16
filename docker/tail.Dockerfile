@@ -9,7 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code: exact version from npm
-ARG CLAUDE_CODE_VERSION=2.1.323
+ARG CLAUDE_CODE_VERSION=2.1.326
 
 # The host's ~/.claude is shared into the container, but its config stores
 # absolute paths under the host home (e.g. plugin marketplace locations).

@@ -46,7 +46,7 @@ from .settings import (
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
 # docker/update-pins.py.
-PROXY_IMAGE = "tecnativa/docker-socket-proxy:latest@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
+PROXY_IMAGE = "tecnativa/docker-socket-proxy:latest@sha256:fd989c12c74edb8424f53f31a2054459f286967c93e113e91ea95432f066493b"
 SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
 EGRESS_PROXY = "claude-egress-proxy"
 # A hash of what a proxy sidecar was started from, so one started from
