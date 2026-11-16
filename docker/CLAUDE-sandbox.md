@@ -50,12 +50,15 @@ listed there is off.
   call is recorded for the user to review. If off,
   no Docker daemon can be reached at all. The docker CLI itself comes with
   the docker feature of the image.
-- CLAUDE_DOCKER_RW_CONFIG (off unless 1). ~/.claude is shared with the
-  host and writable, except settings.json, CLAUDE.md, hooks, commands,
-  skills, agents and rules: if off these are read-only, a change to them
-  fails with
-  "Read-only file system". Ask the user to make it on the host. If on,
-  they are writable.
+- ~/.claude is the sandbox's own, shared by the sandboxed sessions and not
+  with the host: what the host's Claude Code keeps there (its sessions,
+  jobs, logs) is not here, that is not a bug. From the host's ~/.claude
+  come settings.json, CLAUDE.md, hooks, commands, skills, agents, rules,
+  plugins and projects, and the login is kept the same as the host's.
+- CLAUDE_DOCKER_RW_CONFIG (off unless 1). If off, settings.json, CLAUDE.md,
+  hooks, commands, skills, agents and rules of ~/.claude are read-only, a
+  change to them fails with "Read-only file system". Ask the user to make
+  it on the host. If on, they are writable.
 - CLAUDE_DOCKER_CACHE (on unless 0). If on, ~/.cache persists between
   sessions of this project. If off, it is a 2g tmpfs that is gone when the
   session ends, and large downloads can fill it.

@@ -167,7 +167,21 @@ or none when set empty.
 ### Mounts
 
 - The project and any extra directories, read-write at their host paths.
-- `~/.claude`, so login, settings and the project's history persist.
+- As `~/.claude`, a directory of the launcher's that the sandboxed sessions
+  share (`~/.local/state/claude-sandbox/home`), not yours. Of your own
+  `~/.claude` only what is named is mounted into it: the configuration
+  listed below, `plugins` and `projects` (the transcripts).
+  - Everything else Claude Code keeps there stays on its side: the sessions
+    running on the host, its background jobs, its daemon, its logs, and
+    whatever a later version adds. A session neither reads nor writes
+    yours, and your host `claude` does not see the sandbox's.
+  - The login is one all the same. The launcher carries
+    `.credentials.json` between the two directories while a session runs,
+    in both directions, so a session starts logged in and a login renewed
+    on either side is the other's a moment later. `/logout` on one side
+    logs out the other.
+  - The sandbox has its own Claude Code config (theme, folder trust, MCP
+    servers), `.claude.json` in that directory.
 - Never the home directory, its parents or the filesystem root, the
   launcher refuses those.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so a
@@ -196,8 +210,9 @@ or none when set empty.
   missing where a session could create it stops the launch.
 - **What Claude Code keeps for one session.** `~/.claude/shell-snapshots`
   and `session-env` are sourced by every command of the session they are
-  of, those of your host sessions too. A sandboxed session gets an empty
-  tmpfs in place of each, so it can neither read nor add to them.
+  of. Those of your host sessions are not in the sandbox, and a sandboxed
+  session gets an empty tmpfs in place of each, so it can neither read nor
+  add to those of another sandboxed session.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty (`/dev/null` is mounted over them). Templates such as
   `.env.example` stay readable, `CLAUDE_DOCKER_SHADOW` hides more.
@@ -207,9 +222,8 @@ or none when set empty.
     covered by an empty one. The project's own and those of its worktrees
     stay.
   - The prompt history, the paste cache and the file history are kept per
-    project under `~/.local/state/claude-sandbox/history` and mounted in
-    place of the shared ones. The prompt history starts from the project's
-    own lines.
+    project under `~/.local/state/claude-sandbox/history`. The prompt
+    history starts from the project's own lines of yours.
   - So the up-arrow history of a sandboxed session is its project's, and
     `claude` on the host cannot rewind the files of a session run in the
     sandbox.
@@ -323,8 +337,10 @@ read-write project safe to trust blindly afterwards:
   tokens. Add the ones you want there from inside a session.
 - Of the history of other projects, some is still there to read: the
   transcripts of a project first used after the session started, the paths
-  of all your projects (in `~/.claude/.claude.json`), and what Claude Code
-  keeps by session rather than by project (`jobs`, its debug log).
+  of the projects you ran in the sandbox (in its `.claude.json`), and what
+  Claude Code keeps by session rather than by project (`jobs`, its debug
+  log) of the other sandboxed sessions. Those of the host are not there.
+- The login is in the sandbox, a session can read it and use it elsewhere.
 - The egress allowlist includes GitHub, so with a forwarded SSH agent or a
   `GH_TOKEN` a session can still push data out to a repository or gist.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)

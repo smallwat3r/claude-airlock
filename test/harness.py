@@ -149,6 +149,8 @@ class LauncherTest(unittest.TestCase):
         self.project = self.home / "proj"
         # Where the launcher keeps its own records
         self.state = self.home / ".local" / "state" / "claude-sandbox"
+        # The ~/.claude of the sandboxed sessions
+        self.base = self.state / "home"
         # Where Claude Code keeps the transcripts of the project
         name = re.sub(r"[^A-Za-z0-9]", "-", str(self.project))
         self.transcripts = self.home / ".claude" / "projects" / name

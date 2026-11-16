@@ -58,7 +58,8 @@ class DefaultSessionTest(LauncherTest):
         for name in ("shell-snapshots", "session-env"):
             options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
             self.assertIn(f"--tmpfs=/home/node/.claude/{name}:{options}", self.flags)
-            self.assertTrue((self.home / ".claude" / name).is_dir())
+            # What it goes over is there, docker would make it as root
+            self.assertTrue((self.base / name).is_dir())
 
     def test_container_is_hardened(self):
         for flag in (
@@ -138,6 +139,12 @@ class OptionsTest(LauncherTest):
         self.assertFalse(
             [flag for flag in flags if "/.claude/" in flag and flag.endswith(":ro,z")]
         )
+        # The host's all the same, not one a session makes for the sandbox
+        claude = self.home / ".claude"
+        for item in ("settings.json", "hooks", "rules"):
+            self.assertIn(
+                f"--volume={claude / item}:/home/node/.claude/{item}:z", flags
+            )
         self.assertIn("--tmpfs=/home/node/.cache:exec,size=2g", flags)
         self.assertIn("--runtime=runsc", flags)
 
@@ -270,9 +277,89 @@ class OptionsTest(LauncherTest):
         }
         (self.home / ".claude.json").write_text(json.dumps(config))
         self.launch()
-        seeded = self.home / ".claude" / ".claude.json"
+        seeded = self.base / ".claude.json"
         self.assertEqual(json.loads(seeded.read_text()), {"theme": "dark"})
         self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(seeded.stat().st_nlink, 1)
+        # And is not seeded again over what the sessions made of it
+        seeded.write_text("{}")
+        self.launch()
+        self.assertEqual(seeded.read_text(), "{}")
+
+    def test_the_config_the_sandbox_had_is_carried_over_whole(self):
+        # From when the host's ~/.claude was mounted whole
+        had = {"theme": "light", "projects": {str(self.project): {"trusted": True}}}
+        (self.home / ".claude" / ".claude.json").write_text(json.dumps(had))
+        (self.home / ".claude.json").write_text(json.dumps({"theme": "dark"}))
+        self.launch()
+        self.assertEqual(json.loads((self.base / ".claude.json").read_text()), had)
+
+
+class HomeTest(LauncherTest):
+    """A session's ~/.claude is the launcher's, with named parts of the
+    host's."""
+
+    CLAUDE = "/home/node/.claude"
+
+    def mounted_at(self, flags: list[str], target: str) -> list[str]:
+        return [
+            flag
+            for flag in flags
+            if flag.startswith("--volume=") and flag.split(":")[1] == target
+        ]
+
+    def test_the_hosts_claude_directory_is_not_mounted(self):
+        flags = self.launch().flags
+        self.assertEqual(
+            self.mounted_at(flags, self.CLAUDE),
+            [f"--volume={self.base}:{self.CLAUDE}:z"],
+        )
+        self.assertEqual(self.base.stat().st_mode & 0o777, 0o700)
+
+    def test_only_what_is_named_comes_from_the_host(self):
+        claude = self.home / ".claude"
+        for name in ("sessions", "jobs", "daemon"):
+            (claude / name).mkdir()
+        (claude / ".credentials.json").write_text("{}")
+        flags = self.launch().flags
+        from_host = sorted(
+            flag.split(":")[1][len(self.CLAUDE) + 1 :]
+            for flag in flags
+            if flag.startswith(f"--volume={claude}/")
+        )
+        self.assertEqual(
+            from_host,
+            sorted(
+                ("settings.json", "CLAUDE.md", "hooks", "commands", "skills")
+                + ("agents", "rules", "plugins", "projects")
+            ),
+        )
+        for name in ("plugins", "projects"):
+            self.assertIn(f"--volume={claude / name}:{self.CLAUDE}/{name}:z", flags)
+
+    def test_every_mount_in_it_has_something_to_go_over(self):
+        for extra in ({}, {"CLAUDE_DOCKER_SHARED_HISTORY": "1"}):
+            flags = self.launch(**extra).flags
+            (self.work / "log").unlink()
+            inside = [
+                flag.split(":")
+                for flag in flags
+                if flag.startswith(("--volume=", "--tmpfs="))
+                and flag.split(":")[1 if flag.startswith("--volume=") else 0]
+                .removeprefix("--tmpfs=")
+                .startswith(self.CLAUDE + "/")
+            ]
+            self.assertGreater(len(inside), 12)
+            for parts in inside:
+                if parts[0].startswith("--tmpfs="):
+                    over = self.base / Path(parts[0].removeprefix("--tmpfs=")).name
+                    self.assertTrue(over.is_dir(), over)
+                    continue
+                source = Path(parts[0].removeprefix("--volume="))
+                over = self.base / Path(parts[1]).relative_to(self.CLAUDE)
+                self.assertTrue(source.exists(), source)
+                # A file where a file goes, docker would make a directory
+                self.assertEqual(over.is_dir(), source.is_dir(), over)
 
 
 class SocketProxyTest(LauncherTest):

@@ -121,15 +121,28 @@ class Host:
     @property
     def state_dir(self) -> str:
         # The launcher's own records. Never mounted into a session, which
-        # could otherwise edit what is kept about it, but for history_dir.
+        # could otherwise edit what is kept about it, but for
+        # sandbox_claude_dir and history_dir.
         return os.path.join(self.state_home, "claude-sandbox")
 
     @property
+    def sandbox_claude_dir(self) -> str:
+        # The ~/.claude of the sandboxed sessions, see home.py. Mounted
+        # into every session, with the named parts of the host's on top.
+        return os.path.join(self.state_dir, "home")
+
+    @property
     def history_dir(self) -> str:
-        # What the sessions of each project remember, see history.py. The
-        # one part of the state directory that is mounted into a session,
-        # a project's own store into its sessions.
+        # What the sessions of each project remember, see history.py.
+        # Mounted into a session too, a project's own store into its
+        # sessions.
         return os.path.join(self.state_dir, "history")
+
+    @property
+    def login_synced_file(self) -> str:
+        # The login the host and the sandbox last had in common, see
+        # login.py
+        return os.path.join(self.state_dir, "login-synced")
 
     @property
     def transcript_copies_dir(self) -> str:

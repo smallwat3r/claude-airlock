@@ -54,7 +54,10 @@ class HistoryTest(LauncherTest):
         for name in ("file-history", "paste-cache", "history.jsonl"):
             self.assertIn(f"--volume={store / name}:{CLAUDE}/{name}:z", flags)
         # What each is mounted over is there, docker would make it as root
-        self.assertTrue((self.home / ".claude" / "file-history").is_dir())
+        self.assertTrue((self.base / "file-history").is_dir())
+        self.assertTrue((self.base / "history.jsonl").is_file())
+        # And the host's are not made for it
+        self.assertFalse((self.home / ".claude" / "file-history").exists())
         self.assertEqual(store.stat().st_mode & 0o777, 0o700)
 
     def test_the_prompt_history_starts_from_the_projects_own_lines(self):
@@ -76,8 +79,13 @@ class HistoryTest(LauncherTest):
     def test_shared_when_asked_for(self):
         flags = self.launch(CLAUDE_DOCKER_SHARED_HISTORY="1").flags
         self.assertEqual(self.covered(flags), [])
-        self.assertFalse([flag for flag in flags if "history.jsonl" in flag])
         self.assertIn("--env=CLAUDE_DOCKER_SHARED_HISTORY=1", flags)
+        # The host's, which are no longer there with all of its ~/.claude
+        shared = self.home / ".claude"
+        for name in ("file-history", "paste-cache", "history.jsonl"):
+            self.assertIn(f"--volume={shared / name}:{CLAUDE}/{name}:z", flags)
+        self.assertTrue((shared / "paste-cache").is_dir())
+        self.assertFalse(list((self.state / "history").glob("proj-*")))
 
 
 if __name__ == "__main__":

@@ -25,19 +25,13 @@ from .docker import (
     mount_arg,
     project_slug,
 )
+from .home import CLAUDE, home_args, session_state_args
 from .image import Image
 from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings, private_dir
-from .tamper import CONFIG_FILES, CONFIG_TREES
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
 SHADOW_PRUNED_DIRS = ("node_modules", ".git")
-# What the config seeded from the host's leaves out, see seed_config
-SEED_LEFT_OUT = ("projects", "mcpServers")
-# What Claude Code keeps in ~/.claude for one session and reads back into
-# its shell: a snapshot of the shell's setup, and what its hooks export. A
-# session is given its own of each, empty, see session_state_args.
-SESSION_STATE = ("shell-snapshots", "session-env")
 
 
 @dataclass(frozen=True)
@@ -209,66 +203,6 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
         os.close(claim)
 
 
-def seed_config(host: Host) -> None:
-    """Claude writes its global config atomically (temp file + rename). The
-    default location, a single-file bind mount of ~/.claude.json, can't be
-    renamed over, and the container home is read-only, so every config write
-    is lost and Claude re-prompts (theme, folder trust) on each launch.
-    CLAUDE_CONFIG_DIR points at the mounted ~/.claude directory instead:
-    there the config is a regular file in a writable mount, so atomic
-    writes persist. Seeded from the host's global config on first use so
-    onboarding, theme and account carry over. Not what it holds of each
-    project (its path, its settings and the servers set up for it alone):
-    a session has no use for those of another project, see history.py.
-    Nor the servers set up for every project: each comes with what it is
-    started with, a token as often as not, which every session could then
-    read, and with a command that the image need not have. One wanted in
-    here is added in here (claude mcp add). The config the sessions then
-    share still gains an entry for each
-    project that is run in here."""
-    seeded = os.path.join(host.claude_dir, ".claude.json")
-    if os.path.exists(seeded):
-        return
-    try:
-        text = Path(host.home, ".claude.json").read_text(encoding="utf-8")
-        config = json.loads(text)
-    except (OSError, ValueError, RecursionError):
-        # None to carry over, or not one to read: Claude starts afresh
-        return
-    if not isinstance(config, dict):
-        return
-    for left_out in SEED_LEFT_OUT:
-        config.pop(left_out, None)
-    try:
-        descriptor = os.open(seeded, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        # Another launcher was first
-        return
-    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        json.dump(config, file, indent=2)
-
-
-def prepare_claude_dir(settings: Settings, host: Host) -> None:
-    """Create what the mounts below expect to find in the host's ~/.claude."""
-    os.makedirs(host.claude_dir, exist_ok=True)
-    os.makedirs(host.claude_state_dir, exist_ok=True)
-    # Docker would make what a tmpfs goes over as root
-    for name in SESSION_STATE:
-        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
-    seed_config(host)
-    if settings.rw_config:
-        return
-    # So there is something to protect: what is missing could otherwise
-    # be created from inside the container, and the host's claude would
-    # follow it. Empty, they say nothing.
-    for name in CONFIG_TREES:
-        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
-    for name in CONFIG_FILES:
-        file = Path(host.claude_dir, name)
-        if not file.exists():
-            file.write_text("{}\n" if name.endswith(".json") else "", encoding="utf-8")
-
-
 def telemetry_args(settings: Settings) -> list[str]:
     """Unless CLAUDE_DOCKER_TELEMETRY=1, Claude Code is told to keep its
     usage events and crash reports to itself. They go to third parties
@@ -292,7 +226,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         f"--user={os.getuid()}:{os.getgid()}",
         f"--workdir={host.project_dir}",
         # Run under the host home path (symlinked to /home/node in the image)
-        # so absolute paths in the shared ~/.claude config resolve consistently
+        # so absolute paths in the config of ~/.claude resolve consistently
         env_arg("HOME", host.home),
         env_arg("TERM", "xterm-256color"),
         env_arg("INSIDE_EMACS", ""),
@@ -301,7 +235,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # current viewport is gone. Render inline instead so old output stays
         # in the terminal's scrollback.
         env_arg("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", 1),
-        env_arg("CLAUDE_CONFIG_DIR", f"{CONTAINER_HOME}/.claude"),
+        env_arg("CLAUDE_CONFIG_DIR", CLAUDE),
         *telemetry_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
@@ -325,7 +259,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         env_arg("GIT_CONFIG_KEY_1", "tag.gpgsign"),
         env_arg("GIT_CONFIG_VALUE_1", "false"),
         mount_arg(host.project_dir, host.project_dir, "z"),
-        mount_arg(host.claude_dir, f"{CONTAINER_HOME}/.claude", "z"),
+        *home_args(host),
         # ~/.local/share/claude is NOT mounted. It holds the versioned claude
         # binary the launcher symlinks to, mounting the host's copy shadows
         # the image's baked-in version, dangling the symlink (exit 127). The
@@ -350,23 +284,6 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # A stronger runtime when asked for, e.g. runsc (gVisor), which keeps
         # the container off the host kernel. It must be installed in the daemon.
         *([f"--runtime={settings.runtime}"] if settings.runtime else []),
-    ]
-
-
-def session_state_args() -> list[str]:
-    """Claude Code runs every command of a session through what it keeps
-    for that session in ~/.claude: it sources the snapshot of the shell,
-    and what the session's hooks exported. Those of the sessions run on the
-    host are there too, and one written to from in here would run its
-    additions on the host with that session's next command, outside the
-    sandbox. So a session is given a tmpfs in place of each: its own are
-    made there and gone with it, and it neither sees nor reaches those of
-    another session. Whatever CLAUDE_DOCKER_RW_CONFIG says, that is about
-    the config and this is not config. The session's user's alone: a tmpfs
-    is root's unless told otherwise."""
-    options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
-    return [
-        f"--tmpfs={CONTAINER_HOME}/.claude/{name}:{options}" for name in SESSION_STATE
     ]
 
 
@@ -428,35 +345,6 @@ def session_args(action: str, env: Mapping[str, str]) -> list[str]:
         if name in env:
             args.append(env_arg(name))
     return args
-
-
-# What a session cannot change of ~/.claude: all that the check of
-# tamper.py watches there, so the two cannot come apart
-PROTECTED_CONFIG = (*CONFIG_FILES, *CONFIG_TREES)
-
-
-def protect_config_args(settings: Settings, host: Host) -> list[str]:
-    """~/.claude is shared read-write with the host, and settings.json and
-    hooks hold commands the host's own claude runs. Left writable, a
-    compromised session could plant a hook there and get code execution
-    outside the sandbox, so they are mounted read-only on top. CLAUDE.md,
-    skills, agents, commands and rules get the same treatment: they are
-    instructions every later session follows, on the host too. The ones
-    that are missing were made empty by prepare_claude_dir, so that none
-    can be created either. The cost: none of these can be changed from
-    inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out. Plugins stay
-    writable (claude updates them itself): what a session changes of them
-    is not prevented, it is said when the session ends, see tamper.py."""
-    if settings.rw_config:
-        # Shown by bin/claude-statusline
-        return [env_arg("CLAUDE_DOCKER_RW_CONFIG", 1)]
-    return [
-        mount_arg(
-            f"{host.claude_dir}/{item}", f"{CONTAINER_HOME}/.claude/{item}", "ro,z"
-        )
-        for item in PROTECTED_CONFIG
-        if os.path.exists(os.path.join(host.claude_dir, item))
-    ]
 
 
 def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:

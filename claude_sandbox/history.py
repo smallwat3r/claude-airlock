@@ -1,12 +1,14 @@
 """Keeping what Claude Code remembers of other projects out of a session.
 
-~/.claude is mounted whole, Claude Code needs its login, settings and the
-project's own past there. It also holds the past of every other project:
-their transcripts (every prompt, command output and file that was read),
-the prompts typed anywhere, what was pasted, and the copies of edited files
-that rewinding uses. A session has no use for those of another project, and
-one that went wrong could read them all, so unless
-CLAUDE_DOCKER_SHARED_HISTORY=1 they are left out:
+Of the host's ~/.claude a session is given the transcripts (projects),
+Claude Code needs the project's own past there, see home.py. That
+directory also holds the past of every other project: every prompt,
+command output and file that was read. So do three things Claude Code
+keeps in ~/.claude for all projects at once: the prompts typed anywhere,
+what was pasted, and the copies of edited files that rewinding uses. A
+session has no use for those of another project, and one that went wrong
+could read them all, so unless CLAUDE_DOCKER_SHARED_HISTORY=1 they are
+left out:
 
 - In projects, the directory of every other project is covered by an empty
   one. The project's own stay, with those of its worktrees. Covered and not
@@ -14,10 +16,13 @@ CLAUDE_DOCKER_SHARED_HISTORY=1 they are left out:
   (for a new worktree) is a real one on the host. The cost is that a
   project first used after the session started is not covered in it.
 - The prompt history, the paste cache and the file history are kept per
-  project by the launcher and mounted in place of the shared ones, the
-  prompt history starting from the project's own lines of the shared one.
+  project by the launcher and mounted into the session's ~/.claude, the
+  prompt history starting from the project's own lines of the host's.
   Sandboxed sessions of a project share them, the host's claude does not
   see them: it cannot rewind the files of a session run in here.
+
+With CLAUDE_DOCKER_SHARED_HISTORY=1 the three are the host's, mounted from
+its ~/.claude, and nothing of projects is covered.
 
 Directories mounted next to the project (--add-dir) do not bring their
 history along: a directory holds what is in it now, its history also what
@@ -103,31 +108,45 @@ def own_prompts(host: Host) -> list[str]:
 
 
 def prepare_store(host: Host) -> Path:
-    """The project's store with what is mounted from it in place, and in
-    ~/.claude what each is mounted over: docker would make a missing one
-    as root, and a directory where the prompt history goes."""
+    """The project's store with what is mounted from it in place. What
+    each is mounted over is made with the session's ~/.claude, see
+    home.py."""
     store = project_store(host)
     for name in PER_PROJECT_DIRS:
         (store / name).mkdir(mode=0o700, exist_ok=True)
-        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
     prompts = store / PROMPT_HISTORY
     if not prompts.exists():
         descriptor = os.open(prompts, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as seeded:
             seeded.writelines(own_prompts(host))
-    shared = Path(host.claude_dir, PROMPT_HISTORY)
-    if not shared.exists():
-        shared.touch(mode=0o600)
     return store
 
 
+def prepare_shared(host: Host) -> Path:
+    """The host's ~/.claude with what is mounted from it in place when the
+    history is shared: there has to be something to mount."""
+    shared = Path(host.claude_dir)
+    for name in PER_PROJECT_DIRS:
+        (shared / name).mkdir(exist_ok=True)
+    prompts = shared / PROMPT_HISTORY
+    if not prompts.exists():
+        prompts.touch(mode=0o600)
+    return shared
+
+
 def history_args(settings: Settings, host: Host) -> list[str]:
-    """The mounts that keep the history of other projects out of the
-    session, on top of the one of ~/.claude."""
-    if settings.shared_history:
-        # Shown by bin/claude-statusline, and said in docker/CLAUDE-sandbox.md
-        return [env_arg("CLAUDE_DOCKER_SHARED_HISTORY", 1)]
+    """What a session is given of the history, on top of its ~/.claude:
+    the project's own, with the transcripts of other projects covered, or
+    the host's when it is shared."""
     claude = f"{CONTAINER_HOME}/.claude"
+    kept = (*PER_PROJECT_DIRS, PROMPT_HISTORY)
+    if settings.shared_history:
+        shared = prepare_shared(host)
+        return [
+            # Shown by bin/claude-statusline, and said in docker/CLAUDE-sandbox.md
+            env_arg("CLAUDE_DOCKER_SHARED_HISTORY", 1),
+            *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
+        ]
     others = other_projects(host)
     args = []
     if others:
@@ -136,8 +155,5 @@ def history_args(settings: Settings, host: Host) -> list[str]:
             mount_arg(empty, f"{claude}/projects/{name}", "ro,z") for name in others
         ]
     store = prepare_store(host)
-    args += [
-        mount_arg(str(store / name), f"{claude}/{name}", "z")
-        for name in (*PER_PROJECT_DIRS, PROMPT_HISTORY)
-    ]
+    args += [mount_arg(str(store / name), f"{claude}/{name}", "z") for name in kept]
     return args

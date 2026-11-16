@@ -107,6 +107,13 @@ STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-sandbox"
 OTHER_PROJECT="${HOME}/.claude/projects/-claude-smoke-another-project"
 mkdir -p "${OTHER_PROJECT}"
 echo '{"type":"user"}' >"${OTHER_PROJECT}/session.jsonl"
+# What the host's claude keeps for itself, which is not a session's to see,
+# what comes from the host all the same, and the login as it is now
+HOST_SESSION="${HOME}/.claude/sessions/smoke-host-session"
+HOST_PLUGIN="${HOME}/.claude/plugins/smoke-host-plugin"
+mkdir -p "$(dirname "${HOST_SESSION}")" "$(dirname "${HOST_PLUGIN}")"
+touch "${HOST_SESSION}" "${HOST_PLUGIN}"
+SMOKE_LOGIN="$(sha256sum <"${HOME}/.claude/.credentials.json" 2>/dev/null || true)"
 # The sessions leave a cache volume named after the project behind
 # shellcheck disable=SC2317,SC2329 # called by the trap
 cleanup() {
@@ -115,6 +122,7 @@ cleanup() {
     docker volume rm "${volume}" >/dev/null 2>&1 || true
   done
   rm -rf "${PROJECT}" "${SESSION_ERR}" "${OTHER_PROJECT}"
+  rm -f "${HOST_SESSION}" "${HOST_PLUGIN}"
   rm -rf "${STATE}/history/$(basename "${PROJECT}")-"*
 }
 trap cleanup EXIT
@@ -142,6 +150,12 @@ check_fails "the transcripts of another project are out of sight" \
   [ -e /home/node/.claude/projects/-claude-smoke-another-project/session.jsonl ]
 check "the prompt history is there to add to" [ -w /home/node/.claude/history.jsonl ]
 check "the file history is there to add to" touch /home/node/.claude/file-history/smoke-probe
+check_fails "the sessions of the host are out of sight" \
+  [ -e /home/node/.claude/sessions/smoke-host-session ]
+check "~/.claude is writable" touch /home/node/.claude/smoke-probe
+check "the plugins of the host are there" [ -e /home/node/.claude/plugins/smoke-host-plugin ]
+check "the login is that of the host" \
+  [ "$(sha256sum < /home/node/.claude/.credentials.json)" = "'"${SMOKE_LOGIN}"'" ]
 check "claude starts" claude --version
 check "egress is open" curl -fsS -m 15 -o /dev/null https://example.com
 echo planted > .git/hooks/pre-commit
@@ -174,6 +188,10 @@ check "the proxy log rotates on request" \
 check "--net-log also reads the rotated log" \
   bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
 
+check "what a session leaves in ~/.claude stays with the sandbox" \
+  [ -f "${STATE}/home/smoke-probe" ]
+check "and is not in that of the host" bash -c "! ls '${HOME}/.claude/smoke-probe'"
+rm -f "${STATE}/home/smoke-probe"
 check "the history of the session is kept apart, per project" \
   bash -c "ls '${STATE}/history/$(basename "${PROJECT}")-'*/file-history/smoke-probe"
 check "and not with the history of every project" \

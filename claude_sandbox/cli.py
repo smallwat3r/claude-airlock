@@ -15,7 +15,9 @@ from .docker import docker_ok
 from .doors import socket_proxy_watched, ssh_agent_door
 from .follow import follow
 from .history import history_args
+from .home import prepare_home, protect_config_args
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
+from .login import login_shared
 from .network import (
     net_log,
     network_args,
@@ -36,9 +38,7 @@ from .session import (
     extra_dir_args,
     git_config_args,
     interrupts_held,
-    prepare_claude_dir,
     protect_args,
-    protect_config_args,
     protect_env_args,
     protected_dirs,
     refuse_unsafe_dir,
@@ -141,7 +141,7 @@ def session(
         status = build_image(image, host)
         if status != 0:
             return status
-    prepare_claude_dir(settings, host)
+    prepare_home(host)
     # The name, then the network and the proxies a session leans on, before
     # the arguments that name them
     with container_name(host, os.environ) as name, session_network(settings, host):
@@ -209,6 +209,7 @@ def named_session(
                     socket_proxy_watched(settings, host, name, owner),
                     processes_recorded(settings, host, name, owner, image.tag),
                     transcripts_copied(host),
+                    login_shared(host),
                 ):
                     running.enter_context(recording)
                 agent = ssh_agent_door(settings, host, name, env)
