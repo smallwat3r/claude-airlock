@@ -42,6 +42,9 @@ COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.j
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
 HASHED_BYTES = 64 * 1024 * 1024
+# A settings file past this is not read for the scripts it names. It is
+# hashed like any other, so the change that made it this large still shows.
+SETTINGS_BYTES = 1024 * 1024
 
 
 def sha256_hex(data: bytes) -> str:
@@ -103,19 +106,23 @@ def tree_files(root: str) -> list[str]:
 
 def module_git_dirs(directory: str) -> Iterator[str]:
     """The git directories of the submodules kept under a directory, and of
-    theirs. A submodule's name can hold slashes, so they sit at any depth."""
-    try:
-        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
-    except OSError:
-        return
-    for entry in entries:
-        if not entry.is_dir(follow_symlinks=False):
+    theirs. A submodule's name can hold slashes, so they sit at any depth.
+    Without recursion: a session can nest directories deeper than Python
+    calls, and the check must not be made to fail."""
+    pending = [directory]
+    while pending:
+        try:
+            entries = list(os.scandir(pending.pop()))
+        except OSError:
             continue
-        if os.path.isfile(os.path.join(entry.path, "HEAD")):
-            yield entry.path
-            yield from module_git_dirs(os.path.join(entry.path, "modules"))
-        else:
-            yield from module_git_dirs(entry.path)
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if os.path.isfile(os.path.join(entry.path, "HEAD")):
+                yield entry.path
+                pending.append(os.path.join(entry.path, "modules"))
+            else:
+                pending.append(entry.path)
 
 
 def git_configs(git_dir: str) -> list[str]:
@@ -169,14 +176,19 @@ def named_files(settings_file: str, base: str) -> list[str]:
     script is changed by changing the script, with the settings as they
     were. Found by taking each word of a command for a path, relative ones
     from base, which catches the usual "path/to/script arguments" and
-    misses a path a shell would have to work out."""
+    misses a path a shell would have to work out. A file a session made
+    too large or nested too deep to read names nothing, the check goes on
+    without it."""
     try:
+        if os.path.getsize(settings_file) > SETTINGS_BYTES:
+            return []
         settings = json.loads(Path(settings_file).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        commands = list(commands_in(settings))
+    except (OSError, ValueError, RecursionError):
         return []
     home = os.path.expanduser("~")
     found = []
-    for command in commands_in(settings):
+    for command in commands:
         try:
             words = shlex.split(command)
         except ValueError:

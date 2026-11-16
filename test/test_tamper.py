@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,20 @@ class TamperingTest(LauncherTest):
         result = self.launch(session="mkdir .claude; ln -s / .claude/skills")
         self.assertIn(f"  {self.project}/.claude/skills\n", result.stderr)
         self.assertNotIn("/etc/", result.stderr)
+
+    def test_what_a_session_nests_too_deep_does_not_stop_the_check(self):
+        # Deeper than Python can remove again, so rm clears it away
+        modules = self.project / ".git" / "modules"
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(modules)], check=False)
+        deep = "mkdir -p .git/modules/$(python3 -c \"print('a/' * 1500)\")"
+        nested = "python3 -c \"print('[' * 100000 + ']' * 100000)\""
+        result = self.launch(
+            session=f"{deep}; mkdir .claude; {nested} > .claude/settings.json;"
+            " echo x > .git/hooks/pre-commit"
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", result.stderr)
+        self.assertIn(f"  {self.project}/.claude/settings.json\n", result.stderr)
 
     def test_branch_tracking_is_not_reported(self):
         result = self.launch(
