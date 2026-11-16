@@ -16,10 +16,27 @@ jobs:
         with:
           persist-credentials: false
       - run: shellcheck bin/claude-statusline test/smoke-test.sh
-      - run: test/launcher_test.py
       - run: pipx run ruff check bin/claude-docker claude_sandbox test docker/update-pins.py docker/features/excalidraw/excalidraw-export
+      - run: pipx run mypy claude_sandbox bin/claude-docker
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest the launcher promises to run on, the one macOS ships,
+        # and the latest
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python test/launcher_test.py
       # Every feature must assemble into the generated Dockerfile
-      - run: bin/claude-docker --dockerfile | grep -q '^ENTRYPOINT'
+      - run: python bin/claude-docker --dockerfile | grep -q '^ENTRYPOINT'
 
   build:
     runs-on: ubuntu-latest
