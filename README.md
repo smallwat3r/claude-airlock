@@ -95,7 +95,7 @@ others with an example value:
 
 - `CLAUDE_DOCKER_RW_CONFIG=0` (the default)
 
-  If on, `~/.claude/settings.json`, `hooks`, `CLAUDE.md`, `skills` and `agents` are writable from the session. If off, they are read-only there
+  If on, `~/.claude/settings.json`, `CLAUDE.md`, `hooks`, `commands`, `skills`, `agents` and `rules` are writable from the session. If off, they are read-only there, and the ones you do not have are made empty so that a session cannot create them
 
 - `CLAUDE_DOCKER_SHARED_HISTORY=0` (the default)
 
@@ -149,6 +149,9 @@ name stops the launcher instead of being ignored. The file is only read from
 your config directory, never from the project, which the session can write to.
 `CLAUDE_DOCKER_EXTRA_DIRS` and `CLAUDE_DOCKER_EXTRA_DIRS_RO` are not accepted
 there, extra directories belong to one project, not to every session.
+A switch or a limit that is set but empty in the environment says nothing,
+the file is asked next: an empty variable does not switch off what the file
+switched on.
 
 `~/claude-shared` is always mounted when it exists, as a scratch directory
 shared between sessions. `CLAUDE_DOCKER_SHARED_DIR` names another directory,
@@ -176,10 +179,11 @@ or none when set empty.
 ### What is read-only or hidden
 
 - **Claude's configuration.** `~/.claude/settings.json` and `hooks` hold
-  commands your host `claude` runs, and `CLAUDE.md`, `skills` and `agents`
-  are instructions every later session follows. A session must not be able
-  to plant either, so they are read-only. `CLAUDE_DOCKER_RW_CONFIG=1` makes
-  them writable.
+  commands your host `claude` runs, and `CLAUDE.md`, `commands`, `skills`,
+  `agents` and `rules` are instructions every later session follows. A
+  session must not be able to plant either, so they are read-only, and the
+  ones you do not have are made empty so that none can be created.
+  `CLAUDE_DOCKER_RW_CONFIG=1` makes them writable.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty (`/dev/null` is mounted over them). Templates such as
   `.env.example` stay readable, `CLAUDE_DOCKER_SHADOW` hides more.
@@ -218,10 +222,10 @@ rather than locked: the launcher warns when a session changed one.
 | The project and every extra directory | `.git/config` (branch tracking aside) and git hooks, of submodules too and where `core.hooksPath` moved them (husky and the like) |
 | | `.claude/settings.json`, `settings.local.json` and `.mcp.json`, with the scripts their commands name |
 | | `CLAUDE.md` and the `hooks`, `commands`, `skills`, `agents` and `rules` of `.claude` |
-| `~/.claude` | What is not mounted read-only: `commands`, `rules`, and a script `settings.json` names outside `hooks` |
+| `~/.claude` | What is not mounted read-only: a script `settings.json` names outside `hooks`, and with `CLAUDE_DOCKER_RW_CONFIG=1` all of `settings.json`, `CLAUDE.md`, `hooks`, `commands`, `skills`, `agents` and `rules` |
 
-- The warning is printed when the launcher returns, so end a session with
-  `/exit` or Ctrl-D to see it there.
+- The warning is printed when the launcher returns. Ctrl-C does not end
+  the launcher before it, only the session.
 - A session that ends without it, because its Emacs buffer or terminal was
   killed, is checked by the next `claude-docker` launch instead. That
   report also lists what you changed yourself in the meantime.
@@ -254,13 +258,18 @@ for the CLI), through
   opt-in.
 - With `1`, the logs of containers started with a TTY cannot be decoded.
 - Every call a session makes is noted for `--trace`, the denied ones too.
-- The proxy sidecars keep running between sessions. After editing the rules,
-  or to switch them off: `docker rm -f claude-docker-ps-proxy
-  claude-docker-proxy`.
+- A session only shares a network with the proxy of its own mode, so one
+  started without the setting has no way to a proxy another session was
+  given.
+- The proxy sidecars keep running between sessions. Edited rules or a new
+  pinned image are picked up by the next session of that mode, which
+  replaces the proxy. To switch them off: `docker rm -f
+  claude-docker-ps-proxy claude-docker-proxy`.
 
 **The egress filter**, with `CLAUDE_DOCKER_NET_FILTER=1`:
 
-- The session joins an internal network with no route out. Egress goes
+- The session joins an internal network with no route out, and the
+  launcher refuses a network of that name that has one. Egress goes
   through a squid sidecar that only allows the domains in
   `docker/allowed-domains.txt`, and external DNS is blackholed.
 - `claude-docker --net-log` lists the domains it refused, most frequent

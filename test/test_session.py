@@ -157,6 +157,52 @@ class OptionsTest(LauncherTest):
         self.assertIn("--network=claude-docker-net", proxy)
         self.assertTrue(any("allowed-domains.txt" in arg for arg in proxy))
 
+    def test_the_filter_network_is_never_made_with_a_route_out(self):
+        result = self.launch(CLAUDE_DOCKER_NET_FILTER="1")
+        made = [call for call in result.calls if call[:2] == ["network", "create"]]
+        self.assertTrue(made)
+        for call in made:
+            self.assertIn("--internal", call)
+
+    def test_a_filter_network_with_a_route_out_is_refused(self):
+        result = self.launch(CLAUDE_DOCKER_NET_FILTER="1", FAKE_NETWORK="false")
+        self.assert_refused(result, "claude-docker-net is not internal")
+
+    def test_a_socket_proxy_left_on_the_network_is_taken_off_it(self):
+        result = self.launch(FAKE_NETWORK="false claude-docker-proxy claude-other")
+        off = [call for call in result.calls if call[:2] == ["network", "disconnect"]]
+        self.assertEqual(
+            off,
+            [
+                [
+                    *("network", "disconnect", "--force"),
+                    *("claude-docker-open-net", "claude-docker-proxy"),
+                ]
+            ],
+        )
+
+    def test_what_claude_follows_cannot_be_written_or_created(self):
+        flags = self.launch().flags
+        claude = self.home / ".claude"
+        for name in ("settings.json", "CLAUDE.md", "hooks", "skills", "agents"):
+            self.assertIn(
+                f"--volume={claude / name}:/home/node/.claude/{name}:ro,z", flags
+            )
+        # Not there before: made empty, so that a session cannot make them
+        for name in ("commands", "rules"):
+            self.assertEqual(list((claude / name).iterdir()), [])
+            self.assertIn(
+                f"--volume={claude / name}:/home/node/.claude/{name}:ro,z", flags
+            )
+
+    def test_the_seeded_config_leaves_the_other_projects_out(self):
+        config = {"theme": "dark", "projects": {"/home/me/other": {"mcpServers": {}}}}
+        (self.home / ".claude.json").write_text(json.dumps(config))
+        self.launch()
+        seeded = self.home / ".claude" / ".claude.json"
+        self.assertEqual(json.loads(seeded.read_text()), {"theme": "dark"})
+        self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
+
 
 class SocketProxyTest(LauncherTest):
     """Called directly, the socket path is a constant of the network module."""
@@ -211,6 +257,32 @@ class SocketProxyTest(LauncherTest):
         self.assertEqual(network.socket_proxy_args(settings.Settings()), [])
         self.assertEqual(self.calls(), [])
 
+    def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
+        names = {
+            mode: network.network_name(settings.Settings(socket=mode))
+            for mode in ("0", "1", "full")
+        }
+        self.assertEqual(
+            names,
+            {
+                "0": "claude-docker-open-net",
+                "1": "claude-docker-open-net-ps",
+                "full": "claude-docker-open-net-full",
+            },
+        )
+        _, sidecar = self.sidecar_for("full")
+        self.assertIn("--network=claude-docker-open-net-full", sidecar)
+        self.assertNotIn(
+            ["network", "connect", "claude-docker-open-net", "claude-docker-proxy"],
+            self.calls(),
+        )
+
+    def test_a_proxy_is_labelled_with_what_it_was_started_from(self):
+        _, sidecar = self.sidecar_for("1")
+        self.assertTrue(
+            [arg for arg in sidecar if arg.startswith("--label=claude-sandbox.config=")]
+        )
+
 
 class ExtraDirsTest(LauncherTest):
     def setUp(self):
@@ -235,6 +307,24 @@ class ExtraDirsTest(LauncherTest):
     def test_home_directory_is_refused(self):
         result = self.launch(cwd=self.home)
         self.assert_refused(result, "it would defeat the sandbox")
+
+    def test_a_link_to_the_home_directory_is_refused(self):
+        link = self.work / "elsewhere"
+        link.symlink_to(self.home)
+        result = self.launch("--add-dir", str(link))
+        self.assert_refused(result, "it would defeat the sandbox")
+
+    def test_a_dir_inside_the_project_has_its_secrets_hidden_once(self):
+        inside = self.project / "sub"
+        inside.mkdir()
+        (inside / ".env").touch()
+        flags = self.launch("--add-dir", "./sub").flags
+        hidden = f"--volume=/dev/null:{inside / '.env'}:ro"
+        self.assertEqual(flags.count(hidden), 1)
+
+    def test_a_secret_that_cannot_be_hidden_is_not_left_visible(self):
+        (self.project / ".env.a:b").touch()
+        self.assert_refused(self.launch(), "cannot hide")
 
     def test_filesystem_root_is_refused(self):
         result = self.launch("--add-dir", "/")
@@ -269,6 +359,11 @@ class ConfigFileTest(LauncherTest):
     def test_environment_wins(self):
         self.write_config("CLAUDE_DOCKER_MEMORY=8g")
         self.assertIn("--memory=4g", self.launch(CLAUDE_DOCKER_MEMORY="4g").flags)
+
+    def test_an_empty_switch_does_not_undo_the_file(self):
+        self.write_config("CLAUDE_DOCKER_NET_FILTER=1")
+        flags = self.launch(CLAUDE_DOCKER_NET_FILTER="").flags
+        self.assertIn("--network=claude-docker-net", flags)
 
     def test_rejects_an_unknown_setting(self):
         self.write_config("CLAUDE_DOCKER_NET_FILTR=1")

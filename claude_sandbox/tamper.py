@@ -12,7 +12,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from .docker import Launcher, session_alive
+from .launcher import Launcher, session_alive
 from .settings import private_dir
 
 # What Claude follows or starts in a project, on the host as in a session:

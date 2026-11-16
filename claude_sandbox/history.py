@@ -25,15 +25,13 @@ was typed, pasted and read there."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 from pathlib import Path
 
-from .docker import docker_safe_name, env_arg, mount_arg
-from .session import CONTAINER_HOME
-from .settings import Host, Settings, private_dir
+from .docker import env_arg, mount_arg, project_slug
+from .settings import CONTAINER_HOME, Host, Settings, private_dir
 from .transcript import project_roots, transcript_dirs
 
 # What Claude Code names the transcripts of a worktree after: the project's
@@ -80,9 +78,8 @@ def other_projects(host: Host) -> list[str]:
 def project_store(host: Host) -> Path:
     """Where the launcher keeps what a project's sessions remember, named
     like the project's cache volume."""
-    project = docker_safe_name(os.path.basename(host.project_dir))
-    suffix = hashlib.sha256(host.project_dir.encode()).hexdigest()[:8]
-    return Path(private_dir(os.path.join(host.history_dir, f"{project}-{suffix}")))
+    store = os.path.join(host.history_dir, project_slug(host.project_dir))
+    return Path(private_dir(store))
 
 
 def own_prompts(host: Host) -> list[str]:

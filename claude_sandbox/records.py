@@ -72,7 +72,7 @@ class NetSession:
             kept["processes"] = self.processes
         if self.end is not None:
             kept["end"] = self.end
-        return json.dumps(kept) + "\n"
+        return json.dumps(kept)
 
     @classmethod
     def from_line(cls, line: str) -> NetSession | None:
@@ -106,22 +106,26 @@ class NetSession:
         return cls(name, project, start, ip, capture, processes, end)
 
 
-def record_net_session(host: Host, session: NetSession) -> None:
-    """Add a session to the record, and let go of the oldest lines past
-    KEPT_SESSIONS. Under a lock, launchers of other sessions write here
-    too."""
-    private_dir(host.state_dir)
-    with open(
-        host.net_sessions_file, "a+", encoding="utf-8", errors="replace"
-    ) as record:
+def append_kept(path: str, line: str, kept: int) -> None:
+    """Add a line to one of the launcher's records, a file of its state
+    directory for the user alone, and let go of the oldest lines past
+    kept. Under a lock, launchers of other sessions write there too."""
+    private_dir(os.path.dirname(path))
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a+", encoding="utf-8", errors="replace") as record:
         fcntl.flock(record, fcntl.LOCK_EX)
-        record.write(session.as_line())
+        record.write(line + "\n")
         record.flush()
         record.seek(0)
         lines = record.readlines()
-        if len(lines) > KEPT_SESSIONS:
+        if len(lines) > kept:
             record.truncate(0)
-            record.writelines(lines[-KEPT_SESSIONS:])
+            record.writelines(lines[-kept:])
+
+
+def record_net_session(host: Host, session: NetSession) -> None:
+    """Add a session to the record, the oldest go past KEPT_SESSIONS."""
+    append_kept(host.net_sessions_file, session.as_line(), KEPT_SESSIONS)
 
 
 def read_net_sessions(host: Host) -> list[NetSession]:

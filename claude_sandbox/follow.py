@@ -31,7 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .capture import captured_since, cut_short, running_captures, session_name
+from .capture import CaptureSidecar, captured_since, cut_short, running_captures
 from .docker import running_containers
 from .doors import read_uses, use_event
 from .events import Event, clean, flat
@@ -226,8 +226,11 @@ class Follower:
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
-        # The uses of the SSH agent and the Docker socket are shown from now
+        # The uses of the SSH agent and the Docker socket are shown from now:
+        # the time of the one shown last, and how many of that very time
+        # were shown, several can be noted in one moment
         self._doors_since = time.time()
+        self._doors_shown = 0
 
     def title(self, path: Path) -> str:
         return self._tails[path].title
@@ -304,10 +307,10 @@ class Follower:
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
                 self._captures[(sidecar, started)] = CaptureTail(sidecar, self._verbose)
-                name = clean(session_name(sidecar))
+                name = clean(CaptureSidecar.session_of(sidecar))
                 found.notes.append(f"network     following the capture of {name}")
         for key in set(self._captures) - set(running):
-            name = clean(session_name(self._captures.pop(key).sidecar))
+            name = clean(CaptureSidecar.session_of(self._captures.pop(key).sidecar))
             found.notes.append(f"network     the capture of {name} ended")
         if self._rounds == 0 and not running and not self._addresses:
             found.notes.append(
@@ -335,7 +338,7 @@ class Follower:
         for capture in self._captures.values():
             found.events += [(None, event) for event in capture.poll()]
             if capture.newly_cut_short():
-                name = clean(session_name(capture.sidecar))
+                name = clean(CaptureSidecar.session_of(capture.sidecar))
                 found.notes.append(
                     f"network     the capture of {name} STOPPED at its packet"
                     " limit, what comes later is missing"
@@ -347,11 +350,17 @@ class Follower:
     def _poll_doors(self, found: Round) -> None:
         """The uses of the SSH agent and the Docker socket that the
         launchers of the project's sessions noted since the last time."""
+        at_since = 0
         for use in read_uses(self._host, self._doors_since, float("inf")):
             when = float(use["t"])
-            if when <= self._doors_since:
-                continue
-            self._doors_since = when
+            if when == self._doors_since:
+                at_since += 1
+                if at_since <= self._doors_shown:
+                    continue
+                self._doors_shown = at_since
+            elif when > self._doors_since:
+                self._doors_since, self._doors_shown, at_since = when, 1, 1
+            # One noted out of order is shown, the place is kept
             event = use_event(use)
             if event:
                 found.events.append((None, event))

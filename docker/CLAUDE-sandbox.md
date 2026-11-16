@@ -49,8 +49,9 @@ listed there is off.
   no Docker daemon can be reached at all. The docker CLI itself comes with
   the docker feature of the image.
 - CLAUDE_DOCKER_RW_CONFIG (off unless 1). ~/.claude is shared with the
-  host and writable, except settings.json, hooks, CLAUDE.md, skills and
-  agents: if off these are read-only, a change to them fails with
+  host and writable, except settings.json, CLAUDE.md, hooks, commands,
+  skills, agents and rules: if off these are read-only, a change to them
+  fails with
   "Read-only file system". Ask the user to make it on the host. If on,
   they are writable.
 - CLAUDE_DOCKER_CACHE (on unless 0). If on, ~/.cache persists between

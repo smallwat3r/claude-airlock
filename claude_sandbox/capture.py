@@ -18,33 +18,21 @@ launcher copies it out."""
 
 from __future__ import annotations
 
-import json
-import math
 import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, TypeVar
+from typing import ClassVar
 
-from .docker import (
-    Launcher,
-    docker,
-    docker_bytes,
-    docker_ok,
-    docker_output,
-    session_alive,
-)
+from .docker import docker, docker_bytes, docker_ok
 from .network import namespace_args, sidecar_running
 from .pcap import HTTP_METHODS, Capture
 from .records import NetSession, record_net_session
-from .settings import Fatal, Host, Settings, private_dir
+from .settings import Fatal, Host, Settings
+from .sidecar import Sidecar, keep_latest
 
-# A session's sidecar is named after it. Session names are stepped past
-# the names in use (see container_name), a clash with a session of a project
-# called x.capture is left to docker to refuse.
 CAPTURE_SUFFIX = ".capture"
 CAPTURE_LABEL = "claude-sandbox.capture"
 CAPTURE_FILE = "/capture.pcap"
@@ -97,109 +85,29 @@ PACKET_FILTER = (
 )
 
 
-def capture_name(session: str) -> str:
-    return session + CAPTURE_SUFFIX
+class CaptureSidecar(Sidecar):
+    """The sidecar that owns the network namespace of one session and
+    captures in it."""
 
-
-def session_name(sidecar: str) -> str:
-    return sidecar[: -len(CAPTURE_SUFFIX)]
-
-
-SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
-
-
-@dataclass(frozen=True)
-class Sidecar:
-    """A sidecar of one session as its label tells of it: the project and
-    the start of its session, and the launcher that started it. The label
-    is the launcher's, a session cannot set its own. This one is the
-    capture's, another kind has its own suffix and label (see
-    processes.py)."""
-
-    # What the sidecar's name adds to its session's, and its label
     SUFFIX: ClassVar[str] = CAPTURE_SUFFIX
     LABEL: ClassVar[str] = CAPTURE_LABEL
-
-    name: str
-    project: str
-    start: float
-    launcher: Launcher
-
-    @property
-    def session(self) -> str:
-        return self.name[: -len(self.SUFFIX)]
-
-    @property
-    def label(self) -> str:
-        about = {
-            "project": self.project,
-            "start": self.start,
-            "pid": self.launcher.pid,
-            "launched": self.launcher.started,
-        }
-        return json.dumps(about)
-
-    @classmethod
-    def from_label(  # noqa: PYI019, Self takes Python 3.11
-        cls: type[SidecarKind], name: str, label: str
-    ) -> SidecarKind | None:
-        """The sidecar of a name and a label, none for a container that
-        is not one."""
-        try:
-            about = json.loads(label)
-            project, start = str(about["project"]), float(about["start"])
-            # Not in the label of an earlier version
-            launcher = Launcher(int(about["pid"]), str(about.get("launched", "")))
-        except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
-            return None
-        if not name.endswith(cls.SUFFIX) or not math.isfinite(start):
-            return None
-        return cls(name, project, start, launcher)
-
-    @classmethod
-    def listed(  # noqa: PYI019
-        cls: type[SidecarKind], ended_too: bool = False
-    ) -> list[SidecarKind]:
-        """The sidecars of this kind that are running, of every project,
-        with those that have stopped when asked for."""
-        listed = docker_output(
-            "ps",
-            *(["--all"] if ended_too else []),
-            f"--filter=label={cls.LABEL}",
-            f'--format={{{{.Names}}}}\t{{{{.Label "{cls.LABEL}"}}}}',
-        )
-        found = []
-        for line in listed.splitlines():
-            name, _, label = line.partition("\t")
-            sidecar = cls.from_label(name, label)
-            if sidecar:
-                found.append(sidecar)
-        return found
-
-
-def sidecars(ended_too: bool = False) -> list[Sidecar]:
-    """The capture sidecars that are running, of every project, with
-    those that have stopped when asked for."""
-    return Sidecar.listed(ended_too)
 
 
 def start_capture(
     settings: Settings, host: Host, session: str, image_tag: str
-) -> Sidecar:
+) -> CaptureSidecar:
     """Start the sidecar a session is about to join. It runs the sandbox
     image, which has tcpdump, as root with just what tcpdump needs: raw
     sockets, and the two capabilities its start-up change of user (to
     root, -Z, so that it can write its file) asks for."""
-    sidecar = Sidecar(
-        capture_name(session), host.project_dir, time.time(), Launcher.current()
-    )
+    sidecar = CaptureSidecar.for_session(session, host.project_dir)
     started = docker(
         "run",
         "--detach",
         "--init",
         f"--name={sidecar.name}",
         *namespace_args(settings),
-        f"--label={CAPTURE_LABEL}={sidecar.label}",
+        sidecar.label_arg,
         "--user=0:0",
         "--cap-drop=ALL",
         "--cap-add=NET_RAW",
@@ -223,7 +131,7 @@ def start_capture(
         said = docker(
             "logs", sidecar.name, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
-        docker_ok("rm", "--force", sidecar.name)
+        sidecar.remove()
         raise Fatal(
             "the network capture did not start, CLAUDE_DOCKER_NET_LOG=0 runs"
             f" a session without it:\n{said.stdout.strip()}"
@@ -231,15 +139,14 @@ def start_capture(
     return sidecar
 
 
-def collect_capture(host: Host, sidecar: Sidecar) -> None:
+def collect_capture(host: Host, sidecar: CaptureSidecar) -> None:
     """Stop a sidecar, copy its capture to the host and note which project
     and time it covers, for --trace to find it by."""
     # tcpdump writes out what it holds when it is asked to stop
     docker_ok("stop", sidecar.name)
     try:
-        directory = Path(private_dir(host.captures_dir))
-        target = directory / f"{sidecar.name}-{int(sidecar.start)}.pcap"
-        if docker_ok("cp", f"{sidecar.name}:{CAPTURE_FILE}", str(target)):
+        target = sidecar.copy_out(CAPTURE_FILE, host.captures_dir, "pcap")
+        if target:
             session = NetSession(
                 sidecar.session,
                 sidecar.project,
@@ -248,24 +155,20 @@ def collect_capture(host: Host, sidecar: Sidecar) -> None:
                 end=time.time(),
             )
             record_net_session(host, session)
-        kept = sorted(directory.glob("*.pcap"), key=lambda file: file.stat().st_mtime)
-        for old in kept[:-KEPT_CAPTURES]:
-            old.unlink(missing_ok=True)
+        keep_latest(Path(host.captures_dir), "*.pcap", KEPT_CAPTURES)
     except OSError as problem:
         # Said and passed over: this runs as a session ends, and what is
         # left to do then (the check of tamper.py) matters more
         print(f"claude-docker: the capture was not kept: {problem}", file=sys.stderr)
     finally:
-        docker_ok("rm", "--force", sidecar.name)
+        sidecar.remove()
 
 
 def collect_ended_captures(host: Host) -> None:
-    """Collect what sessions that ended without their launcher left behind
-    (a killed Emacs buffer, a closed terminal): their sidecar is still
-    there, capture included."""
-    for sidecar in sidecars(ended_too=True):
-        if not session_alive(sidecar.launcher, sidecar.session):
-            collect_capture(host, sidecar)
+    """Collect what sessions that ended without their launcher left
+    behind: their sidecar is still there, capture included."""
+    for sidecar in CaptureSidecar.left_behind():
+        collect_capture(host, sidecar)
 
 
 @contextmanager
@@ -293,7 +196,7 @@ def running_captures(project_dir: str) -> list[tuple[str, float]]:
     the name of each and when it started."""
     return [
         (sidecar.name, sidecar.start)
-        for sidecar in sidecars()
+        for sidecar in CaptureSidecar.listed()
         if sidecar.project == project_dir
     ]
 

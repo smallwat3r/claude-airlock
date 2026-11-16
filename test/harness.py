@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-docker"
 
 # Records its arguments, fails the "does it exist" queries so everything gets
-# created (but says the containers named in FAKE_RUNNING are up), keeps what
+# created (but says the containers named in FAKE_RUNNING are up, and of every
+# network what FAKE_NETWORK says: whether it is internal, then who is on it), keeps what
 # a build was given, and runs FAKE_SESSION (a shell snippet) in place of the
 # container
 FAKE_DOCKER = f"""#!{sys.executable}
@@ -27,6 +28,9 @@ import json, os, shutil, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps(args) + "\\n")
+if args[:2] == ["network", "inspect"] and "FAKE_NETWORK" in os.environ:
+    print(os.environ["FAKE_NETWORK"])
+    sys.exit(0)
 if args[1:2] == ["inspect"] and "IPAddress" in args[2] and "FAKE_IP" in os.environ:
     print(os.environ["FAKE_IP"])
     sys.exit(0)
@@ -68,8 +72,8 @@ if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
 
 
 sys.path.insert(0, str(ROOT))
-MODULES = ("capture", "docker", "follow", "image", "network", "pcap", "records")
-capture, docker, follow, image, network, pcap, records, settings, transcript = (
+MODULES = ("capture", "follow", "image", "launcher", "network", "pcap", "records")
+capture, follow, image, launcher, network, pcap, records, settings, transcript = (
     importlib.import_module(f"claude_sandbox.{name}")
     for name in (*MODULES, "settings", "transcript")
 )

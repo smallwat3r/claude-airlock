@@ -23,12 +23,10 @@ and that of the SSH agent and Docker socket are the launcher's own."""
 from __future__ import annotations
 
 import dataclasses
-import functools
 import json
 import math
 import os
 import pydoc
-import socket
 import subprocess
 import sys
 from collections import Counter
@@ -41,12 +39,13 @@ from typing import Any
 from .capture import cut_short
 from .doors import door_events
 from .events import Event, Who, clean, flat
-from .network import ProxyRequest, logged_requests
+from .network import ProxyRequest, logged_requests, made_by
 from .pcap import Capture, Connection, Flow, Lookup, Request, read_capture
 from .processes import ProcessRecord, read_record, shown_lineage
 from .recorder import compare
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
+from .shown import over, reached, size, verdict
 from .transcript import (
     FILE_TOOLS,
     call_label,
@@ -74,20 +73,6 @@ TIMELINE_SLACK = 30.0
 WHAT_WIDTH = 10
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
-PORT_USES = {
-    22: "ssh",
-    53: "dns",
-    80: "http",
-    443: "https",
-    1883: "mqtt",
-    2375: "docker",
-    3128: "proxy",
-    3306: "mysql",
-    5432: "postgres",
-    6379: "redis",
-    27017: "mongodb",
-}
-
 # How the lines are coloured on a terminal, as the parameters of an SGR
 # escape. What a session did out of sight is what stands out: commands,
 # writes and the network. The conversation, which its user saw anyway, and
@@ -106,47 +91,6 @@ STYLES = {
     "websearch": "34",
     **dict.fromkeys(map(str.lower, FILE_TOOLS), "35"),
 }
-
-
-def size(count: int) -> str:
-    """A number of bytes as shown: 950 B, 1 kB, 2.3 GB."""
-    left = float(count)
-    for unit in ("B", "kB", "MB"):
-        if left < 1000:
-            return f"{left:.0f} {unit}"
-        left /= 1000
-    return f"{left:.1f} GB"
-
-
-@functools.cache
-def over(transport: str, port: int) -> str:
-    """How a connection was made and, going by its port, what for:
-    tcp/https, proxy/ssh, plain tcp for a port without a known use. The
-    usual ones are named here, a host need not have a services file."""
-    if port in PORT_USES:
-        return f"{transport}/{PORT_USES[port]}"
-    try:
-        named_for = "udp" if transport == "udp" else "tcp"
-        return f"{transport}/{socket.getservbyport(port, named_for)}"
-    except (OSError, OverflowError):
-        return transport
-
-
-def verdict(denied: bool) -> str:
-    return "DENIED" if denied else "allowed"
-
-
-def made_by(
-    request: ProxyRequest, session: NetSession, start: float, end: float
-) -> bool:
-    """Whether a session made a request between start and end: it came
-    from the session's address and was open at some point of that time.
-    The proxy logs a tunnel when it closes, which can be much later."""
-    return (
-        session.ip == request.address
-        and request.ended >= max(start, session.start)
-        and request.began <= min(end, session.until)
-    )
 
 
 def proxy_summary(
@@ -210,27 +154,16 @@ def proxy_requests(
     return proxy_summary(requests, sessions), [proxy_event(r) for r in requests]
 
 
-def reached(capture: Capture, address: str, port: int, transport: str = "tcp") -> str:
-    """A destination as shown: tcp/https name (address):port, the name
-    left out when the capture has none for the address, the port for a
-    protocol without ports. An IPv6 address is in brackets ahead of one."""
-    known = capture.names.get(address)
-    if port:
-        literal = f"[{address}]" if ":" in address else address
-        where = f"{known} ({address}):{port}" if known else f"{literal}:{port}"
-    else:
-        where = f"{known} ({address})" if known else address
-    return clean(f"{over(transport, port)} {where}")
-
-
 def how_it_went(connection: Connection, outcome: str) -> str:
     """An outcome of a connection as the words after its destination,
     none for no outcome: the capture does not always tell."""
     if outcome != "closed":
         return {"open": "left open"}.get(outcome, outcome.upper())
     went = f"closed after {connection.seconds:.1f}s"
-    if connection.sent is not None and connection.received is not None:
-        went += f", {size(connection.sent)} out, {size(connection.received)} in"
+    # Of a connection that was reset, one of the two may not be known
+    for count, way in ((connection.sent, "out"), (connection.received, "in")):
+        if count is not None:
+            went += f", {size(count)} {way}"
     return went
 
 
@@ -392,22 +325,34 @@ def capture_events(
     return events
 
 
+def process_records(
+    host: Host, watched: list[NetSession]
+) -> list[tuple[NetSession, ProcessRecord]]:
+    """The record of the processes of each session that has one, those
+    that are still kept."""
+    records = []
+    for session in watched:
+        try:
+            record = read_record(Path(host.process_records_dir, session.processes))
+        except OSError:
+            continue
+        records.append((session, record))
+    return records
+
+
 def processes_of(
-    host: Host, session: NetSession, watched: list[NetSession]
+    session: NetSession, records: list[tuple[NetSession, ProcessRecord]]
 ) -> ProcessRecord | None:
     """The record of the processes of a session, none when there is no
     such record or it is no longer kept: the one of the same container
     that ran at the same time."""
-    for noted in watched:
+    for noted, record in records:
         if (
             noted.name == session.name
             and noted.start <= session.until
             and noted.until >= session.start
         ):
-            try:
-                return read_record(Path(host.process_records_dir, noted.processes))
-            except OSError:
-                return None
+            return record
     return None
 
 
@@ -499,12 +444,12 @@ def network(
     sessions = recorded_sessions(host, start, end)
     filtered = [session for session in sessions if session.ip]
     captured = [session for session in sessions if session.capture]
-    watched = [session for session in sessions if session.processes]
+    records = process_records(
+        host, [session for session in sessions if session.processes]
+    )
     found = [proxy_requests(filtered, start, end)] if filtered else []
     found += [
-        captured_connections(
-            host, session, verbose, processes_of(host, session, watched)
-        )
+        captured_connections(host, session, verbose, processes_of(session, records))
         for session in captured
     ]
     lines = (
@@ -513,25 +458,20 @@ def network(
         else ["network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"]
     )
     events = [event for _, events in found for event in events]
-    for session in watched:
-        record = processes_of(host, session, [session])
-        if record:
-            lines += process_summary(record, verbose)
-            events += process_events(record) if verbose else []
+    for _, record in records:
+        lines += process_summary(record, verbose)
+        events += process_events(record) if verbose else []
     return lines, events
 
 
-def went_wrong(event: Event) -> bool:
-    """Whether an event tells of something gone wrong: a call that failed,
-    a write outside the project, a request the filter refused, a
-    connection that was refused or not answered, a lookup that failed or
-    that stands out, a use of the SSH agent it refused, and what was taken
-    out of the transcript."""
-    fields = event.fields
+def wrong_throughout(fields: dict) -> bool:
+    """Whether an event tells of something gone wrong that every line of
+    it is about: a request the filter refused, a connection that was
+    refused or not answered, a lookup that failed or that stands out, a
+    use of the SSH agent it refused, and what was taken out of the
+    transcript."""
     return bool(
-        fields.get("failed")
-        or fields.get("outside_project")
-        or fields.get("denied")
+        fields.get("denied")
         or fields.get("outcome") in ("refused", "no answer")
         or fields.get("error")
         or fields.get("flagged")
@@ -539,19 +479,26 @@ def went_wrong(event: Event) -> bool:
     )
 
 
+def went_wrong(event: Event) -> bool:
+    """Whether an event tells of something gone wrong: a call that failed,
+    a write outside the project, and what wrong_throughout names."""
+    fields = event.fields
+    return bool(
+        fields.get("failed")
+        or fields.get("outside_project")
+        or wrong_throughout(fields)
+    )
+
+
 def alerting(event: Event, line: str) -> bool:
     """Whether a line of an event is one that tells of what went wrong,
     see went_wrong: how a failed call ended, the file of a write outside
-    the project, and every line of what went wrong on the network."""
+    the project, and every line of what is wrong throughout."""
     fields = event.fields
     return bool(
         (fields.get("failed") and line.startswith(("result: ", "out: ")))
         or (fields.get("outside_project") and line.startswith("file: "))
-        or fields.get("denied")
-        or fields.get("outcome") in ("refused", "no answer")
-        or fields.get("error")
-        or fields.get("flagged")
-        or fields.get("removed")
+        or wrong_throughout(fields)
     )
 
 
@@ -846,13 +793,14 @@ def event_json(session: str, event: Event) -> str:
         "what": event.what,
     }
     try:
-        # NaN and Infinity, which a transcript can hold, are not JSON to
-        # most of what reads it
-        return json.dumps({**about, **event.fields}, allow_nan=False)
-    except ValueError:
-        return json.dumps({**about, **finite(event.fields)})
+        try:
+            # NaN and Infinity, which a transcript can hold, are not JSON
+            # to most of what reads it
+            return json.dumps({**about, **event.fields}, allow_nan=False)
+        except ValueError:
+            return json.dumps({**about, **finite(event.fields)})
     except RecursionError:
-        # Nested as deep as could just be read
+        # Nested as deep as could just be read, by either of the two
         return json.dumps({**about, "unreadable": True})
 
 

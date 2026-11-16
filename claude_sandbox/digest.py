@@ -30,13 +30,13 @@ from pathlib import Path
 from .capture import cut_short
 from .doors import door_events
 from .events import flat
-from .network import EGRESS_PORT, logged_requests
+from .network import logged_requests, made_by
 from .pcap import Capture, read_capture
 from .processes import read_record
 from .recorder import compare
 from .records import NetSession, recorded_sessions
-from .settings import Fatal, Host, private_dir
-from .trace import made_by, reached, size
+from .settings import EGRESS_PORT, Fatal, Host, private_dir
+from .shown import reached, size
 from .transcript import (
     FILE_TOOLS,
     call_input,
@@ -97,6 +97,7 @@ def uploads(capture: Capture, filtered: bool) -> list[str]:
         behind_proxy = filtered and connection.port == EGRESS_PORT
         if not behind_proxy and not is_model_api(connection.address):
             where = reached(capture, connection.address, connection.port)
+            # None of one left open, or reset by the other end: not known
             sent[where] += connection.sent or 0
     for flow in capture.flows:
         if not is_model_api(flow.address):
@@ -240,7 +241,7 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
         for found in recorded_sessions(host, start, end)
         if found.name == session and found.start >= start - 1
     ]
-    door_lines, _ = door_events(host, start, end)
+    door_lines, _ = door_events(host, start, end, session)
     return [
         *network_lines(host, sessions),
         *denied_lines(sessions, start, end),

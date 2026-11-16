@@ -14,6 +14,10 @@ copied by every session of its project that runs while it is written. One
 that got shorter than its copy was rewritten, the copy is then put aside
 and a new one started.
 
+Which transcripts a session writes to is not taken from when they say
+they were written, that is the session's to set: one whose length has
+changed is copied too, and one whose copy is not as long as it is.
+
 What this does not give: a line a session takes back within the moment
 before it is copied, and anything of a session run without the launcher."""
 
@@ -30,8 +34,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .background import in_background
 from .settings import Host, private_dir
-from .transcript import modified, open_transcript, parse_entry, transcript_files
+from .transcript import open_transcript, parse_entry, transcript_files
 
 # Seconds between two looks at the transcripts
 LOOK_EVERY = 0.5
@@ -84,16 +89,50 @@ def catch_up(transcript: Path, copy: Path) -> None:
             have += len(data)
 
 
-def copy_what_changed(host: Host, since: float) -> None:
-    """Catch up the copy of each of the project's transcripts written to
-    since a time."""
-    for transcript in transcript_files(host):
-        if modified(transcript) >= since:
-            try:
-                catch_up(transcript, copy_path(host, transcript))
-            except OSError:
-                # A full disk or the like: the session goes on without
-                continue
+def length(path: Path) -> int | None:
+    """How long a file is, none for one that is not there."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+class Copier:
+    """Keeps the launcher's copies up with the project's transcripts that
+    are written to while a session runs."""
+
+    def __init__(self, host: Host, since: float) -> None:
+        self._host = host
+        # A transcript written just before is the one a resumed session
+        # adds to
+        self._since = since
+        # How long each transcript was when the session started
+        self._lengths = {path: length(path) for path in transcript_files(host)}
+
+    def written_to(self, transcript: Path) -> bool:
+        """Whether a transcript was written to since the session started:
+        it says so, it is new or of another length than it was, or the
+        launcher's copy of it is not as long as it is."""
+        try:
+            about = transcript.stat()
+        except OSError:
+            return False
+        if about.st_mtime >= self._since:
+            return True
+        if about.st_size != self._lengths.get(transcript):
+            return True
+        copied = length(copy_path(self._host, transcript))
+        return copied is not None and copied != about.st_size
+
+    def look(self) -> None:
+        """Catch up the copy of each transcript that was written to."""
+        for transcript in transcript_files(self._host):
+            if self.written_to(transcript):
+                try:
+                    catch_up(transcript, copy_path(self._host, transcript))
+                except OSError:
+                    # A full disk or the like: the session goes on without
+                    continue
 
 
 def let_go_of_old_copies(host: Host) -> None:
@@ -106,10 +145,10 @@ def let_go_of_old_copies(host: Host) -> None:
             continue
 
 
-def keep_copying(host: Host, since: float, stop: threading.Event) -> None:
+def keep_copying(copier: Copier, stop: threading.Event) -> None:
     while True:
         last = stop.wait(LOOK_EVERY)
-        copy_what_changed(host, since)
+        copier.look()
         if last:
             # Once more after the session has ended, for its last lines
             return
@@ -120,17 +159,8 @@ def transcripts_copied(host: Host) -> Iterator[None]:
     """While a session runs, keep the launcher's copies of the project's
     transcripts up with them."""
     let_go_of_old_copies(host)
-    stop = threading.Event()
-    # A transcript written just before is the one a resumed session adds to
-    copying = threading.Thread(
-        target=keep_copying, args=(host, time.time() - 1, stop), daemon=True
-    )
-    copying.start()
-    try:
+    with in_background(keep_copying, Copier(host, time.time() - 1)):
         yield
-    finally:
-        stop.set()
-        copying.join()
 
 
 def lines_of(path: Path) -> list[bytes]:

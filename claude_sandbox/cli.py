@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from .capture import capture_name, collect_ended_captures, session_captured
+from .capture import CaptureSidecar, collect_ended_captures, session_captured
 from .digest import report_session
 from .docker import docker_ok
 from .doors import socket_proxy_watched, ssh_agent_door
@@ -35,6 +35,7 @@ from .session import (
     container_name,
     extra_dir_args,
     git_config_args,
+    interrupts_held,
     prepare_claude_dir,
     protect_config_args,
     refuse_unsafe_dir,
@@ -133,7 +134,7 @@ def session(
 
     name = container_name(host, env)
     # With a capture, the session's network namespace is its sidecar's
-    capture = capture_name(name) if settings.net_log else ""
+    capture = CaptureSidecar.name_for(name) if settings.net_log else ""
     prepare_claude_dir(settings, host)
     # The sidecars a session leans on, before the arguments that name them
     prepare_network(settings)
@@ -168,25 +169,34 @@ def session(
     # The container whose network namespace the session is in
     owner = capture or name
     started = time.time()
-    try:
-        with contextlib.ExitStack() as running:
-            # The capture first, a filtered session's address is its sidecar's
-            running.enter_context(session_captured(settings, host, name, image.tag))
-            running.enter_context(session_address_recorded(settings, host, name, owner))
-            running.enter_context(socket_proxy_watched(settings, host, name, owner))
-            running.enter_context(
-                processes_recorded(settings, host, name, owner, image.tag)
-            )
-            running.enter_context(transcripts_copied(host))
-            run_args += running.enter_context(ssh_agent_door(settings, host, name, env))
-            status = run_session(run_args, image, claude_args)
-    except Fatal:
-        # The session did not start, there is nothing of it to check
-        pending.unlink(missing_ok=True)
-        raise
-    report_session(host, name, started)
-    report_tampering(before, host_exec_fingerprint(watched, host.claude_dir))
-    pending.unlink(missing_ok=True)
+    # From here to the end of the checks, see interrupts_held
+    with interrupts_held():
+        try:
+            with contextlib.ExitStack() as running:
+                # The capture first, a filtered session's address is its
+                # sidecar's
+                for recording in (
+                    session_captured(settings, host, name, image.tag),
+                    session_address_recorded(settings, host, name, owner),
+                    socket_proxy_watched(settings, host, name, owner),
+                    processes_recorded(settings, host, name, owner, image.tag),
+                    transcripts_copied(host),
+                ):
+                    running.enter_context(recording)
+                agent = ssh_agent_door(settings, host, name, env)
+                run_args += running.enter_context(agent)
+                status = run_session(run_args, image, claude_args)
+        except Fatal:
+            # The session did not start, there is nothing of it to check
+            pending.unlink(missing_ok=True)
+            raise
+        try:
+            report_session(host, name, started)
+        finally:
+            # Whatever became of the digest: this check matters more
+            after = host_exec_fingerprint(watched, host.claude_dir)
+            report_tampering(before, after)
+            pending.unlink(missing_ok=True)
     return status
 
 

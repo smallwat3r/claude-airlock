@@ -18,7 +18,6 @@ which names the project and the session."""
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -35,7 +34,8 @@ from contextlib import contextmanager, suppress
 from .docker import env_arg, mount_arg
 from .events import Event, Who, clean
 from .network import session_address, socket_proxy_name, socket_proxy_options
-from .pcap import Cursor, NotThis
+from .reader import Cursor, NotThis
+from .records import append_kept
 from .settings import Host, Settings, private_dir
 
 # The lines kept, the oldest go once there are more
@@ -75,9 +75,7 @@ _PROXY_LINE = re.compile(
 
 
 def note_use(host: Host, project: str, session: str, door: str, **said: object) -> None:
-    """Add a use of a door to the record, and let go of the oldest lines
-    past KEPT_USES. Under a lock, launchers of other sessions write here
-    too."""
+    """Add a use of a door to the record, the oldest go past KEPT_USES."""
     line = json.dumps(
         {
             "t": round(time.time(), 3),
@@ -87,22 +85,15 @@ def note_use(host: Host, project: str, session: str, door: str, **said: object) 
             **said,
         }
     )
-    private_dir(host.state_dir)
-    descriptor = os.open(host.doors_file, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(descriptor, "a+", encoding="utf-8", errors="replace") as record:
-        fcntl.flock(record, fcntl.LOCK_EX)
-        record.write(line + "\n")
-        record.flush()
-        record.seek(0)
-        lines = record.readlines()
-        if len(lines) > KEPT_USES:
-            record.truncate(0)
-            record.writelines(lines[-KEPT_USES:])
+    append_kept(host.doors_file, line, KEPT_USES)
 
 
-def read_uses(host: Host, start: float, end: float) -> list[dict]:
+def read_uses(
+    host: Host, start: float, end: float, session: str | None = None
+) -> list[dict]:
     """The uses of a door by this project's sessions between two times,
-    in the order they were noted."""
+    in the order they were noted. Those of one session when it is named,
+    by its container."""
     found = []
     try:
         with open(host.doors_file, encoding="utf-8", errors="replace") as record:
@@ -112,7 +103,11 @@ def read_uses(host: Host, start: float, end: float) -> list[dict]:
                     when = float(said["t"])
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
-                if said.get("project") == host.project_dir and start <= when <= end:
+                if (
+                    said.get("project") == host.project_dir
+                    and start <= when <= end
+                    and session in (None, said.get("session"))
+                ):
                     found.append(said)
     except OSError:
         return []
@@ -464,10 +459,15 @@ def use_event(said: dict) -> Event | None:
     return None
 
 
-def door_events(host: Host, start: float, end: float) -> tuple[list[str], list[Event]]:
+def door_events(
+    host: Host, start: float, end: float, session: str | None = None
+) -> tuple[list[str], list[Event]]:
     """What this project's sessions did through the doors between two
-    times, as summary lines and as events."""
-    events = [event for event in map(use_event, read_uses(host, start, end)) if event]
+    times, as summary lines and as events. Of one session when it is
+    named: a transcript does not say which container wrote it, the
+    launcher of a session knows."""
+    uses = read_uses(host, start, end, session)
+    events = [event for event in map(use_event, uses) if event]
     by_door = Counter(event.what for event in events)
     lines = []
     if by_door["ssh-agent"]:

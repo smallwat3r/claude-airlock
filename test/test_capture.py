@@ -17,7 +17,7 @@ from pathlib import Path
 from harness import (
     LauncherTest,
     Result,
-    docker,
+    launcher,
     pcap,
     prompts_at,
     records,
@@ -240,6 +240,33 @@ class CaptureFileTest(unittest.TestCase):
             [(what, c.address) for _, what, c in found.endings],
             [("closed", ok), ("refused", shut), ("no answer", slow)],
         )
+
+    def test_a_connection_that_is_reset_still_says_how_much_went(self):
+        there = "198.51.100.7"
+        found = self.read(
+            pcap_file(
+                [
+                    (1.0, tcp(there, 443, sequence=1000), True),
+                    (1.1, answer(there, 443, sequence=5000, acknowledged=1001), False),
+                    # Reset by the session in place of a FIN, 1500 bytes out
+                    # and 20000 in by then
+                    (
+                        2.0,
+                        tcp(there, 443, 0x14, sequence=2501, acknowledged=25001),
+                        True,
+                    ),
+                    (3.0, tcp(there, 80, sequence=10), True),
+                    (3.1, answer(there, 80, sequence=70, acknowledged=11), False),
+                    # Reset by the other end, which says what it sent alone
+                    (4.0, answer(there, 80, 0x04, sequence=171), False),
+                ]
+            )
+        )
+        mine, theirs = found.connections
+        self.assertEqual(
+            (mine.outcome, mine.sent, mine.received), ("closed", 1500, 20000)
+        )
+        self.assertEqual((theirs.sent, theirs.received), (None, 100))
 
     def test_the_other_end_closing_first_says_as_much(self):
         there = "198.51.100.7"
@@ -502,17 +529,17 @@ class CaptureSessionTest(LauncherTest):
 
     def test_the_capture_of_a_running_session_is_left_alone(self):
         me = os.getpid()
-        for launcher in (
+        for mine in (
             {"pid": me},
-            {"pid": me, "launched": docker.process_started(me)},
+            {"pid": me, "launched": launcher.process_started(me)},
         ):
-            result = self.left_behind(**launcher)
+            result = self.left_behind(**mine)
             self.assertEqual(
                 [c for c in result.calls if c[0] in ("stop", "cp", "rm")], []
             )
 
     def test_another_process_with_the_id_of_a_launcher_is_not_taken_for_it(self):
-        self.assertTrue(docker.process_started(os.getpid()))
+        self.assertTrue(launcher.process_started(os.getpid()))
         self.assert_collected(self.left_behind(pid=os.getpid(), launched="earlier"))
 
     def test_only_the_latest_sessions_stay_in_the_record(self):

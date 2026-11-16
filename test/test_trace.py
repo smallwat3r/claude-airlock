@@ -165,6 +165,16 @@ class TraceTest(LauncherTest):
         self.assertEqual(used["cache_read_input_tokens"], 180000)
         self.assertNotIn("step", self.launch("--trace", "3fa9").stdout)
 
+    def test_json_is_written_whatever_shape_an_event_was_given(self):
+        # What is not a number JSON has, nested as deep as can be read
+        deep: object = float("nan")
+        for _ in range(600):
+            deep = [deep]
+        entry = json.loads(json.dumps({"x": deep}))
+        event = Event(0.0, Who.CLAUDE, "bash", ["x"], {"input": entry})
+        written = json.loads(tracing.event_json("0a", event))
+        self.assertEqual((written["session"], written["unreadable"]), ("0a", True))
+
     def test_json_gives_an_object_per_event_with_its_values(self):
         result = self.launch("--trace", "--json")
         self.assertEqual(result.status, 0, result.stderr)

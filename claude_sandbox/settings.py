@@ -14,6 +14,11 @@ _REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 BIN_DIR = os.path.join(_REPO_DIR, "bin")
 DOCKERFILE_DIR = os.path.join(_REPO_DIR, "docker")
 
+# What more than one module has to agree on: the home of the image's user,
+# and the port the egress proxy listens on
+CONTAINER_HOME = "/home/node"
+EGRESS_PORT = 3128
+
 SETTING_PREFIX = "CLAUDE_DOCKER_"
 # The settings a config file may hold, without their prefix. EXTRA_DIRS and
 # EXTRA_DIRS_RO are left out on purpose, what to mount next to a project is
@@ -104,6 +109,11 @@ class Host:
     @property
     def claude_dir(self) -> str:
         return os.path.join(self.home, ".claude")
+
+    @property
+    def claude_state_dir(self) -> str:
+        # Claude Code's own state, mounted into a session
+        return os.path.join(self.home, ".local", "state", "claude")
 
     @property
     def state_dir(self) -> str:
@@ -218,7 +228,11 @@ def read_config_file(path: str) -> dict[str, str]:
 
 def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     """Settings from the environment, then the config file, then the
-    defaults. A variable in the environment wins also when set but empty."""
+    defaults. A list or a name in the environment wins also when set but
+    empty, which says none (no features, no shared directory). A switch
+    or a limit that is set but empty says nothing, and the config file is
+    asked next: an empty variable must not switch off a restriction the
+    file switched on."""
     file_values = read_config_file(config_file)
     defaults = Settings()
 
@@ -227,7 +241,8 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         return env[key] if key in env else file_values.get(key)
 
     def text(name: str, default: str) -> str:
-        return raw(name) or default
+        key = SETTING_PREFIX + name
+        return env.get(key) or file_values.get(key) or default
 
     def choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
         value = text(name, default)

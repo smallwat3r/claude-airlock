@@ -17,7 +17,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .network import EGRESS_PORT
+from .reader import Cursor, NotThis
+from .settings import EGRESS_PORT
 
 # The methods a plain HTTP request starts with, by their first four bytes
 HTTP_METHODS = ("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS", "CONNECT")
@@ -136,36 +137,6 @@ class TcpFlag(enum.IntFlag):
     ACK = 0x10
 
 
-class NotThis(Exception):
-    """The bytes are not the kind of message they were read as."""
-
-
-class Cursor:
-    """Reads a message front to back, in network byte order. Reading past
-    its end raises NotThis: a truncated or foreign message ends the read
-    of that message, nothing more."""
-
-    def __init__(self, data: bytes, at: int = 0) -> None:
-        self.data = data
-        self.at = at
-
-    def take(self, count: int) -> bytes:
-        taken = self.data[self.at : self.at + count]
-        if count < 0 or len(taken) < count:
-            raise NotThis
-        self.at += count
-        return taken
-
-    def number(self, size: int) -> int:
-        return int.from_bytes(self.take(size), "big")
-
-    def skip(self, count: int) -> None:
-        self.take(count)
-
-    def rest(self) -> bytes:
-        return self.data[self.at :]
-
-
 @dataclass(frozen=True)
 class Packet:
     """A captured packet over IPv4 or IPv6."""
@@ -213,7 +184,7 @@ class Connection:
     retried: bool = False
     refused: bool = False
     ended: float | None = None
-    # Bytes each way, known once it is closed in the usual way
+    # Bytes each way, as far as the packet that ended it tells
     sent: int | None = None
     received: int | None = None
 
@@ -451,15 +422,17 @@ class Capture:
 
     def _end_connection(self, packet: Packet, connection: Connection) -> None:
         """A connection ends with the first FIN or RST of either side. A
-        RST from the other end in place of an answer is a refusal. A FIN
-        says how much its sender sent, and acknowledges how much it got."""
+        RST from the other end in place of an answer is a refusal. Either
+        says how much its sender had sent by then, and when it also
+        acknowledges, how much it had got: of a connection that is reset
+        the count is known too, as far as the packet tells."""
         connection.ended = packet.when
         closing = TcpFlag.FIN in packet.tcp_flags
         if not connection.answered and not closing and not packet.sent:
             connection.refused = True
             self.endings.append((packet.when, "refused", connection))
             return
-        if closing and connection.answer_sequence is not None:
+        if connection.answer_sequence is not None:
             # Where the sender of the packet started from, then the other
             starts = [connection.sequence, connection.answer_sequence]
             if not packet.sent:

@@ -47,6 +47,23 @@ class RecorderTest(LauncherTest):
     def rewrite(self, entries: list[dict]) -> None:
         self.transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
 
+    def test_a_transcript_is_copied_whenever_it_says_it_was_written(self):
+        # A session that started later than the transcript was written
+        copier = recorder.Copier(self.host, time.time() + 60)
+        copier.look()
+        self.assertFalse(self.copy.exists())
+        with open(self.transcript, "a") as transcript:
+            transcript.write(json.dumps(prompts_at(self.now + 5)[0]) + "\n")
+        # The time it was written is the session's to set
+        os.utime(self.transcript, (1, 1))
+        copier.look()
+        self.assertEqual(self.copy.read_bytes(), self.transcript.read_bytes())
+        with open(self.transcript, "a") as transcript:
+            transcript.write(json.dumps(prompts_at(self.now + 6)[0]) + "\n")
+        os.utime(self.transcript, (1, 1))
+        recorder.Copier(self.host, time.time() + 60).look()
+        self.assertEqual(self.copy.read_bytes(), self.transcript.read_bytes())
+
     def test_a_copy_gains_what_its_transcript_gains(self):
         recorder.catch_up(self.transcript, self.copy)
         self.assertEqual(self.copy.read_bytes(), self.transcript.read_bytes())

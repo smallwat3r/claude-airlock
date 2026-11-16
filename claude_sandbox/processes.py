@@ -33,11 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-from .capture import Sidecar
-from .docker import Launcher, docker, docker_ok, mount_arg, session_alive
+from .background import in_background
+from .docker import docker, docker_ok, mount_arg
 from .network import sidecar_running
 from .records import NetSession, record_net_session
-from .settings import Host, Settings, private_dir
+from .settings import Host, Settings
+from .sidecar import Sidecar, keep_latest
 
 PROCESSES_SUFFIX = ".procs"
 PROCESSES_LABEL = "claude-sandbox.processes"
@@ -69,16 +70,14 @@ def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watch
     capture sidecar). It runs the sandbox image, which has Python, as root
     with the two capabilities it takes to read as the session's user, and
     lets go of those itself."""
-    watcher = Watcher(
-        session + PROCESSES_SUFFIX, host.project_dir, time.time(), Launcher.current()
-    )
+    watcher = Watcher.for_session(session, host.project_dir)
     docker(
         "run",
         "--detach",
         f"--name={watcher.name}",
         f"--pid=container:{session}",
         f"--network=container:{owner}",
-        f"--label={PROCESSES_LABEL}={watcher.label}",
+        watcher.label_arg,
         "--user=0:0",
         "--cap-drop=ALL",
         "--cap-add=SETUID",
@@ -102,10 +101,8 @@ def collect_record(host: Host, watcher: Watcher) -> None:
     session, whose process namespace it is in."""
     docker_ok("stop", "--time=1", watcher.name)
     try:
-        directory = Path(private_dir(host.process_records_dir))
-        target = directory / f"{watcher.name}-{int(watcher.start)}.jsonl"
-        copied = docker_ok("cp", f"{watcher.name}:{RECORD_FILE}", str(target))
-        if copied and watcher_started(target):
+        target = watcher.copy_out(RECORD_FILE, host.process_records_dir, "jsonl")
+        if target and watcher_started(target):
             session = NetSession(
                 watcher.session,
                 watcher.project,
@@ -115,18 +112,17 @@ def collect_record(host: Host, watcher: Watcher) -> None:
             )
             record_net_session(host, session)
         else:
-            target.unlink(missing_ok=True)
+            if target:
+                target.unlink(missing_ok=True)
             say_not_recorded(watcher)
-        kept = sorted(directory.glob("*.jsonl"), key=lambda file: file.stat().st_mtime)
-        for old in kept[:-KEPT_RECORDS]:
-            old.unlink(missing_ok=True)
+        keep_latest(Path(host.process_records_dir), "*.jsonl", KEPT_RECORDS)
     except OSError as problem:
         print(
             f"claude-docker: the process record was not kept: {problem}",
             file=sys.stderr,
         )
     finally:
-        docker_ok("rm", "--force", watcher.name)
+        watcher.remove()
 
 
 def watcher_started(record: Path) -> bool:
@@ -162,9 +158,8 @@ def say_not_recorded(watcher: Watcher) -> None:
 def collect_ended_records(host: Host) -> None:
     """Collect what sessions that ended without their launcher left
     behind, as collect_ended_captures does."""
-    for watcher in Watcher.listed(ended_too=True):
-        if not session_alive(watcher.launcher, watcher.session):
-            collect_record(host, watcher)
+    for watcher in Watcher.left_behind():
+        collect_record(host, watcher)
 
 
 def watch_when_up(
@@ -193,19 +188,11 @@ def processes_recorded(
     if not settings.proc_log:
         yield
         return
-    stop = threading.Event()
     started: list[Watcher] = []
-    waiting = threading.Thread(
-        target=watch_when_up,
-        args=(host, session, owner, image_tag, started, stop),
-        daemon=True,
-    )
-    waiting.start()
     try:
-        yield
+        with in_background(watch_when_up, host, session, owner, image_tag, started):
+            yield
     finally:
-        stop.set()
-        waiting.join()
         for watcher in started:
             collect_record(host, watcher)
 

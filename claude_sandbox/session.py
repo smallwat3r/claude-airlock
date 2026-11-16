@@ -4,24 +4,29 @@ options and the run itself."""
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import os
 import shlex
-import shutil
 import signal
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .docker import docker, docker_ok, docker_safe_name, env_arg, mount_arg
+from .docker import (
+    docker,
+    docker_ok,
+    docker_safe_name,
+    env_arg,
+    mount_arg,
+    project_slug,
+)
 from .image import Image
-from .settings import BIN_DIR, Fatal, Host, Settings
-
-CONTAINER_HOME = "/home/node"
+from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings
+from .tamper import CONFIG_FILES, CONFIG_TREES
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
@@ -39,10 +44,14 @@ class ExtraDir:
 def refuse_unsafe_dir(path: str, host: Host) -> None:
     """Refuse the filesystem root, the home directory or any of its parents:
     mounting one read-write would expose the whole home and defeat the
-    sandbox."""
-    directory = path.removesuffix("/")
-    if (host.home + "/").startswith(directory + "/"):
-        raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
+    sandbox. By the path as it is written and by where it leads, a link
+    to the home directory is the home directory."""
+    for home, directory in (
+        (host.home, path),
+        (os.path.realpath(host.home), os.path.realpath(path)),
+    ):
+        if (home.rstrip("/") + "/").startswith(directory.rstrip("/") + "/"):
+            raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
 
 
 def resolve_dir(raw: str, host: Host) -> str:
@@ -110,29 +119,56 @@ def container_name(host: Host, env: Mapping[str, str]) -> str:
     return candidate
 
 
+def seed_config(host: Host) -> None:
+    """Claude writes its global config atomically (temp file + rename). The
+    default location, a single-file bind mount of ~/.claude.json, can't be
+    renamed over, and the container home is read-only, so every config write
+    is lost and Claude re-prompts (theme, folder trust) on each launch.
+    CLAUDE_CONFIG_DIR points at the mounted ~/.claude directory instead:
+    there the config is a regular file in a writable mount, so atomic
+    writes persist. Seeded from the host's global config on first use so
+    onboarding, theme and account carry over. Not what it holds of each
+    project (its path, its settings and the servers set up for it alone):
+    a session has no use for those of another project, see history.py.
+    The config the sessions then share still gains an entry for each
+    project that is run in here."""
+    seeded = os.path.join(host.claude_dir, ".claude.json")
+    if os.path.exists(seeded):
+        return
+    try:
+        text = Path(host.home, ".claude.json").read_text(encoding="utf-8")
+        config = json.loads(text)
+    except (OSError, ValueError, RecursionError):
+        # None to carry over, or not one to read: Claude starts afresh
+        return
+    if not isinstance(config, dict):
+        return
+    config.pop("projects", None)
+    try:
+        descriptor = os.open(seeded, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another launcher was first
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2)
+
+
 def prepare_claude_dir(settings: Settings, host: Host) -> None:
     """Create what the mounts below expect to find in the host's ~/.claude."""
     os.makedirs(host.claude_dir, exist_ok=True)
-    os.makedirs(os.path.join(host.home, ".local", "state", "claude"), exist_ok=True)
-
-    # Claude writes its global config atomically (temp file + rename). The
-    # default location, a single-file bind mount of ~/.claude.json, can't be
-    # renamed over, and the container home is read-only, so every config write
-    # is lost and Claude re-prompts (theme, folder trust) on each launch.
-    # CLAUDE_CONFIG_DIR points at the mounted ~/.claude directory instead:
-    # there the config is a regular file in a writable mount, so atomic
-    # writes persist. Seed it from the host's global config on first use so
-    # onboarding, theme and account carry over.
-    seeded = os.path.join(host.claude_dir, ".claude.json")
-    host_config = os.path.join(host.home, ".claude.json")
-    if not os.path.isfile(seeded) and os.path.isfile(host_config):
-        shutil.copy(host_config, seeded)
-
-    # So there is something to protect, a missing settings file could
-    # otherwise be created from inside the container
-    settings_json = os.path.join(host.claude_dir, "settings.json")
-    if not settings.rw_config and not os.path.exists(settings_json):
-        Path(settings_json).write_text("{}\n", encoding="utf-8")
+    os.makedirs(host.claude_state_dir, exist_ok=True)
+    seed_config(host)
+    if settings.rw_config:
+        return
+    # So there is something to protect: what is missing could otherwise
+    # be created from inside the container, and the host's claude would
+    # follow it. Empty, they say nothing.
+    for name in CONFIG_TREES:
+        os.makedirs(os.path.join(host.claude_dir, name), exist_ok=True)
+    for name in CONFIG_FILES:
+        file = Path(host.claude_dir, name)
+        if not file.exists():
+            file.write_text("{}\n" if name.endswith(".json") else "", encoding="utf-8")
 
 
 def telemetry_args(settings: Settings) -> list[str]:
@@ -148,7 +184,6 @@ def telemetry_args(settings: Settings) -> list[str]:
 def base_args(settings: Settings, host: Host, name: str) -> list[str]:
     """What every session gets: identity, the core mounts, the hardening and
     the resource limits."""
-    state_dir = os.path.join(host.home, ".local", "state", "claude")
     return [
         "--rm",
         "--interactive",
@@ -198,7 +233,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # the image's baked-in version, dangling the symlink (exit 127). The
         # image owns the version (auto-updater is off, update = rebuild), so
         # keep it self-contained.
-        mount_arg(state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
+        mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
         *statusline_args(host),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
@@ -259,9 +294,7 @@ def cache_arg(settings: Settings, host: Host) -> str:
     target = f"{CONTAINER_HOME}/.cache"
     if not settings.cache:
         return f"--tmpfs={target}:exec,size=2g"
-    project = docker_safe_name(os.path.basename(host.project_dir))
-    suffix = hashlib.sha256(host.project_dir.encode()).hexdigest()[:8]
-    return mount_arg(f"claude-cache-{project}-{suffix}", target)
+    return mount_arg(f"claude-cache-{project_slug(host.project_dir)}", target)
 
 
 def session_args(action: str, env: Mapping[str, str]) -> list[str]:
@@ -281,7 +314,9 @@ def session_args(action: str, env: Mapping[str, str]) -> list[str]:
     return args
 
 
-PROTECTED_CONFIG = ("settings.json", "hooks", "CLAUDE.md", "skills", "agents")
+# What a session cannot change of ~/.claude: all that the check of
+# tamper.py watches there, so the two cannot come apart
+PROTECTED_CONFIG = (*CONFIG_FILES, *CONFIG_TREES)
 
 
 def protect_config_args(settings: Settings, host: Host) -> list[str]:
@@ -289,11 +324,13 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     hooks hold commands the host's own claude runs. Left writable, a
     compromised session could plant a hook there and get code execution
     outside the sandbox, so they are mounted read-only on top. CLAUDE.md,
-    skills and agents get the same treatment: they are instructions every
-    later session follows, on the host too. The cost: none of these can be
-    changed from inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out.
-    Plugins stay writable (claude updates them itself), their hook scripts
-    are the remaining gap."""
+    skills, agents, commands and rules get the same treatment: they are
+    instructions every later session follows, on the host too. The ones
+    that are missing were made empty by prepare_claude_dir, so that none
+    can be created either. The cost: none of these can be changed from
+    inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out. Plugins stay
+    writable (claude updates them itself), their hook scripts are the
+    remaining gap."""
     if settings.rw_config:
         # Shown by bin/claude-statusline
         return [env_arg("CLAUDE_DOCKER_RW_CONFIG", 1)]
@@ -372,7 +409,9 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
     pruning more directories would be faster but could leave a real secret
     visible."""
     patterns = SHADOWED_NAMES + settings.shadow
-    args = []
+    # By path, in the order found: a directory mounted next to the project
+    # can be inside it, and docker refuses to mount twice at one place
+    hidden: dict[str, None] = {}
     for root in [host.project_dir] + [extra.path for extra in dirs]:
         for directory, subdirs, files in os.walk(root):
             subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
@@ -383,19 +422,36 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
                     continue
                 path = os.path.join(directory, name)
                 if stat.S_ISREG(os.lstat(path).st_mode):
-                    args.append(mount_arg("/dev/null", path, "ro"))
-    return args
+                    hidden[path] = None
+    for path in hidden:
+        if ":" in path:
+            # Not left visible, and not for docker to trip over
+            raise Fatal(
+                f"cannot hide {path}: docker takes no path with a colon,"
+                " rename or remove the file"
+            )
+    return [mount_arg("/dev/null", path, "ro") for path in hidden]
+
+
+@contextmanager
+def interrupts_held() -> Iterator[None]:
+    """Keep Ctrl-C from ending the launcher for as long as the block
+    lasts: it has to outlive the session to collect what its sidecars
+    recorded and to check what it left behind, and Ctrl-C twice is how
+    Claude Code is left. Ctrl-C still reaches docker (same foreground
+    process group) and ends the session there. Held with a handler, one
+    that is ignored would be ignored by docker too."""
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def run_session(run_args: list[str], image: Image, command_args: list[str]) -> int:
     """Run the container and wait for it. Not an exec: the launcher has to
-    outlive the session to check what it left behind. Ctrl-C reaches docker
-    as well (same foreground process group) and ends the session there, the
-    launcher only has to survive it."""
-    previous = signal.signal(signal.SIGINT, lambda *_: None)
-    try:
-        status = docker("run", *run_args, image.tag, *command_args).returncode
-    finally:
-        signal.signal(signal.SIGINT, previous)
+    outlive the session to check what it left behind, see
+    interrupts_held."""
+    status = docker("run", *run_args, image.tag, *command_args).returncode
     # Killed by a signal: report it the way a shell would
     return status if status >= 0 else 128 - status

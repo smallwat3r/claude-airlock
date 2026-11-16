@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
-from dataclasses import dataclass
-from pathlib import Path
 from typing import IO
 
 from .settings import Fatal
@@ -69,10 +68,9 @@ def container_label(container: str, label: str) -> str:
 
 def docker_must(*args: str) -> None:
     """Run a docker command the session cannot do without. Its stdout (an
-    id) is dropped, its own error message is the report."""
-    status = docker(*args, stdout=subprocess.DEVNULL).returncode
-    if status != 0:
-        raise SystemExit(status)
+    id) is dropped, its own error message says what went wrong."""
+    if docker(*args, stdout=subprocess.DEVNULL).returncode != 0:
+        raise Fatal(f"claude-docker: docker {' '.join(args[:2])} failed")
 
 
 def env_arg(name: str, value: object = None) -> str:
@@ -83,7 +81,12 @@ def env_arg(name: str, value: object = None) -> str:
 
 def mount_arg(source: str, target: str, options: str = "") -> str:
     """A bind mount or named volume. The z option relabels a bind mount so
-    containers can read it on SELinux hosts."""
+    containers can read it on SELinux hosts. The three are told apart by
+    colons, so a path that has one cannot be mounted: refused here, docker
+    would take a part of it for something else."""
+    for path in (source, target):
+        if ":" in path:
+            raise Fatal(f"cannot mount {path}: docker takes no path with a colon")
     return "--volume=" + ":".join(part for part in (source, target, options) if part)
 
 
@@ -91,61 +94,9 @@ def docker_safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "-", name)
 
 
-def process_started(pid: int) -> str:
-    """When a process started, as text that is only good to compare, empty
-    when that cannot be told or there is no such process."""
-    try:
-        # Linux: in clock ticks since boot, the 22nd value of the line,
-        # counted from behind the command, which can hold anything
-        said = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-        return said.rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError):
-        pass
-    try:
-        listed = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
-            check=False,
-        )
-    except OSError:
-        return ""
-    return " ".join(listed.stdout.split())
-
-
-@dataclass(frozen=True)
-class Launcher:
-    """The launcher of a session as its records know it: by its process
-    id, and by when that process started, which tells it from a later
-    process that was given the same id. The start is empty when it could
-    not be told, and in a record of an earlier version."""
-
-    pid: int
-    started: str = ""
-
-    @classmethod
-    def current(cls) -> Launcher:
-        return cls(os.getpid(), process_started(os.getpid()))
-
-    @property
-    def alive(self) -> bool:
-        # Zero and below would ask about process groups, not a process
-        if self.pid <= 0:
-            return False
-        try:
-            os.kill(self.pid, 0)
-        except ProcessLookupError:
-            return False
-        except OSError:
-            # Not ours to signal, so it exists
-            pass
-        started = process_started(self.pid)
-        return not self.started or not started or started == self.started
-
-
-def session_alive(launcher: Launcher, container: str) -> bool:
-    """Whether a session is still going: its launcher or its container is
-    there. The container can outlive a killed launcher."""
-    return launcher.alive or docker_ok("container", "inspect", container)
+def project_slug(project_dir: str) -> str:
+    """A name for a project that docker and the filesystem take, and that
+    two projects of the same name do not share: its last part and a hash
+    of its whole path."""
+    suffix = hashlib.sha256(project_dir.encode()).hexdigest()[:8]
+    return f"{docker_safe_name(os.path.basename(project_dir))}-{suffix}"

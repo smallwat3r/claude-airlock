@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .background import in_background
 from .docker import (
     container_label,
     docker,
@@ -29,7 +30,7 @@ from .docker import (
     mount_arg,
 )
 from .records import NetSession, record_net_session
-from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
+from .settings import DOCKERFILE_DIR, EGRESS_PORT, Fatal, Host, Settings
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
@@ -37,8 +38,9 @@ from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 PROXY_IMAGE = "tecnativa/docker-socket-proxy:latest@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
 SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
 EGRESS_PROXY = "claude-egress-proxy"
-EGRESS_PORT = 3128
-EGRESS_CONFIG_LABEL = "claude-sandbox.config"
+# A hash of what a proxy sidecar was started from, so one started from
+# something else (an edited rule, another image) is noticed and replaced
+SIDECAR_CONFIG_LABEL = "claude-sandbox.config"
 # The proxy's log is kept in a volume, so it outlives the proxy's container,
 # as the current file and the one before it (logfile_rotate in squid.conf).
 # The current one is rotated out once it is over the limit, which bounds the
@@ -50,27 +52,67 @@ EGRESS_LOG_DIR = "/var/log/squid"
 EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # Filtered mode joins an internal network with no route out, open mode a
 # plain bridge network. Both are user-defined so container names resolve.
+# Each of the two is one network per socket mode, so that a session only
+# shares a network with the socket proxy it was given: on a network, every
+# container reaches every other by name.
 FILTER_NET = "claude-docker-net"
 OPEN_NET = "claude-docker-open-net"
+SOCKET_NET_SUFFIXES = {"1": "-ps", "full": "-full"}
+FILTER_NETS = (FILTER_NET, *(FILTER_NET + s for s in SOCKET_NET_SUFFIXES.values()))
+SOCKET_PROXIES = {"1": "claude-docker-ps-proxy", "full": "claude-docker-proxy"}
 DOCKER_SOCK = "/var/run/docker.sock"
 
 
 def network_name(settings: Settings) -> str:
-    return FILTER_NET if settings.net_filter else OPEN_NET
+    """The network of a session: by whether it is filtered, and by the
+    socket proxy it is given, if any."""
+    name = FILTER_NET if settings.net_filter else OPEN_NET
+    if socket_proxy_options(settings) is None:
+        return name
+    return name + SOCKET_NET_SUFFIXES[settings.socket]
 
 
 def socket_proxy_name(settings: Settings) -> str:
     """One sidecar per socket mode, so sessions in different modes never
     share. The limited one has its own name on purpose: a full-access sidecar
     left running must not be picked up as the limited one."""
-    if settings.socket == "full":
-        return "claude-docker-proxy"
-    return "claude-docker-ps-proxy"
+    return SOCKET_PROXIES["full" if settings.socket == "full" else "1"]
 
 
-def ensure_network(name: str, *create_options: str) -> None:
-    if not docker_ok("network", "inspect", name):
-        docker_must("network", "create", *create_options, name)
+def network_state(name: str) -> tuple[bool, set[str]] | None:
+    """Whether a network is internal and the containers on it, none for
+    one that is not there."""
+    said = docker_output(
+        "network",
+        "inspect",
+        "--format={{.Internal}} {{range .Containers}}{{.Name}} {{end}}",
+        name,
+    ).split()
+    return (said[0] == "true", set(said[1:])) if said else None
+
+
+def ensure_network(name: str, internal: bool = False) -> set[str]:
+    """Create a network as needed, and give the containers on it. One
+    that is there is checked to be what was asked for: a filtered session
+    on a network with a route out would not be filtered."""
+    state = network_state(name)
+    if state is None:
+        created = docker_ok(
+            "network", "create", *(["--internal"] if internal else []), name
+        )
+        # Another launcher may have been first
+        state = network_state(name)
+        if state is None and not created:
+            raise Fatal(f"claude-docker: the docker network {name} was not created")
+        if state is None:
+            return set()
+    if state[0] != internal:
+        raise Fatal(
+            f"the docker network {name} is {'not ' if internal else ''}internal,"
+            f" which it has to be. Remove it once no session is on it, the"
+            f" next one makes it anew: docker network rm {name}"
+        )
+    return state[1]
 
 
 def sidecar_running(name: str) -> bool:
@@ -78,8 +120,18 @@ def sidecar_running(name: str) -> bool:
     return "true" in state
 
 
-def start_sidecar(name: str, network: str, options: list[str], image: str) -> None:
-    """(Re)create a sidecar on a network."""
+def sidecar_current(name: str, config: str) -> bool:
+    """Running, and started from the config of that hash."""
+    if not sidecar_running(name):
+        return False
+    return container_label(name, SIDECAR_CONFIG_LABEL) == config
+
+
+def start_sidecar(
+    name: str, network: str, config: str, options: list[str], image: str
+) -> None:
+    """(Re)create a sidecar on a network, labelled with the hash of what
+    it is started from."""
     docker_ok("rm", "--force", name)
     docker_must(
         "run",
@@ -87,27 +139,34 @@ def start_sidecar(name: str, network: str, options: list[str], image: str) -> No
         f"--name={name}",
         f"--network={network}",
         "--restart=unless-stopped",
+        f"--label={SIDECAR_CONFIG_LABEL}={config}",
         *options,
         image,
     )
 
 
+def config_hash(*parts: bytes) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(len(part).to_bytes(8, "big") + part)
+    return digest.hexdigest()[:16]
+
+
 def egress_config_hash() -> str:
-    config = b"".join(
+    files = (
         Path(DOCKERFILE_DIR, name).read_bytes()
         for name in ("squid.conf", "allowed-domains.txt")
     )
-    return hashlib.sha256(config).hexdigest()[:16]
+    return config_hash(SQUID_IMAGE.encode(), *files)
 
 
 def start_egress_proxy() -> None:
-    """(Re)create the squid sidecar on the internal network, then give it
-    its second leg on the default bridge. Labelled with a hash of its config,
-    so an edited allowlist is noticed (see egress_proxy_current)."""
-    ensure_network(FILTER_NET, "--internal")
+    """(Re)create the squid sidecar on the internal networks, then give it
+    its other leg on the default bridge. Labelled with a hash of its config
+    and image, so an edited allowlist is noticed (see egress_proxy_current)."""
+    ensure_network(FILTER_NET, internal=True)
     squid = "/etc/squid"
     options = [
-        f"--label={EGRESS_CONFIG_LABEL}={egress_config_hash()}",
         mount_arg(f"{DOCKERFILE_DIR}/squid.conf", f"{squid}/squid.conf", "ro,z"),
         mount_arg(
             f"{DOCKERFILE_DIR}/allowed-domains.txt",
@@ -116,8 +175,12 @@ def start_egress_proxy() -> None:
         ),
         f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
     ]
-    start_sidecar(EGRESS_PROXY, FILTER_NET, options, SQUID_IMAGE)
+    start_sidecar(EGRESS_PROXY, FILTER_NET, egress_config_hash(), options, SQUID_IMAGE)
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
+    # The internal networks of the sessions with a socket proxy, those that
+    # are there: sessions may be running on them
+    for network in FILTER_NETS[1:]:
+        docker_ok("network", "connect", network, EGRESS_PROXY)
     wait_for_egress_proxy()
 
 
@@ -142,9 +205,7 @@ def egress_proxy_current() -> bool:
     """Running, and started from the config as it is on disk now. A stale
     proxy is replaced on the next filtered start, which briefly drops the
     connections of other filtered sessions."""
-    if not sidecar_running(EGRESS_PROXY):
-        return False
-    return container_label(EGRESS_PROXY, EGRESS_CONFIG_LABEL) == egress_config_hash()
+    return sidecar_current(EGRESS_PROXY, egress_config_hash())
 
 
 def access_log(stderr: int | None = None) -> str | None:
@@ -210,18 +271,8 @@ def session_address_recorded(
     if not settings.net_filter:
         yield
         return
-    stop = threading.Event()
-    recorder = threading.Thread(
-        target=record_address,
-        args=(name, owner, host, time.time(), stop),
-        daemon=True,
-    )
-    recorder.start()
-    try:
+    with in_background(record_address, name, owner, host, time.time()):
         yield
-    finally:
-        stop.set()
-        recorder.join()
 
 
 @dataclass(frozen=True)
@@ -268,6 +319,19 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
         )
     except ValueError:
         return None
+
+
+def made_by(
+    request: ProxyRequest, session: NetSession, start: float, end: float
+) -> bool:
+    """Whether a session made a request between start and end: it came
+    from the session's address and was open at some point of that time.
+    The proxy logs a tunnel when it closes, which can be much later."""
+    return (
+        session.ip == request.address
+        and request.ended >= max(start, session.start)
+        and request.began <= min(end, session.until)
+    )
 
 
 def logged_requests(stderr: int | None = None) -> list[ProxyRequest] | None:
@@ -340,11 +404,22 @@ def namespace_args(settings: Settings) -> list[str]:
 def prepare_network(settings: Settings) -> None:
     """Create the session's network as needed, and in filtered mode start
     the egress proxy, or replace one started from another config."""
-    ensure_network(network_name(settings))
+    network = network_name(settings)
+    on_it = ensure_network(network, internal=settings.net_filter)
+    # Only the socket proxy of the session's mode belongs there. Another
+    # is from before each mode had its network, and would be a way to the
+    # Docker socket the session was not given.
+    given = socket_proxy_options(settings) is not None
+    mine = socket_proxy_name(settings) if given else ""
+    for stray in on_it.intersection(SOCKET_PROXIES.values()) - {mine}:
+        docker_ok("network", "disconnect", "--force", network, stray)
     if not settings.net_filter:
         return
     if not egress_proxy_current():
         start_egress_proxy()
+    if network != FILTER_NET:
+        # Made since the proxy started, already joined otherwise
+        docker_ok("network", "connect", network, EGRESS_PROXY)
     rotate_access_log()
 
 
@@ -430,16 +505,20 @@ def socket_proxy_options(settings: Settings) -> list[str] | None:
 
 def start_socket_proxy(settings: Settings) -> None:
     """Start the Docker socket proxy of the session's mode as needed, and
-    put it on the session's network. Opt-in, nothing without it."""
+    put it on the session's network, which is that of its mode alone.
+    Opt-in, nothing without it. One started from other rules or another
+    image is replaced, which ends the calls other sessions have open."""
     options = socket_proxy_options(settings)
     if options is None:
         return
     name = socket_proxy_name(settings)
     network = network_name(settings)
-    if not sidecar_running(name):
-        start_sidecar(name, network, options, PROXY_IMAGE)
-    # A proxy left over from a previous run may sit on another network
-    # (e.g. after toggling CLAUDE_DOCKER_NET_FILTER), attach it to ours
+    rules = Path(DOCKERFILE_DIR, "docker-socket-proxy.cfg").read_bytes()
+    config = config_hash(PROXY_IMAGE.encode(), rules, *map(str.encode, options))
+    if not sidecar_current(name, config):
+        start_sidecar(name, network, config, options, PROXY_IMAGE)
+    # A proxy started by a session of the other network mode (filtered or
+    # open) sits on that one's network, attach it to ours too
     docker_ok("network", "connect", network, name)
 
 

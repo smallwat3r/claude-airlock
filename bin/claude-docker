@@ -40,10 +40,13 @@ Environment, all optional:
   CLAUDE_DOCKER_FEATURES    features to build in, space or comma separated
   CLAUDE_DOCKER_NET_FILTER  1 restricts egress to allowed-domains.txt
   CLAUDE_DOCKER_NET_LOG     0 stops recording what a session connects to
+  CLAUDE_DOCKER_PROC_LOG    0 stops recording the processes of a session
   CLAUDE_DOCKER_TELEMETRY   1 lets Claude Code send usage and crash reports
   CLAUDE_DOCKER_SSH_AGENT   1 forwards the SSH agent
   CLAUDE_DOCKER_SOCKET      1 allows docker ps and logs, full adds inspect
   CLAUDE_DOCKER_RW_CONFIG   1 leaves the protected ~/.claude config writable
+  CLAUDE_DOCKER_SHARED_HISTORY  1 lets a session see what Claude Code
+                            remembers of other projects
   CLAUDE_DOCKER_SHADOW      extra file name globs to hide, colon separated
   CLAUDE_DOCKER_MEMORY      memory limit
   CLAUDE_DOCKER_PIDS        process limit
@@ -57,10 +60,13 @@ To override a default for every session, put NAME=value lines in
 
 The code is the claude_sandbox package next to this directory: settings.py
 (the settings and their defaults), docker.py, image.py, session.py,
-network.py, tamper.py and cli.py for a session, capture.py, pcap.py and
-records.py for the record of its network use, events.py, transcript.py,
-trace.py and follow.py for --trace. Standard library only, and no syntax
-newer than Python 3.9, the version macOS ships.
+network.py, history.py, tamper.py, launcher.py and cli.py for a session,
+sidecar.py, capture.py, pcap.py, reader.py, processes.py, procwatch.py,
+doors.py, recorder.py, records.py and background.py for the records of
+what it did, events.py, transcript.py, shown.py, trace.py, follow.py and
+digest.py for --trace and the lines said when a session ends. Standard
+library only, and no syntax newer than Python 3.9, the version macOS
+ships.
 """
 
 import os

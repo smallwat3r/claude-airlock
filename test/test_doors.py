@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from harness import LauncherTest, network, prompts_at, settings
+from harness import LauncherTest, follow, network, prompts_at, settings
 
 from claude_sandbox import doors
 
@@ -178,6 +178,36 @@ class AgentDoorTest(LauncherTest):
                 doors.note_use(self.host, "/p", "s", "docker", path=str(number))
         lines = Path(self.host.doors_file).read_text().splitlines()
         self.assertEqual([json.loads(line)["path"] for line in lines], ["2", "3", "4"])
+
+    def test_the_uses_of_one_session_can_be_told_from_another(self):
+        for session in ("claude-proj", "claude-proj-2"):
+            doors.note_use(self.host, self.host.project_dir, session, "docker")
+        mine = doors.read_uses(self.host, 0, time.time() + 1, "claude-proj-2")
+        self.assertEqual([use["session"] for use in mine], ["claude-proj-2"])
+        self.assertEqual(len(doors.read_uses(self.host, 0, time.time() + 1)), 2)
+
+    def test_uses_noted_in_the_same_moment_are_all_followed(self):
+        follower = follow.Follower(self.host, verbose=False)
+        moment = time.time() + 5
+        paths = ["/_ping", "/containers/json", "/version"]
+
+        def note(path: str) -> None:
+            with mock.patch.object(doors.time, "time", return_value=moment):
+                doors.note_use(
+                    self.host, self.host.project_dir, "s", "docker", path=path
+                )
+
+        def followed() -> list[str]:
+            found = follow.Round()
+            follower._poll_doors(found)
+            return [event.fields["path"] for _, event in found.events]
+
+        note(paths[0])
+        note(paths[1])
+        self.assertEqual(followed(), paths[:2])
+        note(paths[2])
+        self.assertEqual(followed(), paths[2:])
+        self.assertEqual(followed(), [])
 
 
 class SocketWatchTest(LauncherTest):

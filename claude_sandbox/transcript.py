@@ -23,8 +23,7 @@ from typing import BinaryIO
 from urllib.parse import urlsplit
 
 from .events import Event, Who, clean, flat
-from .session import CONTAINER_HOME
-from .settings import Fatal, Host
+from .settings import CONTAINER_HOME, Fatal, Host
 
 # A live walk of a transcript lets go of the oldest calls once this many
 # wait for a result, and of the oldest steps it has shown
