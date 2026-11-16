@@ -135,6 +135,16 @@ def prepare_claude_dir(settings: Settings, host: Host) -> None:
         Path(settings_json).write_text("{}\n", encoding="utf-8")
 
 
+def telemetry_args(settings: Settings) -> list[str]:
+    """Unless CLAUDE_DOCKER_TELEMETRY=1, Claude Code is told to keep its
+    usage events and crash reports to itself. They go to third parties
+    (Datadog for one) outside of any tool call, with what they hold not
+    the user's to see. Nothing a session does depends on them."""
+    if settings.telemetry:
+        return []
+    return [env_arg("DISABLE_TELEMETRY", 1), env_arg("DISABLE_ERROR_REPORTING", 1)]
+
+
 def base_args(settings: Settings, host: Host, name: str) -> list[str]:
     """What every session gets: identity, the core mounts, the hardening and
     the resource limits."""

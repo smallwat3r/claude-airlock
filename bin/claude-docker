@@ -36,6 +36,7 @@ Environment, all optional:
   CLAUDE_DOCKER_FEATURES    features to build in, space or comma separated
   CLAUDE_DOCKER_NET_FILTER  1 restricts egress to allowed-domains.txt
   CLAUDE_DOCKER_NET_LOG     0 stops recording what a session connects to
+  CLAUDE_DOCKER_TELEMETRY   1 lets Claude Code send usage and crash reports
   CLAUDE_DOCKER_SSH_AGENT   1 forwards the SSH agent
   CLAUDE_DOCKER_SOCKET      1 allows docker ps and logs, full adds inspect
   CLAUDE_DOCKER_RW_CONFIG   1 leaves the protected ~/.claude config writable

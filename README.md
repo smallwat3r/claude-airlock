@@ -65,15 +65,19 @@ The settings, each shown with an example value:
 
   Tools to build into the image, see [The image](#the-image)
 
-- `CLAUDE_DOCKER_NET_FILTER=1` (default: `0`)
+- `CLAUDE_DOCKER_NET_FILTER=0` (the default)
 
-  If on, egress goes through a proxy that only allows the domains in `docker/allowed-domains.txt`, and only HTTP, HTTPS and git over SSH get out
+  If on, egress goes through a proxy that only allows the domains in `docker/allowed-domains.txt`, and only HTTP, HTTPS and git over SSH get out. If off, the network is open
 
-- `CLAUDE_DOCKER_NET_LOG=0` (default: `1`)
+- `CLAUDE_DOCKER_NET_LOG=1` (the default)
 
-  If on, records every TCP connection the session opens and every name it looks up, shown by `--trace`, see [Reviewing a session](#reviewing-a-session)
+  If on, records every TCP connection the session opens and every name it looks up, shown by `--trace`, see [Reviewing a session](#reviewing-a-session). If off, nothing is captured, and `--trace` only has the network use of a filtered session, from the proxy's log
 
-- `CLAUDE_DOCKER_SSH_AGENT=1` (default: `0`)
+- `CLAUDE_DOCKER_TELEMETRY=0` (the default)
+
+  If off, Claude Code is started with `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`: it sends no usage events and no crash reports, which otherwise go out in the background, to Datadog among others. Sessions work the same, though features Anthropic rolls out gradually may stay at their defaults. If on, it sends both as it does outside the sandbox
+
+- `CLAUDE_DOCKER_SSH_AGENT=0` (the default)
 
   If on, forwards your SSH agent, so git over SSH and `ssh` work with your keys. If off, the session has no SSH keys
 
