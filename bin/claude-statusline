@@ -9,7 +9,10 @@ set -u
 input=$(cat)
 parts=()
 
-mapfile -t fields < <(
+fields=()
+while IFS= read -r field; do
+  fields+=("${field}")
+done < <(
   jq -r '(.model.display_name // "?"),
          (.rate_limits.five_hour.used_percentage // -1),
          (.rate_limits.five_hour.resets_at // 0),
