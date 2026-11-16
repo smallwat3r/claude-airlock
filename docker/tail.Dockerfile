@@ -14,7 +14,7 @@ ARG CLAUDE_CODE_VERSION=2.1.323
 # The host's ~/.claude is shared into the container, but its config stores
 # absolute paths under the host home (e.g. plugin marketplace locations).
 # Symlink the host home to /home/node so those paths resolve, and the
-# container runs with HOME set to the host home (see bin/claude-docker).
+# container runs with HOME set to the host home (see claude_sandbox/session.py).
 # Defaults to /home/node, keeping the build a no-op when they already match.
 # The launcher folds the home into the image tag, so an image built for
 # another home is never reused.
@@ -30,7 +30,8 @@ ENV PATH="${HOST_HOME}/.local/bin:${PATH}"
 
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-# ~/.cache is mounted as a named volume (see bin/claude-docker). A new volume
+# ~/.cache is mounted as a named volume (see cache_arg in
+# claude_sandbox/session.py). A new volume
 # takes the owner and mode of the directory it covers, so create it open to
 # whichever host user the container runs as, the way /tmp is.
 # The npm installs above ran as root and left their cache there, which the

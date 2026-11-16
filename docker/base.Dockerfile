@@ -1,6 +1,6 @@
 # Sandboxed environment for running Claude Code via Docker.
 #
-# This is the first of three parts: bin/claude-docker concatenates
+# This is the first of three parts: claude_sandbox/image.py concatenates
 # base.Dockerfile, the selected features/*.Dockerfile and tail.Dockerfile
 # into the Dockerfile it builds. Lines starting with "# claude-feat-md: " are
 # collected into the image's /etc/claude-code/CLAUDE.md, so the tool list
@@ -41,7 +41,7 @@ RUN apt-get update \
     git \
     openssh-client \
     gh \
-    # SSH-over-proxy tunnel for the egress allowlist (see bin/claude-docker)
+    # SSH-over-proxy tunnel for the egress allowlist (see claude_sandbox/network.py)
     netcat-openbsd \
     # Search and filesystem
     ripgrep \
