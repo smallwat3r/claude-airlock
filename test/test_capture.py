@@ -6,19 +6,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import struct
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 from harness import (
     LauncherTest,
     Result,
     capture,
+    prompts_at,
     settings,
 )
 
@@ -144,7 +143,6 @@ class CaptureSessionTest(LauncherTest):
         self.now = time.time()
         self.capture_file = self.work / "capture.pcap"
         self.capture_file.write_bytes(sample_capture(self.now))
-        self.state = self.home / ".local" / "state" / "claude-sandbox"
 
     def captured(self, *args: str, **env: str) -> Result:
         return self.launch(
@@ -224,18 +222,7 @@ class CaptureSessionTest(LauncherTest):
 
     def trace(self, *args: str) -> str:
         self.captured()
-        stamps = [
-            datetime.fromtimestamp(self.now + offset, timezone.utc).isoformat()  # noqa: UP017
-            for offset in (0, 10)
-        ]
-        entries = [
-            {"type": "user", "timestamp": stamp, "message": {"content": "hello"}}
-            for stamp in stamps
-        ]
-        name = re.sub(r"[^A-Za-z0-9]", "-", str(self.project))
-        transcripts = self.home / ".claude" / "projects" / name
-        transcripts.mkdir(parents=True, exist_ok=True)
-        (transcripts / "0a.jsonl").write_text("\n".join(map(json.dumps, entries)))
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         result = self.launch("--trace", *args)
         self.assertEqual(result.status, 0, result.stderr)
         return result.stdout

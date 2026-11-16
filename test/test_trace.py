@@ -9,10 +9,10 @@ import os
 import re
 import time
 import unittest
-from datetime import datetime, timezone
 
 from harness import (
     LauncherTest,
+    prompts_at,
 )
 
 
@@ -21,9 +21,6 @@ class TraceTest(LauncherTest):
 
     def setUp(self):
         super().setUp()
-        name = re.sub(r"[^A-Za-z0-9]", "-", str(self.project))
-        self.transcripts = self.home / ".claude" / "projects" / name
-        self.transcripts.mkdir(parents=True)
 
         def call(tool_id: str, name: str, **tool_input) -> dict:
             block = {"type": "tool_use", "id": tool_id, "name": name}
@@ -60,8 +57,8 @@ class TraceTest(LauncherTest):
             result("t2", "updated"),
             call("t3", "Write", file_path="main.go", content="package main\n"),
         ]
-        lines = [json.dumps(entry) for entry in entries] + ["{half written"]
-        (self.transcripts / f"{self.SESSION}.jsonl").write_text("\n".join(lines))
+        file = self.write_transcript(self.SESSION, entries)
+        file.write_text(file.read_text() + "{half written")
 
     def test_the_session_is_shown_without_docker(self):
         result = self.launch("--trace")
@@ -159,18 +156,7 @@ class NetworkTraceTest(LauncherTest):
         super().setUp()
         self.filtered = self.launch(CLAUDE_DOCKER_NET_FILTER="1", FAKE_IP="172.20.0.5")
         now = time.time()
-        stamps = [
-            datetime.fromtimestamp(now + offset, timezone.utc).isoformat()  # noqa: UP017
-            for offset in (0, 10)
-        ]
-        entries = [
-            {"type": "user", "timestamp": stamp, "message": {"content": "hello"}}
-            for stamp in stamps
-        ]
-        name = re.sub(r"[^A-Za-z0-9]", "-", str(self.project))
-        transcripts = self.home / ".claude" / "projects" / name
-        transcripts.mkdir(parents=True)
-        (transcripts / "0a.jsonl").write_text("\n".join(map(json.dumps, entries)))
+        self.write_transcript("0a", prompts_at(now, now + 10))
         mine, other = "172.20.0.5", "172.20.0.9"
         log = [
             f"{now + 5:.3f} 200 {mine} TCP_TUNNEL/200 4000 CONNECT good.test:443 - -",
@@ -192,9 +178,8 @@ class NetworkTraceTest(LauncherTest):
         return result.stdout
 
     def test_the_session_address_is_recorded(self):
-        state = self.home / ".local" / "state" / "claude-sandbox"
         (session,) = map(
-            json.loads, (state / "net-sessions.jsonl").read_text().splitlines()
+            json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
         )
         self.assertEqual(session["ip"], "172.20.0.5")
         self.assertEqual(session["project"], str(self.project))
@@ -208,8 +193,8 @@ class NetworkTraceTest(LauncherTest):
 
     def test_an_open_session_records_no_address(self):
         self.launch(FAKE_IP="172.20.0.6")
-        state = self.home / ".local" / "state" / "claude-sandbox"
-        self.assertNotIn("172.20.0.6", (state / "net-sessions.jsonl").read_text())
+        sessions = (self.state / "net-sessions.jsonl").read_text()
+        self.assertNotIn("172.20.0.6", sessions)
 
     def test_requests_are_summed_by_destination_refused_first(self):
         stdout = self.trace()
@@ -238,9 +223,7 @@ class NetworkTraceTest(LauncherTest):
         self.assertTrue(first < stdout.index(request) < second)
 
     def test_a_session_without_the_filter_says_so(self):
-        os.remove(
-            self.home / ".local" / "state" / "claude-sandbox" / "net-sessions.jsonl"
-        )
+        os.remove(self.state / "net-sessions.jsonl")
         self.assertIn("# network     not recorded", self.trace())
 
 

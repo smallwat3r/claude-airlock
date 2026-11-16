@@ -53,8 +53,7 @@ class UncheckedSessionTest(LauncherTest):
     KILL_LAUNCHER = "kill -KILL $(ps -o ppid= -p $PPID)"
 
     def pending(self) -> list[Path]:
-        state = self.home / ".local" / "state" / "claude-sandbox"
-        return list(state.glob("pending-checks/*.json"))
+        return list(self.state.glob("pending-checks/*.json"))
 
     def test_a_killed_session_is_checked_by_the_next_launch(self):
         killed = self.launch(

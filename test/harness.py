@@ -7,10 +7,12 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +57,19 @@ capture, image, network, settings = (
     importlib.import_module(f"claude_sandbox.{name}")
     for name in ("capture", "image", "network", "settings")
 )
+
+
+def prompts_at(*times: float) -> list[dict]:
+    """Transcript entries for a prompt at each of the given times, enough
+    for a transcript to span them."""
+    return [
+        {
+            "type": "user",
+            "timestamp": datetime.fromtimestamp(when, timezone.utc).isoformat(),  # noqa: UP017
+            "message": {"content": "hello"},
+        }
+        for when in times
+    ]
 
 
 class Result:
@@ -106,6 +121,11 @@ class LauncherTest(unittest.TestCase):
         self.work = Path(temp.name).resolve()
         self.home = self.work / "home"
         self.project = self.home / "proj"
+        # Where the launcher keeps its own records
+        self.state = self.home / ".local" / "state" / "claude-sandbox"
+        # Where Claude Code keeps the transcripts of the project
+        name = re.sub(r"[^A-Za-z0-9]", "-", str(self.project))
+        self.transcripts = self.home / ".claude" / "projects" / name
         for directory in (
             self.home / ".claude" / "hooks",
             self.home / ".claude" / "skills",
@@ -162,6 +182,13 @@ class LauncherTest(unittest.TestCase):
             check=False,
         )
         return Result(process, self.calls())
+
+    def write_transcript(self, session: str, entries: list[dict]) -> Path:
+        """Leave a transcript the way Claude Code does, a line per entry."""
+        self.transcripts.mkdir(parents=True, exist_ok=True)
+        file = self.transcripts / f"{session}.jsonl"
+        file.write_text("\n".join(map(json.dumps, entries)) + "\n")
+        return file
 
     def write_config(self, *lines: str) -> None:
         directory = self.home / ".config" / "claude-sandbox"
