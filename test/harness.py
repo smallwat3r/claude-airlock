@@ -45,8 +45,7 @@ if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
 if args[0] == "build":
-    for name in ("Dockerfile", "CLAUDE.md"):
-        shutil.copy(os.path.join(args[-1], name), os.environ["FAKE_OUT"])
+    shutil.copytree(args[-1], os.environ["FAKE_OUT"], dirs_exist_ok=True)
 if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
     sys.exit(subprocess.run(os.environ["FAKE_SESSION"], shell=True).returncode)
 """

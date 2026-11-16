@@ -332,7 +332,8 @@ read-write project safe to trust blindly afterwards:
 The image is assembled from the parts in `docker/`: `base.Dockerfile`
 (Claude Code's needs plus git, gh, Python with uv, Node.js and a C
 toolchain), the features you select, then `tail.Dockerfile`. Each feature
-is one plain Dockerfile fragment in `docker/features/`:
+is one plain Dockerfile fragment in `docker/features/`, some with a
+directory of the same name holding files the fragment copies in:
 
 | Feature | Adds |
 | --- | --- |
@@ -380,6 +381,11 @@ as system-level memory, so Claude always knows exactly what is installed.
 
 The image tag is a hash of the generated Dockerfile, so changing the
 selection or editing a part rebuilds on the next start, reusing cached
+A fragment that needs files finds those of a `NAME` directory next to it in
+the build context, as `COPY NAME/file ...`. One that needs another feature
+names it on a `# requires: other` line, and selecting the first then builds
+both.
+
 layers, and each feature set keeps its own image. Old ones pile up, list
 them with `docker images claude-code-sandbox` and remove what you no longer
 use.

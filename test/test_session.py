@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from harness import (
@@ -285,6 +286,36 @@ class ImageTest(LauncherTest):
         self.assertRegex(claude_md, r"(?m)^- Go ")
         self.assertNotIn("KiCad", claude_md)
         self.assertNotIn("Placeholder", claude_md)
+
+    def write_feature(self, name: str, *lines: str) -> Path:
+        directory = self.home / ".config" / "claude-sandbox" / "features"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{name}.Dockerfile").write_text("\n".join(lines) + "\n")
+        return directory
+
+    def test_a_feature_brings_those_it_requires(self):
+        self.write_feature("mine", "# requires: go", "# claude: My tool")
+        self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        claude_md = (self.work / "out" / "CLAUDE.md").read_text()
+        self.assertRegex(claude_md, r"(?m)^- Go ")
+        self.assertRegex(claude_md, r"(?m)^- My tool$")
+
+    def test_an_unknown_required_feature_aborts(self):
+        self.write_feature("mine", "# requires: nothere")
+        result = self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        self.assert_refused(result, "unknown feature: nothere")
+
+    def test_a_feature_brings_its_files_to_the_build(self):
+        tool = self.write_feature("mine", "COPY mine/tool /usr/local/bin/") / "mine"
+        tool.mkdir()
+        (tool / "tool").write_text("one\n")
+        self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        self.assertEqual((self.work / "out" / "mine" / "tool").read_text(), "one\n")
+        # An edited file is another image, like an edited fragment
+        (tool / "tool").write_text("two\n")
+        self.launch(CLAUDE_DOCKER_FEATURES="mine")
+        built = {call[1] for call in self.calls() if call[0] == "build"}
+        self.assertEqual(len(built), 2)
 
     def test_every_feature_assembles(self):
         result = self.launch("--dockerfile")
