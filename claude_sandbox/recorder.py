@@ -35,8 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .background import in_background
-from .settings import Host, private_dir
-from .transcript import open_transcript, parse_entry, transcript_files
+from .files import json_object, open_plain, private_dir
+from .projects import transcript_files
+from .settings import Host
 
 # Seconds between two looks at the transcripts
 LOOK_EVERY = 0.5
@@ -76,7 +77,7 @@ def still_at(descriptor: int, path: Path) -> bool:
 def catch_up(transcript: Path, copy: Path) -> None:
     """Add to a copy what its transcript has gained. Under a lock, the
     launchers of other sessions of the project copy it too."""
-    source = open_transcript(transcript)
+    source = open_plain(transcript)
     if source is None:
         return
     private_dir(str(copy.parent))
@@ -181,7 +182,7 @@ def lines_of(path: Path) -> list[bytes]:
     """The whole lines of a transcript or of a copy, none for one that
     cannot be read. A last line without its end is still being written,
     or was when the copy was made."""
-    file = open_transcript(path)
+    file = open_plain(path)
     if file is None:
         return []
     with file:
@@ -234,7 +235,7 @@ def compare(host: Host, transcript: Path) -> Compared:
         if digest in current or digest in seen:
             continue
         seen.add(digest)
-        entry = parse_entry(line)
+        entry = json_object(line)
         if entry:
             found.gone.append(entry)
     return found

@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
-import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -39,7 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .background import in_background
-from .settings import Host, private_dir, write_whole
+from .files import open_plain, private_dir, write_whole
+from .settings import Host
 
 LOGIN = ".credentials.json"
 # Seconds between two looks at the two files
@@ -75,14 +74,12 @@ def version_of(found: os.stat_result) -> tuple[int, ...]:
 def read_login(path: str) -> Login:
     """The login at a path. One that is not a regular file of a sane size
     is none: a session could leave a link or a pipe in the base."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
+    file = open_plain(path)
+    if file is None:
         return Login(path)
-    with os.fdopen(descriptor, "rb") as file:
-        found = os.fstat(descriptor)
-        if not stat.S_ISREG(found.st_mode) or found.st_size > MOST_READ:
+    with file:
+        found = os.fstat(file.fileno())
+        if found.st_size > MOST_READ:
             return Login(path)
         return Login(path, file.read(MOST_READ), version_of(found))
 
@@ -105,19 +102,7 @@ def carry(source: Login, target: Login) -> bool:
     if source.content is None:
         os.unlink(target.path)
         return True
-    directory = os.path.dirname(target.path)
-    # For the user alone, and under a name that is not there
-    descriptor, partial = tempfile.mkstemp(dir=directory, prefix=LOGIN + ".")
-    try:
-        with os.fdopen(descriptor, "wb") as file:
-            file.write(source.content)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(partial, target.path)
-    except BaseException:
-        Path(partial).unlink(missing_ok=True)
-        raise
-    return True
+    return write_whole(target.path, source.content, durable=True)
 
 
 def last_shared(host: Host) -> str | None:

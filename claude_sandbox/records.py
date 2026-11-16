@@ -19,7 +19,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 
-from .settings import Host, private_dir
+from .files import json_object, private_dir
+from .settings import Host
 
 # The lines kept, the oldest go once there are more. Well past the captures
 # that are kept (see capture.py) and what the egress proxy's log holds.
@@ -79,11 +80,8 @@ class NetSession:
         """The session of a line of the record, none for a line that is
         not one: it has to say what ran, when, and where its network use
         is to be found."""
-        try:
-            said = json.loads(line)
-        except (ValueError, RecursionError):
-            return None
-        if not isinstance(said, dict):
+        said = json_object(line)
+        if said is None:
             return None
         name, project = said.get("name"), said.get("project")
         ip, capture = said.get("ip", ""), said.get("capture", "")

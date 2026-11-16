@@ -11,19 +11,18 @@ from __future__ import annotations
 
 import bisect
 import difflib
-import json
 import os
 import re
-import stat
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO
 from urllib.parse import urlsplit
 
 from .events import Event, Who, clean, flat
-from .settings import CONTAINER_HOME, Fatal, Host
+from .files import json_object, open_plain
+from .projects import transcript_dirs, transcript_files
+from .settings import Fatal, Host
 
 # A live walk of a transcript lets go of the oldest calls once this many
 # wait for a result, and of the oldest steps it has shown
@@ -53,58 +52,6 @@ INPUT_TOKENS = (
 )
 
 
-def project_roots(host: Host) -> list[str]:
-    """The project directory as a session may have known it: its host
-    path, and for a project under the user's home the same place under the
-    container's. The image links the host home to the container's and
-    Claude Code resolves the link, so a sandboxed session records the
-    second, one run on the host the first."""
-    roots = [host.project_dir]
-    home = host.home.rstrip(os.sep)
-    if host.project_dir == home or host.project_dir.startswith(home + os.sep):
-        sandboxed = CONTAINER_HOME + host.project_dir[len(home) :]
-        if sandboxed != host.project_dir:
-            roots.append(sandboxed)
-    return roots
-
-
-def transcript_dir(host: Host, root: str) -> Path:
-    """Where Claude Code keeps the transcripts of the sessions that knew
-    the project as root: named after the path, everything but letters and
-    digits dashed."""
-    return Path(host.claude_dir, "projects", re.sub(r"[^A-Za-z0-9]", "-", root))
-
-
-def project_root(path: Path, host: Host) -> str:
-    """The project directory as the session of this transcript knew it,
-    what the paths it recorded are to be compared with."""
-    for root in project_roots(host):
-        if transcript_dir(host, root) == path.parent:
-            return root
-    return host.project_dir
-
-
-def transcript_dirs(host: Host) -> list[Path]:
-    """Where the project's transcripts are, see project_roots."""
-    return list(
-        dict.fromkeys(transcript_dir(host, root) for root in project_roots(host))
-    )
-
-
-def transcript_files(host: Host) -> list[Path]:
-    """The project's transcripts, in no order, none for a project without
-    a session."""
-    # The directories are writable from inside the sandbox: only plain
-    # files, not a link to something else on the host or a pipe that never
-    # ends
-    return [
-        f
-        for directory in transcript_dirs(host)
-        for f in directory.glob("*.jsonl")
-        if f.is_file() and not f.is_symlink()
-    ]
-
-
 def modified(path: Path) -> float:
     """When a file was last written, 0 for one that has gone since it was
     listed."""
@@ -123,46 +70,14 @@ def session_files(host: Host) -> list[Path]:
     return files
 
 
-def open_transcript(path: Path) -> BinaryIO | None:
-    """A transcript opened to be read, none when it is not there or is
-    not a plain file. The directory is writable from inside the sandbox,
-    and a session can put something else in a transcript's place after it
-    was listed: never a link to something else on the host, nor a pipe
-    that never ends."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return None
-    file = os.fdopen(descriptor, "rb")
-    try:
-        plain = stat.S_ISREG(os.fstat(descriptor).st_mode)
-    except OSError:
-        plain = False
-    if not plain:
-        file.close()
-        return None
-    return file
-
-
-def parse_entry(line: bytes) -> dict | None:
-    """The entry on a line of a transcript, none for a line that is not a
-    JSON object: the last one may be half written by a running session,
-    and one nested too deep to read is the session's doing."""
-    try:
-        entry = json.loads(line.decode("utf-8", "replace"))
-    except (ValueError, RecursionError):
-        return None
-    return entry if isinstance(entry, dict) else None
-
-
 def read_entries(path: Path) -> list[dict]:
     """The transcript's entries, none for one that cannot be read."""
-    file = open_transcript(path)
+    file = open_plain(path)
     if file is None:
         return []
     with file:
-        return [entry for entry in map(parse_entry, file) if entry]
+        # A last line may be half written by a running session
+        return [entry for entry in map(json_object, file) if entry]
 
 
 def local_time(entry: dict) -> datetime | None:

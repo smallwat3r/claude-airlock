@@ -15,8 +15,9 @@ from pathlib import Path
 from harness import (
     LauncherTest,
     launcher,
-    settings,
 )
+
+from claude_sandbox import files
 
 
 class TamperingTest(LauncherTest):
@@ -181,7 +182,7 @@ class UncheckedSessionTest(LauncherTest):
         file = self.state / "pending-checks" / "claude-proj.json"
         file.parent.mkdir(parents=True)
         for content in ("{}", '{"pid": 1}'):
-            settings.write_whole(str(file), content)
+            files.write_whole(str(file), content)
             self.assertEqual(file.read_text(), content)
             self.assertEqual(list(file.parent.iterdir()), [file])
         self.assertEqual(file.stat().st_mode & 0o777, 0o600)

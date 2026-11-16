@@ -3,7 +3,6 @@ options and the run itself."""
 
 from __future__ import annotations
 
-import fcntl
 import fnmatch
 import json
 import os
@@ -26,9 +25,17 @@ from .docker import (
     mount_arg,
     project_slug,
 )
-from .home import CLAUDE, home_args, session_state_args
+from .files import expand_home, private_dir, try_lock_file
+from .home import home_args, session_state_args
 from .image import Image
-from .settings import BIN_DIR, CONTAINER_HOME, Fatal, Host, Settings, private_dir
+from .settings import (
+    BIN_DIR,
+    CONTAINER_CLAUDE,
+    CONTAINER_HOME,
+    Fatal,
+    Host,
+    Settings,
+)
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
@@ -62,14 +69,9 @@ def refuse_unsafe_dir(path: str, host: Host) -> None:
 
 
 def absolute_path(raw: str, host: Host) -> str:
-    """A path as written by the user made absolute, expanding a leading ~
-    (the shell does not expand it in the --add-dir=~/x form, nor is it
-    expanded in the config file)."""
-    expanded = raw
-    if raw == "~":
-        expanded = host.home
-    elif raw.startswith("~/"):
-        expanded = host.home + raw[1:]
+    """A path as written by the user made absolute, a leading ~ expanded
+    and a relative one taken from the project."""
+    expanded = expand_home(raw, host.home)
     return os.path.normpath(os.path.join(host.project_dir, expanded))
 
 
@@ -114,16 +116,8 @@ def configured_extra_dirs(settings: Settings, host: Host) -> list[ExtraDir]:
 
 def claim_name(directory: str, name: str) -> int | None:
     """Claim a name among the launchers, none when another has it: the
-    lock held on a file of that name, which is let go of with the launcher
-    however it ends. The file stays, one that is removed could be locked
-    by two."""
-    descriptor = os.open(os.path.join(directory, name), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(descriptor)
-        return None
-    return descriptor
+    lock held on a file of that name, see lock_file."""
+    return try_lock_file(os.path.join(directory, name))
 
 
 def within(path: str, root: str) -> str | None:
@@ -241,7 +235,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # current viewport is gone. Render inline instead so old output stays
         # in the terminal's scrollback.
         env_arg("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", 1),
-        env_arg("CLAUDE_CONFIG_DIR", CLAUDE),
+        env_arg("CLAUDE_CONFIG_DIR", CONTAINER_CLAUDE),
         *telemetry_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
@@ -300,9 +294,7 @@ def configured_statusline(host: Host) -> str | None:
         words = shlex.split(json.loads(text)["statusLine"]["command"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    program = words[0] if words else ""
-    if program.startswith("~/"):
-        program = host.home + program[1:]
+    program = expand_home(words[0] if words else "", host.home)
     return os.path.normpath(program) if os.path.isabs(program) else None
 
 
@@ -403,10 +395,8 @@ def git_config_args(host: Host) -> list[str]:
     # refers to. Relative paths are taken from the home directory, where
     # ~/.gitconfig is.
     for path in git_include_paths():
-        if path.startswith("~/"):
-            path = host.home + path[1:]
-        elif not path.startswith("/"):
-            path = os.path.join(host.home, path)
+        # Also one that is absolute, which the join leaves as it is
+        path = os.path.join(host.home, expand_home(path, host.home))
         if path == gitconfig or path.startswith(xdg_git + "/"):
             continue
         if os.path.isfile(path):

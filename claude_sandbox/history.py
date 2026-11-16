@@ -30,14 +30,14 @@ was typed, pasted and read there."""
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 
 from .docker import env_arg, mount_arg, project_slug
-from .settings import CONTAINER_HOME, Host, Settings, private_dir
-from .transcript import project_roots, transcript_dirs
+from .files import json_object, private_dir
+from .projects import project_roots, transcript_dirs
+from .settings import CONTAINER_CLAUDE, Host, Settings
 
 # What Claude Code names the transcripts of a worktree after: the project's
 # own name, then its path below the project (.claude/worktrees/NAME) dashed
@@ -96,11 +96,8 @@ def own_prompts(host: Host) -> list[str]:
             Path(host.claude_dir, PROMPT_HISTORY), encoding="utf-8", errors="replace"
         ) as history:
             for line in history:
-                try:
-                    said = json.loads(line)
-                except (ValueError, RecursionError):
-                    continue
-                if isinstance(said, dict) and said.get("project") in roots:
+                said = json_object(line)
+                if said and said.get("project") in roots:
                     kept.append(line if line.endswith("\n") else line + "\n")
     except OSError:
         pass
@@ -138,7 +135,7 @@ def history_args(settings: Settings, host: Host) -> list[str]:
     """What a session is given of the history, on top of its ~/.claude:
     the project's own, with the transcripts of other projects covered, or
     the host's when it is shared."""
-    claude = f"{CONTAINER_HOME}/.claude"
+    claude = CONTAINER_CLAUDE
     kept = (*PER_PROJECT_DIRS, PROMPT_HISTORY)
     if settings.shared_history:
         shared = prepare_shared(host)

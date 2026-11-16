@@ -39,38 +39,13 @@ reference code the session should read but never change.
 
 The image is assembled from docker: base.Dockerfile, the
 selected features/*.Dockerfile, then tail.Dockerfile.
-
-Environment, all optional:
-  CLAUDE_DOCKER_FEATURES    features to build in, space or comma separated
-  CLAUDE_DOCKER_NET_FILTER  1 restricts egress to allowed-domains.txt
-  CLAUDE_DOCKER_NET_LOG     0 stops recording what a session connects to
-  CLAUDE_DOCKER_PROC_LOG    0 stops recording the processes of a session
-  CLAUDE_DOCKER_TELEMETRY   1 lets Claude Code send usage and crash reports
-  CLAUDE_DOCKER_SSH_AGENT   1 forwards the SSH agent
-  CLAUDE_DOCKER_SOCKET      1 allows docker ps and logs, full adds inspect
-  CLAUDE_DOCKER_RW_CONFIG   1 leaves the protected ~/.claude config writable
-  CLAUDE_DOCKER_SHARED_HISTORY  1 lets a session see what Claude Code
-                            remembers of other projects
-  CLAUDE_DOCKER_SHADOW      extra file name globs to hide, colon separated
-  CLAUDE_DOCKER_PROTECT     paths that are read-only wherever they are
-                            mounted, colon separated
-  CLAUDE_DOCKER_MEMORY      memory limit
-  CLAUDE_DOCKER_PIDS        process limit
-  CLAUDE_DOCKER_CACHE       0 keeps ~/.cache on a tmpfs, nothing persists
-  CLAUDE_DOCKER_RUNTIME     container runtime, e.g. runsc for gVisor
-  CLAUDE_DOCKER_SHARED_DIR  scratch directory shared between sessions,
-                            empty for none
-
-To override a default for every session, put NAME=value lines in
-~/.config/claude-sandbox/config, the environment still wins. What is
-hidden (SHADOW) and what is protected (PROTECT) are the lists of both.
 """
 
-# The text above is what --help prints. The code is the claude_sandbox
+# The text above is what --help prints, followed by the settings, which are
+# listed once, in claude_sandbox/settings.py. The code is the claude_sandbox
 # package next to this directory, each module says what it is for in its
-# first lines: cli.py is where a session starts and ends, settings.py has
-# the settings and their defaults. Standard library only, and no syntax
-# newer than Python 3.9, the version macOS ships.
+# first lines: cli.py is where a session starts and ends. Standard library
+# only, and no syntax newer than Python 3.9, the version macOS ships.
 
 import os
 import sys

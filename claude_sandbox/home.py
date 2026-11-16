@@ -29,16 +29,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 from .docker import env_arg, mount_arg
+from .files import json_object, private_dir, write_whole
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
-from .settings import CONTAINER_HOME, Host, Settings, private_dir
-from .tamper import CONFIG_FILES, CONFIG_TREES
+from .settings import CONFIG_FILES, CONFIG_TREES, CONTAINER_CLAUDE, Host, Settings
 
-# Where a session finds its ~/.claude
-CLAUDE = f"{CONTAINER_HOME}/.claude"
 CONFIG = ".claude.json"
 # What the config seeded from the host's leaves out, see seed_config
 SEED_LEFT_OUT = ("projects", "mcpServers")
@@ -47,7 +44,7 @@ SEED_LEFT_OUT = ("projects", "mcpServers")
 # session is given its own of each, empty, see session_state_args.
 SESSION_STATE = ("shell-snapshots", "session-env")
 # What a session cannot change of ~/.claude: all that the check of
-# tamper.py watches there, so the two cannot come apart
+# tamper.py watches there, the two are one list in settings.py
 PROTECTED_CONFIG = (*CONFIG_FILES, *CONFIG_TREES)
 # The directories of the host's ~/.claude that a session can write
 WRITABLE_TREES = ("plugins", "projects")
@@ -57,10 +54,10 @@ def read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
     """A config of Claude Code as text, without some of what it holds.
     None when there is none to carry over, or not one to read."""
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):
+        config = json_object(path.read_bytes())
+    except OSError:
         return None
-    if not isinstance(config, dict):
+    if config is None:
         return None
     for name in left_out:
         config.pop(name, None)
@@ -99,16 +96,7 @@ def seed_config(host: Host) -> None:
         return
     # Whole or not at all, and never over another launcher's: a session
     # that starts meanwhile must not read half a config
-    descriptor, partial = tempfile.mkstemp(dir=host.sandbox_claude_dir, prefix=CONFIG)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            file.write(text)
-        os.link(partial, seeded)
-    except FileExistsError:
-        # Another launcher was first
-        pass
-    finally:
-        os.unlink(partial)
+    write_whole(seeded, text, replace=False)
 
 
 def make_missing(
@@ -159,9 +147,11 @@ def home_args(host: Host) -> list[str]:
     (claude updates them itself): what a session changes of them is not
     prevented, it is said when the session ends, see tamper.py."""
     return [
-        mount_arg(host.sandbox_claude_dir, CLAUDE, "z"),
+        mount_arg(host.sandbox_claude_dir, CONTAINER_CLAUDE, "z"),
         *(
-            mount_arg(os.path.join(host.claude_dir, name), f"{CLAUDE}/{name}", "z")
+            mount_arg(
+                os.path.join(host.claude_dir, name), f"{CONTAINER_CLAUDE}/{name}", "z"
+            )
             for name in WRITABLE_TREES
         ),
     ]
@@ -179,7 +169,7 @@ def session_state_args() -> list[str]:
     the config and this is not config. The session's user's alone: a tmpfs
     is root's unless told otherwise."""
     options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
-    return [f"--tmpfs={CLAUDE}/{name}:{options}" for name in SESSION_STATE]
+    return [f"--tmpfs={CONTAINER_CLAUDE}/{name}:{options}" for name in SESSION_STATE]
 
 
 def protect_config_args(settings: Settings, host: Host) -> list[str]:
@@ -195,7 +185,9 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     the host's and writable."""
     mode = "z" if settings.rw_config else "ro,z"
     args = [
-        mount_arg(os.path.join(host.claude_dir, item), f"{CLAUDE}/{item}", mode)
+        mount_arg(
+            os.path.join(host.claude_dir, item), f"{CONTAINER_CLAUDE}/{item}", mode
+        )
         for item in PROTECTED_CONFIG
     ]
     if settings.rw_config:

@@ -3,11 +3,14 @@ user's config file, and where things are on the host."""
 
 from __future__ import annotations
 
+import dataclasses
+import enum
 import os
-import tempfile
+import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # The checkout's bin and docker directories, found from where this package
 # really is, so bin/claude-docker can be symlinked from anywhere
@@ -16,69 +19,19 @@ BIN_DIR = os.path.join(_REPO_DIR, "bin")
 DOCKERFILE_DIR = os.path.join(_REPO_DIR, "docker")
 
 # What more than one module has to agree on: the home of the image's user,
-# and the port the egress proxy listens on
+# where a session finds its ~/.claude, and the port the egress proxy
+# listens on
 CONTAINER_HOME = "/home/node"
+CONTAINER_CLAUDE = f"{CONTAINER_HOME}/.claude"
 EGRESS_PORT = 3128
+# What Claude follows or runs of ~/.claude, on the host as in a session:
+# its settings and its instructions, single files then whole directories.
+# A session is given them read-only (home.py) and the check of tamper.py
+# watches them, here so that the two cannot come apart.
+CONFIG_FILES = ("settings.json", "CLAUDE.md")
+CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_DOCKER_"
-# The settings a config file may hold, without their prefix. EXTRA_DIRS and
-# EXTRA_DIRS_RO are left out on purpose, what to mount next to a project is
-# a per-project choice, not a default for every session.
-CONFIG_FILE_SETTINGS = frozenset(
-    {
-        "FEATURES",
-        "NET_FILTER",
-        "NET_LOG",
-        "PROC_LOG",
-        "TELEMETRY",
-        "SSH_AGENT",
-        "SOCKET",
-        "RW_CONFIG",
-        "SHARED_HISTORY",
-        "SHADOW",
-        "PROTECT",
-        "MEMORY",
-        "PIDS",
-        "CACHE",
-        "RUNTIME",
-        "SHARED_DIR",
-    }
-)
-
-
-def private_dir(path: str) -> str:
-    """Create a directory for the launcher's own records, with its parents,
-    for the user alone: what is kept there says which hosts a session
-    reached. Returns the path."""
-    # One level at a time, makedirs gives its mode to the last one alone
-    missing = []
-    directory = path
-    while directory and not os.path.isdir(directory):
-        missing.append(directory)
-        directory = os.path.dirname(directory)
-    for directory in reversed(missing):
-        try:
-            os.mkdir(directory, 0o700)
-        except FileExistsError:
-            # Another launcher was first
-            continue
-    return path
-
-
-def write_whole(path: str, text: str) -> None:
-    """Write one of the launcher's records whole or not at all, for the
-    user alone: under another name of its directory first, then renamed.
-    Launchers of other sessions read there, none of them finds half a
-    file. The other name ends in what no reader looks for."""
-    directory, name = os.path.split(path)
-    descriptor, partial = tempfile.mkstemp(dir=directory, prefix=name + ".")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            file.write(text)
-        os.replace(partial, path)
-    except BaseException:
-        Path(partial).unlink(missing_ok=True)
-        raise
 
 
 class Fatal(Exception):
@@ -87,8 +40,9 @@ class Fatal(Exception):
 
 @dataclass(frozen=True)
 class Settings:
-    """Every CLAUDE_DOCKER_* setting. The defaults here are the launcher's
-    defaults, the one place to change them."""
+    """The value of every CLAUDE_DOCKER_* setting, a field for each of
+    SETTINGS. The defaults here are the launcher's defaults, the one place
+    to change them."""
 
     # None falls back to features.txt, then to every feature, "" selects none
     features: str | None = None
@@ -239,6 +193,136 @@ def detect_host(env: Mapping[str, str]) -> Host:
     )
 
 
+class Kind(enum.Enum):
+    """How a setting is read, see load_settings."""
+
+    # On with 1, off with 0
+    SWITCH = enum.auto()
+    # One of the values it names
+    CHOICE = enum.auto()
+    # Anything, taken as it is
+    TEXT = enum.auto()
+    # Anything, and set but empty says none: not the same as not set
+    NAME = enum.auto()
+    # Several, colon separated
+    LIST = enum.auto()
+    # Several, those of the config file and of the environment together
+    MERGED = enum.auto()
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One CLAUDE_DOCKER_* setting: its name without the prefix, how it is
+    read and what --help says of it. Its value is the field of Settings
+    of the same name in lower case, its default is the one there."""
+
+    name: str
+    kind: Kind
+    says: str
+    choices: tuple[str, ...] = ("0", "1")
+    # What to mount next to a project is a per-project choice, not a
+    # default for every session: not taken from the config file
+    config_file: bool = True
+
+    @property
+    def variable(self) -> str:
+        return SETTING_PREFIX + self.name
+
+    @property
+    def field(self) -> str:
+        return self.name.lower()
+
+
+# Every setting, the one list of them: load_settings reads these, the
+# config file takes these and --help names these. The README has a
+# paragraph on each and docker/CLAUDE-sandbox.md tells a session of those
+# it can run into, test/test_settings.py holds both to this list.
+SETTINGS = (
+    Setting("FEATURES", Kind.NAME, "features to build in, space or comma separated"),
+    Setting("NET_FILTER", Kind.SWITCH, "1 restricts egress to allowed-domains.txt"),
+    Setting("NET_LOG", Kind.SWITCH, "0 stops recording what a session connects to"),
+    Setting("PROC_LOG", Kind.SWITCH, "0 stops recording the processes of a session"),
+    Setting(
+        "TELEMETRY", Kind.SWITCH, "1 lets Claude Code send usage and crash reports"
+    ),
+    Setting("SSH_AGENT", Kind.SWITCH, "1 forwards the SSH agent"),
+    Setting(
+        "SOCKET",
+        Kind.CHOICE,
+        "1 allows docker ps and logs, full adds inspect",
+        choices=("0", "1", "full"),
+    ),
+    Setting(
+        "RW_CONFIG", Kind.SWITCH, "1 leaves the protected ~/.claude config writable"
+    ),
+    Setting(
+        "SHARED_HISTORY",
+        Kind.SWITCH,
+        "1 lets a session see what Claude Code remembers of other projects",
+    ),
+    Setting("SHADOW", Kind.MERGED, "extra file name globs to hide, colon separated"),
+    Setting(
+        "PROTECT",
+        Kind.MERGED,
+        "paths that are read-only wherever they are mounted, colon separated",
+    ),
+    Setting("MEMORY", Kind.TEXT, "memory limit"),
+    Setting("PIDS", Kind.TEXT, "process limit"),
+    Setting("CACHE", Kind.SWITCH, "0 keeps ~/.cache on a tmpfs, nothing persists"),
+    Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc for gVisor"),
+    Setting(
+        "SHARED_DIR",
+        Kind.NAME,
+        "scratch directory shared between sessions, empty for none",
+    ),
+    Setting(
+        "EXTRA_DIRS",
+        Kind.LIST,
+        "directories to mount next to the project, colon separated",
+        config_file=False,
+    ),
+    Setting(
+        "EXTRA_DIRS_RO",
+        Kind.LIST,
+        "the same, mounted read-only",
+        config_file=False,
+    ),
+)
+# The settings a config file may hold, without their prefix
+CONFIG_FILE_SETTINGS = frozenset(
+    setting.name for setting in SETTINGS if setting.config_file
+)
+
+
+def settings_help() -> str:
+    """The part of --help about the settings: each with what it does and
+    the default of a limit, then how to set one for every session."""
+    defaults = Settings()
+    width = max(len(setting.variable) for setting in SETTINGS) + 2
+    lines = ["Environment, all optional:"]
+    for setting in SETTINGS:
+        says = setting.says
+        default = getattr(defaults, setting.field)
+        if setting.kind is Kind.TEXT and default:
+            says += f" (default {default})"
+        if not setting.config_file:
+            says += ", not taken from the config file"
+        lines += textwrap.wrap(
+            says,
+            width=78,
+            initial_indent=f"  {setting.variable:<{width}}",
+            subsequent_indent=" " * (width + 2),
+        )
+    merged = " and ".join(s.name for s in SETTINGS if s.kind is Kind.MERGED)
+    lines += [
+        "",
+        "To override a default for every session, put NAME=value lines in",
+        "~/.config/claude-sandbox/config, the environment still wins. Of",
+        f"{merged} the lists of both count.",
+    ]
+    return "\n".join(lines)
+
+
 def read_config_file(path: str) -> dict[str, str]:
     """Defaults for the CLAUDE_DOCKER_* settings from the user's config file:
     one NAME=value per line, # comments, the value taken literally (no
@@ -267,63 +351,41 @@ def read_config_file(path: str) -> dict[str, str]:
 
 def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     """Settings from the environment, then the config file, then the
-    defaults. A list or a name in the environment wins also when set but
-    empty, which says none (no features, no shared directory). A switch
-    or a limit that is set but empty says nothing, and the config file is
-    asked next: an empty variable must not switch off a restriction the
-    file switched on. What is hidden and what is protected are the lists of
-    both, for the same reason."""
+    defaults, each read as its kind says (see Kind). A list or a name in
+    the environment wins also when set but empty, which says none (no
+    features, no shared directory). A switch, a choice or a text that is
+    set but empty says nothing, and the config file is asked next: an
+    empty variable must not switch off a restriction the file switched on.
+    What is hidden and what is protected are the lists of both, for the
+    same reason: what one hides or protects, the other does not take
+    back."""
     file_values = read_config_file(config_file)
     defaults = Settings()
 
-    def raw(name: str) -> str | None:
-        key = SETTING_PREFIX + name
-        return env[key] if key in env else file_values.get(key)
-
-    def text(name: str, default: str) -> str:
-        key = SETTING_PREFIX + name
-        return env.get(key) or file_values.get(key) or default
-
-    def choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
-        value = text(name, default)
-        # Not just ignored: "true" for a restriction would otherwise leave
-        # it off without a word
-        if value not in allowed:
-            raise Fatal(
-                f"{SETTING_PREFIX}{name} must be {' or '.join(allowed)}, got: {value}"
-            )
-        return value
-
-    def flag(name: str, default: bool) -> bool:
-        return choice(name, "1" if default else "0", ("0", "1")) == "1"
-
-    def colon_list(name: str) -> tuple[str, ...]:
-        return tuple(item for item in (raw(name) or "").split(":") if item)
-
-    def both_lists(name: str) -> tuple[str, ...]:
-        # Of the file and of the environment: what one hides or protects,
-        # the other does not take back
-        key = SETTING_PREFIX + name
-        said = f"{file_values.get(key, '')}:{env.get(key, '')}"
+    def items(said: str) -> tuple[str, ...]:
         return tuple(dict.fromkeys(item for item in said.split(":") if item))
 
-    return Settings(
-        features=raw("FEATURES"),
-        net_filter=flag("NET_FILTER", defaults.net_filter),
-        net_log=flag("NET_LOG", defaults.net_log),
-        proc_log=flag("PROC_LOG", defaults.proc_log),
-        telemetry=flag("TELEMETRY", defaults.telemetry),
-        ssh_agent=flag("SSH_AGENT", defaults.ssh_agent),
-        socket=choice("SOCKET", defaults.socket, ("0", "1", "full")),
-        rw_config=flag("RW_CONFIG", defaults.rw_config),
-        shared_history=flag("SHARED_HISTORY", defaults.shared_history),
-        shadow=both_lists("SHADOW"),
-        protect=both_lists("PROTECT"),
-        memory=text("MEMORY", defaults.memory),
-        pids=text("PIDS", defaults.pids),
-        cache=flag("CACHE", defaults.cache),
-        runtime=text("RUNTIME", defaults.runtime),
-        shared_dir=raw("SHARED_DIR"),
-        extra_dirs=colon_list("EXTRA_DIRS"),
-        extra_dirs_ro=colon_list("EXTRA_DIRS_RO"),
-    )
+    def read(setting: Setting) -> Any:
+        key, kind = setting.variable, setting.kind
+        in_file = file_values.get(key)
+        if kind is Kind.NAME:
+            return env.get(key, in_file)
+        if kind is Kind.LIST:
+            return items(env.get(key, in_file or ""))
+        if kind is Kind.MERGED:
+            return items(f"{in_file or ''}:{env.get(key, '')}")
+        default = getattr(defaults, setting.field)
+        if kind is Kind.SWITCH:
+            default = "1" if default else "0"
+        value = env.get(key) or in_file or default
+        if kind is Kind.TEXT:
+            return value
+        # Not just ignored: "true" for a restriction would otherwise leave
+        # it off without a word
+        if value not in setting.choices:
+            raise Fatal(f"{key} must be {' or '.join(setting.choices)}, got: {value}")
+        return value == "1" if kind is Kind.SWITCH else value
+
+    # Each as its kind gives it, which the fields of Settings are typed for
+    values = {setting.field: read(setting) for setting in SETTINGS}
+    return dataclasses.replace(defaults, **values)

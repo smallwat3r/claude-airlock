@@ -12,8 +12,9 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from .files import expand_home, private_dir, write_whole
 from .launcher import Launcher, session_alive
-from .settings import private_dir, write_whole
+from .settings import CONFIG_FILES, CONFIG_TREES
 
 # What Claude follows or starts in a project, on the host as in a session:
 # its settings, the servers it is told to run and its instructions. Relative
@@ -33,10 +34,9 @@ PROJECT_TREES = (
     ".claude/agents",
     ".claude/rules",
 )
-# The same of ~/.claude. Most of it is mounted read-only and cannot differ,
-# unless CLAUDE_DOCKER_RW_CONFIG=1 leaves it writable.
-CONFIG_FILES = ("settings.json", "CLAUDE.md")
-CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
+# The same of ~/.claude is CONFIG_FILES and CONFIG_TREES of settings.py.
+# Most of it is mounted read-only and cannot differ, unless
+# CLAUDE_DOCKER_RW_CONFIG=1 leaves it writable.
 # What is watched there and cannot be protected: Claude Code updates its
 # plugins itself, so they stay writable, and a plugin brings hooks, servers
 # and instructions that the host's claude runs and follows too. The
@@ -227,9 +227,7 @@ def named_files(settings_file: str, base: str) -> list[str]:
         for word in words:
             for variable in ("${CLAUDE_PROJECT_DIR}", "$CLAUDE_PROJECT_DIR"):
                 word = word.replace(variable, base)
-            if word == "~" or word.startswith("~/"):
-                word = home + word[1:]
-            path = os.path.normpath(os.path.join(base, word))
+            path = os.path.normpath(os.path.join(base, expand_home(word, home)))
             if os.path.isfile(path):
                 found.append(path)
     return found
