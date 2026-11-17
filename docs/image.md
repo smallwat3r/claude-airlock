@@ -64,37 +64,27 @@ What the comment lines of a fragment say:
 | `# claude-feat-requires: other` | A feature it needs, selecting the first then builds both |
 | `# claude-feat-lsp: ...` | A language server it installs, as the `lspServers` of a Claude Code plugin (see `docker/features/go.Dockerfile`) |
 
-- A fragment that needs files finds those of a `NAME` directory next to it
-  in the build context, as `COPY NAME/file ...`.
-- The `claude-feat-md` lines were written `# claude:` before. The launcher
-  stops at a fragment that still has one and says so.
+A fragment that needs files finds those of a `NAME` directory next to it
+in the build context, as `COPY NAME/file ...`.
 
 ## Language servers
 
 The launcher makes one plugin of the `claude-feat-lsp` lines, builds it
 into the image and starts `claude` with it. So a session has
 go-to-definition and find-references for the languages of its image
-without a plugin being enabled on the host.
-
-- The `python`, `go`, `cpp` and `typescript` features have one.
-- If the host enables the official plugin for the same server as well
-  (`gopls-lsp`, `clangd-lsp`, `typescript-lsp`, `pyright-lsp`), the sandbox
-  does not need it.
+without a plugin being enabled on the host. The `python`, `go`, `cpp` and
+`typescript` features have one.
 
 ## Rebuilds and pins
 
 - The image tag is a hash of the generated Dockerfile. Changing the
-  selection or editing a part rebuilds on the next start, reusing cached
-  layers, and each feature set keeps its own image.
+  selection or editing a part rebuilds on the next start, and each feature
+  set keeps its own image.
 - Old images pile up, several GB each. `claude-docker --prune` removes
-  them all but the one your settings ask for now, and any a container
-  still uses. Another feature set's image is built again from the layer
-  cache when it is next asked for. The build cache itself is docker's:
-  `docker builder prune`.
+  them all but the one your settings ask for now.
 - Images, downloads and Python packages are pinned by digest, checksum or
-  version. Debian packages follow the pinned base image.
-- Claude Code's auto-updater is off, so upgrading means refreshing the
-  pins, your own fragments and the two sidecar images included:
+  version. Claude Code's auto-updater is off, so upgrading means
+  refreshing the pins:
 
 ```
 docker/update-pins.py
