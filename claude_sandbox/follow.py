@@ -50,6 +50,7 @@ from .trace import (
     Timeline,
     capture_events,
     event_json,
+    name_container,
     picked_session,
     proxy_event,
     trace_options,
@@ -145,6 +146,7 @@ class CaptureTail:
 
     def __init__(self, sidecar: str, verbose: bool):
         self.sidecar = sidecar
+        self.session = CaptureSidecar.session_of(sidecar)
         self._verbose = verbose
         self._offset = 0
         self._reader = PcapReader()
@@ -179,16 +181,21 @@ class ProxyTail:
     def __init__(self) -> None:
         self._offset: int | None = None
 
-    def poll(self, addresses: set[str]) -> list[Event]:
+    def poll(self, addresses: dict[str, str], several: bool) -> list[Event]:
         """The requests logged since the last time that came from one of
-        the addresses."""
+        the addresses, each with the container that has the address (see
+        name_container)."""
         found = logged_since(self._offset)
         if found is None:
             return []
         self._offset, requests = found
-        return [
-            proxy_event(request) for request in requests if request.address in addresses
-        ]
+        events = []
+        for request in requests:
+            if request.address in addresses:
+                event = proxy_event(request)
+                name_container([event], addresses[request.address], several)
+                events.append(event)
+        return events
 
 
 @dataclass
@@ -220,8 +227,9 @@ class Follower:
         self._sizes: dict[Path, int] = {}
         self._captures: dict[tuple[str, float], CaptureTail] = {}
         self._proxy = ProxyTail()
-        # Of the project's filtered sessions that are running
-        self._addresses: set[str] = set()
+        # Of the project's filtered sessions that are running, with the
+        # name of the container each is of
+        self._addresses: dict[str, str] = {}
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
@@ -317,25 +325,37 @@ class Follower:
                 " (none runs, CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
             )
 
-    def _filtered_addresses(self) -> set[str]:
+    def _filtered_addresses(self) -> dict[str, str]:
         """The addresses of the project's filtered sessions that are
-        running, the proxy's log tells its requests apart by them."""
+        running, the proxy's log tells its requests apart by them, each
+        with the name of its session's container."""
         now = time.time()
         recorded = [
             session for session in recorded_sessions(self._host, now, now) if session.ip
         ]
         if not recorded:
-            return set()
+            return {}
         # A filtered session has the address of its sidecar when it is
         # captured, either way it runs while a container of its name does
         running = running_containers()
-        return {session.ip for session in recorded if session.name in running}
+        return {
+            session.ip: session.name for session in recorded if session.name in running
+        }
+
+    def _several(self) -> bool:
+        """Whether more than one of the project's sessions is followed on
+        the network, so that each line has to say which it is of."""
+        names = {capture.session for capture in self._captures.values()}
+        return len(names.union(self._addresses.values())) > 1
 
     def _poll_network(self, found: Round) -> None:
         if not self._docker:
             return
+        several = self._several()
         for capture in self._captures.values():
-            found.events += [(None, event) for event in capture.poll()]
+            events = capture.poll()
+            name_container(events, capture.session, several)
+            found.events += [(None, event) for event in events]
             if capture.newly_cut_short():
                 name = clean(CaptureSidecar.session_of(capture.sidecar))
                 found.notes.append(
@@ -343,7 +363,7 @@ class Follower:
                     " limit, what comes later is missing"
                 )
         if self._addresses:
-            requests = self._proxy.poll(self._addresses)
+            requests = self._proxy.poll(self._addresses, several)
             found.events += [(None, event) for event in requests]
 
     def _poll_doors(self, found: Round) -> None:

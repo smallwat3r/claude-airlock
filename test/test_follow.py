@@ -408,6 +408,40 @@ class FollowNetworkTest(LauncherTest):
         for absent in ("before.test", "theirs.test", "half", "\x1b"):
             self.assertNotIn(absent, shown)
 
+    def test_sessions_followed_together_are_told_apart_by_container(self):
+        mine, other = "172.20.0.5", "172.20.0.9"
+        sessions = [
+            {"name": "claude-proj", "project": str(self.project), "ip": mine},
+            {"name": "claude-proj-2", "project": str(self.project), "ip": other},
+        ]
+        self.state.mkdir(parents=True)
+        (self.state / "net-sessions.jsonl").write_text(
+            "".join(json.dumps({**s, "start": self.now}) + "\n" for s in sessions)
+        )
+        log = self.work / "access.log"
+        log.touch()
+        following = Following(
+            self,
+            FAKE_PS="claude-proj\nclaude-proj-2\nclaude-egress-proxy",
+            FAKE_ACCESS_LOG=str(log),
+        )
+        following.until("long ago")
+        with open(log, "a") as logged:
+            logged.write(
+                f"{self.now + 5:.3f} 0 {mine} TCP_TUNNEL/200 50 CONNECT"
+                " mine.test:443 - -\n"
+                f"{self.now + 6:.3f} 0 {other} TCP_TUNNEL/200 50 CONNECT"
+                " theirs.test:443 - -\n"
+            )
+        add(self.file, self.last)
+        shown = following.until(DONE)
+        self.assertIn(
+            "net         [claude-proj] proxy/https CONNECT mine.test:443", shown
+        )
+        self.assertIn(
+            "net         [claude-proj-2] proxy/https CONNECT theirs.test:443", shown
+        )
+
 
 class TranscriptTailTest(unittest.TestCase):
     def setUp(self):

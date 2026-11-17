@@ -468,6 +468,10 @@ terminal an event says so once, and its other lines are indented under it:
 - The same thing on the network several times in a row is one line with
   how often (`x4`). Claude Code's own connections come by the dozen and
   would bury the one a command made.
+- A transcript does not say which container wrote it. So when several
+  sessions of the project ran at the same time, the trace of one has what
+  the others did on the network too, and each of those lines starts with
+  the name of its container (`[claude-api-2]`).
 
 With `--verbose`, a `step` line comes ahead of what one answer of the model
 did, and says what that answer used:
@@ -525,7 +529,9 @@ Every object has `session`, `time`, `who` and `what`, then:
 | Docker socket | `method`, `path`, `status`, `denied` |
 
 What happened on the network also has `during`, the ids of the tool calls
-running at that time. An entry that was taken out of the transcript has
+running at that time. What the launcher recorded of a container (a
+connection, a request, a lookup, a process) has `container`, its name. An
+entry that was taken out of the transcript has
 `removed`.
 
 ### The network

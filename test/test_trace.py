@@ -605,6 +605,37 @@ class NetworkTraceTest(LauncherTest):
         self.assertNotIn("theirs.test", stdout)
         self.assertNotIn("after.test", stdout)
 
+    def test_a_session_alone_is_named_in_the_values_only(self):
+        self.assertNotIn("[claude-proj]", self.trace())
+        events = map(json.loads, self.trace("--json").splitlines())
+        containers = {e.get("container") for e in events if e["what"] == "net"}
+        self.assertEqual(containers, {"claude-proj"})
+
+    def test_sessions_at_the_same_time_are_told_apart_by_container(self):
+        (mine,) = map(
+            json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
+        )
+        other = {**mine, "name": "claude-proj-2", "ip": "172.20.0.9"}
+        with open(self.state / "net-sessions.jsonl", "a") as sessions:
+            sessions.write(json.dumps(other) + "\n")
+        stdout = self.trace()
+        self.assertIn(
+            "#   from claude-proj, claude-proj-2, which ran in this time,"
+            " each line says which",
+            stdout,
+        )
+        self.assertIn("net         [claude-proj] proxy/https CONNECT good.test", stdout)
+        self.assertIn(
+            "net         [claude-proj-2] proxy/https CONNECT theirs.test", stdout
+        )
+        by_url = {
+            event["url"]: event["container"]
+            for event in map(json.loads, self.trace("--json").splitlines())
+            if event["what"] == "net"
+        }
+        self.assertEqual(by_url["good.test:443"], "claude-proj")
+        self.assertEqual(by_url["theirs.test:443"], "claude-proj-2")
+
     def test_logged_urls_cannot_drive_the_terminal(self):
         self.assertIn("[31mesc.test:443", self.trace())
         self.assertNotIn("\x1b", self.trace("--verbose"))

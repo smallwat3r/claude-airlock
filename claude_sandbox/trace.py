@@ -101,7 +101,7 @@ def proxy_summary(
     lines = []
     if len(sessions) > 1:
         names = ", ".join(sorted({clean(session.name) for session in sessions}))
-        lines.append(f"  from {names}, which ran in this time and are not told apart")
+        lines.append(f"  from {names}, which ran in this time, each line says which")
     if not requests:
         lines.append("  no request in the egress proxy's log")
     count: Counter[tuple[bool, str]] = Counter()
@@ -138,20 +138,38 @@ def proxy_event(request: ProxyRequest) -> Event:
     return Event(request.began, Who.SANDBOX, "net", [detail], fields)
 
 
+def name_container(events: list[Event], name: str, shown: bool) -> None:
+    """Say of each event which container it is of, by the name the
+    launcher gave it. A transcript does not say which container wrote it,
+    so what the project's other sessions did at the same time is in its
+    trace too: the name is what tells them apart. Always among the values
+    of the event, in its line only when shown, which is when there is more
+    than one to tell apart."""
+    for event in events:
+        event.fields["container"] = name
+        if shown:
+            event.details[0] = f"[{clean(name)}] {event.details[0]}"
+
+
 def proxy_requests(
-    sessions: list[NetSession], start: float, end: float
+    sessions: list[NetSession], start: float, end: float, several: bool = False
 ) -> tuple[list[str], list[Event]]:
     """What filtered sessions asked the egress proxy for between start and
-    end, as summary lines and as one event per request."""
+    end, as summary lines and as one event per request, each with the
+    container it came from (see name_container)."""
     logged = logged_requests(stderr=subprocess.DEVNULL)
     if logged is None:
         return ["  the egress proxy's log cannot be read"], []
-    requests = [
-        request
-        for request in logged
-        if any(made_by(request, session, start, end) for session in sessions)
-    ]
-    return proxy_summary(requests, sessions), [proxy_event(r) for r in requests]
+    requests, events = [], []
+    for request in logged:
+        by = next((s for s in sessions if made_by(request, s, start, end)), None)
+        if by is None:
+            continue
+        event = proxy_event(request)
+        name_container([event], by.name, several)
+        requests.append(request)
+        events.append(event)
+    return proxy_summary(requests, sessions), events
 
 
 def how_it_went(connection: Connection, outcome: str) -> str:
@@ -410,7 +428,11 @@ def process_summary(record: ProcessRecord, verbose: bool) -> list[str]:
 
 
 def captured_connections(
-    host: Host, session: NetSession, verbose: bool, record: ProcessRecord | None
+    host: Host,
+    session: NetSession,
+    verbose: bool,
+    record: ProcessRecord | None,
+    several: bool = False,
 ) -> tuple[list[str], list[Event]]:
     """What a captured session connected to, as summary lines and as
     events, each connection with the process that made it when a record
@@ -427,6 +449,7 @@ def captured_connections(
     events = capture_events(capture, verbose)
     if record:
         name_processes(events, record)
+    name_container(events, session.name, several)
     return [heading, *capture_summary(capture, verbose)], events
 
 
@@ -447,9 +470,13 @@ def network(
     records = process_records(
         host, [session for session in sessions if session.processes]
     )
-    found = [proxy_requests(filtered, start, end)] if filtered else []
+    # A session can have a line for each of its records, under one name
+    several = len({session.name for session in sessions}) > 1
+    found = [proxy_requests(filtered, start, end, several)] if filtered else []
     found += [
-        captured_connections(host, session, verbose, processes_of(session, records))
+        captured_connections(
+            host, session, verbose, processes_of(session, records), several
+        )
         for session in captured
     ]
     lines = (
@@ -458,9 +485,11 @@ def network(
         else ["network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"]
     )
     events = [event for _, events in found for event in events]
-    for _, record in records:
+    for session, record in records:
         lines += process_summary(record, verbose)
-        events += process_events(record) if verbose else []
+        ran = process_events(record) if verbose else []
+        name_container(ran, session.name, several)
+        events += ran
     return lines, events
 
 
