@@ -25,6 +25,7 @@ from .follow import follow
 from .history import history_args
 from .home import prepare_home, protect_config_args
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
+from .limits import LimitsHit, limits_watched
 from .login import login_shared
 from .mounts import (
     ExtraDir,
@@ -252,6 +253,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
     # The container whose network namespace the session is in
     owner = capture or name
     started = time.time()
+    hit = LimitsHit()
     # From here to the end of the checks, see interrupts_held
     with interrupts_held():
         try:
@@ -267,6 +269,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
                     login_shared(host),
                 ):
                     running.enter_context(recording)
+                hit = running.enter_context(limits_watched(settings, name))
                 agent = ssh_agent_door(settings, host, name, env)
                 agent_args = running.enter_context(agent)
                 run_args += agent_args
@@ -283,7 +286,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
             pending.unlink(missing_ok=True)
             raise
         try:
-            report_session(host, name, started)
+            report_session(host, name, started, hit.lines())
         finally:
             # Whatever became of the digest: this check matters more
             after = host_exec_fingerprint(watched, host.claude_dir)

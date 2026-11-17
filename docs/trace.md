@@ -52,7 +52,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `listen`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -156,6 +156,15 @@ process it sees in the session and which one holds each connection:
 sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
 ```
 
+A socket that starts to wait for connections is a line too (`listen`),
+with the process that holds it. One that waits on more than the session's
+own loopback is `OPEN to its network`, where the other sessions that run
+can reach it, those of other projects too.
+
+```
+sandbox  listen  tcp 0.0.0.0:8080  OPEN to its network  by: [812] node server.js < bash < claude
+```
+
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
 missed. The session can neither stop it nor reach its record.
@@ -182,8 +191,12 @@ claude-docker: of this session, claude-docker --trace has the rest:
   sent 14 MB to tcp/https gist.github.com (140.82.121.4):443
   refused by the egress filter:
     example.org:443 x3
+  ran into its memory limit of 16g, what it ran was ended for it: CLAUDE_DOCKER_MEMORY sets the limit
+  ran into its limit of processes 3 times, what it tried to start then did not: CLAUDE_DOCKER_PIDS sets the limit
   lookups that stand out:
     4a6f...3d.x.example.com: an unusually long name
+  waited for connections, open to the other sessions on its network:
+    tcp 0.0.0.0:8080
   written outside the project:
     /home/me/.bashrc
   the transcript of 3fa9c0de was changed: 3 lines the launcher copied are gone or altered
@@ -205,7 +218,7 @@ log:
 | --- | --- | --- |
 | `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB at most |
 | `captures` | The capture of each session | A few kB each as a rule, the latest 100 |
-| `processes` | What ran in each session | A few hundred kB each as a rule, the latest 100 |
+| `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
 | `transcripts` | The launcher's copy of each transcript | For 30 days |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |

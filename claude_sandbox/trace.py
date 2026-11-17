@@ -400,9 +400,39 @@ def process_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
+def listener_events(record: ProcessRecord) -> list[Event]:
+    """One event per socket that started to wait for connections, with
+    the process that held it. One that waits on more than the session's
+    own loopback says so: the other sessions that run are on its network,
+    of other projects too."""
+    events = []
+    for listener in record.listeners:
+        detail = flat(listener.at)
+        if listener.open:
+            detail += "  OPEN to its network"
+        lineage = record.lineage(max(listener.pids), listener.when) if listener.pids else []
+        if lineage:
+            detail += f"  by: {flat(shown_lineage(lineage))}"
+        fields = {
+            "port": listener.port,
+            "address": listener.address,
+            "open": listener.open,
+            "pids": list(listener.pids),
+        }
+        events.append(Event(listener.when, Who.SANDBOX, "listen", [detail], fields))
+    return events
+
+
 def process_summary(record: ProcessRecord, verbose: bool) -> list[str]:
     hint = "" if verbose else ", each one shown with --verbose"
     lines = [f"  processes {len(record.processes)} seen to run{hint}"]
+    if record.process_limit:
+        lines.append(
+            f"  its limit of processes was RUN INTO {record.process_limit} times"
+        )
+    reachable = sum(listener.open for listener in record.listeners)
+    if reachable:
+        lines.append(f"  {reachable} sockets waited for connections, OPEN to its network")
     if record.full:
         lines.append("  the record of them STOPPED at its size limit")
     if record.unreadable:
@@ -470,7 +500,7 @@ def network(
     events = [event for _, events in found for event in events]
     for session, record in records:
         lines += process_summary(record, verbose)
-        ran = process_events(record) if verbose else []
+        ran = listener_events(record) + (process_events(record) if verbose else [])
         name_container(ran, session.name, several)
         events += ran
     return lines, events

@@ -189,6 +189,30 @@ class Process:
         return " ".join([self.name, *self.argv[1:]])
 
 
+@dataclass(frozen=True)
+class Listener:
+    """A socket that was noted to wait for connections: when, on which
+    port and address, and the processes that held it."""
+
+    when: float
+    port: int
+    address: str
+    pids: tuple[int, ...]
+
+    @property
+    def open(self) -> bool:
+        """Whether it can be reached from outside the session: not one
+        that waits on the session's own loopback alone. A session shares
+        its network with the other sessions that run."""
+        return not (self.address.startswith("127.") or self.address == "::1")
+
+    @property
+    def at(self) -> str:
+        """Where it waits, as written: 0.0.0.0:8080, [::]:8080."""
+        address = f"[{self.address}]" if ":" in self.address else self.address
+        return f"tcp {address}:{self.port}"
+
+
 @dataclass
 class ProcessRecord:
     """What a watcher noted of one session."""
@@ -200,6 +224,11 @@ class ProcessRecord:
     holders: dict[tuple[int, str, int], list[tuple[float, tuple[int, ...]]]] = field(
         default_factory=dict
     )
+    # The sockets that waited for connections, in the order they were noted
+    listeners: list[Listener] = field(default_factory=list)
+    # How often the session could not start a process for its limit of
+    # them, as last noted
+    process_limit: int = 0
     # Whether it stopped at its size limit, and whether it could not see
     # which process holds a socket
     full: bool = False
@@ -216,6 +245,14 @@ class ProcessRecord:
             if "note" in said:
                 self.full |= said["note"] == "full"
                 self.unreadable |= said["note"] == "unreadable"
+            elif "limit" in said:
+                if said["limit"] == "pids":
+                    self.process_limit = max(self.process_limit, int(said["hits"]))
+            elif "listen" in said:
+                pids = tuple(int(pid) for pid in said["pids"])
+                self.listeners.append(
+                    Listener(when, int(said["listen"]), str(said["on"]), pids)
+                )
             elif "port" in said:
                 key = (int(said["port"]), str(said["to"]), int(said["to_port"]))
                 pids = tuple(int(pid) for pid in said["pids"])

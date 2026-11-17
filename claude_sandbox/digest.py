@@ -153,6 +153,21 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
         record = session_record(host, session)
         if record and record.full:
             lines.append("the record of its processes stopped at its size limit")
+        if record:
+            # Each place once, however often a server was started there
+            waited = dict.fromkeys(
+                flat(listener.at) for listener in record.listeners if listener.open
+            )
+            lines += listed(
+                "waited for connections, open to the other sessions on its network:",
+                list(waited),
+            )
+        if record and record.process_limit:
+            lines.append(
+                f"ran into its limit of processes {record.process_limit} times,"
+                " what it tried to start then did not: CLAUDE_DOCKER_PIDS sets"
+                " the limit"
+            )
         capture = session_capture(host, session)
         if capture is None:
             continue
@@ -256,18 +271,22 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
     ]
 
 
-def report_session(host: Host, session: str, start: float) -> None:
-    """Say what is worth a look about a session that has just ended. What
+def report_session(
+    host: Host, session: str, start: float, heard: list[str] | None = None
+) -> None:
+    """Say what is worth a look about a session that has just ended, with
+    what the launcher heard of it while it ran (see limits.py). What
     cannot be read is passed over: this runs as a session ends, and what
     is left to do then (the check of tamper.py) matters more."""
     try:
         lines = session_digest(host, session, start)
     except (OSError, Fatal):
-        return
+        lines = []
     except Exception as problem:  # noqa: BLE001
         # What it reads is a session's to write. Said, and the check that
         # follows is still made.
         lines = [f"this could not be worked out: {flat(repr(problem))[:200]}"]
+    lines = [*(heard or []), *lines]
     if lines:
         print(
             "claude-docker: of this session, claude-docker --trace has the rest:",

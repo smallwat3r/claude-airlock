@@ -10,8 +10,11 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from harness import LauncherTest, prompts_at
 from test_capture import pcap_file, tcp
@@ -87,6 +90,66 @@ class WatcherTest(unittest.TestCase):
             watch.note(note=big)
         self.assertLessEqual(len(out.getvalue()), procwatch.MOST_BYTES + 100)
         self.assertEqual(json.loads(out.getvalue().splitlines()[-1])["note"], "full")
+
+
+    def test_a_process_cannot_fill_the_record_with_its_command_line(self):
+        long = b"\0".join([b"x" * 5000] * 200) + b"\0"
+        kept = procwatch.command_line(long)
+        self.assertEqual(kept[-1], procwatch.CUT)
+        self.assertLessEqual(sum(map(len, kept)), procwatch.MOST_COMMAND + 3)
+        # One that fits is left as it is, an empty argument too
+        self.assertEqual(procwatch.command_line(b"sh\0-c\0\0"), ["sh", "-c", ""])
+        self.assertEqual(procwatch.command_line(b""), [])
+
+    def test_room_is_kept_for_the_connections_once_the_processes_filled_theirs(self):
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        big = "x" * (procwatch.MOST_BYTES // 4)
+        for _ in range(6):
+            watch.note(pid=1, argv=[big])
+        watch.note(reserved=True, port=40212, to="203.0.113.9", to_port=443, pids=[7])
+        watch.note(pid=2, argv=["late"])
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([line.get("note") for line in said[-2:]], ["full", None])
+        self.assertEqual(said[-1]["to"], "203.0.113.9")
+        self.assertEqual(sum("note" in line for line in said), 1)
+        # Until that room is used up too
+        for _ in range(3):
+            watch.note(reserved=True, note=big)
+        self.assertLessEqual(len(out.getvalue()), procwatch.MOST_BYTES)
+
+    def test_running_into_the_limit_of_processes_is_noted_when_it_grows(self):
+        with tempfile.TemporaryDirectory() as root:
+            events = Path(root, "1", "root", "sys", "fs", "cgroup", "pids.events")
+            events.parent.mkdir(parents=True)
+            self.assertIsNone(procwatch.limit_hits(1, root))
+            events.write_text("max 3\n")
+            self.assertEqual(procwatch.limit_hits(1, root), 3)
+            events.write_text("nothing of the kind\n")
+            self.assertIsNone(procwatch.limit_hits(1, root))
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        for hits in (0, 2, 2, 5, None):
+            with mock.patch.object(procwatch, "limit_hits", return_value=hits):
+                watch._look_at_limits([1, 7])
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([line["hits"] for line in said], [2, 5])
+        self.assertEqual(noted(*said).process_limit, 5)
+
+    def test_a_socket_that_waits_for_connections_is_noted_once(self):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            port = server.getsockname()[1]
+            self.assertIn((port, "127.0.0.1", 0), procwatch.connections(listening=True))
+            self.assertNotIn(port, [key[0] for key in procwatch.connections()])
+            out = io.StringIO()
+            watch = procwatch.Watch(out)
+            watch.look()
+            watch.look()
+        seen = [json.loads(line) for line in out.getvalue().splitlines()]
+        ours = [line for line in seen if line.get("listen") == port]
+        self.assertEqual([line["on"] for line in ours], ["127.0.0.1"])
 
 
 class RecordTest(unittest.TestCase):
@@ -257,6 +320,47 @@ class SidecarTest(LauncherTest):
         result = self.launch("--trace", *args)
         self.assertEqual(result.status, 0, result.stderr)
         return result.stdout
+
+    def test_a_session_that_ran_into_its_limits_is_said_to(self):
+        with open(self.record_file, "a") as record:
+            record.write(json.dumps({"t": self.now + 3, "limit": "pids", "hits": 4}))
+            record.write("\n")
+        ended = self.watched(FAKE_EVENTS="oom\noom", CLAUDE_DOCKER_MEMORY="2g")
+        self.assertIn("ran into its limit of processes 4 times", ended.stderr)
+        self.assertIn("ran into its memory limit of 2g 2 times", ended.stderr)
+        self.assertIn(
+            ["events", "--filter=container=claude-proj", "--filter=event=oom"],
+            [call[:3] for call in ended.calls],
+        )
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        self.assertIn(
+            "its limit of processes was RUN INTO 4 times", self.launch("--trace").stdout
+        )
+        # Nothing of either from a session that kept within them
+        self.assertNotIn("memory limit", self.launch().stderr)
+
+    def test_a_socket_that_waits_for_connections_is_said(self):
+        waits = [
+            {"t": self.now + 3, "listen": 8080, "on": "0.0.0.0", "pids": [812]},
+            {"t": self.now + 3, "listen": 9229, "on": "127.0.0.1", "pids": [7]},
+            {"t": self.now + 4, "listen": 8080, "on": "0.0.0.0", "pids": [812]},
+        ]
+        with open(self.record_file, "a") as record:
+            record.write("".join(json.dumps(line) + "\n" for line in waits))
+        ended = self.watched()
+        # Only what the other sessions on its network can reach, and once
+        self.assertIn("waited for connections, open to the other", ended.stderr)
+        self.assertEqual(ended.stderr.count("tcp 0.0.0.0:8080"), 1)
+        self.assertNotIn("9229", ended.stderr)
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        shown = self.launch("--trace").stdout
+        self.assertRegex(
+            shown,
+            r"sandbox  listen      tcp 0\.0\.0\.0:8080  OPEN to its network"
+            r"  by: \[812\] curl -sS https://good.test < claude",
+        )
+        self.assertRegex(shown, r"listen      tcp 127\.0\.0\.1:9229  by: \[7\] claude")
+        self.assertIn("2 sockets waited for connections, OPEN", shown)
 
     def test_the_trace_says_which_process_made_a_connection(self):
         stdout = self.trace()

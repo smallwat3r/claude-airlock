@@ -48,6 +48,8 @@ if args[0] == "images":
     print(os.environ.get("FAKE_IMAGES", ""))
 if args[0] == "rmi" and args[1] in os.environ.get("FAKE_RUNNING_IMAGES", ""):
     sys.exit(1)
+if args[0] == "events":
+    print(os.environ.get("FAKE_EVENTS", ""))
 if args[0] == "version":
     print(os.environ.get("FAKE_VERSION", ""))
 if args[0] == "cp" and ".procs:" in args[1]:
