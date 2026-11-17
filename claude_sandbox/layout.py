@@ -22,25 +22,44 @@ from .transcript import FILE_TOOLS
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
-# How the lines are coloured on a terminal, as the parameters of an SGR
-# escape. What a session did out of sight is what stands out: commands,
-# writes and the network. The conversation, which its user saw anyway, and
-# the lines about the trace itself are dimmed, the other tools are left
-# as they are.
-DIM = "2"
+# What a text on a terminal is styled with, each the parameter of an SGR
+# escape. A style is one of them or several, see together, and none is "".
+# The one place they are named, whatever writes in colour takes them here.
 BOLD = "1"
-ALERT = "1;31"
+DIM = "2"
+ITALIC = "3"
+RED = "31"
+GREEN = "32"
+YELLOW = "33"
+BLUE = "34"
+MAGENTA = "35"
+CYAN = "36"
+BRIGHT_GREEN = "92"
+BRIGHT_MAGENTA = "95"
+BRIGHT_CYAN = "96"
+
+
+def together(*styles: str) -> str:
+    """Several styles as one, those that are none left out."""
+    return ";".join(filter(None, styles))
+
+
+ALERT = together(BOLD, RED)
+# How the lines are coloured. What a session did out of sight is what
+# stands out: commands, writes and the network. The conversation, which
+# its user saw anyway, and the lines about the trace itself are dimmed,
+# the other tools are left as they are.
 STYLES = {
     "prompt": DIM,
     "reply": DIM,
     "command": DIM,
-    "bash": "33",
-    "net": "36",
-    "dns": "36",
+    "bash": YELLOW,
+    "net": CYAN,
+    "dns": CYAN,
     # The network too, asked for through a tool
-    "webfetch": "34",
-    "websearch": "34",
-    **dict.fromkeys(map(str.lower, FILE_TOOLS), "35"),
+    "webfetch": BLUE,
+    "websearch": BLUE,
+    **dict.fromkeys(map(str.lower, FILE_TOOLS), MAGENTA),
 }
 
 
@@ -236,8 +255,8 @@ class Layout:
             return painted(style, rest)
         start = headed(head, start) if head else painted(style, start)
         if extra:
-            both = ";".join(filter(None, (style, extra)))
-            bold = ";".join(filter(None, (style, BOLD)))
+            both = together(style, extra)
+            bold = together(style, BOLD)
             return start + painted(bold, label + colon) + painted(both, reason)
         return start + painted(style, said)
 

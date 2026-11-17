@@ -23,12 +23,11 @@ import time
 from collections.abc import Callable
 
 from ..events import Event, Who, clean
-from ..layout import painted
+from ..layout import BOLD, GREEN, painted
 from ..transcript import content_blocks
 from .console import Page
 
-CODE = "32"
-BOLD = "1"
+CODE = GREEN
 # What stands for the start and the end of a span until its line is
 # wrapped: an escape would count as text that takes room. Neither is in a
 # text that has been through clean.

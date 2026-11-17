@@ -22,7 +22,18 @@ from ..docker import docker_ok, project_slug
 from ..events import Event, Who, clean, flat, labelled
 from ..files import private_dir
 from ..follow import Follower
-from ..layout import STYLES, Layout, painted, went_wrong
+from ..layout import (
+    BOLD,
+    BRIGHT_CYAN,
+    BRIGHT_GREEN,
+    BRIGHT_MAGENTA,
+    ITALIC,
+    STYLES,
+    Layout,
+    painted,
+    together,
+    went_wrong,
+)
 from ..settings import Host
 from .asking import Asker
 from .commands import LOCAL, Commands, Did, Handover
@@ -41,14 +52,14 @@ MORE = ". "
 LONG_TURN = 30.0
 # Said once a turn is over, and how in colour: bold bright green
 READY = labelled("ready", "claude has finished, waiting for your input")
-READY_STYLE = "1;92"
+READY_STYLE = together(BOLD, BRIGHT_GREEN)
 # Where each side of the conversation starts, to be found among what the
 # session does: the line over a reply of claude bold and bright cyan, a
 # line the user sent bold and bright magenta
-REPLY_HEAD_STYLE = "1;96"
-SENT_STYLE = "1;95"
+REPLY_HEAD_STYLE = together(BOLD, BRIGHT_CYAN)
+SENT_STYLE = together(BOLD, BRIGHT_MAGENTA)
 # Why claude says it makes a call, in italics under its bold label
-REASON_STYLE = "3"
+REASON_STYLE = ITALIC
 # Seconds between two looks at what is followed while a turn runs, and
 # while none does: what a session does on its own then is rare
 POLL = 0.5

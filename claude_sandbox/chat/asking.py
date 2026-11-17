@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 
 from ..events import clean, flat, labelled
-from ..layout import WHAT_WIDTH, painted, prefixed
+from ..layout import CYAN, GREEN, RED, WHAT_WIDTH, painted, prefixed
 from ..transcript import call_details
 from .console import Console, Page
 from .reply import reply_lines
@@ -41,7 +41,7 @@ LOOK_EVERY = 0.2
 TOO_SOON = 1.0
 # In colour, of the diff of an edit shown whole, the lines it takes out
 # and those it puts in, by how they start
-DIFF_STYLES = {"  diff: -": "31", "  diff: +": "32", "  diff: @": "36"}
+DIFF_STYLES = {"  diff: -": RED, "  diff: +": GREEN, "  diff: @": CYAN}
 
 
 class Question:
