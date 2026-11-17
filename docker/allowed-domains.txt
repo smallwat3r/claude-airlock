@@ -12,3 +12,5 @@ registry.npmjs.org
 files.pythonhosted.org
 .golang.org
 packages.typst.org
+registry.terraform.io
+releases.hashicorp.com

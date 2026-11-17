@@ -167,6 +167,28 @@ def pin_mcap(pins: Pins) -> None:
     print("mcap", mcap)
 
 
+def pin_hashicorp(pins: Pins, product: str, arg: str) -> None:
+    # The release API names the version, the shas are computed on the zips
+    # rather than taken from the SHA256SUMS on the same server
+    version = fetch_json(
+        f"https://api.releases.hashicorp.com/v1/releases/{product}/latest"
+    )["version"]
+    pins.set_arg(f"{arg}_VERSION", version)
+    url = f"https://releases.hashicorp.com/{product}/{version}"
+    for arch in ("amd64", "arm64"):
+        sha = fetch_sha256(f"{url}/{product}_{version}_linux_{arch}.zip")
+        pins.set_arg(f"{arg}_SHA256_{arch.upper()}", sha)
+    print(product, version)
+
+
+def pin_terraform(pins: Pins) -> None:
+    pin_hashicorp(pins, "terraform", "TERRAFORM")
+
+
+def pin_terraform_ls(pins: Pins) -> None:
+    pin_hashicorp(pins, "terraform-ls", "TERRAFORM_LS")
+
+
 def pin_ocrab(pins: Pins) -> None:
     ocrab = github_latest_tag("smallwat3r/ocrab-font")
     url = f"https://raw.githubusercontent.com/smallwat3r/ocrab-font/{ocrab}/fonts/ocrab.otf"
@@ -185,32 +207,16 @@ def npm_latest(package: str) -> str:
     return fetch_json(f"https://registry.npmjs.org/{package}/latest")["version"]
 
 
-def pin_claude_code(pins: Pins) -> None:
-    version = npm_latest("@anthropic-ai/claude-code")
-    pins.set_arg("CLAUDE_CODE_VERSION", version)
-    print("claude-code", version)
+def pin_npm(packages: dict[str, str]) -> Callable[[Pins], None]:
+    """A pinner that sets each ARG to the latest version of its package."""
 
+    def pin(pins: Pins) -> None:
+        for arg, package in packages.items():
+            version = npm_latest(package)
+            pins.set_arg(arg, version)
+            print(package, version)
 
-def pin_pyright(pins: Pins) -> None:
-    version = npm_latest("pyright")
-    pins.set_arg("PYRIGHT_VERSION", version)
-    print("pyright", version)
-
-
-def pin_typescript_language_server(pins: Pins) -> None:
-    version = npm_latest("typescript-language-server")
-    pins.set_arg("TYPESCRIPT_LANGUAGE_SERVER_VERSION", version)
-    print("typescript-language-server", version)
-
-
-def pin_excalidraw(pins: Pins) -> None:
-    for name, package in (
-        ("EXCALIDRAW_VERSION", "@excalidraw/excalidraw"),
-        ("EXCALIDRAW_ESBUILD_VERSION", "esbuild"),
-    ):
-        version = npm_latest(package)
-        pins.set_arg(name, version)
-        print(package, version)
+    return pin
 
 
 def pin_gopls(pins: Pins) -> None:
@@ -240,22 +246,37 @@ def pin_digests(pins: Pins) -> None:
         print(f"{image}:{tag} {digest}")
 
 
+def arg_marker(arg: str) -> str:
+    """The marker of a pin that is an ARG of a Dockerfile."""
+    return rf"(?m)^ARG {arg}="
+
+
+# The npm packages pinned by ARGs, by the ARG that marks them: esbuild
+# builds Excalidraw, it is pinned along with it
+NPM_PINS = {
+    "CLAUDE_CODE_VERSION": {"CLAUDE_CODE_VERSION": "@anthropic-ai/claude-code"},
+    "PYRIGHT_VERSION": {"PYRIGHT_VERSION": "pyright"},
+    "EXCALIDRAW_VERSION": {
+        "EXCALIDRAW_VERSION": "@excalidraw/excalidraw",
+        "EXCALIDRAW_ESBUILD_VERSION": "esbuild",
+    },
+    "TYPESCRIPT_LANGUAGE_SERVER_VERSION": {
+        "TYPESCRIPT_LANGUAGE_SERVER_VERSION": "typescript-language-server"
+    },
+}
+
 # Each pin runs only when its marker appears in one of the files
 PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"node:\d+-[a-z]+-slim", pin_node),
-    (r"(?m)^ARG GO_VERSION=", pin_go),
-    (r"(?m)^ARG TYPST_VERSION=", pin_typst),
-    (r"(?m)^ARG MCAP_VERSION=", pin_mcap),
-    (r"(?m)^ARG OCRAB_VERSION=", pin_ocrab),
+    (arg_marker("GO_VERSION"), pin_go),
+    (arg_marker("TYPST_VERSION"), pin_typst),
+    (arg_marker("MCAP_VERSION"), pin_mcap),
+    (arg_marker("TERRAFORM_VERSION"), pin_terraform),
+    (arg_marker("TERRAFORM_LS_VERSION"), pin_terraform_ls),
+    (arg_marker("OCRAB_VERSION"), pin_ocrab),
     (r"astral-sh/uv:[0-9.]+", pin_uv),
-    (r"(?m)^ARG CLAUDE_CODE_VERSION=", pin_claude_code),
-    (r"(?m)^ARG PYRIGHT_VERSION=", pin_pyright),
-    (r"(?m)^ARG EXCALIDRAW_VERSION=", pin_excalidraw),
-    (
-        r"(?m)^ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION=",
-        pin_typescript_language_server,
-    ),
-    (r"(?m)^ARG GOPLS_VERSION=", pin_gopls),
+    *((arg_marker(arg), pin_npm(packages)) for arg, packages in NPM_PINS.items()),
+    (arg_marker("GOPLS_VERSION"), pin_gopls),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),
 ]
