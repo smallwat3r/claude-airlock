@@ -895,6 +895,10 @@ runs them all, `test/launcher_test.py -k trace` those with trace in their
 name, and each file runs on its own. `pytest test` works too if you have
 it.
 
+The files are run side by side, as many at a time as there are CPUs, which
+`--jobs` changes. A file that takes much longer than the others sets how
+long it all takes, so one that grows is better split.
+
 The `Makefile` has a shortcut for each of these and for the upkeep of the
 image, `make` lists them:
 
