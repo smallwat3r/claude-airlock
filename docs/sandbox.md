@@ -70,6 +70,22 @@ rather than locked: the launcher warns when a session changed one.
 - In `~/.claude`: the plugins, and what `CLAUDE_DOCKER_RW_CONFIG=1` made
   writable.
 
+Said apart, as something to read before you build, test or commit there:
+
+- What your tools run, wherever it is in the project or an extra
+  directory: Makefiles and other build files, `package.json`,
+  `pyproject.toml`, `conftest.py`, the configuration of a hook manager
+  (`.pre-commit-config.yaml`, `.husky`), `.envrc`, CI workflows, and what
+  an editor runs (`.vscode`, `.devcontainer`).
+- Below the top of a project: `CLAUDE.md` and the `.claude` of a
+  subdirectory, and the config and hooks of a repository that is there, or
+  that a session planted there.
+
+Both name a file however it was changed, by a command as by an edit, and
+only when what it holds is no longer what it was. Not looked into:
+`node_modules`, `.venv`, and the working trees of `--worktree`, each the
+whole project again.
+
 A session that ends without its launcher, a killed terminal say, is
 checked by the next `claude-docker` launch instead.
 

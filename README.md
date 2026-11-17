@@ -20,7 +20,7 @@ What you get:
   copies as it is written and flags when a line is later changed or
   removed. `--trace` shows it all.
 - **A check when it ends.** The launcher warns when a session changed a
-  file that runs commands on the host, a git hook say.
+  file that runs commands on the host, a git hook or a Makefile say.
 - **Line mode.** Claude Code with a simpler UI: a prompt, and above it
   what the session does, the network included.
 - **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
@@ -199,11 +199,12 @@ before it uses a tool unless `CLAUDE_DOCKER_ASK=1`, so all of this it can
 do on its own, also when something it read told it to:
 
 - Anything in the project can be changed, including files that run code on
-  the host later. The launcher warns about git's and Claude's own (see
-  above). The rest is for you to review in the diff before running things
-  outside the sandbox: Makefiles, build files, package scripts, the
-  configuration of a hook manager such as pre-commit, a `CLAUDE.md` below
-  the top of the project, and a repository planted in a subdirectory.
+  the host later. The launcher warns about git's and Claude's own, and
+  about the build files, hook managers and nested `CLAUDE.md` it knows by
+  name (see [the check](docs/sandbox.md#the-check-when-a-session-ends)).
+  It names them, it does not read them for you, and its list is not
+  whole: a script a Makefile calls, what is in `node_modules`, and any
+  build file it has no name for are still yours to review in the diff.
 - `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
   plugin's hook scripts are not protected the way `settings.json` is. A
   change to them is reported when the session ends, not prevented.

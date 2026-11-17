@@ -64,7 +64,9 @@ from .settings import (
     settings_help,
 )
 from .tamper import (
+    build_fingerprint,
     host_exec_fingerprint,
+    report_build_changes,
     report_tampering,
     report_unchecked_sessions,
     save_pending_check,
@@ -242,7 +244,8 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
     pending = Path(host.pending_checks_dir, name + ".json")
     report_unchecked_sessions(pending.parent)
     before = host_exec_fingerprint(watched, host.claude_dir)
-    save_pending_check(pending, watched, host.claude_dir, before)
+    build = build_fingerprint(watched)
+    save_pending_check(pending, watched, host.claude_dir, before, build)
     # What sessions that ended without their launcher left behind
     CaptureSidecar.collect_left_behind(host)
     Watcher.collect_left_behind(host)
@@ -285,6 +288,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
             # Whatever became of the digest: this check matters more
             after = host_exec_fingerprint(watched, host.claude_dir)
             report_tampering(before, after, claude_dir=host.claude_dir)
+            report_build_changes(build, build_fingerprint(watched))
             pending.unlink(missing_ok=True)
     return status
 

@@ -53,6 +53,50 @@ CONFIG_WATCHED_FILES = (
 # with how many they are. That is the plugin: where it is from, then its
 # name.
 WATCHED_TREE_DEPTH = 2
+# What the tools of a project run on the host, by the name of the file,
+# wherever in the project it is: what make, a package manager, a test
+# runner, a hook manager or direnv is told to do. Not what git and Claude
+# run of their own accord, which is above: these run when their tool is
+# used, so a change to one is said apart, as something to read before
+# that. No such list is whole, it is the ones most projects have.
+BUILD_FILES = frozenset(
+    (
+        *("Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile"),
+        *("Taskfile.yml", "Taskfile.yaml", "Rakefile", "Gemfile", "Procfile"),
+        *("package.json", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs"),
+        *("pyproject.toml", "setup.py", "setup.cfg", "conftest.py", "noxfile.py"),
+        *("tox.ini", "sitecustomize.py", "usercustomize.py"),
+        *("build.gradle", "build.gradle.kts", "settings.gradle", "gradlew", "mvnw"),
+        *("settings.gradle.kts", "pom.xml", "CMakeLists.txt", "meson.build"),
+        *("build.rs", "build.zig", "configure", "configure.ac"),
+        *(".pre-commit-config.yaml", "lefthook.yml", ".lefthook.yml"),
+        *(".envrc", ".tool-versions", "mise.toml", ".mise.toml"),
+        *(".gitattributes", ".gitmodules", ".gitlab-ci.yml"),
+        *("Dockerfile", "Vagrantfile", "Tiltfile"),
+        *("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"),
+    )
+)
+# The directories all of which is such a file, by their name: the hooks of
+# husky, the tasks and settings an editor runs, a dev container
+BUILD_TREES = frozenset((".husky", ".vscode", ".devcontainer"))
+# And the one that is by where it is, in .github
+WORKFLOWS = (".github", "workflows")
+# What tells that a directory below the top of a project is one Claude
+# follows instructions in, or one git runs hooks in: what the check above
+# watches at the top
+CLAUDE_MARKS = frozenset((".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"))
+# The directories that are not looked into for those: what git keeps for
+# itself, and what a package manager fills with thousands of other
+# projects' build files. What is in them can still run on the host, it is
+# not seen here.
+NOT_LOOKED_INTO = frozenset((".git", "node_modules", ".venv", "__pycache__"))
+# Nor are the working trees claude makes for a session of its own
+# (--worktree): each is the whole project again, and all of it new
+WORKTREES = os.path.join(".claude", "worktrees")
+# No more of them than this are watched, a session can make any number
+MOST_BUILD_FILES = 5000
+# The changed ones that are named, the others are counted
+MOST_NAMED = 20
 # The files whose commands are followed to the scripts they name
 COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
 # No more of a file than this is read. Which files are hashed is partly up
@@ -287,6 +331,99 @@ def host_exec_fingerprint(
     return fingerprint
 
 
+def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
+    """The files of one mounted directory that build_fingerprint hashes,
+    the git configs it finds on the way hashed as those are."""
+    watched: list[str] = []
+    for directory, subdirs, files in os.walk(root):
+        if len(watched) > MOST_BUILD_FILES:
+            break
+        names = {*subdirs, *files}
+        if directory != root:
+            watched += below_the_top(directory, names, fingerprint)
+        watched += [os.path.join(directory, name) for name in BUILD_FILES & names]
+        for name in BUILD_TREES.intersection(subdirs):
+            watched += tree_files(os.path.join(directory, name))
+        if WORKFLOWS[0] in subdirs:
+            watched += tree_files(os.path.join(directory, *WORKFLOWS))
+        subdirs[:] = [
+            name
+            for name in subdirs
+            if name not in NOT_LOOKED_INTO
+            and name not in BUILD_TREES
+            and os.path.join(directory, name) != os.path.join(root, WORKTREES)
+        ]
+    return watched
+
+
+def build_fingerprint(directories: list[str]) -> dict[str, str]:
+    """Hashes, by path, of what a session can write that the tools of a
+    project run on the host, see BUILD_FILES, anywhere in the mounted
+    directories. With what the check of host_exec_fingerprint watches at
+    the top of each, found below it: the instructions and settings Claude
+    follows in a directory it works in, and the config and hooks of a
+    repository that is there, or that a session planted there."""
+    fingerprint: dict[str, str] = {}
+    watched: list[str] = []
+    try:
+        for root in directories:
+            watched += build_files(root, fingerprint)
+    except RecursionError:
+        # Directories nested deeper than Python walks, a session's doing:
+        # said as a change, the check must not be made to fail
+        fingerprint["directories nested too deep to look into"] = "unwatched"
+    for path in watched[:MOST_BUILD_FILES]:
+        if os.path.isfile(path) or os.path.islink(path):
+            fingerprint[path] = file_hash(path)
+    if len(watched) > MOST_BUILD_FILES:
+        fingerprint[f"more than {MOST_BUILD_FILES} such files, the rest"] = "unwatched"
+    return fingerprint
+
+
+def below_the_top(
+    directory: str, names: set[str], fingerprint: dict[str, str]
+) -> list[str]:
+    """What is watched of a directory below the top of a project for
+    git's and Claude's sake, as host_exec_fingerprint does of the top:
+    the files to hash, the git configs hashed as those are."""
+    watched: list[str] = []
+    if CLAUDE_MARKS & names:
+        watched += claude_files(directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES)
+    if ".git" in names:
+        git_dir = os.path.join(directory, ".git")
+        # A file, in a working tree or a submodule: where its directory is
+        watched.append(git_dir)
+        for config in git_configs(git_dir):
+            fingerprint[config] = git_config_hash(config)
+        watched += tree_files(os.path.join(git_dir, "hooks"))
+    return watched
+
+
+def report_build_changes(
+    before: dict[str, str], after: dict[str, str], unchecked: str = ""
+) -> None:
+    """Name the files of build_fingerprint that differ, the first
+    MOST_NAMED of them. unchecked as for report_tampering."""
+    changed = sorted(
+        path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+    )
+    if not changed:
+        return
+    more = len(changed) - MOST_NAMED
+    whose = f"the session {unchecked} started" if unchecked else "this session started"
+    print(
+        f"claude-docker: since {whose}, these files that your tools run on the"
+        " host (make, a package manager, a test runner, a hook manager, an"
+        " editor), or that git and Claude follow below the top of the"
+        " project, have changed:",
+        *(f"  {path}" for path in changed[:MOST_NAMED]),
+        *([f"  and {more} more"] if more > 0 else []),
+        "Read them before you build, test or commit there outside the sandbox.",
+        sep="\n",
+        file=sys.stderr,
+    )
+
+
 def named_changes(changed: list[str], claude_dir: str) -> list[str]:
     """The changed files as they are named in the report: each by its
     path, those under a watched tree of ~/.claude by their directory
@@ -348,7 +485,11 @@ def report_tampering(
 
 
 def save_pending_check(
-    file: Path, watched: list[str], claude_dir: str, before: dict[str, str]
+    file: Path,
+    watched: list[str],
+    claude_dir: str,
+    before: dict[str, str],
+    build: dict[str, str] | None = None,
 ) -> None:
     """Keep a session's starting fingerprint on disk until its check has
     run. A launcher that dies with its terminal (a killed Emacs buffer, a
@@ -362,6 +503,8 @@ def save_pending_check(
         "watched": watched,
         "claude_dir": claude_dir,
         "before": before,
+        # What build_fingerprint gave
+        "build": build or {},
     }
     write_whole(str(file), json.dumps(pending))
 
@@ -379,6 +522,12 @@ def report_unchecked_sessions(directory: Path) -> None:
                 str(pending.get("claude_dir", "")),
                 {str(k): str(v) for k, v in pending["before"].items()},
             )
+            # Not in a check saved by an earlier version
+            build = (
+                {str(k): str(v) for k, v in pending["build"].items()}
+                if "build" in pending
+                else None
+            )
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Said out loud, a check must not vanish without a word
             print(
@@ -391,4 +540,6 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         after = host_exec_fingerprint(watched, claude_dir)
         report_tampering(before, after, unchecked=file.stem, claude_dir=claude_dir)
+        if build is not None:
+            report_build_changes(build, build_fingerprint(watched), file.stem)
         file.unlink(missing_ok=True)
