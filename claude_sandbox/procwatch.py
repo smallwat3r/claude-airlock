@@ -147,12 +147,17 @@ def address(encoded: str) -> str:
     return str(mapped or found)
 
 
-def connections(listening: bool = False) -> dict[tuple[int, str, int], str]:
-    """The TCP connections of the network namespace, each by its own
-    port, the address and the port at the other end, with the inode of
-    its socket. With listening, the sockets that wait for connections
-    instead, each by its port and the address it waits on."""
-    found = {}
+Sockets = dict[tuple[int, str, int], str]
+
+
+def sockets() -> tuple[Sockets, Sockets]:
+    """The TCP sockets of the network namespace, each with its inode, from
+    one read of each table, the kernel takes its time over them: the
+    connections, each by its own port, the address and the port at the
+    other end, and the sockets that wait for connections, each by its port
+    and the address it waits on."""
+    connected: Sockets = {}
+    waiting: Sockets = {}
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
             lines = read(table).decode("ascii", "replace").splitlines()[1:]
@@ -164,7 +169,7 @@ def connections(listening: bool = False) -> dict[tuple[int, str, int], str]:
                 local, remote, state, inode = parts[1], parts[2], parts[3], parts[9]
                 on, port = local.rsplit(":", 1)
                 to, to_port = remote.rsplit(":", 1)
-                if listening:
+                if state == TCP_LISTEN:
                     key = (int(port, 16), address(on), 0)
                 else:
                     key = (int(port, 16), address(to), int(to_port, 16))
@@ -173,9 +178,18 @@ def connections(listening: bool = False) -> dict[tuple[int, str, int], str]:
             if inode == "0":
                 # Let go of
                 continue
-            if listening == (state == TCP_LISTEN) and (listening or key[2]):
-                found[key] = inode
-    return found
+            if state == TCP_LISTEN:
+                waiting[key] = inode
+            elif key[2]:
+                connected[key] = inode
+    return connected, waiting
+
+
+def connections(listening: bool = False) -> Sockets:
+    """The TCP connections of the network namespace, with listening the
+    sockets that wait for connections instead, see sockets."""
+    connected, waiting = sockets()
+    return waiting if listening else connected
 
 
 def limit_hits(pid: int, root: str = "/proc") -> int | None:
@@ -266,8 +280,9 @@ class Watch:
             if name.isdigit() and int(name) not in self._own
         ]
         self._look_at_processes(pids, now)
-        self._look_at_connections(pids)
-        self._look_at_listeners(pids)
+        connected, waiting = sockets()
+        self._look_at_connections(connected, pids)
+        self._look_at_listeners(waiting, pids)
         if now - self._limits_seen >= LIMITS_EVERY:
             self._limits_seen = now
             self._look_at_limits(pids)
@@ -293,8 +308,7 @@ class Watch:
                 known = (what, now, now)
             self._processes[pid] = (what, known[1], now)
 
-    def _look_at_connections(self, pids: list[int]) -> None:
-        current = connections()
+    def _look_at_connections(self, current: Sockets, pids: list[int]) -> None:
         self._connections &= current.keys()
         self._tries = {key: n for key, n in self._tries.items() if key in current}
         new = {
@@ -331,12 +345,11 @@ class Watch:
             self._limit_hits = hits
             self.note(reserved=True, limit="pids", hits=hits)
 
-    def _look_at_listeners(self, pids: list[int]) -> None:
+    def _look_at_listeners(self, current: Sockets, pids: list[int]) -> None:
         """Note each socket that started to wait for connections, with
         the processes that hold it, none when those were not found: it is
         there all the same, for whatever else is on the session's network
         to connect to."""
-        current = connections(listening=True)
         self._listening &= current.keys()
         new = {
             key: inode
