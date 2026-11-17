@@ -37,37 +37,6 @@ PCAP_READ_SIZE = 1 << 16
 PCAP_LONGEST_FRAME = 262144
 # In a cooked frame, the packet type of one the machine sent
 COOKED_SENT = 4
-ETHERTYPE_IPV4 = 0x0800
-ETHERTYPE_IPV6 = 0x86DD
-# The part of an IPv4 header's fragment field that says where in the
-# datagram a fragment goes: other than 0, it has no transport header
-IPV4_FRAGMENT_OFFSET = 0x1FFF
-IPV6_HEADER = 40
-# The headers that can come between the IPv6 header and the transport's:
-# hop-by-hop options, routing and destination options, which say their
-# own length, and the fragment header, which says where a fragment goes
-IPV6_OPTION_HEADERS = (0, 43, 60)
-IPV6_FRAGMENT_HEADER = 44
-IPV6_FRAGMENT_OFFSET = 0xFFF8
-# A packet cannot have more of them than this, a longer walk is not one
-IPV6_MOST_HEADERS = 8
-UDP_HEADER = 8
-# What is not TCP is named by its number over IP, the usual ones by name
-TRANSPORT_NAMES = {
-    1: "icmp",
-    17: "udp",
-    33: "dccp",
-    47: "gre",
-    58: "icmp6",
-    132: "sctp",
-    136: "udplite",
-}
-# Of those, the ones that start with the two ports
-PORTED_TRANSPORTS = (17, 33, 132, 136)
-# The type of an echo request, by the ICMP it is of: the one message of
-# either a session without capabilities can send (a ping), the others are
-# the kernel's own
-ICMP_ECHO = {1: 8, 58: 128}
 DNS_IS_RESPONSE = 0x8000
 DNS_ERROR_CODE = 0x000F
 # The two top bits of a length that is a pointer to the rest of a name
@@ -119,12 +88,64 @@ class LinkType(enum.IntEnum):
     COOKED_2 = 276
 
 
-class Protocol(enum.IntEnum):
-    """The protocols over IP that are read into, by their number there.
-    Of any other just where it went and how much."""
+class EtherType(enum.IntEnum):
+    """What a frame carries, of that the two that are read."""
 
+    IPV4 = 0x0800
+    IPV6 = 0x86DD
+
+
+class Protocol(enum.IntEnum):
+    """What IP carries, by its number there. TCP and UDP are read into,
+    of any other transport just where it went and how much. The headers
+    IPv6 can have ahead of the transport's are numbered the same way."""
+
+    HOP_BY_HOP_OPTIONS = 0
+    ICMP = 1
     TCP = 6
     UDP = 17
+    DCCP = 33
+    ROUTING = 43
+    FRAGMENT = 44
+    GRE = 47
+    ICMP6 = 58
+    DESTINATION_OPTIONS = 60
+    SCTP = 132
+    UDPLITE = 136
+
+
+# The part of an IPv4 header's fragment field that says where in the
+# datagram a fragment goes: other than 0, it has no transport header
+IPV4_FRAGMENT_OFFSET = 0x1FFF
+IPV6_HEADER = 40
+# The headers that can come between the IPv6 header and the transport's
+# and say their own length. The fragment header, which says where a
+# fragment goes, is of a fixed one.
+IPV6_OPTION_HEADERS = (
+    Protocol.HOP_BY_HOP_OPTIONS,
+    Protocol.ROUTING,
+    Protocol.DESTINATION_OPTIONS,
+)
+IPV6_FRAGMENT_OFFSET = 0xFFF8
+# A packet cannot have more of them than this, a longer walk is not one
+IPV6_MOST_HEADERS = 8
+UDP_HEADER = 8
+# What is not TCP is named by its number over IP, the usual ones by name
+TRANSPORT_NAMES: dict[int, str] = {
+    Protocol.ICMP: "icmp",
+    Protocol.UDP: "udp",
+    Protocol.DCCP: "dccp",
+    Protocol.GRE: "gre",
+    Protocol.ICMP6: "icmp6",
+    Protocol.SCTP: "sctp",
+    Protocol.UDPLITE: "udplite",
+}
+# Of those, the ones that start with the two ports
+PORTED_TRANSPORTS = (Protocol.UDP, Protocol.DCCP, Protocol.SCTP, Protocol.UDPLITE)
+# The type of an echo request, by the ICMP it is of: the one message of
+# either a session without capabilities can send (a ping), the others are
+# the kernel's own
+ICMP_ECHO: dict[int, int] = {Protocol.ICMP: 8, Protocol.ICMP6: 128}
 
 
 class TcpFlag(enum.IntFlag):
@@ -585,9 +606,9 @@ def ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
         ethertype, sent = reader.number(2), True
     else:
         raise NotThis
-    if ethertype == ETHERTYPE_IPV4:
+    if ethertype == EtherType.IPV4:
         return reader.rest(), sent, 4
-    if ethertype == ETHERTYPE_IPV6:
+    if ethertype == EtherType.IPV6:
         return reader.rest(), sent, 6
     raise NotThis
 
@@ -642,7 +663,7 @@ def ipv6_header(datagram: bytes) -> IpHeader:
         if protocol in IPV6_OPTION_HEADERS:
             protocol = extension.number(1)
             at += (extension.number(1) + 1) * 8
-        elif protocol == IPV6_FRAGMENT_HEADER:
+        elif protocol == Protocol.FRAGMENT:
             protocol = extension.number(1)
             extension.skip(1)  # reserved
             later = bool(extension.number(2) & IPV6_FRAGMENT_OFFSET)

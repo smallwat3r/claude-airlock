@@ -23,6 +23,7 @@ door_events.py."""
 from __future__ import annotations
 
 import base64
+import enum
 import hashlib
 import json
 import os
@@ -53,25 +54,44 @@ AGENT_CONNECTIONS = 16
 AGENT_IDLE = 120.0
 # The longest message an agent takes, as OpenSSH has it
 AGENT_LONGEST = 256 * 1024
-AGENT_FAILURE = 5
-AGENT_LIST = 11
-AGENT_IDENTITIES = 12
-AGENT_SIGN = 13
-# What else an agent can be asked, by the number of the request
-AGENT_REQUESTS = {
-    17: "asked to add a key",
-    18: "asked to remove a key",
-    19: "asked to remove every key",
-    20: "asked to add a smartcard key",
-    21: "asked to remove a smartcard key",
-    22: "asked to lock the agent",
-    23: "asked to unlock the agent",
-    25: "asked to add a key",
-    26: "asked to add a smartcard key",
+
+
+class AgentMessage(enum.IntEnum):
+    """What a message to or from an SSH agent is, by the number it starts
+    with (draft-ietf-sshm-ssh-agent)."""
+
+    FAILURE = 5
+    LIST = 11
+    # The answer to LIST
+    IDENTITIES = 12
+    SIGN = 13
+    ADD = 17
+    REMOVE = 18
+    REMOVE_ALL = 19
+    ADD_SMARTCARD = 20
+    REMOVE_SMARTCARD = 21
+    LOCK = 22
+    UNLOCK = 23
+    ADD_CONSTRAINED = 25
+    ADD_SMARTCARD_CONSTRAINED = 26
+    # By its name, see SESSION_BIND
+    EXTENSION = 27
+
+
+# What else an agent can be asked than to list its keys and to sign
+AGENT_REQUESTS: dict[int, str] = {
+    AgentMessage.ADD: "asked to add a key",
+    AgentMessage.REMOVE: "asked to remove a key",
+    AgentMessage.REMOVE_ALL: "asked to remove every key",
+    AgentMessage.ADD_SMARTCARD: "asked to add a smartcard key",
+    AgentMessage.REMOVE_SMARTCARD: "asked to remove a smartcard key",
+    AgentMessage.LOCK: "asked to lock the agent",
+    AgentMessage.UNLOCK: "asked to unlock the agent",
+    AgentMessage.ADD_CONSTRAINED: "asked to add a key",
+    AgentMessage.ADD_SMARTCARD_CONSTRAINED: "asked to add a smartcard key",
 }
-# An extension, by its name. The one that is passed on is how ssh tells the
-# agent which host it signs for: not a use of a key, and not noted.
-AGENT_EXTENSION = 27
+# The extension that is passed on is how ssh tells the agent which host it
+# signs for: not a use of a key, and not noted.
 SESSION_BIND = b"session-bind@openssh.com"
 # Who refused a request, when that was not the agent
 BY_LAUNCHER = "launcher"
@@ -156,15 +176,21 @@ def signed_for(data: bytes) -> str:
         return "a signature"
 
 
+def kind_of(message: bytes) -> int:
+    """The number a message starts with, which says what it is, see
+    AgentMessage. An empty one is none of them."""
+    return message[0] if message else 0
+
+
 def passed_on(request: bytes) -> bool:
     """Whether a request is one the agent is asked on a session's behalf:
     to list the keys, to sign, and the extension that goes with signing.
     Anything else would change the agent for the user and everything else
     that uses it."""
-    kind = request[:1]
-    if kind in (bytes([AGENT_LIST]), bytes([AGENT_SIGN])):
+    kind = kind_of(request)
+    if kind in (AgentMessage.LIST, AgentMessage.SIGN):
         return True
-    if kind != bytes([AGENT_EXTENSION]):
+    if kind != AgentMessage.EXTENSION:
         return False
     try:
         return text(Cursor(request, 1)) == SESSION_BIND
@@ -238,7 +264,7 @@ class AgentDoor:
                     if request is None:
                         return
                     if not passed_on(request):
-                        refusal = bytes([AGENT_FAILURE])
+                        refusal = bytes([AgentMessage.FAILURE])
                         self._note(request, refusal, refused_by=BY_LAUNCHER)
                         client.sendall(len(refusal).to_bytes(4, "big") + refusal)
                         continue
@@ -256,13 +282,13 @@ class AgentDoor:
         refused_by names who refused it instead. What a session sends is
         the session's to choose: one that is not what it says it is is
         noted as that."""
-        kind = request[:1]
-        refused = answer[:1] == bytes([AGENT_FAILURE])
+        kind = kind_of(request)
+        refused = kind_of(answer) == AgentMessage.FAILURE
         said: dict[str, object] = {"refused": True} if refused else {}
         if refused_by:
             said["by"] = refused_by
         try:
-            if kind == bytes([AGENT_SIGN]):
+            if kind == AgentMessage.SIGN:
                 reader = Cursor(request, 1)
                 key = fingerprint(text(reader))
                 said.update(
@@ -271,17 +297,16 @@ class AgentDoor:
                     comment=self._comments.get(key, ""),
                     what=signed_for(text(reader)),
                 )
-            elif kind == bytes([AGENT_LIST]):
+            elif kind == AgentMessage.LIST:
                 said.update(did="list", keys=self._listed(answer))
-            elif kind == bytes([AGENT_EXTENSION]):
+            elif kind == AgentMessage.EXTENSION:
                 if not refused_by:
                     return
                 said.update(did="other", what="asked for an extension")
             else:
-                number = kind[0] if kind else 0
                 said.update(
                     did="other",
-                    what=AGENT_REQUESTS.get(number, f"sent request {number}"),
+                    what=AGENT_REQUESTS.get(kind, f"sent request {kind}"),
                 )
         except NotThis:
             said.update(did="other", what="sent a request that could not be read")
@@ -295,7 +320,7 @@ class AgentDoor:
 
     def _listed(self, answer: bytes) -> int:
         """How many keys the agent listed, their comments remembered."""
-        if answer[:1] != bytes([AGENT_IDENTITIES]):
+        if kind_of(answer) != AgentMessage.IDENTITIES:
             return 0
         reader = Cursor(answer, 1)
         count = reader.number(4)
