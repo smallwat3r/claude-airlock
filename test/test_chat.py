@@ -1287,6 +1287,54 @@ class CommandsTest(LauncherTest):
         self.assertEqual(seen, [True])
         self.assertFalse(ours.shelling)
 
+    def test_ctrl_c_ends_what_a_command_of_the_users_runs_in_the_container(self):
+        ours = self.commands()
+        # docker's end of it: it passes on what the command writes, and
+        # what it started outlives it, as in a container
+        client = (
+            "import subprocess, sys\n"
+            "out = {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT}\n"
+            "ran = subprocess.Popen(sys.argv[1:], **out)\n"
+            "for line in ran.stdout:\n"
+            "    sys.stdout.buffer.write(line)\n"
+            "    sys.stdout.buffer.flush()\n"
+        )
+        killed: list[str] = []
+
+        def run(*args: str, **options):
+            self.assertEqual(args[:2], ("exec", "claude-test"))
+            return subprocess.Popen([sys.executable, "-c", client, *args[2:]], **options)
+
+        def in_container(*args: str) -> bool:
+            killed.append(args[-1])
+            return subprocess.run(["bash", "-c", args[-1]], check=False).returncode == 0
+
+        threading.Timer(1.0, ours.interrupt).start()
+        started = time.monotonic()
+        with (
+            unittest.mock.patch.object(commands, "docker_popen", run),
+            unittest.mock.patch.object(commands, "docker_ok", in_container),
+            written() as lines,
+        ):
+            self.assertIs(ours.do(None, "!echo up; sleep 60"), commands.Did.DONE)
+        self.assertLess(time.monotonic() - started, 30)
+        # Its group is not shown, what it wrote is
+        self.assertEqual(lines[1], "up")
+        self.assertIn("interrupted", lines[-1])
+        self.assertNotIn("may still be running", lines[-1])
+        (kill,) = killed
+        group = int(kill.rsplit("-", 1)[1])
+        for _ in range(50):
+            try:
+                with open(f"/proc/{group}/stat") as stat:
+                    if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                        break
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("what the command ran was left running")
+
     def test_ctrl_c_is_for_a_command_of_the_users_while_it_runs(self):
         host = Host(str(self.home), str(self.project), "", "")
         chat = talk.Chat(host, status.Sandbox("claude-test"), Layout())

@@ -181,7 +181,8 @@ class Chat:
         that is slow to leave. Else it ends the wait for a line, which
         drops what was typed."""
         if self._commands.shelling and not self._leaving:
-            # For the command the user runs, which docker ends on it
+            # For the command the user runs
+            self._commands.interrupt()
             return
         if self._leaving or (self._turns.running and not self._over):
             self._interrupt = True

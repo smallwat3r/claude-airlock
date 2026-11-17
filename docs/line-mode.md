@@ -48,7 +48,7 @@ A line can be typed at any time, claude takes it up when it can.
 | You type | Does |
 | --- | --- |
 | Enter | Sends the line |
-| Ctrl-C | Interrupts the turn, a second one stops the session |
+| Ctrl-C | Interrupts the turn, a second one stops the session. While a `!COMMAND` runs, ends that command |
 | Ctrl-D, `/exit`, `/quit` | Leaves |
 | Tab | Completes the names of commands and of files (`@src/main.py`) |
 | Up, Down | The lines typed before |
