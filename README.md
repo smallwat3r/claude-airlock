@@ -9,6 +9,20 @@ and a process sidecar that share one network namespace, the egress proxy,
 the Docker socket proxy and the SSH agent are
 opt-in](docs/architecture.excalidraw.png)
 
+What you get:
+
+- **A contained session.** Only the project is mounted, as your user, on a
+  read-only root filesystem with all capabilities dropped. Secrets in
+  `.env` files read as empty, and Claude's own configuration is read-only.
+- **A record of what it did.** Every tool call, connection, DNS lookup and
+  process is recorded from outside the session, and `--trace` shows it.
+- **A check when it ends.** The launcher warns when a session changed a
+  file that runs commands on the host, a git hook say.
+- **Line mode.** Claude Code without its full-screen UI: a prompt, and
+  under it what the session does, the network included.
+- **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
+  each off until you switch it on.
+
 Contents:
 
 - [Requirements](#requirements), [Install](#install) and [Usage](#usage),
@@ -18,8 +32,8 @@ Contents:
 - [Reviewing a session](#reviewing-a-session) with `--trace`
 - [Line mode](#line-mode), Claude Code without its full-screen UI
 - [The image](#the-image) and its features
-- [Tests](#tests), [Statusline](#statusline) and
-  [Editor integration](#editor-integration)
+- [Statusline](#statusline), [Editor integration](#editor-integration)
+  and [Tests](#tests)
 
 ## Requirements
 
@@ -49,12 +63,13 @@ claude-docker                       # builds the image on first use
 claude-docker -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
 
-Any other argument is forwarded to `claude`. Since the container is the
-sandbox, `claude` is started with `--dangerously-skip-permissions`: it does
-not ask before it uses a tool. `CLAUDE_DOCKER_ASK=1` has it ask as it does
-outside the sandbox, and a `--permission-mode` of your own is left as it
-is. See [Known limits](#known-limits) for what a session can reach without
-being asked.
+Any other argument is forwarded to `claude`.
+
+The container is the sandbox, so `claude` is started with
+`--dangerously-skip-permissions` and does not ask before it uses a tool.
+`CLAUDE_DOCKER_ASK=1` has it ask, and a `--permission-mode` of your own is
+left as it is. [Known limits](#known-limits) says what a session can reach
+without being asked.
 
 The launcher's own options, `claude-docker --help` lists them with the
 settings:
@@ -90,102 +105,63 @@ CLAUDE_DOCKER_LINE_MODE=0 claude-docker  # or in the config file, for every sess
 
 ### Settings
 
-All optional, set in the environment. The on and off switches are shown at
-their default, the others with an example value:
+All optional, set in the environment or in [the config file](#the-config-file).
+A switch takes `1` for on and `0` for off. Any other value, such as `true`,
+stops the launcher instead of quietly leaving a restriction off.
 
-- `CLAUDE_DOCKER_EXTRA_DIRS=a:b` (default: none)
+What a session gets:
 
-  Extra directories to mount, same as repeated `--add-dir`
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_EXTRA_DIRS=a:b` | none | Extra directories to mount, as repeated `--add-dir` |
+| `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` | none | The same read-only, as repeated `--add-dir-ro` |
+| `CLAUDE_DOCKER_SHARED_DIR=~/scratch` | `~/claude-shared` if it exists | Scratch directory shared between sessions, empty for none |
+| `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` | none | More file names to hide, on top of the `.env` family |
+| `CLAUDE_DOCKER_PROTECT="~/kit:docs"` | none | Paths that are read-only wherever they are mounted |
+| `CLAUDE_DOCKER_RW_CONFIG` | `0` | `1` makes the protected parts of `~/.claude` (`settings.json`, `CLAUDE.md`, `hooks`...) writable |
+| `CLAUDE_DOCKER_SHARED_HISTORY` | `0` | `1` lets a session see Claude Code's history of every project, not only its own |
+| `CLAUDE_DOCKER_CACHE` | `1` | `~/.cache` persists per project. `0` makes it a 2g tmpfs |
+| `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
-- `CLAUDE_DOCKER_EXTRA_DIRS_RO=a:b` (default: none)
+The doors, all closed by default:
 
-  The same read-only, as repeated `--add-dir-ro`
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_NET_FILTER` | `0` | `1` allows only the domains in `docker/allowed-domains.txt`, over HTTP, HTTPS and git over SSH |
+| `CLAUDE_DOCKER_SSH_AGENT` | `0` | `1` forwards your SSH agent, so git over SSH and `ssh` work with your keys |
+| `CLAUDE_DOCKER_SOCKET` | `0` | `1` allows `docker ps` and `docker logs` against the host, `full` adds `inspect`, `stats` and `top` |
 
-- `CLAUDE_DOCKER_FEATURES="go typst"` (default: `features.txt`, else every feature)
+What is recorded, for `--trace`:
 
-  Tools to build into the image, see [The image](#the-image)
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_NET_LOG` | `1` | Records every connection, what is sent by UDP or a ping, and every name looked up. `0` records nothing |
+| `CLAUDE_DOCKER_PROC_LOG` | `1` | Records the processes that run and which of them made each connection. `0` records nothing |
 
-- `CLAUDE_DOCKER_NET_FILTER=0` (the default)
+How Claude Code runs:
 
-  If on, egress goes through a proxy that only allows the domains in `docker/allowed-domains.txt`, and only HTTP, HTTPS and git over SSH get out. If off, the network is open
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's full-screen UI |
+| `CLAUDE_DOCKER_ASK` | `0` | `1` has Claude Code ask before it uses a tool, as it does outside the sandbox |
+| `CLAUDE_DOCKER_TELEMETRY` | `0` | `1` lets Claude Code send usage events and crash reports |
 
-- `CLAUDE_DOCKER_NET_LOG=1` (the default)
+The container and its image:
 
-  If on, records every TCP connection the session opens, what it sends by anything else (UDP, a ping) and every name it looks up, over IPv4 and IPv6, shown by `--trace`, see [Reviewing a session](#reviewing-a-session). If off, nothing is captured, and `--trace` only has the network use of a filtered session, from the proxy's log
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_DOCKER_FEATURES="go typst"` | `features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
+| `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Memory limit |
+| `CLAUDE_DOCKER_PIDS=1024` | `512` | Process limit |
+| `CLAUDE_DOCKER_RUNTIME=runsc` | Docker's own | Container runtime, gVisor say, which must be installed in Docker |
 
-- `CLAUDE_DOCKER_PROC_LOG=1` (the default)
-
-  If on, records the processes that run in the session and which of them made each connection, shown by `--trace`. If off, a connection is only known by the tool call that ran at its time
-
-- `CLAUDE_DOCKER_TELEMETRY=0` (the default)
-
-  If off, Claude Code is started with `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`: it sends no usage events and no crash reports, which otherwise go out in the background, to Datadog among others. Sessions work the same, though features Anthropic rolls out gradually may stay at their defaults. If on, it sends both as it does outside the sandbox
-
-- `CLAUDE_DOCKER_ASK=0` (the default)
-
-  If off, Claude Code is started with `--dangerously-skip-permissions` and does not ask before it uses a tool: the container is what keeps a session from the host. If on, it asks as it does outside the sandbox. Not added when you give `--permission-mode` or one of the two flags yourself, nor to a command of claude's (`claude-docker mcp list`)
-
-- `CLAUDE_DOCKER_LINE_MODE=1` (the default)
-
-  If on, a session runs in line mode, Claude Code without its full-screen UI: lines are only ever added, never redrawn, see [Line mode](#line-mode). If off, it runs in Claude Code's full-screen UI, and `claude-docker --line-mode` is one session in line mode
-
-- `CLAUDE_DOCKER_SSH_AGENT=0` (the default)
-
-  If on, forwards your SSH agent, so git over SSH and `ssh` work with your keys. If off, the session has no SSH keys
-
-- `CLAUDE_DOCKER_SOCKET=0` (the default)
-
-  If `1`, `docker ps` and `docker logs` work against the host daemon, `full` adds `inspect`, `stats` and `top`. If off, the session cannot reach Docker at all
-
-- `CLAUDE_DOCKER_RW_CONFIG=0` (the default)
-
-  If on, `~/.claude/settings.json`, `CLAUDE.md`, `hooks`, `commands`, `skills`, `agents` and `rules` are writable from the session. If off, they are read-only there, and the ones you do not have are made empty so that a session cannot create them
-
-- `CLAUDE_DOCKER_SHARED_HISTORY=0` (the default)
-
-  If off, a session sees what Claude Code remembers of its own project alone: the transcripts, prompt history, pastes and file history of other projects are left out. If on, it sees those of every project
-
-- `CLAUDE_DOCKER_SHADOW="*.pem:.npmrc"` (default: none)
-
-  Extra file name globs to hide, on top of the `.env` family. What the config file names and what the environment names both count
-
-- `CLAUDE_DOCKER_PROTECT="~/claude-shared/kit:docs"` (default: none)
-
-  Paths that are read-only in every session that has them mounted, inside the project or a directory mounted next to it. What the config file names and what the environment names both count
-
-- `CLAUDE_DOCKER_MEMORY=32g` (default: `16g`)
-
-  Container memory limit
-
-- `CLAUDE_DOCKER_PIDS=1024` (default: `512`)
-
-  Container process limit
-
-- `CLAUDE_DOCKER_CACHE=1` (the default)
-
-  If on, `~/.cache` is a per-project volume that persists between sessions. If off, it is a 2g tmpfs that is gone when the session ends
-
-- `CLAUDE_DOCKER_SHARED_DIR=~/scratch` (default: `~/claude-shared` if it exists)
-
-  Scratch directory shared between sessions, empty for none
-
-- `CLAUDE_DOCKER_RUNTIME=runsc` (default: Docker's own)
-
-  Container runtime, e.g. gVisor, must be installed in Docker
-
-- `ANTHROPIC_API_KEY`, `GH_TOKEN` (default: unset)
-
-  Passed through when set, `GH_TOKEN` is how `gh` logs in
-
-The on and off switches take `1` for on and `0` for off
-(`CLAUDE_DOCKER_SOCKET` also `full`). Any other value, such as `true`, stops the launcher instead of
-quietly leaving a restriction off.
+The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the two
+records in [docs/trace.md](docs/trace.md).
 
 ### The config file
 
 To change a default for every session, put the same variables in
-`~/.config/claude-sandbox/config`, one per line. The environment still wins,
-so a single session can override the file:
+`~/.config/claude-sandbox/config`, one per line:
 
 ```
 # ~/.config/claude-sandbox/config
@@ -194,18 +170,16 @@ CLAUDE_DOCKER_NET_FILTER=1
 CLAUDE_DOCKER_SHARED_DIR=/home/me/scratch
 ```
 
-Values are taken literally, without quotes or `~` expansion, and an unknown
-name stops the launcher instead of being ignored. The file is only read from
-your config directory, never from the project, which the session can write to.
-`CLAUDE_DOCKER_EXTRA_DIRS` and `CLAUDE_DOCKER_EXTRA_DIRS_RO` are not accepted
-there, extra directories belong to one project, not to every session.
-A switch or a limit that is set but empty in the environment says nothing,
-the file is asked next: an empty variable does not switch off what the file
-switched on.
-
-`~/claude-shared` is always mounted when it exists, as a scratch directory
-shared between sessions. `CLAUDE_DOCKER_SHARED_DIR` names another directory,
-or none when set empty.
+- The environment wins, so one session can override the file. A variable
+  that is set but empty says nothing, the file is asked next.
+- Values are taken literally, without quotes or `~` expansion.
+- An unknown name stops the launcher.
+- The file is only read from your config directory, never from the
+  project, which a session can write to.
+- `CLAUDE_DOCKER_EXTRA_DIRS` and `CLAUDE_DOCKER_EXTRA_DIRS_RO` are not
+  accepted there, extra directories belong to one project.
+- `CLAUDE_DOCKER_SHADOW` and `CLAUDE_DOCKER_PROTECT` add up: what the file
+  names and what the environment names both count.
 
 ## What the sandbox does
 
@@ -248,66 +222,35 @@ do on its own, also when something it read told it to:
 
 ## Reviewing a session
 
-`claude-docker --trace` shows what the latest session of the project did: what it ran, where and why, what it wrote and what it reached on the network, in the order it happened. `--trace --follow` shows it as it happens. How to read it, the JSON Lines, the network capture, the copy of the transcript and what is kept: [docs/trace.md](docs/trace.md).
+`claude-docker --trace` shows what the latest session of the project did, in
+the order it happened: what it ran and why, what it wrote, and what it
+reached on the network. `--trace --follow` shows it as it happens. See
+[docs/trace.md](docs/trace.md).
 
 ## Line mode
 
 A session runs in line mode by default: Claude Code without its
-full-screen UI. You get a prompt and, under it, what the session
-does in the lines of `--trace`, the network included. Lines are only ever
-added, never redrawn, in a terminal, an Emacs shell buffer or a file alike.
+full-screen UI. You get a prompt and, under it, what the session does in
+the lines of `--trace`, the network included. Lines are only added, never
+redrawn, so it works in a terminal, an Emacs shell buffer or a file alike.
 `CLAUDE_DOCKER_LINE_MODE=0` gives the full-screen UI back. See
 [docs/line-mode.md](docs/line-mode.md).
+
+![A turn in line mode at a terminal](docs/line-mode.png)
 
 ## The image
 
 The image is assembled from `docker/base.Dockerfile`, the features you pick
-and `docker/tail.Dockerfile`. Which features there are, how to add your own,
-the language servers and how versions are pinned:
-[docs/image.md](docs/image.md).
-
-## Tests
-
-`test/launcher_test.py` checks the launcher's security-relevant behaviour
-without needing Docker: what gets mounted, shadowed and switched off by
-default, the tamper check, the network capture, the records the launcher
-keeps of a session and `--trace`. It runs the
-launcher against a fake `docker` that records every call. CI runs it on
-Python 3.9 and the latest, together with ruff, mypy, shellcheck and a small
-image build.
-
-The checks are in `test/test_*.py`, by topic, with what they share in
-`test/harness.py`. They need nothing but Python: `test/launcher_test.py`
-runs them all, `test/launcher_test.py -k trace` those with trace in their
-name, and each file runs on its own. `pytest test` works too if you have
-it.
-
-The files are run side by side, as many at a time as there are CPUs, which
-`--jobs` changes. A file that takes much longer than the others sets how
-long it all takes, so one that grows is better split.
-
-The `Makefile` has a shortcut for each of these and for the upkeep of the
-image, `make` lists them:
-
-```
-make check          # ruff, shellcheck, mypy and the tests, as CI runs them
-make test K=trace   # the tests with trace in their name
-make smoke          # test/smoke-test.sh
-make upgrade        # refresh the pins, then rebuild the image
-```
-
-`test/smoke-test.sh` is the end-to-end check, run by hand on the host against
-a real Docker daemon. It replaces the sidecars, then starts open, filtered
-and socket-proxy sessions in a throwaway project and checks the sandbox from
-the inside. Run it after changing the launcher, the Dockerfile parts or the
-sidecar configuration, or after moving the checkout.
+and `docker/tail.Dockerfile`. See [docs/image.md](docs/image.md) for the
+features, how to add your own, the language servers and how versions are
+pinned.
 
 ## Statusline
 
-`bin/claude-statusline` shows the model, the 5h and 7d usage limits, and
-inside the sandbox the container name, network mode, the opt-in doors that
-are open (SSH agent, Docker socket, writable settings) and extra mounts. Enable
-it in `~/.claude/settings.json`:
+For Claude Code's full-screen UI. `bin/claude-statusline` shows the model,
+the 5h and 7d usage limits, and inside the sandbox the container name, the
+network mode, the doors that are open and the extra mounts. Enable it in
+`~/.claude/settings.json`:
 
 ```json
 {
@@ -318,11 +261,11 @@ it in `~/.claude/settings.json`:
 }
 ```
 
-The script is mounted into the container at its host path, so the same
-setting works inside and outside the sandbox. In [line mode](#line-mode)
-the statusline heads the prompt, as a multi-line `PS1` would, and is
-refreshed at the end of each turn. That also holds when the
-setting names a symlink to the script, it is mounted there as well.
+The script is mounted into the container at its host path, a symlink to it
+too, so the same setting works inside and outside the sandbox.
+
+[Line mode](#line-mode) does not run it. It shows the same above its
+prompt, made from what it knows of the session.
 
 ## Editor integration
 
@@ -334,10 +277,31 @@ Point your editor's Claude Code integration at `claude-docker` instead of
 (setq claude-code-program (executable-find "claude-docker"))
 ```
 
-`CLAUDE_BUFFER_NAME`, which claude-code.el exports, is used to give parallel
-sessions on the same project distinct container names.
+- `CLAUDE_BUFFER_NAME`, which claude-code.el exports, gives parallel
+  sessions on the same project distinct container names.
+- That buffer runs in [line mode](#line-mode).
+- No terminal emulator is needed: `claude-docker` run from `M-x shell`
+  works the same.
 
-That buffer runs in [line mode](#line-mode)
-in place of Claude Code's full-screen UI. It needs no terminal emulator either:
-`claude-docker` run from `M-x shell` works the same, there nothing is ever
-written twice.
+## Tests
+
+```
+make check          # ruff, shellcheck, mypy and the tests, as CI runs them
+make test K=trace   # the tests with trace in their name
+make smoke          # test/smoke-test.sh
+make upgrade        # refresh the pins, then rebuild the image
+```
+
+- **The unit tests** (`test/test_*.py`, by topic) need nothing but Python.
+  They run the launcher against a fake `docker` that records every call,
+  and check what is mounted, shadowed and switched off by default, the
+  tamper check, the records of a session, `--trace` and line mode.
+  `test/launcher_test.py` runs them all side by side, `--jobs` says how
+  many at a time. Each file also runs on its own, and `pytest test` works.
+- **CI** runs them on Python 3.9 and the latest, with ruff, mypy,
+  shellcheck and a small image build.
+- **The smoke test** (`test/smoke-test.sh`) is run by hand on the host
+  against a real Docker daemon. It starts open, filtered and socket-proxy
+  sessions in a throwaway project and checks the sandbox from the inside.
+  Run it after changing the launcher, the Dockerfile parts or the sidecar
+  configuration, or after moving the checkout.

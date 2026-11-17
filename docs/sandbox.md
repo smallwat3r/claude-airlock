@@ -1,5 +1,16 @@
 # What the sandbox does
 
+What a session is given and what it is kept from:
+
+- [Mounts](#mounts): what a session sees of your files
+- [What is read-only or hidden](#what-is-read-only-or-hidden)
+- [Hardening](#hardening) of the container
+- [How Claude Code is started](#how-claude-code-is-started): permissions
+  and telemetry
+- [The check when a session ends](#the-check-when-a-session-ends)
+- [The opt-in doors](#the-opt-in-doors): the SSH agent, the Docker socket
+  and the egress filter
+
 ## Mounts
 
 - The project and any extra directories, read-write at their host paths.
@@ -52,7 +63,8 @@
   add to those of another sandboxed session.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty (`/dev/null` is mounted over them). Templates such as
-  `.env.example` stay readable, `CLAUDE_DOCKER_SHADOW` hides more.
+  `.env.example` stay readable, `CLAUDE_DOCKER_SHADOW` hides more, by
+  file name globs (`*.pem:.npmrc`).
 - **The history of other projects.** A session could otherwise read every
   prompt, command output and file of all of them.
   - Under `~/.claude/projects`, the directory of each other project is
@@ -75,6 +87,21 @@
   tmpfs (`/tmp`, `~/.npm`, `~/.config`).
 - Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`
   runs the session under gVisor if you have it.
+
+## How Claude Code is started
+
+- **Without asking.** Claude Code is started with
+  `--dangerously-skip-permissions` and does not ask before it uses a tool:
+  the container is what keeps a session from the host.
+  `CLAUDE_DOCKER_ASK=1` has it ask as it does outside the sandbox. The
+  flag is not added when you give `--permission-mode` or one of the two
+  flags yourself, nor to a command of claude's (`claude-docker mcp list`).
+- **Without telemetry.** Claude Code is started with `DISABLE_TELEMETRY=1`
+  and `DISABLE_ERROR_REPORTING=1`: it sends no usage events and no crash
+  reports, which otherwise go out in the background, to Datadog among
+  others. Sessions work the same, though features Anthropic rolls out
+  gradually may stay at their defaults. `CLAUDE_DOCKER_TELEMETRY=1` sends
+  both as outside the sandbox.
 
 ## The check when a session ends
 

@@ -30,7 +30,19 @@ network, in the order it happened.
 2026-01-02 10:03:05  claude   edit        result: ok, 0.0s, 1 line out
 ```
 
-That is how it looks in a file or a pipe: plain text, every line starting
+On this page:
+
+- Reading a trace: the [options](#options), [the lines](#reading-the-lines),
+  [JSON](#as-json), and [following a session](#following-a-session) as it
+  runs
+- What each record holds and how far to trust it:
+  [the network](#the-network), [the transcript](#the-transcript),
+  [what ran](#what-ran), and
+  [the SSH agent and the Docker socket](#the-ssh-agent-and-the-docker-socket)
+- [When a session ends](#when-a-session-ends) and
+  [what is kept](#what-is-kept)
+
+That is how the example looks in a file or a pipe: plain text, every line starting
 with when, who and what, so any line `grep` finds says it all. On a
 terminal an event says so once, and its other lines are indented under it:
 
@@ -78,6 +90,8 @@ terminal an event says so once, and its other lines are indented under it:
 - A command comes with the reason Claude gave for it (`why:`), its working
   directory when that is not the project (`cwd:`), how it ended and how
   many lines it put out.
+- A list of todos claude keeps shows as how far it is (`todos: 2/7 done,
+  now: Fixing the lockfile`), `--verbose` has each of them.
 - What went wrong is in capitals: `FAILED` for a call, `OUTSIDE PROJECT`
   for a file written there, `DENIED` for a request the egress filter
   refused.

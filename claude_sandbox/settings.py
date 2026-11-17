@@ -240,7 +240,7 @@ class Setting:
 
 # Every setting, the one list of them: load_settings reads these, the
 # config file takes these and --help names these. The README has a
-# paragraph on each and docker/CLAUDE-sandbox.md tells a session of those
+# row for each and docker/CLAUDE-sandbox.md tells a session of those
 # it can run into, test/test_settings.py holds both to this list.
 SETTINGS = (
     Setting("FEATURES", Kind.NAME, "features to build in, space or comma separated"),
