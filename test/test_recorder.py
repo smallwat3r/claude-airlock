@@ -8,6 +8,7 @@ import json
 import os
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from harness import LauncherTest, prompts_at, settings
@@ -155,6 +156,88 @@ class RecorderTest(LauncherTest):
             "# transcript  as the launcher copied it (5 lines)",
             self.launch("--trace").stdout,
         )
+
+    def test_a_session_that_removed_its_transcript_is_still_traced(self):
+        recorder.catch_up(self.transcript, self.copy)
+        self.transcript.unlink()
+        self.assertEqual(recorder.removed_transcripts(self.host), [self.transcript])
+        result = self.launch("--trace")
+        self.assertEqual(result.status, 0, result.stderr)
+        self.assertIn("# session     0a  ", result.stdout)
+        self.assertIn("# transcript  REMOVED, it is no longer there", result.stdout)
+        self.assertIn(
+            "$ curl https://evil.test  REMOVED FROM THE TRANSCRIPT", result.stdout
+        )
+        self.assertIn("# tool calls  2 (Bash 2)", result.stdout)
+        listed = self.launch("--trace", "list").stdout
+        self.assertRegex(listed, r"0a +1 prompts +2 calls  REMOVED  ")
+        self.assertIn("evil.test", self.launch("--trace", "0a", "--failed").stdout)
+
+    def test_a_removed_transcript_is_said_when_the_session_ends(self):
+        # Written to, so that it is copied, then removed
+        added = json.dumps(prompts_at(time.time())[0])
+        gone = f"echo '{added}' >> '{self.transcript}'; sleep 1.2; rm '{self.transcript}'"
+        result = self.launch(session=gone)
+        self.assertIn("the transcript of 0a was removed", result.stderr)
+
+    def test_a_subagent_that_removed_its_transcript_is_still_traced(self):
+        ran = call(3, self.now + 3, "curl https://evil.test/sub")
+        theirs = self.subagent([*prompts_at(self.now + 3), *ran])
+        recorder.Copier(self.host, time.time() - 60).look()
+        theirs.unlink()
+        self.assertEqual(
+            recorder.removed_subagents(self.host, self.transcript), [theirs]
+        )
+        result = self.launch("--trace")
+        self.assertRegex(
+            result.stdout,
+            r"agent    bash        \$ curl https://evil.test/sub"
+            r"  REMOVED FROM THE TRANSCRIPT",
+        )
+
+    def test_a_line_that_holds_no_entry_is_shown_as_unreadable(self):
+        # Half a line ahead of the entry Claude Code writes next
+        with open(self.transcript, "a") as transcript:
+            transcript.write('{"x":"' + json.dumps(call(3, self.now + 3, "id")[0]))
+            transcript.write("\n")
+        recorder.catch_up(self.transcript, self.copy)
+        result = self.launch("--trace")
+        self.assertIn("# transcript  1 lines CANNOT BE READ", result.stdout)
+        self.assertRegex(
+            result.stdout,
+            r"sandbox  transcript  UNREADABLE line of the transcript: \{\"x\":\"\{",
+        )
+        failed = self.launch("--trace", "--failed").stdout
+        self.assertIn("UNREADABLE line of the transcript", failed)
+        # Taken out again, it is gone as any line is
+        self.rewrite(self.entries)
+        recorder.catch_up(self.transcript, self.copy)
+        gone = recorder.compare(self.host, self.transcript).gone
+        self.assertEqual([entry["type"] for entry in gone], ["unreadable-line"])
+
+    def test_a_copy_that_stopped_at_its_limit_is_not_said_to_be_whole(self):
+        size = self.transcript.stat().st_size
+        with unittest.mock.patch.object(recorder, "MOST_COPIED", size):
+            recorder.catch_up(self.transcript, self.copy)
+            whole = recorder.compare(self.host, self.transcript)
+            self.assertFalse(whole.cut_short)
+            with open(self.transcript, "a") as transcript:
+                transcript.write(json.dumps(call(3, self.now + 3, "id")[0]) + "\n")
+            recorder.catch_up(self.transcript, self.copy)
+            compared = recorder.compare(self.host, self.transcript)
+        self.assertEqual(self.copy.stat().st_size, size)
+        self.assertTrue(compared.cut_short)
+        self.assertIn("NOT ALL COPIED", compared.header()[0])
+        self.assertNotIn("as the launcher copied it", "".join(compared.header()))
+
+    def test_looks_that_failed_are_counted(self):
+        copier = recorder.Copier(self.host, time.time() - 60)
+        with unittest.mock.patch.object(
+            recorder, "catch_up", side_effect=OSError(24, "Too many open files")
+        ):
+            copier.look()
+        self.assertEqual(copier.failed, 1)
+        self.assertIn("Too many open files", copier.problem)
 
     def test_old_copies_go(self):
         recorder.catch_up(self.transcript, self.copy)

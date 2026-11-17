@@ -19,6 +19,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, BinaryIO
 
+# What a session can write is read a line at a time, and no line longer
+# than this is held in memory
+LINE_LIMIT = 32 << 20
+# The kind of the entry that stands for a line of a transcript that holds
+# no entry, and how much of such a line is kept to be shown
+UNREADABLE = "unreadable-line"
+UNREADABLE_SHOWN = 2000
 # How each mode of open_locked opens its file, which is made as needed
 LOCKED_MODES = {
     "r+": os.O_RDWR,
@@ -160,6 +167,42 @@ def open_plain(path: str | Path) -> BinaryIO | None:
         os.close(descriptor)
         return None
     return os.fdopen(descriptor, "rb")
+
+
+def bounded_lines(file: BinaryIO, longest: int = LINE_LIMIT) -> Iterator[bytes | None]:
+    """The lines of a file a session can write, each with its end, a last
+    one without when that is how the file ends. None in the place of a
+    line longer than longest, which is passed over and not held in
+    memory: a file can be made one line as large as the disk, a hole
+    that takes no room on it."""
+    while True:
+        line = file.readline(longest + 1)
+        if not line:
+            return
+        if len(line) <= longest or line.endswith(b"\n"):
+            yield line
+            continue
+        # The rest of it, a piece at a time
+        while line and not line.endswith(b"\n"):
+            line = file.readline(longest)
+        yield None
+
+
+def line_entry(line: bytes | None) -> dict | None:
+    """A whole line of a transcript as the entry it holds, none for an
+    empty one. A line that holds none, or was too long to read (see
+    bounded_lines), is an entry that says so: Claude Code writes no such
+    line, a session that writes half a line ahead of an entry does, and
+    what it did there must not go without a word."""
+    if line is None:
+        return {"type": UNREADABLE, "text": "(a line too long to read)"}
+    if not line.strip():
+        return None
+    entry = json_object(line)
+    if entry is not None:
+        return entry
+    shown = line[:UNREADABLE_SHOWN].decode("utf-8", "replace").rstrip("\n")
+    return {"type": UNREADABLE, "text": shown}
 
 
 def json_object(text: str | bytes) -> dict | None:

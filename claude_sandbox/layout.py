@@ -48,14 +48,15 @@ def wrong_throughout(fields: dict) -> bool:
     """Whether an event tells of something gone wrong that every line of
     it is about: a request the filter refused, a connection that was
     refused or not answered, a lookup that failed or that stands out, a
-    use of the SSH agent it refused, and what was taken out of the
-    transcript."""
+    use of the SSH agent it refused, what was taken out of the
+    transcript, and a line of it that cannot be read."""
     return bool(
         fields.get("denied")
         or fields.get("outcome") in ("refused", "no answer")
         or fields.get("error")
         or fields.get("flagged")
         or fields.get("removed")
+        or fields.get("unreadable_line")
     )
 
 

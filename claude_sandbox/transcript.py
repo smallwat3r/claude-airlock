@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .events import Event, Who, clean, flat, labelled
-from .files import json_object, open_plain
+from .files import UNREADABLE, bounded_lines, json_object, line_entry, open_plain
 from .projects import transcript_dirs, transcript_files
 from .settings import Fatal, Host
 
@@ -46,11 +46,18 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
 # How Claude Code records a command the user gave it (/model sonnet): its
 # name and its arguments in tags, and what the command said in others
-_COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
-_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
-_COMMAND_SAID = re.compile(
-    r"<local-command-(stdout|stderr)>(.*?)</local-command-\1>", re.DOTALL
-)
+# Each is found by where it starts and where it then ends, see between: a
+# pattern that looks for the end from every start takes the square of the
+# time over a text of starts without an end, which is a session's to write
+_COMMAND_NAME = ("<command-name>", "</command-name>")
+_COMMAND_ARGS = ("<command-args>", "</command-args>")
+_COMMAND_SAID = re.compile(r"<local-command-(stdout|stderr)>")
+# The times an entry can say it was written at, as seconds since the
+# epoch: any other is not one a session ran at, and not one every
+# platform and time zone can show as a date
+EARLIEST, LATEST = 86400.0, 2e11
+# More than a session could use or cost: a count above it is not one
+MOST_COUNTED = 10**15
 # What a step of the model read, as the API counts it: not cached, newly
 # put in the cache, and read from it
 INPUT_TOKENS = (
@@ -88,9 +95,17 @@ def read_entries(path: Path) -> list[dict]:
     file = open_plain(path)
     if file is None:
         return []
+    entries = []
     with file:
-        # A last line may be half written by a running session
-        return [entry for entry in map(json_object, file) if entry]
+        for line in bounded_lines(file):
+            if line is None or line.endswith(b"\n"):
+                entry = line_entry(line)
+            else:
+                # A last line may be half written by a running session
+                entry = json_object(line)
+            if entry:
+                entries.append(entry)
+    return entries
 
 
 def local_time(entry: dict) -> datetime | None:
@@ -101,7 +116,8 @@ def local_time(entry: dict) -> datetime | None:
         # fromisoformat only takes a trailing Z from Python 3.11
         when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))  # noqa: FURB162
         # Both can fail on a date too far from now for the platform
-        when.timestamp()
+        if not EARLIEST <= when.timestamp() <= LATEST:
+            return None
         return when.astimezone()
     except (ValueError, OverflowError, OSError):
         return None
@@ -387,22 +403,53 @@ def result_details(ended: dict, verbose: bool) -> list[str]:
     return ["result: " + ", ".join(notes), *("out: " + line for line in shown)]
 
 
+def between(text: str, opening: str, closing: str) -> str | None:
+    """What a text holds between the first of an opening tag and the
+    closing one after it, none without the two."""
+    start = text.find(opening)
+    end = text.find(closing, start + len(opening)) if start >= 0 else -1
+    return text[start + len(opening) : end] if end >= 0 else None
+
+
+def command_said(content: str) -> list[str]:
+    """What a command of Claude Code's said, each part it is recorded in:
+    what it wrote to its output and to its errors, in their order."""
+    parts: list[str] = []
+    at = 0
+    # The kinds that have no end from here on
+    open_ended: set[str] = set()
+    for opening in _COMMAND_SAID.finditer(content):
+        kind = opening[1]
+        if opening.start() < at or kind in open_ended:
+            continue
+        closing = f"</local-command-{kind}>"
+        end = content.find(closing, opening.end())
+        if end < 0:
+            open_ended.add(kind)
+            continue
+        parts.append(content[opening.end() : end])
+        at = end + len(closing)
+    return parts
+
+
 def as_typed(text: str) -> str:
     """A prompt as the user typed it: a command of Claude Code's is
     recorded as its name and arguments in tags, anything else as it is."""
-    name = _COMMAND_NAME.search(text)
-    if not name or not text.lstrip().startswith("<command-"):
+    if not text.lstrip().startswith("<command-"):
         return text
-    args = _COMMAND_ARGS.search(text)
-    return f"{name[1].strip()} {args[1].strip() if args else ''}".strip()
+    name = between(text, *_COMMAND_NAME)
+    if name is None:
+        return text
+    args = between(text, *_COMMAND_ARGS) or ""
+    return f"{name.strip()} {args.strip()}".strip()
 
 
 def command_event(when: float, entry: dict, verbose: bool) -> Event | None:
     """What a command of Claude Code's said (/model, /context), which the
     model had no part in. None for an entry that holds nothing said."""
     content = entry.get("content")
-    said = _COMMAND_SAID.findall(content) if isinstance(content, str) else []
-    text = "\n".join(part for _, part in said).strip()
+    said = command_said(content) if isinstance(content, str) else []
+    text = "\n".join(said).strip()
     lines = [line for line in clean(text).splitlines() if verbose or line.strip()]
     if not lines:
         return None
@@ -430,9 +477,12 @@ def call_event(
 ) -> Event:
     """A tool call as it was issued, how it ended is added by the walk
     that finds its result."""
-    name = clean(block.get("name", "?"))
+    # On one line: it is what the event is, and stays in its column
+    name = flat(block.get("name", "?"))
     tool_input = call_input(block)
     details = call_details(name, tool_input, entry.get("cwd"), project_dir, verbose)
+    # A call without arguments is a call all the same, and has its line
+    details = details or ["(no arguments)"]
     fields = {
         "tool": name,
         "id": str(block.get("id")),
@@ -443,6 +493,17 @@ def call_event(
     if name in FILE_TOOLS and path is not None:
         fields["outside_project"] = outside(path, project_dir)
     return Event(when, who, name.lower(), details, fields)
+
+
+def unreadable_event(when: float, entry: dict) -> Event:
+    """A line of the transcript that holds no entry, see line_entry of
+    files.py: what a session did there is not told, that it is so is.
+    When is not known either, it is put where it was found."""
+    text = entry.get("text")
+    shown = shortened(flat(text if isinstance(text, str) else ""))
+    details = [f"UNREADABLE line of the transcript: {shown}"]
+    fields = {"unreadable_line": True, "text": text}
+    return Event(when, Who.SANDBOX, "transcript", details, fields)
 
 
 def call_label(event: Event) -> str:
@@ -474,7 +535,7 @@ def step_usage(entry: dict) -> tuple[str, dict] | None:
 def tokens(usage: object, kind: str) -> int:
     """A count of tokens in what the API said was used, 0 without one."""
     count = usage.get(kind) if isinstance(usage, dict) else None
-    return count if type(count) is int and count > 0 else 0
+    return count if type(count) is int and 0 < count <= MOST_COUNTED else 0
 
 
 def step_tokens(usage: dict) -> dict[str, int]:
@@ -583,6 +644,8 @@ class Walk:
     def take(self, entry: dict) -> list[Event]:
         """The events an entry adds."""
         kind = entry.get("type")
+        if kind == UNREADABLE:
+            return [unreadable_event(self._when, entry)]
         said_by_command = kind == "system" and entry.get("subtype") == "local_command"
         if kind not in ("user", "assistant") and not said_by_command:
             return []
@@ -717,11 +780,11 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     cost = last.get("cost-state", {})
 
     def seen(key: str) -> str:
-        values = {clean(e[key]) for e in entries if isinstance(e.get(key), str)}
+        values = {flat(e[key]) for e in entries if isinstance(e.get(key), str)}
         return ", ".join(sorted(values)) or "?"
 
     models = {
-        clean(e["message"].get("model", ""))
+        flat(e["message"].get("model", ""))
         for e in entries
         if e.get("type") == "assistant" and isinstance(e.get("message"), dict)
     }
@@ -732,14 +795,19 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
         ("permissions", seen("permissionMode")),
     ]
     if times:
-        minutes = int((times[-1] - times[0]).total_seconds() // 60)
-        span = f"{times[0]:%Y-%m-%d %H:%M} to {times[-1]:%H:%M} ({minutes} min)"
-        rows.append(("when", f"{span}, times are {times[0]:%Z}"))
-    if isinstance(cost.get("totalCostUSD"), (int, float)):
-        rows.append(("cost", f"${cost['totalCostUSD']:.2f}"))
+        # Not the first and the last: the order of the entries is the
+        # session's to choose
+        first, last_time = min(times), max(times)
+        minutes = int((last_time - first).total_seconds() // 60)
+        span = f"{first:%Y-%m-%d %H:%M} to {last_time:%H:%M} ({minutes} min)"
+        rows.append(("when", f"{span}, times are {first:%Z}"))
+    spent = cost.get("totalCostUSD")
+    # Not a number and a number too large to write are not a cost
+    if isinstance(spent, (int, float)) and 0 <= spent <= MOST_COUNTED:
+        rows.append(("cost", f"${spent:.2f}"))
     if "totalLinesAdded" in cost:
         added, removed = cost.get("totalLinesAdded"), cost.get("totalLinesRemoved")
-        rows.append(("lines", clean(f"+{added} -{removed}")))
+        rows.append(("lines", flat(f"+{added} -{removed}")[:PREVIEW_WIDTH]))
     rows.append(("prompts", str(len(prompts(entries)))))
     steps = [
         step_tokens(u) for u in dict(filter(None, map(step_usage, entries))).values()
@@ -753,7 +821,7 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
         )
         rows.append(("tokens", f"{total}, over {len(steps)} steps of the model"))
 
-    by_tool = Counter(clean(block.get("name", "?")) for _, block in calls)
+    by_tool = Counter(flat(block.get("name", "?")) for _, block in calls)
     counts = ", ".join(f"{name} {count}" for name, count in by_tool.most_common())
     rows.append(("tool calls", f"{len(calls)} ({counts})" if calls else "0"))
     results = tool_results(entries).values()
@@ -800,7 +868,7 @@ def pages_fetched(entries: list[dict]) -> list[str]:
 
 def summary(entries: list[dict], project_dir: str) -> list[str]:
     """What to know before reading on."""
-    rows = [("project", clean(project_dir)), *overview(entries)]
+    rows = [("project", flat(project_dir)), *overview(entries)]
     return [
         *(labelled(name, value) for name, value in rows),
         *files_written(entries, project_dir),

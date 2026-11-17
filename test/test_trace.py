@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock
 from datetime import datetime
 
 from harness import (
@@ -20,6 +21,7 @@ from harness import (
     transcript,
 )
 
+from claude_sandbox import files, settings, trace
 from claude_sandbox.events import Event, Who
 from claude_sandbox.layout import Layout, event_json, folded
 from claude_sandbox.transcript import call_details
@@ -523,6 +525,101 @@ class TraceTest(LauncherTest):
         result = self.launch("--trace")
         self.assertEqual(result.status, 0, result.stderr)
         self.assertIn("prompt      early", result.stdout)
+
+    def add(self, *entries: dict) -> None:
+        file = self.transcripts / f"{self.SESSION}.jsonl"
+        with open(file, "a") as written:
+            written.write("\n" + "\n".join(map(json.dumps, entries)) + "\n")
+
+    def test_no_value_a_session_writes_stops_the_trace(self):
+        at = {"type": "user", "message": {"content": "odd"}}
+        twice = self.call("d1", "mcp__db__drop_all")
+        self.add(
+            # Dates that can be read and not shown, in any time zone
+            {**at, "timestamp": "0001-01-01T00:00:00Z"},
+            {**at, "timestamp": "9999-12-31T23:59:59Z"},
+            # Too large to write as a cost or to count
+            {"type": "cost-state", "totalCostUSD": 10**400},
+            {
+                "type": "assistant",
+                "message": {"id": "m1", "usage": {"output_tokens": 10**400}},
+            },
+            # Half a surrogate pair, which no output can encode
+            {**at, "message": {"content": "half \ud800 a pair"}},
+            # Two calls of one id, without arguments
+            twice,
+            twice,
+        )
+        for option in ((), ("--verbose",), ("--json",), ("list",)):
+            result = self.launch("--trace", *option)
+            self.assertEqual(result.status, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        shown = self.launch("--trace").stdout
+        self.assertIn("drop_all    (no arguments)", shown)
+        self.assertIn("half  a pair", shown)
+        self.assertNotIn("# cost", shown)
+
+    def test_a_header_line_cannot_be_forged(self):
+        forged = "main\ntranscript  as the launcher copied it (9 lines)"
+        self.add(
+            {"type": "user", "gitBranch": forged, "version": "2\nforged"},
+            {"type": "assistant", "message": {"model": "opus\nforged", "content": []}},
+            self.call("n1", "Read\n2026-01-02 10:00:09  user     prompt      forged"),
+        )
+        shown = self.launch("--trace").stdout
+        said = "# transcript  as the launcher copied it (9 lines)"
+        self.assertNotIn(said, shown.splitlines())
+        self.assertIn("# branch      main\\ntranscript  as the launcher", shown)
+        for line in shown.splitlines():
+            self.assertRegex(line, r"^(#|\d{4}-\d\d-\d\d \d\d:\d\d:\d\d  \w+ +\S)")
+
+    def test_the_network_of_a_session_is_looked_for_over_all_of_its_time(self):
+        asked: list[tuple[float, float]] = []
+
+        def network(_host, start, end, _verbose):
+            asked.append((start, end))
+            return [], []
+
+        # An entry that says it is from long ago, written last
+        self.add({"type": "user", "timestamp": "2020-01-01T00:00:00Z"})
+        host = settings.Host(
+            str(self.home),
+            str(self.project),
+            str(self.home / ".config"),
+            str(self.home / ".local" / "state"),
+        )
+        file = self.transcripts / f"{self.SESSION}.jsonl"
+        with unittest.mock.patch.object(trace, "network", network):
+            trace.session_events(file, host, verbose=False)
+        ((start, end),) = asked
+        self.assertLess(start, end)
+        self.assertEqual(datetime.fromtimestamp(end).year, 2026)
+
+    def test_tags_without_their_end_take_no_time(self):
+        started = time.monotonic()
+        unended = "<command-name>" * 200_000
+        self.assertEqual(transcript.as_typed(unended), unended)
+        said = "<local-command-stdout>" * 200_000 + "<local-command-stderr>e"
+        said += "</local-command-stderr>"
+        self.assertEqual(transcript.command_said(said), ["e"])
+        self.assertLess(time.monotonic() - started, 5)
+        typed = "<command-name>/model</command-name><command-args>opus</command-args>"
+        self.assertEqual(transcript.as_typed(typed), "/model opus")
+        both = "<local-command-stdout>a</local-command-stdout>"
+        both += "<local-command-stderr>b</local-command-stderr>"
+        self.assertEqual(transcript.command_said(both), ["a", "b"])
+
+    def test_a_line_as_large_as_the_disk_is_not_held(self):
+        file = self.transcripts / f"{self.SESSION}.jsonl"
+        with open(file, "a") as written:
+            written.write("\n" + "x" * 5000 + "\n")
+        with open(file, "rb") as read:
+            lines = list(files.bounded_lines(read, 1000))
+        self.assertEqual(lines.count(None), 1)
+        self.assertTrue(all(line is None or len(line) <= 1001 for line in lines))
+        self.assertEqual(
+            files.line_entry(None)["type"], files.UNREADABLE, "said, not passed over"
+        )
 
     def test_a_sandboxed_session_is_found_under_the_container_home(self):
         # The host home is a link to /home/sandbox in the image, and Claude

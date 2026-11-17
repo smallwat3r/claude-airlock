@@ -28,11 +28,11 @@ from .capture import cut_short, session_capture
 from .door_events import door_events
 from .egress_log import logged_requests, requests_made
 from .events import flat
-from .files import json_object, open_locked, private_dir
+from .files import UNREADABLE, json_object, open_locked, private_dir
 from .pcap import Capture
 from .processes import session_record
 from .projects import project_root, session_transcripts, subagent_session
-from .recorder import compare
+from .recorder import compare, copied_at, removed_transcripts
 from .records import NetSession, recorded_sessions
 from .settings import EGRESS_PORT, Fatal, Host
 from .shown import reached, size
@@ -190,19 +190,30 @@ def transcript_lines(host: Host, start: float) -> list[str]:
         if modified(path) < start:
             continue
         project_dir = project_root(path, host)
+        entries = read_entries(path)
         written.extend(
-            flat(file)
-            for file in written_paths(read_entries(path))
-            if outside(file, project_dir)
+            flat(file) for file in written_paths(entries) if outside(file, project_dir)
         )
         compared = compare(host, path)
+        # A subagent's is named by its session
+        session = subagent_session(path)
+        whose = "a subagent of " if session else ""
+        named = f"the transcript of {whose}{flat((session or path).stem)[:8]}"
         if compared.gone or compared.rewritten:
-            # A subagent's is named by its session
-            session = subagent_session(path)
-            whose = "a subagent of " if session else ""
             lines.append(
-                f"the transcript of {whose}{flat((session or path).stem)[:8]} was changed:"
+                f"{named} was changed:"
                 f" {len(compared.gone)} lines the launcher copied are gone or altered"
+            )
+        unreadable = sum(entry.get("type") == UNREADABLE for entry in entries)
+        if unreadable:
+            lines.append(f"{named} has {unreadable} lines that cannot be read")
+        if compared.cut_short:
+            lines.append(f"{named} was not all copied, it is past the launcher's limit")
+    for path in removed_transcripts(host):
+        if copied_at(host, path) >= start:
+            lines.append(
+                f"the transcript of {flat(path.stem)[:8]} was removed, --trace"
+                " shows the launcher's copy of it"
             )
     return [
         *listed("written outside the project:", list(dict.fromkeys(written))),
@@ -236,6 +247,10 @@ def report_session(host: Host, session: str, start: float) -> None:
         lines = session_digest(host, session, start)
     except (OSError, Fatal):
         return
+    except Exception as problem:  # noqa: BLE001
+        # What it reads is a session's to write. Said, and the check that
+        # follows is still made.
+        lines = [f"this could not be worked out: {flat(repr(problem))[:200]}"]
     if lines:
         print(
             "claude-docker: of this session, claude-docker --trace has the rest:",

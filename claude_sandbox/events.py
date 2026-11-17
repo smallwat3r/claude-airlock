@@ -13,9 +13,10 @@ import re
 from dataclasses import dataclass
 
 # C0 and C1 controls except tab and newline, and the bidi overrides: a
-# transcript could otherwise drive the terminal or reorder what is shown
+# transcript could otherwise drive the terminal or reorder what is shown.
+# Half a surrogate pair too, which JSON can hold and no output can write.
 _BIDI = "".join(map(chr, [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]))
-_UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f" + _BIDI + "]")
+_UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff" + _BIDI + "]")
 # Of the label a header line starts with: session, network, day, chat...
 LABEL_WIDTH = 12
 

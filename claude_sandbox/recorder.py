@@ -28,6 +28,7 @@ import contextlib
 import glob
 import hashlib
 import os
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -36,8 +37,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .background import in_background
-from .files import json_object, open_locked, open_plain, private_dir
-from .projects import session_transcripts, subagent_session
+from .files import bounded_lines, line_entry, open_locked, open_plain, private_dir
+from .projects import (
+    SUBAGENTS_DIR,
+    session_transcripts,
+    subagent_session,
+    transcript_dirs,
+)
 from .settings import Host
 
 # Seconds between two looks at the transcripts
@@ -133,6 +139,9 @@ class Copier:
         self._since = since
         # How long each transcript was when the session started
         self._lengths = {path: length(path) for path in session_transcripts(host)}
+        # The looks at a transcript that failed, and why the last one did
+        self.failed = 0
+        self.problem = ""
 
     def written_to(self, transcript: Path) -> bool:
         """Whether a transcript was written to since the session started:
@@ -155,9 +164,11 @@ class Copier:
             if self.written_to(transcript):
                 try:
                     catch_up(transcript, copy_path(self._host, transcript))
-                except OSError:
-                    # A full disk or the like: the session goes on without
-                    continue
+                except OSError as problem:
+                    # A full disk or the like: the session goes on
+                    # without, and it is said once it is over
+                    self.failed += 1
+                    self.problem = str(problem)
 
 
 def let_go_of_old_copies(host: Host) -> None:
@@ -192,19 +203,75 @@ def transcripts_copied(host: Host) -> Iterator[None]:
     """While a session runs, keep the launcher's copies of the project's
     transcripts up with them."""
     let_go_of_old_copies(host)
-    with in_background(keep_copying, Copier(host, time.time() - 1)):
-        yield
+    copier = Copier(host, time.time() - 1)
+    try:
+        with in_background(keep_copying, copier):
+            yield
+    finally:
+        if copier.failed:
+            # What was written and taken back meanwhile is not in the
+            # copy, and a session can be what made the copying fail
+            print(
+                "claude-docker: the transcripts could not be copied at"
+                f" {copier.failed} looks, what the session took out of them"
+                f" meanwhile is not known: {copier.problem}",
+                file=sys.stderr,
+            )
 
 
 def lines_of(path: Path) -> list[bytes]:
     """The whole lines of a transcript or of a copy, none for one that
     cannot be read. A last line without its end is still being written,
-    or was when the copy was made."""
+    or was when the copy was made. Not a line too long to be held, see
+    bounded_lines: a trace shows that one as it is found."""
     file = open_plain(path)
     if file is None:
         return []
     with file:
-        return [line for line in file if line.endswith(b"\n")]
+        return [line for line in bounded_lines(file) if line and line.endswith(b"\n")]
+
+
+def removed_transcripts(host: Host) -> list[Path]:
+    """The transcripts of the project's sessions the launcher has a copy
+    of and that are no longer there, each by where it was: a session can
+    remove its own, and with it everything that lists the transcripts
+    would no longer know of the session."""
+    removed = []
+    for directory in transcript_dirs(host):
+        for copy in Path(host.transcript_copies_dir, directory.name).glob("*.jsonl"):
+            transcript = directory / copy.name
+            if copy.is_file() and not plain_file(transcript):
+                removed.append(transcript)
+    return removed
+
+
+def removed_subagents(host: Host, transcript: Path) -> list[Path]:
+    """The same of the subagents of one session, by its transcript."""
+    copies = copy_path(host, transcript.with_suffix("") / SUBAGENTS_DIR / "any").parent
+    return [
+        subagent
+        for copy in sorted(copies.glob("agent-*.jsonl"))
+        for subagent in [transcript.with_suffix("") / SUBAGENTS_DIR / copy.name]
+        if copy.is_file() and not plain_file(subagent)
+    ]
+
+
+def plain_file(path: Path) -> bool:
+    """Whether a transcript is there to be read, see open_plain."""
+    file = open_plain(path)
+    if file is None:
+        return False
+    file.close()
+    return True
+
+
+def copied_at(host: Host, transcript: Path) -> float:
+    """When the launcher last added to its copy of a transcript, 0
+    without one."""
+    try:
+        return copy_path(host, transcript).stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 @dataclass
@@ -220,6 +287,11 @@ class Compared:
     gone: list[dict] = field(default_factory=list)
     # How often it was rewritten shorter while a launcher watched
     rewritten: int = 0
+    # Whether the transcript itself is no longer there
+    removed: bool = False
+    # Whether the copy stopped at its size limit with more to copy: what
+    # the transcript holds past it has nothing to be compared with
+    cut_short: bool = False
 
     def header(self, subagents: int = 0) -> list[str]:
         """The line of a trace that says how far its transcript is to be
@@ -230,12 +302,21 @@ class Compared:
             if subagents:
                 return [f"{name}as they are now, the launcher has not copied them all"]
             return [f"{name}as it is now, the launcher has no copy of it to compare"]
+        stopped = (
+            f"{name}NOT ALL COPIED: the launcher stops at"
+            f" {MOST_COPIED >> 20} MB, what came later cannot be compared"
+        )
+        limit = [stopped] if self.cut_short else []
+        if self.removed and not subagents:
+            said = f"the {self.lines} lines the launcher copied are shown as REMOVED"
+            return [f"{name}REMOVED, it is no longer there: {said}", *limit]
         if not self.gone and not self.rewritten:
-            return [f"{name}as the launcher copied {it} ({self.lines} lines)"]
+            said = f"{name}as the launcher copied {it} ({self.lines} lines)"
+            return limit or [said]
         said = f"{len(self.gone)} lines the launcher copied are gone or altered"
         if self.rewritten:
             said += f", rewritten {self.rewritten} times"
-        return [f"{name}CHANGED: {said}, they are shown as REMOVED"]
+        return [f"{name}CHANGED: {said}, they are shown as REMOVED", *limit]
 
     def with_(self, other: Compared) -> Compared:
         """The two as one: copied when both are, and what either lost."""
@@ -244,6 +325,8 @@ class Compared:
             self.lines + other.lines,
             self.gone + other.gone,
             self.rewritten + other.rewritten,
+            self.removed or other.removed,
+            self.cut_short or other.cut_short,
         )
 
 
@@ -257,6 +340,10 @@ def compare(host: Host, transcript: Path) -> Compared:
     found = Compared(bool(copied), len(copied), rewritten=len(copies) - 1)
     if not copied:
         return found
+    found.removed = not plain_file(transcript)
+    found.cut_short = (length(copy) or 0) >= MOST_COPIED and (
+        length(transcript) or 0
+    ) > (length(copy) or 0)
     current = {hashlib.sha256(line).digest() for line in lines_of(transcript)}
     seen: set[bytes] = set()
     for line in copied:
@@ -264,7 +351,8 @@ def compare(host: Host, transcript: Path) -> Compared:
         if digest in current or digest in seen:
             continue
         seen.add(digest)
-        entry = json_object(line)
+        # One that holds no entry is said to be gone too, as that
+        entry = line_entry(line)
         if entry:
             found.gone.append(entry)
     return found

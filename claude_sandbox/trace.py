@@ -36,17 +36,25 @@ from .capture import cut_short, session_capture
 from .door_events import door_events
 from .egress_log import ProxyRequest, logged_requests, requests_made
 from .events import Event, Who, clean, flat, labelled
+from .files import UNREADABLE
 from .layout import Layout, event_json, shown_what, went_wrong
 from .pcap import Capture, Connection, Flow, Lookup, Request
 from .processes import ProcessRecord, session_record, shown_lineage
 from .projects import project_root, subagent_files
-from .recorder import Compared, compare
+from .recorder import (
+    Compared,
+    compare,
+    copied_at,
+    removed_subagents,
+    removed_transcripts,
+)
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
 from .shown import over, reached, size, verdict
 from .transcript import (
     call_label,
     entry_times,
+    modified,
     prompts,
     read_entries,
     session_files,
@@ -571,9 +579,29 @@ def removed_events(gone: list[dict], project_dir: str, verbose: bool) -> list[Ev
     no longer has, each said to have been removed."""
     events = transcript_events(gone, project_dir, verbose)
     for event in events:
-        event.details[0] += "  REMOVED FROM THE TRANSCRIPT"
+        first = event.details[0] if event.details else ""
+        event.details[:1] = [f"{first}  REMOVED FROM THE TRANSCRIPT".lstrip()]
         event.fields["removed"] = True
     return events
+
+
+def traced_files(host: Host) -> list[Path]:
+    """The transcripts a trace can be of, the latest session first: the
+    project's, and those the launcher has a copy of that are no longer
+    there, each by where it was. A session that removed its transcript is
+    then still the session it was, with what the launcher copied of it."""
+    removed = removed_transcripts(host)
+    try:
+        files = session_files(host)
+    except Fatal:
+        if not removed:
+            raise
+        files = []
+
+    def last_written(path: Path) -> float:
+        return modified(path) or copied_at(host, path)
+
+    return sorted([*files, *removed], key=last_written, reverse=True)
 
 
 def subagents_header(compared: list[Compared]) -> list[str]:
@@ -595,22 +623,41 @@ def session_events(
     project_dir = project_root(path, host)
     compared = compare(host, path)
     # What its subagents did is in a transcript of each, see subagent_files
-    subagents = [(read_entries(f), compare(host, f)) for f in subagent_files(path)]
-    theirs = [entry for of_one, _ in subagents for entry in of_one]
-    times = [when.timestamp() for when in entry_times(entries)]
+    of_subagents = [*subagent_files(path), *removed_subagents(host, path)]
+    subagents = [(read_entries(f), compare(host, f)) for f in of_subagents]
+    # What a transcript that is no longer there held, as it was copied
+    entries_known = entries or compared.gone
+    theirs = [entry for of_one, copied in subagents for entry in of_one or copied.gone]
+    # With what was taken out: when the session ran is not what is left
+    # of it. By the earliest and the latest, the order is the session's.
+    times = [
+        when.timestamp() for when in entry_times([*entries, *compared.gone, *theirs])
+    ]
+    unreadable = sum(e.get("type") == UNREADABLE for e in [*entries, *theirs])
     net_lines: list[str] = []
     net_events: list[Event] = []
     door_rows: list[tuple[str, str]] = []
     door_uses: list[Event] = []
     if times:
-        start, end = times[0], times[-1]
+        start, end = min(times), max(times)
         net_lines, net_events = network(host, start, end, verbose)
         door_rows, door_uses = door_events(host, start, end)
     header = [
-        labelled("session", f"{flat(path.stem)}  {title(entries)}"),
+        labelled("session", f"{flat(path.stem)}  {title(entries_known)}"),
         *compared.header(),
         *subagents_header([copied for _, copied in subagents]),
-        *summary(entries + theirs, project_dir),
+        *(
+            [
+                labelled(
+                    "transcript",
+                    f"{unreadable} lines CANNOT BE READ, shown as UNREADABLE:"
+                    " what was done there is not told",
+                )
+            ]
+            if unreadable
+            else []
+        ),
+        *summary(entries_known + theirs, project_dir),
         *net_lines,
         *(labelled(door, used) for door, used in door_rows),
         *chosen.header(),
@@ -653,7 +700,7 @@ def render_json(path: Path, host: Host, chosen: Filter = EVERYTHING) -> str:
     return "".join(event_json(path.stem, event) + "\n" for event in events)
 
 
-def session_rows(files: list[Path]) -> list[tuple[Path, str]]:
+def session_rows(files: list[Path], host: Host | None = None) -> list[tuple[Path, str]]:
     """Each session with the line that tells of it: when it last did
     something, the start of its id (enough to name it to --trace), its
     size and its title. In the order of that time, the latest first, and
@@ -661,12 +708,17 @@ def session_rows(files: list[Path]) -> list[tuple[Path, str]]:
     rows = []
     for path in files:
         entries = read_entries(path)
+        removed = ""
+        if not entries and host is not None:
+            # No longer there: as the launcher copied it, and said so
+            entries = compare(host, path).gone
+            removed = "REMOVED  " if entries else ""
         times = entry_times(entries)
         last = max(times) if times else None
         when = f"{last:%Y-%m-%d %H:%M}" if last else ""
         line = (
             f"{when:16}  {flat(path.stem)[:8]}  {len(prompts(entries)):3d} prompts"
-            f"  {len(tool_calls(entries)):4d} calls  {title(entries)}"
+            f"  {len(tool_calls(entries)):4d} calls  {removed}{title(entries)}"
         )
         rows.append((last.timestamp() if last else 0.0, path, line))
     # Stable: the files come the last written first
@@ -674,9 +726,9 @@ def session_rows(files: list[Path]) -> list[tuple[Path, str]]:
     return [(path, line) for _, path, line in rows]
 
 
-def list_sessions(files: list[Path]) -> str:
+def list_sessions(files: list[Path], host: Host | None = None) -> str:
     """One line per session, see session_rows."""
-    return "".join(line + "\n" for _, line in session_rows(files))
+    return "".join(line + "\n" for _, line in session_rows(files, host))
 
 
 def show(text: str, colour: bool = False) -> None:
@@ -738,9 +790,9 @@ def trace(host: Host, args: list[str]) -> int:
     Lines, all of it or what --only and --failed choose. "list" lists
     them instead."""
     options, names, chosen = trace_options(args, ("--verbose", "--json"))
-    files = session_files(host)
+    files = traced_files(host)
     if names == ["list"]:
-        show(list_sessions(files))
+        show(list_sessions(files, host))
         return 0
     path = picked_session(files, names[0]) if names else files[0]
     if "--json" in options:

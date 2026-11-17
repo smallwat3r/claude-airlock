@@ -43,7 +43,7 @@ through your pager.
 | `3fa9` | The session whose id starts so, instead of the latest |
 | `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process |
 | `--only bash,net` | The events of the kinds named, by what the `what` column says |
-| `--failed` | What went wrong: a failed call, a write outside the project, a refused request or connection, a lookup that stands out, what was taken out of the transcript |
+| `--failed` | What went wrong: a failed call, a write outside the project, a refused request or connection, a lookup that stands out, what was taken out of the transcript, a line of it that cannot be read |
 | `--json` | JSON Lines, see [As JSON](#as-json) |
 | `--follow` | The sessions as they run, see [Following a session](#following-a-session) |
 
@@ -52,7 +52,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `ssh-agent` or `docker` |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -131,9 +131,17 @@ compares the two. The header says what came of it:
 # transcript  as the launcher copied it (212 lines)
 # transcript  CHANGED: 3 lines the launcher copied are gone or altered, they are shown as REMOVED
 # transcript  as it is now, the launcher has no copy of it to compare
+# transcript  REMOVED, it is no longer there: the 212 lines the launcher copied are shown as REMOVED
+# transcript  NOT ALL COPIED: the launcher stops at 512 MB, what came later cannot be compared
+# transcript  1 lines CANNOT BE READ, shown as UNREADABLE: what was done there is not told
 ```
 
-- The last line is that of a session run outside the sandbox.
+- The third line is that of a session run outside the sandbox.
+- A session that removed its transcript is still listed and traced, from
+  the launcher's copy, for as long as that is kept.
+- A line that holds no entry is not Claude Code's doing: half a line
+  written ahead of an entry makes that entry unreadable. It is shown as
+  `UNREADABLE`, with `--failed` too.
 - The copy is made half a second or so after a line is written. One a
   session takes back within that moment is out of reach.
 - The transcripts of subagents are copied and compared the same way.
@@ -179,6 +187,7 @@ claude-docker: of this session, claude-docker --trace has the rest:
   written outside the project:
     /home/me/.bashrc
   the transcript of 3fa9c0de was changed: 3 lines the launcher copied are gone or altered
+  the transcript of 3fa9c0de was removed, --trace shows the launcher's copy of it
   ssh agent 4 requests, 2 signatures
 ```
 

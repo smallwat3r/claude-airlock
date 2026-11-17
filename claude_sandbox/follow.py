@@ -38,7 +38,7 @@ from .door_events import use_event
 from .doors import read_uses
 from .egress_log import logged_since
 from .events import Event, clean, flat, labelled
-from .files import json_object, open_plain
+from .files import line_entry, open_plain
 from .layout import Layout, event_json
 from .pcap import Capture, PcapReader, take_frames
 from .projects import project_root, subagent_files, transcript_files
@@ -104,14 +104,15 @@ class TranscriptTail:
         """The events of what was written since the last time."""
         events: list[Event] = []
         for line in self._new_lines():
-            entry = json_object(line)
+            entry = line_entry(line)
             if entry:
                 events += self._events(entry)
         return events
 
-    def _new_lines(self) -> Iterator[bytes]:
+    def _new_lines(self) -> Iterator[bytes | None]:
         """The lines completed since the last time, none while it is not
-        a plain file that can be read (see open_plain)."""
+        a plain file that can be read (see open_plain). None in the place
+        of a line that was too long to hold."""
         file = open_plain(self.path)
         if file is None:
             return
@@ -131,9 +132,10 @@ class TranscriptTail:
                     # The end of the line that was too long
                     del lines[0]
                     self._dropping = False
+                yield from lines
                 if len(self._partial) > LINE_LIMIT:
                     self._partial, self._dropping = b"", True
-                yield from lines
+                    yield None
 
     def _events(self, entry: dict) -> list[Event]:
         if entry.get("type") == "ai-title":

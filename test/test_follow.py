@@ -459,17 +459,27 @@ class TranscriptTailTest(unittest.TestCase):
         self.file.write_text(whole[:20])
         self.assertEqual(self.said(tail), [])
         self.file.write_text(whole + "{not json}\n[1]\n" + whole)
-        self.assertEqual(self.said(tail), ["hello", "hello"])
+        # A whole line that holds no entry is not Claude Code's doing
+        self.assertEqual(
+            self.said(tail),
+            [
+                "hello",
+                "UNREADABLE line of the transcript: {not json}",
+                "UNREADABLE line of the transcript: [1]",
+                "hello",
+            ],
+        )
         self.assertEqual(self.said(tail), [])
 
-    def test_a_line_too_long_to_hold_is_dropped(self):
+    def test_a_line_too_long_to_hold_is_dropped_and_said_to_be(self):
         tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
         with mock.patch.object(follow, "LINE_LIMIT", 100):
             add(self.file, prompt("x" * 500))
             # Still without its end, which the next look finds
             with open(self.file, "a") as transcript:
                 transcript.write(json.dumps(prompt("y" * 500))[:400])
-            self.assertEqual(self.said(tail), ["x" * 200 + "..."])
+            too_long = "UNREADABLE line of the transcript: (a line too long to read)"
+            self.assertEqual(self.said(tail), ["x" * 200 + "...", too_long])
             with open(self.file, "a") as transcript:
                 transcript.write("the rest of it\n")
             add(self.file, prompt("after"))
