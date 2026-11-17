@@ -1040,6 +1040,26 @@ class AskingTest(unittest.TestCase):
         asker.ask = ask  # type: ignore[method-assign]
         return asker
 
+    def test_a_line_entered_before_a_question_could_be_read_is_no_answer(self):
+        screen = console.Console("/nowhere")
+        # A shell buffer of Emacs: someone types, and what is not known
+        screen.interactive, screen._redrawn = True, False
+        asker = asking.Asker(page(), screen, "/p", lambda: False, lambda: None)
+        answers: list[str | None] = []
+        asked = threading.Thread(target=lambda: answers.append(asker.ask("allow? ")))
+        with written() as lines:
+            asked.start()
+            while not asker.asking:
+                time.sleep(0.01)
+            # Typed for claude, entered as the question came
+            self.assertFalse(asker.take("yes"))
+            self.assertTrue(asker.asking)
+            with unittest.mock.patch.object(asking, "TOO_SOON", 0.0):
+                self.assertTrue(asker.take("y"))
+            asked.join(5)
+        self.assertEqual(answers, ["y"])
+        self.assertIn("came before the question could be read", "".join(lines))
+
     def test_an_answer_names_options_by_number_or_is_taken_as_said(self):
         options = [{"label": "Red"}, {"label": "Blue"}]
         self.assertEqual(asking.chosen("2", options), "Blue")

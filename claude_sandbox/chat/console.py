@@ -458,6 +458,13 @@ class Console:
             sys.stdout.flush()
             self._on_screen = True
 
+    @property
+    def sees_typing(self) -> bool:
+        """Whether what is being typed is known, see typed: not in a
+        shell buffer of Emacs, which keeps the line to itself until it is
+        entered."""
+        return self._redrawn
+
     def typed(self) -> str:
         """What the user has typed of the line being read, as far as that
         is known: at a terminal that is redrawn."""

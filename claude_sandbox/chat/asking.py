@@ -34,6 +34,11 @@ NAME_WIDTH = 80
 RULE_WIDTH = 500
 # Seconds between two looks at whether there is still someone to ask
 LOOK_EVERY = 0.2
+# Where what is being typed cannot be seen (see sees_typing of Console), a
+# line entered sooner than this after a question was put was typed before
+# it could be read: it is not the answer, a yes among them would allow a
+# tool unseen
+TOO_SOON = 1.0
 # In colour, of the diff of an edit shown whole, the lines it takes out
 # and those it puts in, by how they start
 DIFF_STYLES = {"  diff: -": "31", "  diff: +": "32", "  diff: @": "36"}
@@ -47,6 +52,7 @@ class Question:
         # Whether a line was being typed when the question was put: that
         # line was meant as a prompt, and is not taken for the answer
         self.stale = stale
+        self.put = time.monotonic()
         self.answered = threading.Event()
         # None for no answer: the input ended, or Ctrl-C
         self.said: str | None = None
@@ -138,6 +144,13 @@ class Asker:
             return False
         if question.stale:
             question.stale = False
+            return False
+        unseen = self._console.interactive and not self._console.sees_typing
+        if unseen and time.monotonic() - question.put < TOO_SOON:
+            early = "that line came before the question could be read"
+            self._page.say(
+                [labelled("chat", f"{early}, it is not taken for the answer")]
+            )
             return False
         # Over before the next line is read, and before its answer wakes
         # the thread that puts the next question: that one must stay
