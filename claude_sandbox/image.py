@@ -53,6 +53,11 @@ def text_lines(text: str) -> list[str]:
     return lines[:-1] if lines[-1] == "" else lines
 
 
+def marked(text: str, marker: str) -> list[str]:
+    """What follows the marker on each line of a part that starts with it."""
+    return [line[len(marker) :] for line in text_lines(text) if line.startswith(marker)]
+
+
 def available_features(host: Host) -> list[str]:
     names = set()
     for directory in host.feature_dirs:
@@ -104,9 +109,8 @@ def with_required(names: list[str], host: Host) -> list[str]:
             continue
         found.add(name)
         text = feature_file(name, host).read_text(encoding="utf-8")
-        for line in text_lines(text):
-            if line.startswith(REQUIRES_MARKER):
-                pending.extend(line[len(REQUIRES_MARKER) :].split())
+        for required in marked(text, REQUIRES_MARKER):
+            pending.extend(required.split())
     return sorted(found)
 
 
@@ -114,11 +118,9 @@ def language_servers(parts: list[Path], texts: list[str]) -> dict:
     """The language servers the parts declare, by name."""
     servers: dict = {}
     for part, text in zip(parts, texts):
-        for line in text_lines(text):
-            if not line.startswith(LSP_MARKER):
-                continue
+        for line in marked(text, LSP_MARKER):
             try:
-                declared = json.loads(line[len(LSP_MARKER) :])
+                declared = json.loads(line)
             except ValueError as error:
                 raise Fatal(
                     f'{part}: a "{LSP_MARKER}" line is not JSON: {error}'
@@ -127,6 +129,53 @@ def language_servers(parts: list[Path], texts: list[str]) -> dict:
                 raise Fatal(f'{part}: a "{LSP_MARKER}" line is not a JSON object')
             servers.update(declared)
     return servers
+
+
+def lsp_plugin(servers: dict) -> str:
+    """The manifest of the plugin that gives a session the language
+    servers of its image."""
+    manifest = {
+        "name": "claude-sandbox-lsp",
+        "description": "The language servers built into this sandbox image",
+        "version": "1.0.0",
+        "lspServers": servers,
+    }
+    return json.dumps(manifest, indent=2)
+
+
+def sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
+    """The CLAUDE.md of the image: the template, with the tools the parts
+    say they bring in place of its placeholder bullet, which is there to
+    be seen when the template is read on its own. The list is made of the
+    "# claude-feat-md: " lines of the parts, so it always matches what is
+    built."""
+    for part, text in zip(parts, texts):
+        if marked(text, FORMER_CLAUDE_MD_MARKER):
+            raise Fatal(
+                f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'
+                f' "{CLAUDE_MD_MARKER}", rename them'
+            )
+    template = Path(DOCKERFILE_DIR, "CLAUDE-sandbox.md").read_text(encoding="utf-8")
+    lines = [
+        line for line in text_lines(template) if not line.startswith("- _Placeholder:")
+    ]
+    lines += ["- " + tool for text in texts for tool in marked(text, CLAUDE_MD_MARKER)]
+    return "\n".join(lines).rstrip("\n")
+
+
+def image_tag(
+    host: Host, dockerfile: str, claude_md: str, context_dirs: dict[str, Path]
+) -> str:
+    """The tag of the image: a hash of everything it is built from, the
+    files of the build context and the host home included."""
+    # The plugin is made of lines of the Dockerfile, so it is in the tag too
+    content = f"{host.home}\n{dockerfile}\n{claude_md}\n"
+    digest = hashlib.sha256(content.encode())
+    for name, directory in context_dirs.items():
+        for file in sorted(path for path in directory.rglob("*") if path.is_file()):
+            digest.update(f"{name}/{file.relative_to(directory)}\n".encode())
+            digest.update(file.read_bytes())
+    return f"{IMAGE_NAME}:{digest.hexdigest()[:12]}"
 
 
 def prepare_image(settings: Settings, host: Host) -> Image:
@@ -156,46 +205,10 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     }
     texts = [part.read_text(encoding="utf-8") for part in parts]
     dockerfile = "".join(text.rstrip("\n") + "\n\n" for text in texts)
-
-    for part, text in zip(parts, texts):
-        if any(line.startswith(FORMER_CLAUDE_MD_MARKER) for line in text_lines(text)):
-            raise Fatal(
-                f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'
-                f' "{CLAUDE_MD_MARKER}", rename them'
-            )
-
-    # The template ends with a placeholder bullet, visible when the file is
-    # read on its own, the generated tool list takes its place. The list is
-    # the "# claude-feat-md: " lines of the parts, so it always matches what is
-    # built.
-    template = Path(DOCKERFILE_DIR, "CLAUDE-sandbox.md").read_text(encoding="utf-8")
-    marker = CLAUDE_MD_MARKER
-    claude_md_lines = [
-        line for line in text_lines(template) if not line.startswith("- _Placeholder:")
-    ] + [
-        "- " + line[len(marker) :]
-        for text in texts
-        for line in text_lines(text)
-        if line.startswith(marker)
-    ]
-    claude_md = "\n".join(claude_md_lines).rstrip("\n")
+    claude_md = sandbox_claude_md(parts, texts)
     servers = language_servers(parts, texts)
-    manifest = {
-        "name": "claude-sandbox-lsp",
-        "description": "The language servers built into this sandbox image",
-        "version": "1.0.0",
-        "lspServers": servers,
-    }
-    plugin = json.dumps(manifest, indent=2)
-
-    # The plugin is made of lines of the Dockerfile, so it is in the tag too
-    content = f"{host.home}\n{dockerfile}\n{claude_md}\n"
-    digest = hashlib.sha256(content.encode())
-    for name, directory in context_dirs.items():
-        for file in sorted(path for path in directory.rglob("*") if path.is_file()):
-            digest.update(f"{name}/{file.relative_to(directory)}\n".encode())
-            digest.update(file.read_bytes())
-    tag = f"{IMAGE_NAME}:{digest.hexdigest()[:12]}"
+    tag = image_tag(host, dockerfile, claude_md, context_dirs)
+    plugin = lsp_plugin(servers)
     return Image(tag, dockerfile, claude_md, context_dirs, plugin, bool(servers))
 
 
