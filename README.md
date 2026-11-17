@@ -21,8 +21,8 @@ What you get:
   removed. `--trace` shows it all.
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook say.
-- **Line mode.** Claude Code without its full-screen UI: a prompt, and
-  under it what the session does, the network included.
+- **Line mode.** Claude Code with a simpler UI: a prompt, and above it
+  what the session does, the network included.
 - **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
   each off until you switch it on.
 
@@ -232,9 +232,9 @@ reached on the network. `--trace --follow` shows it as it happens. See
 
 ## Line mode
 
-A session runs in line mode by default: Claude Code without its
-full-screen UI. You get a prompt and, under it, what the session does in
-the lines of `--trace`, the network included. Lines are only added, never
+A session runs in line mode by default: Claude Code with a simpler UI.
+You get a prompt and, above it, what the session does in the lines of
+`--trace`, the network included. Lines are only added, never
 redrawn, so it works in a terminal, an Emacs shell buffer or a file alike.
 `CLAUDE_DOCKER_LINE_MODE=0` gives the full-screen UI back. See
 [docs/line-mode.md](docs/line-mode.md).
