@@ -327,6 +327,33 @@ class FollowNetworkTest(LauncherTest):
             tails[0], ["exec", self.SIDECAR, "tail", "-c", "+1", "/capture.pcap"]
         )
 
+    def test_how_a_session_is_doing_shows_as_its_watcher_says_it(self):
+        about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
+        said = self.work / "said"
+        lines = [
+            # From before the following began, and not about its health
+            {"t": self.now - 60, "health": {"mem": [1, 2**34]}},
+            {"t": self.now + 60, "pid": 5, "ppid": 1, "exe": "/bin/x", "argv": ["x"]},
+            {"t": self.now + 60, "health": {"mem": [2**31, 2**34], "cpu": 12.0}},
+            {"t": self.now + 61, "oom": 1, "gone": [[812, 2**33, "node"]]},
+            "not a line of it",
+        ]
+        said.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        following = Following(
+            self,
+            FAKE_PS=f"claude-proj.procs\t{json.dumps(about)}",
+            FAKE_PROXY_LOG=str(said),
+        )
+        shown = following.until("OUT OF MEMORY")
+        self.assertEqual(shown.count("sandbox  health"), 2)
+        self.assertIn("sandbox  health      mem 2g of 16g (12%)  cpu 12%", shown)
+        self.assertIn("gone since: [812] node 8g", shown)
+        # Asked of the watcher from outside, nothing is run next to the session
+        asked = [c for c in self.calls() if c[:1] == ["logs"]]
+        self.assertEqual(asked[0][2], "claude-proj.procs")
+        self.assertRegex(asked[0][1], r"^--since=\d+\.\d{3}$")
+        self.assertEqual([c for c in self.calls() if c[:1] == ["exec"]], [])
+
     def test_what_becomes_of_a_connection_shows_when_it_does(self):
         captured = self.work / "capture.pcap"
         there = "198.51.100.7"

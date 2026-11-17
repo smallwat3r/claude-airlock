@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import ClassVar
 
 from .background import in_background, wait_for
-from .docker import container_running, docker, mount_arg
+from .docker import container_running, docker, docker_output, mount_arg
+from .health import Ended, Sample, read_health
 from .records import NetSession
 from .settings import Host, Settings
 from .sidecar import Sidecar
@@ -107,6 +108,34 @@ def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watch
         stderr=subprocess.DEVNULL,
     )
     return watcher
+
+
+def running_watchers(project_dir: str) -> list[tuple[str, float]]:
+    """The watchers of the sessions of a project that are running now, as
+    the name of each and when it started."""
+    return [
+        (watcher.name, watcher.start)
+        for watcher in Watcher.listed()
+        if watcher.project == project_dir
+    ]
+
+
+def said_since(watcher: str, since: float) -> list[Sample | Ended]:
+    """How a running session was doing since a time, as its watcher said
+    it aloud: the record itself stays in the sidecar until the session is
+    over, and a command run there to read it would be noted as one of the
+    session's. Nothing when it cannot be asked."""
+    found = []
+    for line in docker_output("logs", f"--since={since:.3f}", watcher).splitlines():
+        try:
+            said = json.loads(line)
+            when = float(said["t"])
+            health = read_health(when, said) if when > since else None
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            continue
+        if health:
+            found.append(health)
+    return found
 
 
 def watcher_started(record: Path) -> bool:
@@ -229,6 +258,10 @@ class ProcessRecord:
     # How often the session could not start a process for its limit of
     # them, as last noted
     process_limit: int = 0
+    # How the session was doing every so often, and each time a process
+    # of it was ended for want of memory, see health.py
+    samples: list[Sample] = field(default_factory=list)
+    ended: list[Ended] = field(default_factory=list)
     # Whether it stopped at its size limit, and whether it could not see
     # which process holds a socket
     full: bool = False
@@ -248,6 +281,12 @@ class ProcessRecord:
             elif "limit" in said:
                 if said["limit"] == "pids":
                     self.process_limit = max(self.process_limit, int(said["hits"]))
+            elif "health" in said or "oom" in said:
+                health = read_health(when, said)
+                if isinstance(health, Sample):
+                    self.samples.append(health)
+                elif health:
+                    self.ended.append(health)
             elif "listen" in said:
                 pids = tuple(int(pid) for pid in said["pids"])
                 self.listeners.append(

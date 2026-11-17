@@ -52,7 +52,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `listen`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -169,6 +169,39 @@ With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
 missed. The session can neither stop it nor reach its record.
 
+The same sidecar notes how the session is doing (`health`), every 30
+seconds: the memory it holds, the CPU it used since the line before (100%
+is one CPU), its processes, any tmpfs that is half full or more, and its
+largest process. The figures are those of the container's cgroup, read
+from outside the session.
+
+```
+sandbox  health  mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512  top: [812] node 2g
+sandbox  health  ALMOST OUT OF memory  mem 15g of 16g (93%)  cpu 96%  pids 91 of 512  waited for: memory 35%  top: [812] node 13g
+sandbox  health  OUT OF MEMORY, a process was ended for it  gone since: [812] node 14g
+```
+
+- A line comes out of turn when the session first uses 70% of its
+  memory, its processes or a tmpfs (`running low on`), and 90% (`ALMOST
+  OUT OF`). At 90%, and when it spent a tenth of the time waiting for
+  memory (`STALLED`), the line is one of those `--failed` keeps.
+- `waited for` is the share of the time something in the session stood
+  still for want of memory, CPU or disk, as the kernel counts it. High
+  use alone is often harmless, this says whether it hurt.
+- `held back` is the time the session was slowed at `CLAUDE_DOCKER_CPUS`.
+- When the kernel ends a process for want of memory it does not say
+  which. `gone since` names the large ones that were there a second
+  before and are not any more: the likely ones, not proof.
+- The header of a trace sums it up: the most memory held, the CPU used
+  on average and at most, and what else came near its limit.
+- `--only health` shows these lines alone, `--json` has every figure,
+  each tmpfs and the three largest processes.
+- Memory is written as `CLAUDE_DOCKER_MEMORY` is, in units of 1024
+  (`3.1g`, `512m`), so a figure can be held against the limit as it was
+  set. What went over the network is in units of 1000 (`14 MB`), as
+  network tools count.
+- It takes cgroup v2. On a host with version 1 the lines are not there.
+
 ## The SSH agent and the Docker socket
 
 A session started with `CLAUDE_DOCKER_SSH_AGENT=1` or `CLAUDE_DOCKER_SOCKET`
@@ -248,6 +281,9 @@ it, so it can be started and stopped at any time.
 - A tool call shows when it is issued, and its result on a line of its own
   when that comes. The two have the same number (`[7]`).
 - The start of a session id follows that session alone.
+- How the session is doing (`health`) shows every 30 seconds, and within
+  about 10 seconds when a limit is near or a process was ended for want
+  of memory. Line mode shows the same lines among what the session does.
 - `--verbose`, `--json`, `--only` and `--failed` work as above:
 
 ```

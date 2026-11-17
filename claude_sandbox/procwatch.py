@@ -13,13 +13,22 @@ missed. What it does note is what was there.
     {"t": 1.6, "port": 40212, "to": "203.0.113.9", "to_port": 443, "pids": [812]}
     {"t": 1.7, "listen": 8080, "on": "0.0.0.0", "pids": [812]}
     {"t": 2.0, "limit": "pids", "hits": 3}
+    {"t": 3.0, "health": {"mem": [used, limit], "cpu": 240.0, "pids": [87, 512], ...}}
+    {"t": 4.0, "oom": 1, "gone": [[812, 9876543210, "node"]]}
     {"t": 9.0, "note": "..."}
 
 The first when a process is first seen or has become another program, the
 second when a connection is, with the processes that hold its socket, the
 third when a socket starts to wait for connections, the fourth when the
 session could not start a process for its limit of them, with how often
-that has been so.
+that has been so. The fifth every HEALTH_EVERY seconds, and out of turn
+when the session comes near a limit: how much of its memory, CPUs,
+processes and tmpfs it uses, how long it was stalled for want of them and
+its largest processes, as its cgroup says (version 2, of version 1 only
+what /proc gives). The sixth when a process of it was ended for want of
+memory, with the large ones that are gone since. Those two are written to
+the watcher's output as well, for what follows a session as it runs: the
+record stays in the sidecar until the session is over.
 
 It runs as root, so that the session, which shares its process namespace,
 can neither stop it nor reach its file. To read what a process of the
@@ -35,6 +44,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 
 # Seconds between two looks
 INTERVAL = 0.04
@@ -69,6 +79,23 @@ LIMITS_EVERY = 1.0
 PIDS_EVENTS = ("sys/fs/cgroup/pids.events", "sys/fs/cgroup/pids/pids.events")
 # Where docker's own resolver waits in every container, not the session's
 RESOLVER = "127.0.0.11"
+# Seconds between two lines on how the session is doing
+HEALTH_EVERY = 30.0
+# The percent of a limit from which the session is near it, and at it. A
+# line is written out of turn when one is first reached, and again once
+# the use has been this much lower in between, no more often than every
+# so many seconds: the session can go up and down as it likes.
+NEAR_LIMIT = (70, 90)
+WELL_BELOW = 5
+OUT_OF_TURN_EVERY = 5.0
+# The largest processes that are named, and the tmpfs that are looked at
+LARGEST = 3
+MOST_TMPFS = 16
+NAME_LENGTH = 64
+# Where a container finds what it uses and may use, under the root of one
+# of its processes (cgroup v2)
+CGROUP = "sys/fs/cgroup"
+PAGE = os.sysconf("SC_PAGE_SIZE")
 _CAPABILITY_VERSION_3 = 0x20080522
 
 
@@ -205,6 +232,241 @@ def limit_hits(pid: int, root: str = "/proc") -> int | None:
     return None
 
 
+def keyed(path: str) -> dict[str, int]:
+    """A file of names with a number each, a line for each."""
+    found = {}
+    for line in read(path).decode("ascii", "replace").splitlines():
+        name, _, value = line.partition(" ")
+        if value.isdigit():
+            found[name] = int(value)
+    return found
+
+
+def stalled(path: str) -> int:
+    """For how many microseconds something of the session waited for what
+    the file is about, since it started (the kernel's pressure files)."""
+    for line in read(path).decode("ascii", "replace").splitlines():
+        if line.startswith("some "):
+            return int(line.rpartition("total=")[2])
+    raise ValueError(path)
+
+
+def limit(said: str) -> int | None:
+    """A limit as a cgroup file has it, none for one that is not set."""
+    return None if said == "max" else int(said)
+
+
+def session_tmpfs(mounts: str) -> list[str]:
+    """Where the session has a tmpfs to write to, by the list of what one
+    of its processes has mounted: those docker mounts for it, not the
+    kernel's own under /proc, /sys and /dev. But /dev/shm, which programs
+    fill."""
+    found = []
+    for line in read(mounts).decode("utf-8", "replace").splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[2] != "tmpfs":
+            continue
+        place = parts[1]
+        kernels = place.startswith(("/proc", "/sys", "/dev")) and place != "/dev/shm"
+        # A space in a path is written as its number there, none of
+        # these has one
+        if not kernels and "\\" not in place:
+            found.append(place)
+    return found[:MOST_TMPFS]
+
+
+def percent(used: float, of: float | None) -> int | None:
+    return int(100 * used / of) if of else None
+
+
+class Health:
+    """Reads how the session is doing from the cgroup of its container
+    and from /proc. Each figure on its own: what cannot be read (another
+    kernel, cgroup v1) is left out, the rest is still told. Given what
+    it notes a line with, and what says how a process is called."""
+
+    def __init__(
+        self,
+        note: Callable[..., None],
+        name_of: Callable[[int], str],
+        proc: str = "/proc",
+    ) -> None:
+        self._note = note
+        self._name_of = name_of
+        self._proc = proc
+        # What the counters that only grow said at the last line, and when
+        self._counted: dict[str, int] = {}
+        self._counted_at = 0.0
+        self._said_at = 0.0
+        self._out_of_turn_at = 0.0
+        # How near each limit the session was last found: 0, 1 (near) or
+        # 2 (at it), see NEAR_LIMIT
+        self._levels: dict[str, int] = {}
+        # How often a process was ended for want of memory, as last read
+        self._ended: int | None = None
+        # The largest processes as last seen: pid, bytes and name
+        self._largest: list[tuple[int, int, str]] = []
+        # What came nearer a limit and is still to be said
+        self._rose: list[str] = []
+
+    def look(self, pids: list[int], now: float) -> None:
+        if not pids:
+            return
+        first = f"{self._proc}/{min(pids)}"
+        cgroup = f"{first}/root/{CGROUP}"
+        self._look_for_the_ended(cgroup, set(pids))
+        self._largest = self._sized(pids)
+        said, limited = self._used(first, cgroup)
+        self._rose += [name for name in self._risen(limited) if name not in self._rose]
+        rose = self._rose
+        counted = self._count(cgroup)
+        if not self._counted_at:
+            # Nothing to compare with yet, the first line comes next time
+            self._counted, self._counted_at = counted, now
+            return
+        out_of_turn = rose and now - self._out_of_turn_at >= OUT_OF_TURN_EVERY
+        if not out_of_turn and self._said_at and now - self._said_at < HEALTH_EVERY:
+            return
+        said.update(self._since(counted, now))
+        self._counted, self._counted_at, self._said_at = counted, now, now
+        if rose:
+            said["rose"] = rose
+            self._rose = []
+            self._out_of_turn_at = now
+        if self._largest:
+            said["top"] = [list(process) for process in self._largest]
+        self._note(aloud=True, health=said)
+
+    def _look_for_the_ended(self, cgroup: str, pids: set[int]) -> None:
+        """Note that a process was ended for want of memory since the
+        last look, with the large ones that are gone: the kernel ends the
+        one that holds the most, it does not say which."""
+        try:
+            ended = keyed(f"{cgroup}/memory.events").get("oom_kill", 0)
+        except OSError:
+            return
+        if self._ended is not None and ended > self._ended:
+            gone = [list(p) for p in self._largest if p[0] not in pids]
+            self._note(aloud=True, oom=ended, gone=gone)
+        self._ended = ended
+
+    def _sized(self, pids: list[int]) -> list[tuple[int, int, str]]:
+        sized = []
+        for pid in pids:
+            try:
+                pages = int(read(f"{self._proc}/{pid}/statm").split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            if pages:
+                sized.append((pages * PAGE, pid))
+        sized.sort(reverse=True)
+        return [(pid, size, self._name_of(pid)) for size, pid in sized[:LARGEST]]
+
+    def _used(
+        self, first: str, cgroup: str
+    ) -> tuple[dict[str, object], dict[str, tuple[int, int | None]]]:
+        """What the session uses now, as a line says it, and of that what
+        has a limit to be near, each as what is used and the most there
+        can be (none for no limit): memory without what the kernel keeps
+        of files and gives back when asked, processes, and each tmpfs."""
+        said: dict[str, object] = {}
+        limited: dict[str, tuple[int, int | None]] = {}
+        try:
+            held = int(read(f"{cgroup}/memory.current"))
+            cached = keyed(f"{cgroup}/memory.stat").get("inactive_file", 0)
+            most = limit(read(f"{cgroup}/memory.max").decode().strip())
+            limited["memory"] = (max(held - cached, 0), most)
+            said["mem"] = list(limited["memory"])
+        except (OSError, ValueError):
+            pass
+        try:
+            most = limit(read(f"{cgroup}/pids.max").decode().strip())
+            limited["pids"] = (int(read(f"{cgroup}/pids.current")), most)
+            said["pids"] = list(limited["pids"])
+        except (OSError, ValueError):
+            pass
+        try:
+            quota, period = read(f"{cgroup}/cpu.max").decode().split()
+            if quota != "max":
+                said["cpus"] = round(int(quota) / int(period), 2)
+        except (OSError, ValueError):
+            pass
+        tmpfs = {}
+        try:
+            for place in session_tmpfs(f"{first}/mounts"):
+                about = os.statvfs(f"{first}/root{place}")
+                size = about.f_blocks * about.f_frsize
+                limited[place] = (size - about.f_bfree * about.f_frsize, size)
+                tmpfs[place] = list(limited[place])
+        except OSError:
+            pass
+        if tmpfs:
+            said["tmpfs"] = tmpfs
+        return said, limited
+
+    def _risen(self, limited: dict[str, tuple[int, int | None]]) -> list[str]:
+        """What the session has come nearer a limit of than it was, by
+        name: memory, pids, or the place of a tmpfs."""
+        rose = []
+        levels = {}
+        for name, (now, most) in limited.items():
+            share = percent(now, most)
+            if share is None:
+                continue
+            was = self._levels.get(name, 0)
+            level = sum(share >= mark for mark in NEAR_LIMIT)
+            if level < was and share >= NEAR_LIMIT[level] - WELL_BELOW:
+                # Not far enough below that mark to say so again on the
+                # way up, it may be below the ones above it
+                level += 1
+            if level > was:
+                rose.append(name)
+            levels[name] = level
+        self._levels = levels
+        return rose
+
+    def _count(self, cgroup: str) -> dict[str, int]:
+        """The counters that only grow: microseconds of CPU used and of
+        being held back at the limit of them, and of waiting for memory,
+        CPU and disk."""
+        counted = {}
+        try:
+            cpu = keyed(f"{cgroup}/cpu.stat")
+            counted["cpu"] = cpu["usage_usec"]
+            counted["throttled"] = cpu.get("throttled_usec", 0)
+        except (OSError, KeyError):
+            pass
+        for what in ("memory", "cpu", "io"):
+            try:
+                counted[f"stalled {what}"] = stalled(f"{cgroup}/{what}.pressure")
+            except (OSError, ValueError):
+                continue
+        return counted
+
+    def _since(self, counted: dict[str, int], now: float) -> dict[str, object]:
+        """What the counters say of the time since the last line: CPU in
+        percent of one, the seconds held back, and for what percent of
+        the time something waited for memory, CPU or disk."""
+        passed = max(now - self._counted_at, 0.001) * 1e6
+        grown = {
+            name: max(count - self._counted[name], 0)
+            for name, count in counted.items()
+            if name in self._counted
+        }
+        said: dict[str, object] = {"seconds": round(passed / 1e6, 1)}
+        if "cpu" in grown:
+            said["cpu"] = round(100 * grown["cpu"] / passed, 1)
+            said["throttled"] = round(grown["throttled"] / 1e6, 1)
+        waited = {
+            name.partition(" ")[2]: round(100 * count / passed, 1)
+            for name, count in grown.items()
+            if name.startswith("stalled ")
+        }
+        if waited:
+            said["stalled"] = waited
+        return said
+
+
 class Holders:
     """Finds the processes that hold sockets, by what their descriptors
     link to."""
@@ -253,12 +515,25 @@ class Watch:
         # and when that was last looked at
         self._limit_hits = 0
         self._limits_seen = 0.0
+        self._health = Health(self.note, self.name_of)
 
-    def note(self, reserved: bool = False, **said: object) -> None:
+    def name_of(self, pid: int) -> str:
+        """What a process is called for short: its program, else what it
+        says it is."""
+        known = self._processes.get(pid)
+        if not known:
+            return "?"
+        _, program, argv = known[0]
+        return os.path.basename(program or (argv[0] if argv else "?"))[:NAME_LENGTH]
+
+    def note(self, reserved: bool = False, aloud: bool = False, **said: object) -> None:
         """Add a line to the record, while there is room for it: what is
-        not reserved (a process) leaves RESERVED for what is (a
-        connection, a socket that waits, a word of the watcher's own). The
-        record says once that it is full, when its processes are."""
+        not reserved (a process, how the session is doing) leaves RESERVED
+        for what is (a connection, a socket that waits, a word of the
+        watcher's own), a session must not be rid of those by what it
+        makes the others fill. The record says once that it is full, when
+        that part is. A line said aloud goes to the watcher's output too,
+        no more of them than to the record."""
         if self._written >= MOST_BYTES or (self._full and not reserved):
             return
         line = json.dumps({"t": round(time.time(), 3), **said}) + "\n"
@@ -267,10 +542,18 @@ class Watch:
             return
         if not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
             self._full = True
+            aloud = False
             line = json.dumps({"t": round(time.time(), 3), "note": "full"}) + "\n"
         self._written += len(line)
         self._out.write(line)
         self._out.flush()
+        if aloud:
+            try:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            except (OSError, ValueError):
+                # Nobody listens, the record has it
+                pass
 
     def look(self) -> None:
         now = time.monotonic()
@@ -286,6 +569,7 @@ class Watch:
         if now - self._limits_seen >= LIMITS_EVERY:
             self._limits_seen = now
             self._look_at_limits(pids)
+            self._health.look(pids, now)
 
     def _look_at_processes(self, pids: list[int], now: float) -> None:
         for pid in set(self._processes).difference(pids):

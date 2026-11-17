@@ -139,7 +139,7 @@ What is recorded, for `--trace`:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_DOCKER_NET_LOG` | `1` | Records every connection, what is sent by UDP or a ping, and every name looked up. `0` records nothing |
-| `CLAUDE_DOCKER_PROC_LOG` | `1` | Records the processes that run and which of them made each connection. `0` records nothing |
+| `CLAUDE_DOCKER_PROC_LOG` | `1` | Records the processes that run, which of them made each connection, and the memory and CPU the session uses. `0` records nothing |
 
 How Claude Code runs:
 

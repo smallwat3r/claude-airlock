@@ -37,6 +37,7 @@ from .door_events import door_events
 from .egress_log import ProxyRequest, logged_requests, requests_made
 from .events import Event, Who, clean, flat, labelled
 from .files import UNREADABLE
+from .health import health_summary
 from .layout import Layout, event_json, shown_what, went_wrong
 from .pcap import Capture, Connection, Flow, Lookup, Request
 from .processes import ProcessRecord, session_record, shown_lineage
@@ -423,7 +424,9 @@ def listener_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
-def process_summary(record: ProcessRecord, verbose: bool) -> list[str]:
+def watched_summary(record: ProcessRecord, verbose: bool) -> list[str]:
+    """The lines of the header on what a session's watcher noted: its
+    processes, and how it was doing."""
     hint = "" if verbose else ", each one shown with --verbose"
     lines = [f"  processes {len(record.processes)} seen to run{hint}"]
     if record.process_limit:
@@ -437,7 +440,7 @@ def process_summary(record: ProcessRecord, verbose: bool) -> list[str]:
         lines.append("  the record of them STOPPED at its size limit")
     if record.unreadable:
         lines.append("  which process made a connection could not be seen")
-    return lines
+    return lines + health_summary(record.samples, record.ended)
 
 
 def captured_connections(
@@ -499,8 +502,10 @@ def network(
     )
     events = [event for _, events in found for event in events]
     for session, record in records:
-        lines += process_summary(record, verbose)
+        lines += watched_summary(record, verbose)
         ran = listener_events(record) + (process_events(record) if verbose else [])
+        ran += [sample.event() for sample in record.samples]
+        ran += [ended.event() for ended in record.ended]
         name_container(ran, session.name, several)
         events += ran
     return lines, events

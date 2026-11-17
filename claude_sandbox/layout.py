@@ -53,6 +53,8 @@ STYLES = {
     "prompt": DIM,
     "reply": DIM,
     "command": DIM,
+    # How the session is doing comes every so often, and is no act of it
+    "health": DIM,
     "bash": YELLOW,
     "net": CYAN,
     "dns": CYAN,

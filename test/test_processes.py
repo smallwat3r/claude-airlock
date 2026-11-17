@@ -19,7 +19,7 @@ from unittest import mock
 from harness import LauncherTest, prompts_at
 from test_capture import pcap_file, tcp
 
-from claude_sandbox import processes, procwatch
+from claude_sandbox import health, processes, procwatch
 
 SIDECAR = "claude-proj.procs"
 
@@ -217,6 +217,298 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(len(record.lineage(5, 2.0)), 1)
 
 
+GIB = 2**30
+
+
+class FakeSession:
+    """What a watcher reads of a session, made up in a directory: the
+    cgroup of its container and its processes."""
+
+    def __init__(self, root: Path):
+        self.proc = root
+        self.first = root / "1"
+        self.cgroup = self.first / "root" / "sys" / "fs" / "cgroup"
+        self.cgroup.mkdir(parents=True)
+        (self.first / "root" / "tmp").mkdir()
+        (self.first / "mounts").write_text(
+            "proc /proc proc rw 0 0\n"
+            "tmpfs /dev tmpfs rw 0 0\n"
+            "tmpfs /sys/fs/cgroup tmpfs ro 0 0\n"
+            "tmpfs /tmp tmpfs rw,size=4194304k 0 0\n"
+            "overlay / overlay ro 0 0\n"
+        )
+        self.set("memory.max", str(16 * GIB))
+        self.set("pids.max", "512")
+        self.set("cpu.max", "150000 100000")
+        self.set("memory.events", "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0")
+        self.use()
+
+    def set(self, name: str, said: str) -> None:
+        (self.cgroup / name).write_text(said + "\n")
+
+    def use(
+        self,
+        memory: float = 1.0,
+        cpu_seconds: float = 0.0,
+        throttled_seconds: float = 0.0,
+        processes: int = 20,
+        waited_for_memory: float = 0.0,
+    ) -> None:
+        """What the session has used by now: memory in GiB, the rest as
+        it has added up since it started."""
+        cached = GIB // 4
+        self.set("memory.current", str(int(memory * GIB) + cached))
+        self.set("memory.stat", f"anon 5\ninactive_file {cached}\nactive_file 7")
+        self.set("pids.current", str(processes))
+        self.set(
+            "cpu.stat",
+            f"usage_usec {int(cpu_seconds * 1e6)}\nuser_usec 1\nnr_throttled 3\n"
+            f"throttled_usec {int(throttled_seconds * 1e6)}",
+        )
+        waited = int(waited_for_memory * 1e6)
+        self.set("memory.pressure", f"some avg10=0.00 total={waited}\nfull total=0")
+        self.set("cpu.pressure", "some avg10=0.00 avg60=0.00 avg300=0.00 total=0")
+
+    def run(self, pid: int, megabytes: int) -> None:
+        directory = self.proc / str(pid)
+        directory.mkdir(exist_ok=True)
+        pages = megabytes * 2**20 // procwatch.PAGE
+        (directory / "statm").write_text(f"{pages * 2} {pages} 10 1 0 5 0\n")
+
+
+class HealthWatchTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.session = FakeSession(Path(directory.name))
+        self.out = io.StringIO()
+        # What it says aloud is not for the output of the tests
+        quiet = mock.patch.object(sys, "stdout", io.StringIO())
+        quiet.start()
+        self.addCleanup(quiet.stop)
+        self.watch = procwatch.Watch(self.out)
+        self.watch._processes[812] = (("9", "/usr/bin/node", ["node", "build.js"]), 0, 0)
+        self.health = self.reader()
+        self.session.run(1, 1)
+        self.session.run(812, 900)
+        self.pids = [1, 812]
+
+    def reader(self) -> procwatch.Health:
+        return procwatch.Health(
+            self.watch.note, self.watch.name_of, str(self.session.proc)
+        )
+
+    def said(self) -> list[dict]:
+        return [json.loads(line) for line in self.out.getvalue().splitlines()]
+
+    def test_how_the_session_is_doing_is_noted_every_so_often(self):
+        self.health.look(self.pids, 100.0)
+        # Nothing to compare with yet
+        self.assertEqual(self.said(), [])
+        self.session.use(memory=2.0, cpu_seconds=3.0, throttled_seconds=0.5)
+        self.health.look(self.pids, 102.0)
+        (line,) = self.said()
+        health = line["health"]
+        # Without what the kernel keeps of files and gives back when asked
+        self.assertEqual(health["mem"], [2 * GIB, 16 * GIB])
+        self.assertEqual(health["pids"], [20, 512])
+        self.assertEqual((health["cpu"], health["cpus"]), (150.0, 1.5))
+        self.assertEqual((health["throttled"], health["seconds"]), (0.5, 2.0))
+        self.assertEqual(health["stalled"], {"memory": 0.0, "cpu": 0.0})
+        # Of the tmpfs only the session's own, as large as it is
+        self.assertEqual(list(health["tmpfs"]), ["/tmp"])
+        self.assertEqual(health["top"][0], [812, 900 * 2**20, "node"])
+        self.assertNotIn("rose", health)
+        # Not again before its time, then with what was used since
+        self.session.use(memory=2.0, cpu_seconds=18.0)
+        self.health.look(self.pids, 102.0 + procwatch.HEALTH_EVERY - 1)
+        self.assertEqual(len(self.said()), 1)
+        self.health.look(self.pids, 102.0 + procwatch.HEALTH_EVERY)
+        self.assertEqual(self.said()[-1]["health"]["cpu"], 50.0)
+
+    def test_coming_near_a_limit_is_noted_out_of_turn_and_not_over_and_over(self):
+        self.health.look(self.pids, 100.0)
+        self.health.look(self.pids, 101.0)
+        for second, memory in enumerate((12.0, 11.5, 12.5, 15.0, 15.2, 9.0, 12.0)):
+            self.session.use(memory=memory)
+            self.health.look(self.pids, 110.0 + 6 * second)
+        rose = [line["health"].get("rose") for line in self.said()]
+        # Near at 12, at it at 15, and near again only once well below
+        self.assertEqual(rose, [None, ["memory"], ["memory"], ["memory"]])
+        self.session.use(memory=12.0, processes=500)
+        self.health.look(self.pids, 152.0)
+        self.assertEqual(self.said()[-1]["health"]["rose"], ["pids"])
+        # Found at a limit, which the first line says. Then to just under
+        # the mark below it and up again: near once more is not news, at
+        # it is
+        steady = self.reader()
+        for second, memory in enumerate((15.0, 10.6, 12.0, 15.0)):
+            self.session.use(memory=memory)
+            steady.look(self.pids, 300.0 + 40 * second)
+        self.assertEqual(
+            [line["health"].get("rose") for line in self.said()[-3:]],
+            [["memory"], None, ["memory"]],
+        )
+        # No more often than that, however the session goes up and down
+        before = len(self.said())
+        for second in range(4):
+            self.session.use(memory=9.0 if second % 2 else 12.0)
+            self.health.look(self.pids, 153.0 + second)
+        self.assertEqual(len(self.said()), before)
+
+    def test_a_rise_that_came_too_soon_after_another_is_said_when_it_can_be(self):
+        self.health.look(self.pids, 100.0)
+        self.health.look(self.pids, 101.0)
+        self.session.use(memory=12.0)
+        self.health.look(self.pids, 102.0)
+        self.session.use(memory=15.0)
+        self.health.look(self.pids, 103.0)
+        self.assertEqual(len(self.said()), 2)
+        self.health.look(self.pids, 102.0 + procwatch.OUT_OF_TURN_EVERY)
+        self.assertEqual(self.said()[-1]["health"]["rose"], ["memory"])
+        self.assertEqual(len(self.said()), 3)
+
+    def test_the_watcher_and_the_trace_agree_on_what_is_near_a_limit(self):
+        # The watcher stands alone in its sidecar, so each has its own
+        self.assertEqual(procwatch.NEAR_LIMIT, (health.NEAR_LIMIT, health.AT_LIMIT))
+
+    def test_a_process_ended_for_want_of_memory_is_noted_with_what_is_gone(self):
+        self.health.look(self.pids, 100.0)
+        self.session.set("memory.events", "oom 1\noom_kill 1")
+        self.health.look([1], 101.0)
+        ended = [line for line in self.said() if "oom" in line]
+        self.assertEqual(ended, [{**ended[0], "oom": 1, "gone": [[812, 900 * 2**20, "node"]]}])
+        # Once, and of one that was already counted nothing
+        self.health.look([1], 102.0)
+        self.assertEqual(sum("oom" in line for line in self.said()), 1)
+
+    def test_what_cannot_be_read_is_left_out_and_the_rest_still_told(self):
+        for name in ("memory.current", "cpu.stat", "memory.pressure", "cpu.max"):
+            (self.session.cgroup / name).unlink()
+        (self.session.first / "mounts").unlink()
+        self.health.look(self.pids, 100.0)
+        self.health.look(self.pids, 101.0)
+        (line,) = self.said()
+        self.assertEqual(
+            set(line["health"]), {"pids", "seconds", "stalled", "top"}, line["health"]
+        )
+
+    def test_it_is_said_aloud_too_for_who_follows_the_session(self):
+        aloud = io.StringIO()
+        with mock.patch.object(sys, "stdout", aloud):
+            self.watch.note(aloud=True, health={"cpu": 1.0})
+            self.watch.note(pid=5, argv=["quiet"])
+        self.assertEqual(aloud.getvalue(), self.out.getvalue().splitlines(True)[0])
+
+
+class HealthShownTest(unittest.TestCase):
+    def sample(self, **said) -> health.Sample:
+        found = health.read_health(5.0, {"t": 5.0, "health": said})
+        assert isinstance(found, health.Sample)
+        return found
+
+    def test_a_sample_is_one_line_with_what_matters(self):
+        sample = self.sample(
+            mem=[3 * GIB + GIB // 10, 16 * GIB],
+            pids=[87, 512],
+            cpu=240.4,
+            seconds=30.0,
+            throttled=0.0,
+            tmpfs={"/tmp": [GIB, 4 * GIB], "/home/sandbox/.npm": [GIB // 2, GIB]},
+            stalled={"memory": 0.0, "cpu": 0.4, "io": 3.0},
+            top=[[812, 2 * GIB, "node"], [7, GIB, "claude"]],
+        )
+        event = sample.event()
+        self.assertEqual(
+            event.details[0],
+            "mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512"
+            "  /home/sandbox/.npm 50%  waited for: io 3%  top: [812] node 2g",
+        )
+        self.assertEqual(event.what, "health")
+        self.assertNotIn("flagged", event.fields)
+        self.assertEqual(event.fields["memory"], {"used": 3 * GIB + GIB // 10, "limit": 16 * GIB})
+        self.assertEqual(event.fields["top"][0], {"pid": 812, "rss": 2 * GIB, "name": "node"})
+
+    def test_a_limit_that_is_near_and_one_that_is_reached_are_said(self):
+        near = self.sample(mem=[12 * GIB, 16 * GIB], rose=["memory"]).event()
+        self.assertEqual(
+            near.details, ["running low on memory  mem 12g of 16g (75%)"]
+        )
+        self.assertNotIn("flagged", near.fields)
+        reached = self.sample(
+            mem=[15 * GIB, 16 * GIB],
+            tmpfs={"/tmp": [39, 40]},
+            stalled={"memory": 35.0},
+            cpu=150.0,
+            cpus=1.5,
+            throttled=12.0,
+            rose=["/tmp"],
+        ).event()
+        self.assertEqual(
+            reached.details[0],
+            "ALMOST OUT OF memory, /tmp, STALLED for want of memory"
+            "  mem 15g of 16g (93%)  cpu 150% of 1.5 cpus, held back 12.0s"
+            "  /tmp 97%  waited for: memory 35%",
+        )
+        self.assertTrue(reached.fields["flagged"])
+
+    def test_no_limit_is_no_share_and_a_name_is_the_sessions_to_choose(self):
+        event = self.sample(
+            mem=[GIB, None], pids=[5, None], top=[[9, GIB, "evil\x1b[31m\nname"]]
+        ).event()
+        self.assertEqual(event.details, ["mem 1g  pids 5  top: [9] evil[31m\\nname 1g"])
+
+    def test_a_process_that_was_ended_is_said_with_the_likely_one(self):
+        ended = health.read_health(7.0, {"t": 7.0, "oom": 2, "gone": [[812, 9 * GIB, "node"]]})
+        assert ended is not None
+        self.assertEqual(
+            ended.event().details,
+            ["OUT OF MEMORY, a process was ended for it  gone since: [812] node 9g"],
+        )
+        unseen = health.read_health(7.0, {"t": 7.0, "oom": 3, "gone": []})
+        assert unseen is not None
+        self.assertIn("which one was not seen", unseen.event().details[0])
+        self.assertIsNone(health.read_health(7.0, {"t": 7.0, "pid": 5}))
+
+    def test_a_line_that_does_not_hold_up_is_passed_over(self):
+        record = noted(
+            {"t": 1, "health": {"mem": "lots"}},
+            {"t": 1, "health": []},
+            {"t": 1, "oom": "often"},
+            {"t": 1, "health": {"top": [[1, 2]]}},
+            {"t": 2, "health": {"mem": [1, 2]}},
+        )
+        self.assertEqual([found.when for found in record.samples], [2.0])
+        self.assertEqual(record.ended, [])
+
+    def test_the_header_sums_it_up(self):
+        samples = [
+            self.sample(mem=[2 * GIB, 16 * GIB], cpu=100.0, seconds=30.0, pids=[10, 512]),
+            self.sample(
+                mem=[9 * GIB, 16 * GIB],
+                cpu=400.0,
+                seconds=10.0,
+                cpus=4,
+                throttled=6.0,
+                pids=[400, 512],
+                tmpfs={"/tmp": [1, 100]},
+                stalled={"memory": 22.0},
+            ),
+        ]
+        ended = [health.Ended(8.0, 2)]
+        self.assertEqual(
+            health.health_summary(samples, ended),
+            [
+                "  memory 9g of 16g (56%) at most",
+                "  cpu 175% on average, 400% at most of 4 cpus, held back 6s in all",
+                "  pids 78% of its limit at most",
+                "  STALLED for want of memory, up to 22% of the time",
+                "  OUT OF MEMORY, a process was ended for it 2 times",
+            ],
+        )
+        self.assertEqual(health.health_summary([], []), [])
+
+
 class SidecarTest(LauncherTest):
     def setUp(self):
         super().setUp()
@@ -361,6 +653,45 @@ class SidecarTest(LauncherTest):
         )
         self.assertRegex(shown, r"listen      tcp 127\.0\.0\.1:9229  by: \[7\] claude")
         self.assertIn("2 sockets waited for connections, OPEN", shown)
+
+    def test_the_trace_says_how_the_session_was_doing(self):
+        lines = [
+            {
+                "t": self.now + 3,
+                "health": {
+                    "mem": [2 * GIB, 16 * GIB],
+                    "cpu": 80.0,
+                    "seconds": 30.0,
+                    "pids": [30, 512],
+                    "top": [[812, GIB, "curl"]],
+                },
+            },
+            {
+                "t": self.now + 4,
+                "health": {"mem": [15 * GIB, 16 * GIB], "rose": ["memory"]},
+            },
+            {"t": self.now + 5, "oom": 1, "gone": [[812, 14 * GIB, "curl"]]},
+        ]
+        with open(self.record_file, "a") as record:
+            record.write("".join(json.dumps(line) + "\n" for line in lines))
+        shown = self.trace()
+        self.assertIn(
+            "sandbox  health      mem 2g of 16g (12%)  cpu 80%  pids 30 of 512"
+            "  top: [812] curl 1g",
+            shown,
+        )
+        self.assertIn("health      ALMOST OUT OF memory  mem 15g of 16g (93%)", shown)
+        self.assertIn("gone since: [812] curl 14g", shown)
+        self.assertIn("#   memory 15g of 16g (93%) at most", shown)
+        self.assertIn("#   cpu 80% on average, 80% at most", shown)
+        self.assertIn("#   OUT OF MEMORY, a process was ended for it 1 times", shown)
+        # What went wrong of it is what --failed keeps, and --only picks it
+        failed = self.launch("--trace", "--failed").stdout
+        self.assertEqual(failed.count("sandbox  health"), 2)
+        self.assertEqual(self.launch("--trace", "--only", "health").stdout.count("  health  "), 3)
+        events = map(json.loads, self.launch("--trace", "--json").stdout.splitlines())
+        (first, *_) = (e for e in events if e.get("what") == "health")
+        self.assertEqual(first["memory"], {"used": 2 * GIB, "limit": 16 * GIB})
 
     def test_the_trace_says_which_process_made_a_connection(self):
         stdout = self.trace()

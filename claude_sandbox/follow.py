@@ -9,7 +9,8 @@ project's running sessions, read out of its sidecar. For a filtered
 session the egress proxy's log. And what the launcher notes of the use of
 the SSH agent and the Docker socket (see doors.py). Not the record of the
 processes: which process made a connection is told by --trace of a
-session that is over.
+session that is over. Of what the watcher of the processes notes, only
+how the session is doing, which it says aloud (see health.py).
 
 Three things differ from the trace of a session that is over. A tool call
 is shown when it is issued and its result when that comes, as an event of
@@ -41,6 +42,7 @@ from .events import Event, clean, flat, labelled
 from .files import line_entry, open_plain
 from .layout import Layout, event_json
 from .pcap import Capture, PcapReader, take_frames
+from .processes import Watcher, running_watchers, said_since
 from .projects import project_root, subagent_files, transcript_files
 from .records import recorded_sessions
 from .settings import Fatal, Host
@@ -69,6 +71,9 @@ INTERVAL = 1.0
 LOOK_EVERY = 3
 # The events from before the start that are shown, as tail -f would
 HISTORY = 10
+# Seconds between two questions to a watcher on how its session is doing:
+# it says so every 30 seconds, and at once when a limit is near
+HEALTH_EVERY = 10.0
 READ_SIZE = 1 << 20
 # A transcript is the session's to write: a line longer than this is
 # dropped, not held in memory
@@ -176,6 +181,27 @@ class CaptureTail:
         return True
 
 
+class HealthTail:
+    """How one session is doing, asked of its watcher every so often
+    from when the following began."""
+
+    def __init__(self, watcher: str) -> None:
+        self.watcher = watcher
+        self.session = Watcher.session_of(watcher)
+        self._since = time.time()
+        self._asked = 0.0
+
+    def poll(self) -> list[Event]:
+        now = time.monotonic()
+        if now - self._asked < HEALTH_EVERY:
+            return []
+        self._asked = now
+        found = said_since(self.watcher, self._since)
+        if found:
+            self._since = max(one.when for one in found)
+        return [one.event() for one in found]
+
+
 class ProxyTail:
     """The egress proxy's log, read as it grows from where it ended when
     the following began."""
@@ -237,6 +263,7 @@ class Follower:
         # How long each transcript without a tail was when last looked at
         self._sizes: dict[Path, int] = {}
         self._captures: dict[tuple[str, float], CaptureTail] = {}
+        self._health: dict[tuple[str, float], HealthTail] = {}
         self._proxy = ProxyTail()
         # Of the project's filtered sessions that are running, with the
         # name of the container each is of
@@ -350,9 +377,9 @@ class Follower:
                 self._subagents[path] = (session, tail)
 
     def _look_for_sessions(self, found: Round) -> None:
-        """Start to follow the captures of the project's sessions that
-        started, let go of those that ended, and note the addresses of its
-        filtered sessions that run."""
+        """Start to follow the captures and the watchers of the project's
+        sessions that started, let go of those that ended, and note the
+        addresses of its filtered sessions that run."""
         if not self._docker:
             return
         try:
@@ -362,6 +389,11 @@ class Follower:
                 if self._ours(CaptureSidecar.session_of(sidecar))
             ]
             self._addresses = self._filtered_addresses()
+            watched = [
+                (watcher, started)
+                for watcher, started in running_watchers(self._host.project_dir)
+                if self._ours(Watcher.session_of(watcher))
+            ]
         except Fatal:
             self._docker = False
             found.notes.append(
@@ -379,6 +411,12 @@ class Follower:
         for key in set(self._captures) - set(running):
             name = clean(self._captures.pop(key).session)
             found.notes.append(labelled("network", f"the capture of {name} ended"))
+        # How each is doing, without a word on the following of it
+        for key in set(self._health) - set(watched):
+            del self._health[key]
+        for key in watched:
+            if key not in self._health:
+                self._health[key] = HealthTail(key[0])
         if self._rounds == 0 and not running and not self._addresses:
             found.notes.append(
                 labelled(
@@ -411,6 +449,7 @@ class Follower:
         """Whether more than one of the project's sessions is followed on
         the network, so that each line has to say which it is of."""
         names = {capture.session for capture in self._captures.values()}
+        names.update(health.session for health in self._health.values())
         return len(names.union(self._addresses.values())) > 1
 
     def _poll_network(self, found: Round) -> None:
@@ -433,6 +472,10 @@ class Follower:
         if self._addresses:
             requests = self._proxy.poll(self._addresses, several)
             found.events += [(None, event) for event in requests]
+        for health in self._health.values():
+            events = health.poll()
+            name_container(events, health.session, several)
+            found.events += [(None, event) for event in events]
 
     def _poll_doors(self, found: Round) -> None:
         """The uses of the SSH agent and the Docker socket that the
