@@ -1,9 +1,13 @@
 # Shortcuts for working on the sandbox itself. The checks are the ones CI
 # runs (.github/workflows/ci.yml), keep the two in step.
 
+# A Python tool from PATH, else run by uvx or pipx, as CI does
+python_tool = $(or $(shell command -v $(1) 2>/dev/null),$(if \
+	$(shell command -v uvx 2>/dev/null),uvx $(1),pipx run $(1)))
+
 PYTHON ?= python3
-RUFF ?= ruff
-MYPY ?= mypy
+RUFF ?= $(call python_tool,ruff)
+MYPY ?= $(call python_tool,mypy)
 SHELLCHECK ?= shellcheck
 
 LAUNCHER := bin/claude-docker
