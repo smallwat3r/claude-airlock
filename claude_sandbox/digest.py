@@ -48,6 +48,7 @@ MODEL_API = (
     ipaddress.ip_network("160.79.104.0/23"),
     ipaddress.ip_network("2607:6bc0::/48"),
 )
+MODEL_DOMAIN = "anthropic.com"
 # Of one kind of thing, how many are listed
 MOST_LISTED = 8
 # The destinations kept per project, the ones reached longest ago go first
@@ -60,6 +61,11 @@ def is_model_api(address: str) -> bool:
     except ValueError:
         return False
     return any(found in network for network in MODEL_API)
+
+
+def is_model_host(host: str) -> bool:
+    """The same by name, as a filtered session asks its proxy for it."""
+    return host == MODEL_DOMAIN or host.endswith("." + MODEL_DOMAIN)
 
 
 def destinations(capture: Capture) -> dict[str, str]:
@@ -164,20 +170,31 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
 
 
 def denied_lines(sessions: list[NetSession], start: float, end: float) -> list[str]:
-    """What the egress filter refused the session."""
+    """What the egress filter's log says of the session: where it sent
+    a lot, and what it was refused."""
     filtered = [session for session in sessions if session.ip]
     logged = logged_requests(stderr=subprocess.DEVNULL) if filtered else None
     if not logged:
         return []
-    denied = Counter(
-        flat(request.url)
-        for request, _ in requests_made(logged, filtered, start, end)
-        if request.denied
-    )
-    return listed(
-        "refused by the egress filter:",
-        [f"{url} x{count}" for url, count in denied.most_common()],
-    )
+    made = [request for request, _ in requests_made(logged, filtered, start, end)]
+    denied = Counter(flat(request.url) for request in made if request.denied)
+    # How much went where through the filter, which a capture cannot tell
+    # of a session whose every connection is to the proxy
+    sent: Counter[str] = Counter()
+    for request in made:
+        if not request.denied and request.sent and not is_model_host(request.host):
+            sent[flat(f"{request.host}:{request.port}")] += request.sent
+    return [
+        *(
+            f"sent {size(count)} to {where} through the egress filter"
+            for where, count in sent.most_common()
+            if count >= LARGE_UPLOAD
+        ),
+        *listed(
+            "refused by the egress filter:",
+            [f"{url} x{count}" for url, count in denied.most_common()],
+        ),
+    ]
 
 
 def transcript_lines(host: Host, start: float) -> list[str]:

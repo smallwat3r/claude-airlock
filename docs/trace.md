@@ -93,7 +93,7 @@ session, which can neither forge nor edit them:
 
 | Record | Kept when | Holds |
 | --- | --- | --- |
-| The egress proxy's log | `CLAUDE_DOCKER_NET_FILTER=1` | What the session asked the proxy for: method, host, allowed or `DENIED`, bytes and duration |
+| The egress proxy's log | `CLAUDE_DOCKER_NET_FILTER=1` | What the session asked the proxy for: method, host, allowed or `DENIED`, the bytes each way and duration |
 | The capture | Unless `CLAUDE_DOCKER_NET_LOG=0` | Every TCP connection whatever the protocol, what was sent by anything but TCP, and every name looked up |
 
 The capture is taken by a sidecar that shares the session's network
@@ -192,8 +192,9 @@ claude-docker: of this session, claude-docker --trace has the rest:
 ```
 
 A destination is known by its name, which is the session's own word. An
-upload is said from 10 MB to one destination on, not for the model's API
-and not for a filtered session, where everything goes to the proxy.
+upload is said from 10 MB to one destination on, not for the model's API.
+Of a filtered session it is what the proxy's log says went up to each
+host, a tunnel is logged when it closes.
 
 ## What is kept
 

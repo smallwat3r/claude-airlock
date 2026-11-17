@@ -27,6 +27,9 @@ from .network import (
 from .records import NetSession
 from .settings import Fatal
 
+# The fields of a line that says how much the session sent, the last of them
+SENT_FIELDS = 11
+
 
 @dataclass(frozen=True)
 class ProxyRequest:
@@ -40,10 +43,22 @@ class ProxyRequest:
     method: str
     url: str
     size: int
+    # The bytes the session sent, of a tunnel what went up through it.
+    # None for a line of a proxy started before its log said so.
+    sent: int | None = None
 
     @property
     def began(self) -> float:
         return self.ended - self.seconds
+
+    @property
+    def host(self) -> str:
+        """The host asked for, empty for a URL that cannot be read."""
+        try:
+            target = urlsplit(self.url if "://" in self.url else "//" + self.url)
+            return target.hostname or ""
+        except ValueError:
+            return ""
 
     @property
     def port(self) -> int:
@@ -58,9 +73,11 @@ class ProxyRequest:
 
 
 def parse_proxy_request(line: str) -> ProxyRequest | None:
-    """A line of squid's native log format, none for anything else."""
+    """A line of the proxy's log, none for anything else: squid's native
+    format, then the bytes the session sent (see docker/squid.conf)."""
+    said = line.split()
     try:
-        ended, milliseconds, address, result, sent, method, url = line.split()[:7]
+        ended, milliseconds, address, result, size, method, url = said[:7]
         return ProxyRequest(
             float(ended),
             float(milliseconds) / 1000,
@@ -68,7 +85,8 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
             "DENIED" in result,
             method,
             url,
-            int(sent),
+            int(size),
+            max(int(said[10]), 0) if len(said) == SENT_FIELDS else None,
         )
     except ValueError:
         return None

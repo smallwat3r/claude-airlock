@@ -21,7 +21,7 @@ from harness import (
     transcript,
 )
 
-from claude_sandbox import files, settings, trace
+from claude_sandbox import egress_log, files, settings, trace
 from claude_sandbox.events import Event, Who
 from claude_sandbox.layout import Layout, event_json, folded
 from claude_sandbox.transcript import call_details
@@ -766,6 +766,59 @@ class NetworkTraceTest(LauncherTest):
     def test_logged_urls_cannot_drive_the_terminal(self):
         self.assertIn("[31mesc.test:443", self.trace())
         self.assertNotIn("\x1b", self.trace("--verbose"))
+
+    def test_a_request_says_how_much_the_session_sent_where_the_log_does(self):
+        # As a squid of 5.7 wrote them with the format of docker/squid.conf
+        tunnel = egress_log.parse_proxy_request(
+            "1794956804.916    501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT"
+            " up.test:443 - HIER_DIRECT/127.0.0.1 - 3000059"
+        )
+        self.assertEqual((tunnel.size, tunnel.sent), (1039, 3000059))
+        self.assertEqual((tunnel.host, tunnel.port), ("up.test", 443))
+        denied = egress_log.parse_proxy_request(
+            "1794956804.917      0 127.0.0.1 TCP_DENIED/403 1607 CONNECT"
+            " example.org:443 - HIER_NONE/- text/html 59"
+        )
+        self.assertEqual((denied.denied, denied.sent), (True, 59))
+        # One of a proxy from before, which did not say
+        earlier = egress_log.parse_proxy_request(
+            "1794956804.916 501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT up.test:443 - -"
+        )
+        self.assertIsNone(earlier.sent)
+        with open(self.access_log, "a") as log:
+            log.write(
+                f"{time.time() + 5:.3f} 200 172.20.0.5 TCP_TUNNEL/200 1039 CONNECT"
+                " up.test:443 - HIER_DIRECT/203.0.113.9 - 3000059\n"
+            )
+        self.assertIn(
+            "CONNECT up.test:443 allowed 3 MB out, 1 kB in 0.2s", self.trace()
+        )
+
+    def test_a_filtered_session_that_sent_a_lot_is_said_to_when_it_ends(self):
+        now = time.time()
+        mine = "172.20.0.7"
+        sent = "CONNECT {} - HIER_DIRECT/203.0.113.9 - {}"
+        self.access_log.write_text(
+            "".join(
+                f"{now + 2:.3f} 100 {mine} TCP_TUNNEL/200 900 {line}\n"
+                for line in (
+                    sent.format("up.test:443", 9_000_000),
+                    sent.format("up.test:443", 8_000_000),
+                    sent.format("small.test:443", 2_000_000),
+                    sent.format("api.anthropic.com:443", 90_000_000),
+                )
+            )
+        )
+        ended = self.launch(
+            # Logged while it runs, whenever it got to start
+            session="sleep 2.5",
+            CLAUDE_DOCKER_NET_FILTER="1",
+            FAKE_IP=mine,
+            FAKE_ACCESS_LOG=str(self.access_log),
+        )
+        self.assertIn("sent 17 MB to up.test:443 through the egress filter", ended.stderr)
+        self.assertNotIn("small.test", ended.stderr)
+        self.assertNotIn("anthropic", ended.stderr)
 
     def test_every_request_is_an_event_at_the_time_it_began(self):
         stdout = self.trace()

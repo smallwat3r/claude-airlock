@@ -107,9 +107,12 @@ def proxy_event(request: ProxyRequest) -> Event:
     the session's to choose, so they are cleaned."""
     protocol = over("proxy", request.port)
     method, url = clean(request.method), clean(request.url)
+    # What the session sent, where the proxy's log says so
+    out = f" {size(request.sent)} out," if request.sent is not None else ""
+    back = " in" if out else ""
     detail = (
         f"{protocol} {method} {url} {verdict(request.denied)}"
-        f" {size(request.size)} {request.seconds:.1f}s"
+        f"{out} {size(request.size)}{back} {request.seconds:.1f}s"
     )
     fields = {
         "protocol": protocol,
@@ -119,6 +122,7 @@ def proxy_event(request: ProxyRequest) -> Event:
         "denied": request.denied,
         "bytes": request.size,
         "seconds": request.seconds,
+        **({"bytes_out": request.sent} if request.sent is not None else {}),
     }
     return Event(request.began, Who.SANDBOX, "net", [detail], fields)
 
