@@ -97,7 +97,8 @@ def own_prompts(host: Host) -> list[str]:
         ) as history:
             for line in history:
                 said = json_object(line)
-                if said and said.get("project") in roots:
+                project = said.get("project") if said else None
+                if isinstance(project, str) and project in roots:
                     kept.append(line if line.endswith("\n") else line + "\n")
     except OSError:
         pass

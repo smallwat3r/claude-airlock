@@ -67,7 +67,8 @@ class Launcher:
             return False
         try:
             os.kill(self.pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, OverflowError):
+            # Gone, or no process id at all
             return False
         except OSError:
             # Not ours to signal, so it exists

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import io
 import os
 import sys
 import time
@@ -293,6 +294,12 @@ def cli(usage: str = "") -> int:
     the text --help prints ahead of the settings, the docstring of
     bin/claude-docker."""
     try:
+        # Whatever a session wrote, showing it must not be what fails: a
+        # character the terminal's encoding has none for is written as
+        # its number
+        for stream in (sys.stdout, sys.stderr):
+            if isinstance(stream, io.TextIOWrapper):
+                stream.reconfigure(errors="backslashreplace")
         status = main(sys.argv[1:], usage)
         # Here, where a reader that left can still be told from a failure
         sys.stdout.flush()
