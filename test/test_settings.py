@@ -103,6 +103,7 @@ class SettingsListTest(LauncherTest):
             CLAUDE_DOCKER_RW_CONFIG="1",
             CLAUDE_DOCKER_SHARED_HISTORY="1",
             CLAUDE_DOCKER_PROTECT="docs",
+            CLAUDE_DOCKER_CPUS="2",
         ).flags
         given = {
             NAMED.match(flag[len("--env=") :]).group()

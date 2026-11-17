@@ -71,6 +71,9 @@ class Settings:
     protect: tuple[str, ...] = ()
     memory: str = "16g"
     pids: str = "512"
+    # How many of the machine's CPUs a session can use at most, as docker
+    # reads it (4, 1.5), "" for all of them
+    cpus: str = ""
     cache: bool = True
     runtime: str = ""
     # Whether Claude Code asks before it uses a tool, as outside the sandbox
@@ -288,6 +291,7 @@ SETTINGS = (
     ),
     Setting("MEMORY", Kind.TEXT, "memory limit"),
     Setting("PIDS", Kind.TEXT, "process limit"),
+    Setting("CPUS", Kind.TEXT, "CPU limit, e.g. 4 or 1.5, all of them when not set"),
     Setting("CACHE", Kind.SWITCH, "0 keeps ~/.cache on a tmpfs, nothing persists"),
     Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc for gVisor"),
     Setting("ASK", Kind.SWITCH, "1 has Claude Code ask before it uses a tool"),

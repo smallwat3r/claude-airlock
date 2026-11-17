@@ -12,6 +12,8 @@ from harness import (
     Result,
 )
 
+from claude_sandbox import session
+
 
 class OptionsTest(LauncherTest):
     def test_opt_ins(self):
@@ -185,6 +187,70 @@ class OptionsTest(LauncherTest):
         (self.home / ".claude.json").write_text(json.dumps({"theme": "dark"}))
         self.launch()
         self.assertEqual(json.loads((self.base / ".claude.json").read_text()), had)
+
+
+class ScratchTest(LauncherTest):
+    def sizes(self, **env: str) -> dict[str, str]:
+        """How large each tmpfs of the session is, by its place under
+        the home of the container, or where it is."""
+        found = {}
+        for flag in self.launch(**env).flags:
+            if not flag.startswith("--tmpfs="):
+                continue
+            target, _, options = flag[len("--tmpfs=") :].partition(":")
+            (size,) = (o[5:] for o in options.split(",") if o.startswith("size="))
+            found[target.replace("/home/sandbox/", "")] = size
+        return found
+
+    def test_it_is_as_large_as_it_is_meant_to_be_with_memory_to_spare(self):
+        self.assertEqual(
+            self.sizes(),
+            {
+                "/tmp": "4g",
+                ".config": "64m",
+                ".npm": "1g",
+                ".claude/shell-snapshots": "64m",
+                ".claude/session-env": "64m",
+            },
+        )
+
+    def test_it_takes_no_more_than_half_of_a_small_memory_limit(self):
+        sizes = self.sizes(CLAUDE_DOCKER_MEMORY="2g", CLAUDE_DOCKER_CACHE="0")
+        self.assertEqual(len(sizes), 6)
+        self.assertIn(".cache", sizes)
+        # What Claude Code keeps for the session is of them
+        self.assertIn(".claude/session-env", sizes)
+        total = sum(int(size.rstrip("m")) for size in sizes.values())
+        self.assertLessEqual(total, 1024)
+        self.assertGreater(total, 1024 - len(sizes))
+
+    def test_a_memory_limit_is_read_as_docker_reads_it(self):
+        for said, megabytes in (
+            ("2g", 2048),
+            ("2048m", 2048),
+            ("1.5GiB", 1536),
+            ("512 MB", 512),
+            ("1048576k", 1024),
+            ("1073741824", 1024),
+            ("1t", 1024 * 1024),
+        ):
+            self.assertEqual(session.memory_megabytes(said), megabytes, said)
+        for said in ("", "lots", "-2g", "2x", "g"):
+            self.assertIsNone(session.memory_megabytes(said), said)
+
+    def test_none_is_without_a_limit_however_little_memory_there_is(self):
+        sizes = self.sizes(CLAUDE_DOCKER_MEMORY="6m")
+        self.assertEqual(sizes[".config"], "1m")
+
+    def test_no_memory_limit_leaves_them_as_large_as_they_are(self):
+        self.assertIn(
+            "--tmpfs=/tmp:exec,size=4g", self.launch(CLAUDE_DOCKER_MEMORY="0").flags
+        )
+
+    def test_a_limit_that_is_not_read_is_left_to_docker(self):
+        launched = self.launch(CLAUDE_DOCKER_MEMORY="lots")
+        self.assertIn("--memory=lots", launched.flags)
+        self.assertIn("--tmpfs=/tmp:exec,size=4g", launched.flags)
 
 
 class ConfigFileTest(LauncherTest):

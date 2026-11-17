@@ -17,7 +17,7 @@ what is named here:
                                       history.py
 
 On top of the base go what a project's sessions remember (history.py) and
-a tmpfs for what Claude Code keeps for one session (session_state_args).
+a tmpfs for what Claude Code keeps for one session (session_state).
 The config (.claude.json) is the base's own, see seed_config. The login
 (.credentials.json) is the base's own too, and the launcher keeps it the
 same as the host's, see login.py.
@@ -31,7 +31,7 @@ import json
 import os
 from pathlib import Path
 
-from .docker import env_arg, mount_arg
+from .docker import Tmpfs, env_arg, mount_arg
 from .files import json_object, private_dir, write_whole
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .settings import CONFIG_FILES, CONFIG_TREES, CONTAINER_CLAUDE, Host, Settings
@@ -41,7 +41,7 @@ CONFIG = ".claude.json"
 SEED_LEFT_OUT = ("projects", "mcpServers")
 # What Claude Code keeps in ~/.claude for one session and reads back into
 # its shell: a snapshot of the shell's setup, and what its hooks export. A
-# session is given its own of each, empty, see session_state_args.
+# session is given its own of each, empty, see session_state.
 SESSION_STATE = ("shell-snapshots", "session-env")
 # What a session cannot change of ~/.claude: all that the check of
 # tamper.py watches there, the two are one list in settings.py
@@ -157,7 +157,7 @@ def home_args(host: Host) -> list[str]:
     ]
 
 
-def session_state_args() -> list[str]:
+def session_state() -> list[Tmpfs]:
     """Claude Code runs every command of a session through what it keeps
     for that session in ~/.claude: it sources the snapshot of the shell,
     and what the session's hooks exported. Those of the other sandboxed
@@ -168,8 +168,11 @@ def session_state_args() -> list[str]:
     another session. Whatever CLAUDE_DOCKER_RW_CONFIG says, that is about
     the config and this is not config. The session's user's alone: a tmpfs
     is root's unless told otherwise."""
-    options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
-    return [f"--tmpfs={CONTAINER_CLAUDE}/{name}:{options}" for name in SESSION_STATE]
+    user = (os.getuid(), os.getgid())
+    return [
+        Tmpfs(f"{CONTAINER_CLAUDE}/{name}", 64, runs=True, owner=user, mode="700")
+        for name in SESSION_STATE
+    ]
 
 
 def protect_config_args(settings: Settings, host: Host) -> list[str]:

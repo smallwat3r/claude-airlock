@@ -117,6 +117,14 @@ class DefaultSessionTest(LauncherTest):
         for flag in ("--memory=16g", "--memory-swap=16g", "--pids-limit=512"):
             self.assertIn(flag, self.flags)
 
+    def test_every_cpu_unless_a_limit_is_set(self):
+        self.assertNotIn("cpus", "\n".join(self.flags).lower())
+        # The second session of this test, after the one of setUp
+        calls = self.launch(CLAUDE_DOCKER_CPUS="1.5").calls
+        limited = [call for call in calls if call[0] == "run"][-1]
+        self.assertIn("--cpus=1.5", limited)
+        self.assertIn("--env=CLAUDE_DOCKER_CPUS=1.5", limited)
+
     def test_opt_in_doors_are_closed(self):
         text = "\n".join(self.flags)
         for marker in (

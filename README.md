@@ -123,7 +123,7 @@ What a session gets:
 | `CLAUDE_DOCKER_PROTECT="~/kit:docs"` | none | Paths that are read-only wherever they are mounted |
 | `CLAUDE_DOCKER_RW_CONFIG` | `0` | `1` makes the protected parts of `~/.claude` (`settings.json`, `CLAUDE.md`, `hooks`...) writable |
 | `CLAUDE_DOCKER_SHARED_HISTORY` | `0` | `1` lets a session see Claude Code's history of every project, not only its own |
-| `CLAUDE_DOCKER_CACHE` | `1` | `~/.cache` persists per project. `0` makes it a 2g tmpfs |
+| `CLAUDE_DOCKER_CACHE` | `1` | `~/.cache` persists per project. `0` makes it a tmpfs of at most 2g |
 | `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set, `GH_TOKEN` is how `gh` logs in |
 
 The doors, all closed by default:
@@ -154,8 +154,9 @@ The container and its image:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_DOCKER_FEATURES="go typst"` | `features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
-| `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Memory limit |
+| `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Memory limit. Below about 10g, `/tmp` and the other tmpfs shrink to fit in half of it |
 | `CLAUDE_DOCKER_PIDS=1024` | `512` | Process limit |
+| `CLAUDE_DOCKER_CPUS=4` | every CPU | CPU limit, a fraction like `1.5` works too. A session at its limit runs slower, nothing is ended |
 | `CLAUDE_DOCKER_RUNTIME=runsc` | Docker's own | Container runtime, gVisor say, which must be installed in Docker |
 
 The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the two

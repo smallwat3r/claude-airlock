@@ -15,7 +15,7 @@ What a session is given and what it is kept from.
   while a session runs, so a session starts logged in.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so one
   session cannot poison another project's dependencies.
-  `CLAUDE_DOCKER_CACHE=0` goes back to a 2g tmpfs.
+  `CLAUDE_DOCKER_CACHE=0` goes back to a tmpfs of at most 2g.
 - The git config, read-only. There is no gpg in the image, so sign the
   commits on the host before pushing.
 
@@ -41,7 +41,8 @@ What a session is given and what it is kept from.
 ## Hardening
 
 - Runs as your user, with a read-only root filesystem, all capabilities
-  dropped, `no-new-privileges`, and PID and memory limits.
+  dropped, `no-new-privileges`, and PID and memory limits. A CPU limit with
+  `CLAUDE_DOCKER_CPUS`.
 - Writable space is the mounts, the cache volume and a few size-capped
   tmpfs (`/tmp`, `~/.npm`, `~/.config`).
 - Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`

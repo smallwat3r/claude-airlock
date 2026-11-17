@@ -60,12 +60,16 @@ listed there is off.
   change to them fails with "Read-only file system". Ask the user to make
   it on the host. If on, they are writable.
 - CLAUDE_DOCKER_CACHE (on unless 0). If on, ~/.cache persists between
-  sessions of this project. If off, it is a 2g tmpfs that is gone when the
+  sessions of this project. If off, it is a tmpfs of at most 2g that is gone when the
   session ends, and large downloads can fill it.
 - CLAUDE_DOCKER_MEMORY and CLAUDE_DOCKER_PIDS, the container's memory and
   process limits. A process killed without a reason of its own (exit code
   137) ran into the first, "Resource temporarily unavailable" or a failure
   to fork into the second. Say which limit and its current value.
+- CLAUDE_DOCKER_CPUS (no limit unless listed), how many CPUs the container
+  can use at most. nproc still counts every CPU of the host, and what
+  runs on more than the limit is held back, not ended: give builds and
+  tests that many jobs (make -j4 for 4), not nproc's count.
 - CLAUDE_DOCKER_DIRS, the directories mounted next to the project. One
   marked (ro) is read-only, the user mounts it writable with --add-dir. Any
   other path of the host is not here at all, that takes --add-dir too.

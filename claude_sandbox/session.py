@@ -5,6 +5,7 @@ launcher ends while it runs in ending.py."""
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from .claude_args import is_a_command, says_permissions
 from .docker import (
+    Tmpfs,
     docker,
     docker_ok,
     docker_safe_name,
@@ -23,7 +25,7 @@ from .docker import (
 )
 from .ending import Ending
 from .files import expand_home, json_object, private_dir, try_lock_file
-from .home import home_args, session_state_args, statusline_of
+from .home import home_args, session_state, statusline_of
 from .image import Image
 from .settings import (
     BIN_DIR,
@@ -133,6 +135,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         env_arg("CLAUDE_DOCKER_CACHE", int(settings.cache)),
         env_arg("CLAUDE_DOCKER_MEMORY", settings.memory),
         env_arg("CLAUDE_DOCKER_PIDS", settings.pids),
+        *([env_arg("CLAUDE_DOCKER_CPUS", settings.cpus)] if settings.cpus else []),
         # No gpg binary (or key) in the image, so a host gitconfig with
         # commit.gpgsign=true would make every commit fail. Sign the
         # sandbox's commits at review time, before pushing.
@@ -150,20 +153,17 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # keep it self-contained.
         mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
         *statusline_args(host),
-        *session_state_args(),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--read-only",
-        # exec where builds and test binaries run, sized so a runaway process
-        # cannot eat host RAM through an unbounded tmpfs (default: half of RAM)
-        "--tmpfs=/tmp:exec,size=4g",
-        f"--tmpfs={CONTAINER_HOME}/.config:size=64m",
-        f"--tmpfs={CONTAINER_HOME}/.npm:exec,size=1g",
+        *scratch_args(settings, host),
         f"--pids-limit={settings.pids}",
         # Same value for swap, otherwise docker allows as much swap again on top
         f"--memory={settings.memory}",
         f"--memory-swap={settings.memory}",
-        cache_arg(settings, host),
+        # Not ended at this limit as at that of memory, held back: what a
+        # session runs gets no more of the machine's CPUs than so many
+        *([f"--cpus={settings.cpus}"] if settings.cpus else []),
         # A stronger runtime when asked for, e.g. runsc (gVisor), which keeps
         # the container off the host kernel. It must be installed in the daemon.
         *([f"--runtime={settings.runtime}"] if settings.runtime else []),
@@ -199,16 +199,56 @@ def statusline_args(host: Host) -> list[str]:
     return [mount_arg(script, target, "ro,z") for target in targets]
 
 
-def cache_arg(settings: Settings, host: Host) -> str:
-    """~/.cache holds the Go module, uv and npm caches. By default it is a
-    named volume per project, so sessions do not download everything again.
-    Per project on purpose: a shared cache would let a compromised session
-    poison the dependencies of every other project. Unlike the tmpfs it has
-    no size cap, remove the claude-cache-* volumes to reclaim the space."""
-    target = f"{CONTAINER_HOME}/.cache"
-    if not settings.cache:
-        return f"--tmpfs={target}:exec,size=2g"
-    return mount_arg(f"claude-cache-{project_slug(host.project_dir)}", target)
+# What a session can write to outside its mounts. /tmp is where builds and
+# test binaries run. Each is sized, a tmpfs is as large as half of the
+# machine's memory otherwise.
+SCRATCH = (
+    Tmpfs("/tmp", 4096, runs=True),
+    Tmpfs(f"{CONTAINER_HOME}/.config", 64),
+    Tmpfs(f"{CONTAINER_HOME}/.npm", 1024, runs=True),
+)
+CACHE = Tmpfs(f"{CONTAINER_HOME}/.cache", 2048, runs=True)
+# What is written there counts towards the session's memory limit, and is
+# not given back when a process is ended for want of memory. So together
+# they get no more than this much of the limit, each less by as much as it
+# takes: a full one then says that it is full, with memory left to run in.
+SCRATCH_SHARE = 0.5
+# A memory limit as docker reads it: a number, and what it counts in
+_MEMORY = re.compile(r"(\d+(?:\.\d+)?) ?([kmgtp]?)i?b?", re.IGNORECASE)
+_MEGABYTES = {"": 2**-20, "k": 2**-10, "m": 1, "g": 2**10, "t": 2**20, "p": 2**30}
+
+
+def memory_megabytes(limit: str) -> float | None:
+    """A memory limit in megabytes, none for one that cannot be read:
+    docker says what is wrong with it."""
+    said = _MEMORY.fullmatch(limit.strip())
+    if said is None:
+        return None
+    return float(said.group(1)) * _MEGABYTES[said.group(2).lower()]
+
+
+def scratch_args(settings: Settings, host: Host) -> list[str]:
+    """What a session writes to that is not mounted from the host: the
+    tmpfs of SCRATCH and those of what Claude Code keeps for one session
+    (see session_state of home.py), sized for its memory limit (see
+    SCRATCH_SHARE), and ~/.cache, which holds the Go module, uv and npm caches. By default
+    that is a named volume per project, so sessions do not download
+    everything again. Per project on purpose: a shared cache would let a
+    compromised session poison the dependencies of every other project.
+    Unlike the tmpfs it has no size cap, remove the claude-cache-* volumes
+    to reclaim the space."""
+    mounts = [*session_state(), *SCRATCH, *([] if settings.cache else [CACHE])]
+    limit = memory_megabytes(settings.memory)
+    share = 1.0
+    # None is set with 0, as docker has it
+    if limit:
+        wanted = sum(mount.megabytes for mount in mounts)
+        share = min(1.0, limit * SCRATCH_SHARE / wanted)
+    args = [mount.arg(share) for mount in mounts]
+    if settings.cache:
+        volume = f"claude-cache-{project_slug(host.project_dir)}"
+        args.append(mount_arg(volume, CACHE.target))
+    return args
 
 
 def session_args(action: str, env: Mapping[str, str]) -> list[str]:

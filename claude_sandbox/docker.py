@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from typing import IO, Any
 
 from .settings import Fatal
@@ -109,6 +110,34 @@ def mount_arg(source: str, target: str, options: str = "") -> str:
         if ":" in path:
             raise Fatal(f"cannot mount {path}: docker takes no path with a colon")
     return "--volume=" + ":".join(part for part in (source, target, options) if part)
+
+
+@dataclass(frozen=True)
+class Tmpfs:
+    """A directory of a container that is kept in memory and gone with it,
+    of at most so many megabytes."""
+
+    target: str
+    megabytes: int
+    # Whether what is in it can be run
+    runs: bool = False
+    # Whose it is, as a user and a group, and who else may use it: root's
+    # and open to all unless told otherwise
+    owner: tuple[int, int] | None = None
+    mode: str = ""
+
+    def arg(self, share: float = 1.0) -> str:
+        """The mount, with that share of its size. Never of none, which
+        would say no limit at all."""
+        megabytes = max(1, int(self.megabytes * share))
+        size = f"{megabytes}m" if megabytes % 1024 else f"{megabytes // 1024}g"
+        options = ["exec"] if self.runs else []
+        options.append(f"size={size}")
+        if self.owner:
+            options += [f"uid={self.owner[0]}", f"gid={self.owner[1]}"]
+        if self.mode:
+            options.append(f"mode={self.mode}")
+        return f"--tmpfs={self.target}:{','.join(options)}"
 
 
 def docker_safe_name(name: str) -> str:
