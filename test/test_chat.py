@@ -39,7 +39,7 @@ from claude_sandbox.events import Event, Who
 from claude_sandbox.follow import Follower
 from claude_sandbox.layout import Layout
 from claude_sandbox.mounts import ExtraDir
-from claude_sandbox.settings import Host, Settings
+from claude_sandbox.settings import Host, Settings, SocketAccess
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
 # A test at a terminal that waits for what never comes fails after this
@@ -1502,7 +1502,7 @@ class StatusTest(LauncherTest):
 
     def test_the_sandbox_is_shown_as_the_session_was_started(self):
         settings = Settings(
-            net_filter=True, ssh_agent=True, socket="full", shared_history=True
+            net_filter=True, ssh_agent=True, socket=SocketAccess.FULL, shared_history=True
         )
         dirs = [
             ExtraDir(str(self.home / "shared")),
@@ -1528,7 +1528,7 @@ class StatusTest(LauncherTest):
             sandbox = status.Sandbox.started(
                 "claude-x", settings, [], str(self.home), ssh_agent=False
             )
-        self.assertEqual((sandbox.socket, sandbox.ssh_agent), ("0", False))
+        self.assertEqual((sandbox.socket, sandbox.ssh_agent), (SocketAccess.OFF, False))
 
     def test_it_heads_the_prompt_and_is_said_when_asked_for(self):
         shown = page()

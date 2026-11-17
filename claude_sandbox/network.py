@@ -42,6 +42,7 @@ from .settings import (
     Fatal,
     Host,
     Settings,
+    SocketAccess,
 )
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
@@ -71,9 +72,12 @@ EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # container reaches every other by name.
 FILTER_NET = "claude-docker-net"
 OPEN_NET = "claude-docker-open-net"
-SOCKET_NET_SUFFIXES = {"1": "-ps", "full": "-full"}
+SOCKET_NET_SUFFIXES = {SocketAccess.LIMITED: "-ps", SocketAccess.FULL: "-full"}
 FILTER_NETS = (FILTER_NET, *(FILTER_NET + s for s in SOCKET_NET_SUFFIXES.values()))
-SOCKET_PROXIES = {"1": "claude-docker-ps-proxy", "full": "claude-docker-proxy"}
+SOCKET_PROXIES = {
+    SocketAccess.LIMITED: "claude-docker-ps-proxy",
+    SocketAccess.FULL: "claude-docker-proxy",
+}
 DOCKER_SOCK = "/var/run/docker.sock"
 # The networks each proxy can be on, by its name: where a session that uses
 # it would be found
@@ -111,7 +115,8 @@ def socket_proxy_name(settings: Settings) -> str:
     """One sidecar per socket mode, so sessions in different modes never
     share. The limited one has its own name on purpose: a full-access sidecar
     left running must not be picked up as the limited one."""
-    return SOCKET_PROXIES["full" if settings.socket == "full" else "1"]
+    full = settings.socket is SocketAccess.FULL
+    return SOCKET_PROXIES[SocketAccess.FULL if full else SocketAccess.LIMITED]
 
 
 @dataclass(frozen=True)
@@ -519,7 +524,7 @@ def socket_proxy_options(settings: Settings) -> list[str]:
                                  inspect, stats and top. inspect shows the
                                  environment of every container on the host,
                                  secrets included."""
-    if settings.socket == "1":
+    if settings.socket is SocketAccess.LIMITED:
         # The image renders this template into its HAProxy config. No allow
         # switches are passed, so if a future image ignored the template, its
         # stock rules would deny containers rather than open them up.
@@ -569,5 +574,5 @@ def socket_proxy_args(settings: Settings) -> list[str]:
     return [
         env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),
         # Shown by bin/claude-statusline
-        env_arg("CLAUDE_DOCKER_SOCKET", settings.socket),
+        env_arg("CLAUDE_DOCKER_SOCKET", settings.socket.value),
     ]

@@ -15,10 +15,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..events import flat, labelled
-from ..layout import DIM, painted
+from ..layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
 from ..mounts import ExtraDir
 from ..network import has_socket_proxy
-from ..settings import Settings
+from ..settings import Settings, SocketAccess
 from ..transcript import LATEST
 from .console import Page
 from .pipe import Session, amount
@@ -27,11 +27,8 @@ from .turn import Usage
 # The windows of the limits of the account that are shown, as claude
 # names them, with how the status names them
 WINDOWS = {"five_hour": "5h", "seven_day": "7d"}
-# How each part is coloured, as the parameters of an SGR escape
-BOLD = "1"
-GREEN = "1;32"
-YELLOW = "33"
-RED = "31"
+# How the name of the session is coloured
+NAME_STYLE = together(BOLD, GREEN)
 # From how many percent used a limit or the context is yellow, and red
 WARN_AT = 70
 ALARM_AT = 90
@@ -89,8 +86,7 @@ class Sandbox:
     name: str
     net_filter: bool = False
     ssh_agent: bool = False
-    # 0, 1 or full, see CLAUDE_DOCKER_SOCKET
-    socket: str = "0"
+    socket: SocketAccess = SocketAccess.OFF
     rw_config: bool = False
     shared_history: bool = False
     # Each as it is shown, (ro) after one that is read-only
@@ -116,7 +112,7 @@ class Sandbox:
             name,
             net_filter=settings.net_filter,
             ssh_agent=ssh_agent,
-            socket=settings.socket if has_socket_proxy(settings) else "0",
+            socket=settings.socket if has_socket_proxy(settings) else SocketAccess.OFF,
             rw_config=settings.rw_config,
             shared_history=settings.shared_history,
             dirs=shown,
@@ -126,13 +122,13 @@ class Sandbox:
         """The sandbox as parts of the status: yellow what widens what a
         session reaches, red what shows every container on the host with
         its secrets."""
-        parts = [(GREEN, f"[{flat(self.name)}]")]
+        parts = [(NAME_STYLE, f"[{flat(self.name)}]")]
         parts.append((DIM, "net:filtered") if self.net_filter else (YELLOW, "net:open"))
         if self.ssh_agent:
             parts.append((YELLOW, "ssh-agent"))
-        if self.socket == "1":
+        if self.socket is SocketAccess.LIMITED:
             parts.append((YELLOW, "docker:ps"))
-        elif self.socket == "full":
+        elif self.socket is SocketAccess.FULL:
             parts.append((RED, "docker:full"))
         if self.rw_config:
             parts.append((YELLOW, "config:rw"))

@@ -31,6 +31,18 @@ class SettingsListTest(LauncherTest):
         missing = str(self.work / "no-config")
         self.assertEqual(settings.load_settings({}, missing), settings.Settings())
 
+    def test_a_choice_is_read_as_what_it_names_and_no_other_is_taken(self):
+        missing = str(self.work / "no-config")
+        for said, access in (
+            ("0", settings.SocketAccess.OFF),
+            ("1", settings.SocketAccess.LIMITED),
+            ("full", settings.SocketAccess.FULL),
+        ):
+            read = settings.load_settings({"CLAUDE_DOCKER_SOCKET": said}, missing)
+            self.assertIs(read.socket, access)
+        with self.assertRaises(settings.Fatal):
+            settings.load_settings({"CLAUDE_DOCKER_SOCKET": "all"}, missing)
+
     def test_the_config_file_takes_all_but_the_per_project_ones(self):
         left_out = {s.name for s in settings.SETTINGS} - settings.CONFIG_FILE_SETTINGS
         self.assertEqual(left_out, {"EXTRA_DIRS", "EXTRA_DIRS_RO"})

@@ -231,7 +231,7 @@ class SocketProxyTest(LauncherTest):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def sidecar_for(self, mode: str) -> tuple[list[str], list[str]]:
+    def sidecar_for(self, mode: settings.SocketAccess) -> tuple[list[str], list[str]]:
         asked = settings.Settings(socket=mode)
         network.start_socket_proxy(asked)
         args = network.socket_proxy_args(asked)
@@ -240,7 +240,7 @@ class SocketProxyTest(LauncherTest):
         return args, sidecars[0]
 
     def test_mode_1_uses_the_limited_sidecar(self):
-        args, sidecar = self.sidecar_for("1")
+        args, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         self.assertIn("--name=claude-docker-ps-proxy", sidecar)
         self.assertTrue(any("docker-socket-proxy.cfg" in arg for arg in sidecar))
         # No allow switches, the stock rules deny containers
@@ -248,14 +248,14 @@ class SocketProxyTest(LauncherTest):
         self.assertIn("--env=DOCKER_HOST=tcp://claude-docker-ps-proxy:2375", args)
 
     def test_mode_full_uses_its_own_sidecar_and_blocks_writes(self):
-        args, sidecar = self.sidecar_for("full")
+        args, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
         self.assertIn("--name=claude-docker-proxy", sidecar)
         for switch in ("CONTAINERS=1", "POST=0", "EXEC=0"):
             self.assertIn(f"--env={switch}", sidecar)
         self.assertIn("--env=DOCKER_HOST=tcp://claude-docker-proxy:2375", args)
 
     def test_the_socket_is_mounted_read_only(self):
-        _, sidecar = self.sidecar_for("1")
+        _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         self.assertIn(
             f"--volume={network.DOCKER_SOCK}:/var/run/docker.sock:ro", sidecar
         )
@@ -267,17 +267,17 @@ class SocketProxyTest(LauncherTest):
     def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
         names = {
             mode: network.network_name(settings.Settings(socket=mode))
-            for mode in ("0", "1", "full")
+            for mode in settings.SocketAccess
         }
         self.assertEqual(
             names,
             {
-                "0": "claude-docker-open-net",
-                "1": "claude-docker-open-net-ps",
-                "full": "claude-docker-open-net-full",
+                settings.SocketAccess.OFF: "claude-docker-open-net",
+                settings.SocketAccess.LIMITED: "claude-docker-open-net-ps",
+                settings.SocketAccess.FULL: "claude-docker-open-net-full",
             },
         )
-        _, sidecar = self.sidecar_for("full")
+        _, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
         self.assertIn("--network=claude-docker-open-net-full", sidecar)
         self.assertNotIn(
             ["network", "connect", "claude-docker-open-net", "claude-docker-proxy"],
@@ -285,7 +285,7 @@ class SocketProxyTest(LauncherTest):
         )
 
     def test_a_proxy_is_labelled_with_what_it_was_started_from(self):
-        _, sidecar = self.sidecar_for("1")
+        _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         self.assertTrue(
             [arg for arg in sidecar if arg.startswith("--label=claude-sandbox.config=")]
         )

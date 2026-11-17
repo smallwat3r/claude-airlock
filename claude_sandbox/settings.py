@@ -38,6 +38,18 @@ class Fatal(Exception):
     """A problem to report to the user as one line, without a traceback."""
 
 
+class SocketAccess(enum.Enum):
+    """What of the host's Docker daemon a session reaches, each by what
+    CLAUDE_DOCKER_SOCKET says for it, see socket_proxy_options of
+    network.py."""
+
+    OFF = "0"
+    # docker ps and docker logs
+    LIMITED = "1"
+    # Every read of a container, which adds inspect, stats and top
+    FULL = "full"
+
+
 @dataclass(frozen=True)
 class Settings:
     """The value of every CLAUDE_DOCKER_* setting, a field for each of
@@ -51,7 +63,7 @@ class Settings:
     proc_log: bool = True
     telemetry: bool = False
     ssh_agent: bool = False
-    socket: str = "0"  # 0, 1 or full
+    socket: SocketAccess = SocketAccess.OFF
     rw_config: bool = False
     shared_history: bool = False
     shadow: tuple[str, ...] = ()
@@ -225,6 +237,8 @@ class Setting:
     kind: Kind
     says: str
     choices: tuple[str, ...] = ("0", "1")
+    # For a choice, what its values are read as: one of these, by value
+    of: type[enum.Enum] | None = None
     # What to mount next to a project is a per-project choice, not a
     # default for every session: not taken from the config file
     config_file: bool = True
@@ -255,7 +269,8 @@ SETTINGS = (
         "SOCKET",
         Kind.CHOICE,
         "1 allows docker ps and logs, full adds inspect",
-        choices=("0", "1", "full"),
+        choices=tuple(access.value for access in SocketAccess),
+        of=SocketAccess,
     ),
     Setting(
         "RW_CONFIG", Kind.SWITCH, "1 leaves the protected ~/.claude config writable"
@@ -384,6 +399,8 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         default = getattr(defaults, setting.field)
         if kind is Kind.SWITCH:
             default = "1" if default else "0"
+        elif isinstance(default, enum.Enum):
+            default = default.value
         value = env.get(key) or in_file or default
         if kind is Kind.TEXT:
             return value
@@ -391,7 +408,9 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
         # it off without a word
         if value not in setting.choices:
             raise Fatal(f"{key} must be {' or '.join(setting.choices)}, got: {value}")
-        return value == "1" if kind is Kind.SWITCH else value
+        if kind is Kind.SWITCH:
+            return value == "1"
+        return setting.of(value) if setting.of else value
 
     # Each as its kind gives it, which the fields of Settings are typed for
     values = {setting.field: read(setting) for setting in SETTINGS}

@@ -326,7 +326,7 @@ class SocketWatchTest(LauncherTest):
         }
         with mock.patch.object(network, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
             with mock.patch.dict(os.environ, environment):
-                asked = settings.Settings(socket="1")
+                asked = settings.Settings(socket=settings.SocketAccess.LIMITED)
                 with doors.socket_proxy_watched(
                     asked, host, "claude-proj", "claude-proj"
                 ):
