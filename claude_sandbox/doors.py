@@ -44,6 +44,13 @@ from .settings import Host, Settings
 
 # The lines kept, the oldest go once there are more
 KEPT_USES = 5000
+# The connections a session can have to the agent at once, and the seconds
+# one can stay open with nothing asked. Each takes a thread and two
+# descriptors of the launcher: without a bound a session could use them
+# all up, and with them what else the launcher does while it runs, the
+# copy of its transcript for one (see recorder.py).
+AGENT_CONNECTIONS = 16
+AGENT_IDLE = 120.0
 # The longest message an agent takes, as OpenSSH has it
 AGENT_LONGEST = 256 * 1024
 AGENT_FAILURE = 5
@@ -177,6 +184,7 @@ class AgentDoor:
         self._agent = agent
         # The comment of each key the agent has listed, by its fingerprint
         self._comments: dict[str, str] = {}
+        self._free = threading.BoundedSemaphore(AGENT_CONNECTIONS)
         directory = private_dir(host.agent_sockets_dir)
         # A short name: the path of a socket cannot be long
         name = hashlib.sha256(session.encode()).hexdigest()[:12]
@@ -205,7 +213,21 @@ class AgentDoor:
             except OSError:
                 # Closed, the session has ended
                 return
-            threading.Thread(target=self._pass_on, args=(client,), daemon=True).start()
+            if not self._free.acquire(blocking=False):
+                # Too many at once, see AGENT_CONNECTIONS: ssh takes this
+                # for an agent that is not there
+                client.close()
+                continue
+            # Only for what the session is waited on, the agent takes
+            # the time its user does to confirm
+            client.settimeout(AGENT_IDLE)
+            threading.Thread(target=self._serve_one, args=(client,), daemon=True).start()
+
+    def _serve_one(self, client: socket.socket) -> None:
+        try:
+            self._pass_on(client)
+        finally:
+            self._free.release()
 
     def _pass_on(self, client: socket.socket) -> None:
         with client, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as agent:

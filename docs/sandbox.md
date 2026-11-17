@@ -84,7 +84,8 @@ Each is off until you switch it on, and each use is noted for `--trace`.
   first.
 - The session gets a socket of the launcher's in front of the agent. It
   passes on listing the keys and signing with one. Adding or removing
-  keys and locking the agent are refused.
+  keys and locking the agent are refused. A session has 16 connections to
+  it at most, and one that asks nothing for two minutes is closed.
 - On macOS its use is not noted.
 
 **The Docker socket**, with `CLAUDE_DOCKER_SOCKET` (and the `docker` feature

@@ -112,7 +112,7 @@ class AgentDoorTest(LauncherTest):
         short = settings.Host(
             self.host.home, self.host.project_dir, self.host.config_home, self.directory
         )
-        door = doors.AgentDoor(short, "claude-proj", agent.path)
+        door = self.door = doors.AgentDoor(short, "claude-proj", agent.path)
         self.addCleanup(door.close)
         self.host = short
         answers = []
@@ -125,6 +125,47 @@ class AgentDoorTest(LauncherTest):
 
     def uses(self) -> list[dict]:
         return doors.read_uses(self.host, 0, time.time() + 5)
+
+    def test_a_session_cannot_hold_more_than_so_many_connections(self):
+        answers = self.through_the_door(b"\x0b")
+        self.assertEqual(len(answers), 1)
+        path = self.door.path
+        before = len(os.listdir("/proc/self/fd"))
+        held = []
+        self.addCleanup(lambda: [each.close() for each in held])
+        for _ in range(doors.AGENT_CONNECTIONS * 4):
+            client = socket.socket(socket.AF_UNIX)
+            held.append(client)
+            # As fast as the door takes them in
+            for _ in range(200):
+                try:
+                    client.connect(path)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.01)
+            client.settimeout(5)
+        time.sleep(0.5)
+        # Ours, and for each that was let in the door's two
+        most = len(held) + 2 * doors.AGENT_CONNECTIONS
+        self.assertLessEqual(len(os.listdir("/proc/self/fd")) - before, most + 2)
+        # Those past the bound were closed at once, and the door still serves
+        self.assertEqual(held[-1].recv(1), b"")
+        for each in held:
+            each.close()
+        time.sleep(0.5)
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(path)
+            client.sendall(string(b"\x0b"))
+            self.assertEqual(doors.read_message(client)[:1], b"\x0c")
+
+    def test_a_connection_that_asks_nothing_is_let_go(self):
+        self.through_the_door(b"\x0b")
+        path = self.door.path
+        idle = mock.patch.object(doors, "AGENT_IDLE", 0.2)
+        with idle, socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(5)
+            client.connect(path)
+            self.assertEqual(client.recv(1), b"")
 
     def test_requests_reach_the_agent_and_are_noted(self):
         answers = self.through_the_door(b"\x0b", sign_request(login("git")))
