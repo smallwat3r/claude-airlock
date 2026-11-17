@@ -14,8 +14,11 @@ What you get:
 - **A contained session.** Only the project is mounted, as your user, on a
   read-only root filesystem with all capabilities dropped. Secrets in
   `.env` files read as empty, and Claude's own configuration is read-only.
-- **A record of what it did.** Every tool call, connection, DNS lookup and
-  process is recorded from outside the session, and `--trace` shows it.
+- **A record of what it did.** Every connection, DNS lookup and process is
+  recorded from outside the session, so the session cannot tamper with
+  it. Its tool calls come from its own transcript, which the launcher
+  copies as it is written and flags when a line is later changed or
+  removed. `--trace` shows it all.
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook say.
 - **Line mode.** Claude Code without its full-screen UI: a prompt, and
