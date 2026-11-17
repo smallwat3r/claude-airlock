@@ -18,6 +18,9 @@ from .settings import CONTAINER_HOME, Host
 MOST_SUBAGENTS = 1000
 # Where Claude Code keeps the transcripts of a session's subagents, in SESSION/
 SUBAGENTS_DIR = "subagents"
+# What a transcript's name ends with, and that of a subagent starts with
+TRANSCRIPT_SUFFIX = ".jsonl"
+SUBAGENT_PREFIX = "agent-"
 
 
 def project_roots(host: Host) -> list[str]:
@@ -66,18 +69,48 @@ def transcript_dirs(host: Host) -> list[Path]:
     )
 
 
-def transcript_files(host: Host) -> list[Path]:
-    """The project's transcripts, in no order, none for a project without
-    a session."""
+def plain_files(directory: Path) -> tuple[list[str], set[str]]:
+    """The names of the plain files of a directory, and those of its
+    directories, neither through a link. None for one that is not there.
+    As the listing says, without a look at each: it is listed often while
+    a session runs, see recorder.py."""
+    files: list[str] = []
+    directories: set[str] = set()
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        files.append(entry.name)
+                    elif entry.is_dir(follow_symlinks=False):
+                        directories.add(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return files, directories
+
+
+def listed_transcripts(directory: Path) -> tuple[list[Path], set[str]]:
+    """The transcripts in one of the project's directories, and the names
+    of the directories next to them: that of a session holds what its
+    subagents wrote."""
     # The directories are writable from inside the sandbox: only plain
     # files, not a link to something else on the host or a pipe that never
     # ends. A session can still put one in a transcript's place after it
     # was listed, so each is opened with open_plain of files.py.
+    files, directories = plain_files(directory)
+    found = [directory / name for name in files if name.endswith(TRANSCRIPT_SUFFIX)]
+    return found, directories
+
+
+def transcript_files(host: Host) -> list[Path]:
+    """The project's transcripts, in no order, none for a project without
+    a session."""
     return [
-        f
+        transcript
         for directory in transcript_dirs(host)
-        for f in directory.glob("*.jsonl")
-        if f.is_file() and not f.is_symlink()
+        for transcript in listed_transcripts(directory)[0]
     ]
 
 
@@ -92,19 +125,23 @@ def subagent_files(transcript: Path) -> list[Path]:
     # are opened with open_plain of files.py, as a transcript is.
     if directory.parent.is_symlink() or directory.is_symlink():
         return []
-    found = [
-        f
-        for f in sorted(directory.glob("agent-*.jsonl"))
-        if f.is_file() and not f.is_symlink()
-    ]
-    return found[:MOST_SUBAGENTS]
+    names = sorted(
+        name
+        for name in plain_files(directory)[0]
+        if name.startswith(SUBAGENT_PREFIX) and name.endswith(TRANSCRIPT_SUFFIX)
+    )
+    return [directory / name for name in names[:MOST_SUBAGENTS]]
 
 
 def session_transcripts(host: Host) -> list[Path]:
     """Every transcript the project's sessions write: their own and
     those of their subagents."""
-    return [
-        path
-        for transcript in transcript_files(host)
-        for path in (transcript, *subagent_files(transcript))
-    ]
+    found: list[Path] = []
+    for directory in transcript_dirs(host):
+        transcripts, directories = listed_transcripts(directory)
+        for transcript in transcripts:
+            found.append(transcript)
+            # Most sessions started no subagent and have no directory
+            if transcript.name[: -len(TRANSCRIPT_SUFFIX)] in directories:
+                found += subagent_files(transcript)
+    return found

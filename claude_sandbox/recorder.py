@@ -139,6 +139,8 @@ class Copier:
         self._since = since
         # How long each transcript was when the session started
         self._lengths = {path: length(path) for path in session_transcripts(host)}
+        # Where the copy of each transcript there is goes, worked out once
+        self._copies: dict[Path, Path] = {}
         # The looks at a transcript that failed, and why the last one did
         self.failed = 0
         self.problem = ""
@@ -155,15 +157,28 @@ class Copier:
             return True
         if about.st_size != self._lengths.get(transcript):
             return True
-        copied = length(copy_path(self._host, transcript))
+        copied = length(self._copy_of(transcript))
         return copied is not None and copied != about.st_size
+
+    def _copy_of(self, transcript: Path) -> Path:
+        copy = self._copies.get(transcript)
+        if copy is None:
+            copy = self._copies[transcript] = copy_path(self._host, transcript)
+        return copy
 
     def look(self) -> None:
         """Catch up the copy of each transcript that was written to."""
-        for transcript in session_transcripts(self._host):
+        transcripts = session_transcripts(self._host)
+        # Not of those that are gone, a session can make any number
+        self._copies = {
+            transcript: copy
+            for transcript in transcripts
+            if (copy := self._copies.get(transcript)) is not None
+        }
+        for transcript in transcripts:
             if self.written_to(transcript):
                 try:
-                    catch_up(transcript, copy_path(self._host, transcript))
+                    catch_up(transcript, self._copy_of(transcript))
                 except OSError as problem:
                     # A full disk or the like: the session goes on
                     # without, and it is said once it is over
