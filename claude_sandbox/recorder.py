@@ -4,7 +4,8 @@ makes of the two.
 The transcript is written from inside the sandbox, a session could rewrite
 its own and take out what it did. So while a session runs, the launcher
 copies what the project's transcripts gain to its state directory, which is
-not mounted into any session, a moment after it is written. --trace reads
+not mounted into any session, a moment after it is written. Those of the
+subagents too, what a subagent ran is in a transcript of its own. --trace reads
 the transcript, and says what the copy has that the transcript no longer
 does.
 
@@ -23,7 +24,7 @@ before it is copied, and anything of a session run without the launcher."""
 
 from __future__ import annotations
 
-import fcntl
+import contextlib
 import glob
 import hashlib
 import os
@@ -35,8 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .background import in_background
-from .files import json_object, open_plain, private_dir
-from .projects import transcript_files
+from .files import json_object, open_locked, open_plain, private_dir
+from .projects import session_transcripts, subagent_session
 from .settings import Host
 
 # Seconds between two looks at the transcripts
@@ -51,11 +52,22 @@ MOST_PUT_ASIDE = 5
 # transcript by default
 KEPT_DAYS = 30
 ASIDE_SUFFIX = ".was"
+# Of the directory the copies of a session's subagents are kept in
+SUBAGENTS_SUFFIX = ".subagents"
 
 
 def copy_path(host: Host, transcript: Path) -> Path:
     """Where the copy of a transcript is kept: by the names of its
-    directory and of its file, which are Claude Code's and hold no path."""
+    directory and of its file, which are Claude Code's and hold no path.
+    That of a subagent (PROJECT/SESSION/subagents/NAME) is kept in
+    PROJECT/SESSION.subagents, which is the copy of no transcript: those
+    end in .jsonl."""
+    session = subagent_session(transcript)
+    if session is not None:
+        kept = f"{session.name}{SUBAGENTS_SUFFIX}"
+        return Path(
+            host.transcript_copies_dir, session.parent.name, kept, transcript.name
+        )
     return Path(host.transcript_copies_dir, transcript.parent.name, transcript.name)
 
 
@@ -81,9 +93,7 @@ def catch_up(transcript: Path, copy: Path) -> None:
     if source is None:
         return
     private_dir(str(copy.parent))
-    descriptor = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with source, os.fdopen(descriptor, "ab") as kept:
-        fcntl.flock(kept, fcntl.LOCK_EX)
+    with source, open_locked(copy, "ab") as kept:
         if not still_at(kept.fileno(), copy):
             # Put aside by the launcher that had the lock: this is no
             # longer the copy, the next look opens the one that is
@@ -122,7 +132,7 @@ class Copier:
         # adds to
         self._since = since
         # How long each transcript was when the session started
-        self._lengths = {path: length(path) for path in transcript_files(host)}
+        self._lengths = {path: length(path) for path in session_transcripts(host)}
 
     def written_to(self, transcript: Path) -> bool:
         """Whether a transcript was written to since the session started:
@@ -141,7 +151,7 @@ class Copier:
 
     def look(self) -> None:
         """Catch up the copy of each transcript that was written to."""
-        for transcript in transcript_files(self._host):
+        for transcript in session_transcripts(self._host):
             if self.written_to(transcript):
                 try:
                     catch_up(transcript, copy_path(self._host, transcript))
@@ -152,12 +162,20 @@ class Copier:
 
 def let_go_of_old_copies(host: Host) -> None:
     oldest = time.time() - KEPT_DAYS * 86400
-    for copy in Path(host.transcript_copies_dir).glob("*/*"):
+    kept = Path(host.transcript_copies_dir)
+    # Those of the sessions, then those of their subagents
+    for copy in [*kept.glob("*/*"), *kept.glob(f"*/*{SUBAGENTS_SUFFIX}/*")]:
         try:
+            if copy.is_dir():
+                continue
             if copy.stat().st_mtime < oldest:
                 copy.unlink()
         except OSError:
             continue
+    for directory in kept.glob(f"*/*{SUBAGENTS_SUFFIX}"):
+        with contextlib.suppress(OSError):
+            # Once it is empty
+            directory.rmdir()
 
 
 def keep_copying(copier: Copier, stop: threading.Event) -> None:
@@ -203,19 +221,30 @@ class Compared:
     # How often it was rewritten shorter while a launcher watched
     rewritten: int = 0
 
-    def header(self) -> list[str]:
+    def header(self, subagents: int = 0) -> list[str]:
         """The line of a trace that says how far its transcript is to be
-        believed."""
+        believed, or those of so many subagents taken together."""
+        name = f"subagents   {subagents}, " if subagents else "transcript  "
+        it = "them" if subagents else "it"
         if not self.copied:
-            return [
-                "transcript  as it is now, the launcher has no copy of it to compare"
-            ]
+            if subagents:
+                return [f"{name}as they are now, the launcher has not copied them all"]
+            return [f"{name}as it is now, the launcher has no copy of it to compare"]
         if not self.gone and not self.rewritten:
-            return [f"transcript  as the launcher copied it ({self.lines} lines)"]
+            return [f"{name}as the launcher copied {it} ({self.lines} lines)"]
         said = f"{len(self.gone)} lines the launcher copied are gone or altered"
         if self.rewritten:
-            said += f", it was rewritten {self.rewritten} times"
-        return [f"transcript  CHANGED: {said}, they are shown as REMOVED"]
+            said += f", rewritten {self.rewritten} times"
+        return [f"{name}CHANGED: {said}, they are shown as REMOVED"]
+
+    def with_(self, other: Compared) -> Compared:
+        """The two as one: copied when both are, and what either lost."""
+        return Compared(
+            self.copied and other.copied,
+            self.lines + other.lines,
+            self.gone + other.gone,
+            self.rewritten + other.rewritten,
+        )
 
 
 def compare(host: Host, transcript: Path) -> Compared:

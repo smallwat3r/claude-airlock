@@ -61,6 +61,11 @@ class Settings:
     pids: str = "512"
     cache: bool = True
     runtime: str = ""
+    # Whether Claude Code asks before it uses a tool, as outside the sandbox
+    ask: bool = False
+    # Whether a session runs in line mode (chat/), not behind Claude
+    # Code's own
+    line_mode: bool = True
     # None is ~/claude-shared when it exists, "" no shared directory
     shared_dir: str | None = None
     extra_dirs: tuple[str, ...] = ()
@@ -270,6 +275,8 @@ SETTINGS = (
     Setting("PIDS", Kind.TEXT, "process limit"),
     Setting("CACHE", Kind.SWITCH, "0 keeps ~/.cache on a tmpfs, nothing persists"),
     Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc for gVisor"),
+    Setting("ASK", Kind.SWITCH, "1 has Claude Code ask before it uses a tool"),
+    Setting("LINE_MODE", Kind.SWITCH, "0 runs Claude Code with its full-screen UI"),
     Setting(
         "SHARED_DIR",
         Kind.NAME,

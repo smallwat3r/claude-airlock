@@ -22,38 +22,35 @@ and that of the SSH agent and Docker socket are the launcher's own."""
 
 from __future__ import annotations
 
-import dataclasses
-import json
-import math
+import functools
 import os
 import pydoc
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from .capture import cut_short
+from .capture import cut_short, session_capture
 from .door_events import door_events
-from .egress_log import ProxyRequest, logged_requests, made_by
-from .events import Event, Who, clean, flat
-from .pcap import Capture, Connection, Flow, Lookup, Request, read_capture
-from .processes import ProcessRecord, read_record, shown_lineage
-from .projects import project_root
-from .recorder import compare
+from .egress_log import ProxyRequest, logged_requests, requests_made
+from .events import Event, Who, clean, flat, labelled
+from .layout import Layout, event_json, shown_what, went_wrong
+from .pcap import Capture, Connection, Flow, Lookup, Request
+from .processes import ProcessRecord, session_record, shown_lineage
+from .projects import project_root, subagent_files
+from .recorder import Compared, compare
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
 from .shown import over, reached, size, verdict
 from .transcript import (
-    FILE_TOOLS,
     call_label,
     entry_times,
     prompts,
     read_entries,
     session_files,
+    sessions_named,
     summary,
     title,
     tool_calls,
@@ -69,28 +66,8 @@ DURING_WIDTH = 60
 # Seconds for which the timeline remembers a call that has ended, for the
 # events of the network that are read later than they happened
 TIMELINE_SLACK = 30.0
-# Of the column that says what an event is, a longer name is cut to it
-WHAT_WIDTH = 10
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
-# How the lines are coloured on a terminal, as the parameters of an SGR
-# escape. What a session did out of sight is what stands out: commands,
-# writes and the network. The conversation, which its user saw anyway, and
-# the lines about the trace itself are dimmed, the other tools are left
-# as they are.
-DIM = "2"
-ALERT = "1;31"
-STYLES = {
-    "prompt": DIM,
-    "reply": DIM,
-    "bash": "33",
-    "net": "36",
-    "dns": "36",
-    # The network too, asked for through a tool
-    "webfetch": "34",
-    "websearch": "34",
-    **dict.fromkeys(map(str.lower, FILE_TOOLS), "35"),
-}
 
 
 def proxy_summary(
@@ -161,10 +138,7 @@ def proxy_requests(
     if logged is None:
         return ["  the egress proxy's log cannot be read"], []
     requests, events = [], []
-    for request in logged:
-        by = next((s for s in sessions if made_by(request, s, start, end)), None)
-        if by is None:
-            continue
+    for request, by in requests_made(logged, sessions, start, end):
         event = proxy_event(request)
         name_container([event], by.name, several)
         requests.append(request)
@@ -348,14 +322,11 @@ def process_records(
 ) -> list[tuple[NetSession, ProcessRecord]]:
     """The record of the processes of each session that has one, those
     that are still kept."""
-    records = []
-    for session in watched:
-        try:
-            record = read_record(Path(host.process_records_dir, session.processes))
-        except OSError:
-            continue
-        records.append((session, record))
-    return records
+    return [
+        (session, record)
+        for session in watched
+        if (record := session_record(host, session)) is not None
+    ]
 
 
 def processes_of(
@@ -442,9 +413,8 @@ def captured_connections(
     ended = datetime.fromtimestamp(session.until)
     name = clean(session.name)
     heading = f"  captured in {name} from {began:%H:%M:%S} to {ended:%H:%M:%S}"
-    try:
-        capture = read_capture(Path(host.captures_dir, session.capture))
-    except OSError:
+    capture = session_capture(host, session)
+    if capture is None:
         return [heading, "  its capture is no longer kept"], []
     events = capture_events(capture, verbose)
     if record:
@@ -454,16 +424,13 @@ def captured_connections(
 
 
 def network(
-    host: Host, entries: list[dict], verbose: bool
+    host: Host, start: float, end: float, verbose: bool
 ) -> tuple[list[str], list[Event]]:
     """What the session did on the network and what ran in it, from what
     the launcher kept: the egress proxy's log for a filtered session, a
     capture for one run without CLAUDE_DOCKER_NET_LOG=0, and the record
-    of its processes for one run without CLAUDE_DOCKER_PROC_LOG=0."""
-    times = [when.timestamp() for when in entry_times(entries)]
-    if not times:
-        return [], []
-    start, end = times[0], times[-1]
+    of its processes for one run without CLAUDE_DOCKER_PROC_LOG=0, all
+    of those between start and end."""
     sessions = recorded_sessions(host, start, end)
     filtered = [session for session in sessions if session.ip]
     captured = [session for session in sessions if session.capture]
@@ -482,7 +449,11 @@ def network(
     lines = (
         ["network", *(line for some, _ in found for line in some)]
         if found
-        else ["network     not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"]
+        else [
+            labelled(
+                "network", "not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
+            )
+        ]
     )
     events = [event for _, events in found for event in events]
     for session, record in records:
@@ -491,80 +462,6 @@ def network(
         name_container(ran, session.name, several)
         events += ran
     return lines, events
-
-
-def wrong_throughout(fields: dict) -> bool:
-    """Whether an event tells of something gone wrong that every line of
-    it is about: a request the filter refused, a connection that was
-    refused or not answered, a lookup that failed or that stands out, a
-    use of the SSH agent it refused, and what was taken out of the
-    transcript."""
-    return bool(
-        fields.get("denied")
-        or fields.get("outcome") in ("refused", "no answer")
-        or fields.get("error")
-        or fields.get("flagged")
-        or fields.get("removed")
-    )
-
-
-def went_wrong(event: Event) -> bool:
-    """Whether an event tells of something gone wrong: a call that failed,
-    a write outside the project, and what wrong_throughout names."""
-    fields = event.fields
-    return bool(
-        fields.get("failed")
-        or fields.get("outside_project")
-        or wrong_throughout(fields)
-    )
-
-
-def alerting(event: Event, line: str) -> bool:
-    """Whether a line of an event is one that tells of what went wrong,
-    see went_wrong: how a failed call ended, the file of a write outside
-    the project, and every line of what is wrong throughout."""
-    fields = event.fields
-    return bool(
-        (fields.get("failed") and line.startswith(("result: ", "out: ")))
-        or (fields.get("outside_project") and line.startswith("file: "))
-        or wrong_throughout(fields)
-    )
-
-
-def shown_what(what: str) -> str:
-    """What an event is, as it fits its column: of a tool of an MCP
-    server (mcp__server__tool) the name of the tool, and a name that is
-    still too long cut. --json has it whole."""
-    name = what.rpartition("__")[2] or what
-    return name if len(name) <= WHAT_WIDTH else name[: WHAT_WIDTH - 1] + "~"
-
-
-def folded(events: Iterable[Event]) -> list[Event]:
-    """The events with each run of the same thing on the network as one,
-    said to have happened so many times. What Claude Code itself keeps
-    reaching comes by the dozen, and would bury the one connection that
-    a command made."""
-    runs: list[tuple[Event, int]] = []
-    for event in events:
-        last, count = runs[-1] if runs else (None, 0)
-        if (
-            last
-            and event.what in ("net", "dns")
-            and (event.who, event.what, event.details)
-            == (last.who, last.what, last.details)
-            and went_wrong(event) == went_wrong(last)
-        ):
-            runs[-1] = (last, count + 1)
-        else:
-            runs.append((event, 1))
-    return [
-        event
-        if count == 1
-        else dataclasses.replace(
-            event, details=[f"{event.details[0]}  x{count}", *event.details[1:]]
-        )
-        for event, count in runs
-    ]
 
 
 @dataclass(frozen=True)
@@ -589,7 +486,7 @@ class Filter:
         a trace kept in a file must not pass for a whole one."""
         said = [f"only {', '.join(sorted(self.only))}"] if self.only else []
         said += ["only what went wrong"] if self.failed else []
-        return [f"shown       {', '.join(said)}"] if said else []
+        return [labelled("shown", ", ".join(said))] if said else []
 
 
 # The filter that leaves nothing out
@@ -679,6 +576,14 @@ def removed_events(gone: list[dict], project_dir: str, verbose: bool) -> list[Ev
     return events
 
 
+def subagents_header(compared: list[Compared]) -> list[str]:
+    """The line that says how far the transcripts of a session's
+    subagents are to be believed, none for a session without any."""
+    if not compared:
+        return []
+    return functools.reduce(Compared.with_, compared).header(len(compared))
+
+
 def session_events(
     path: Path, host: Host, verbose: bool, chosen: Filter = EVERYTHING
 ) -> tuple[list[str], list[Event]]:
@@ -689,23 +594,37 @@ def session_events(
     entries = read_entries(path)
     project_dir = project_root(path, host)
     compared = compare(host, path)
-    net_lines, net_events = network(host, entries, verbose)
+    # What its subagents did is in a transcript of each, see subagent_files
+    subagents = [(read_entries(f), compare(host, f)) for f in subagent_files(path)]
+    theirs = [entry for of_one, _ in subagents for entry in of_one]
     times = [when.timestamp() for when in entry_times(entries)]
-    door_lines, door_uses = (
-        door_events(host, times[0], times[-1]) if times else ([], [])
-    )
+    net_lines: list[str] = []
+    net_events: list[Event] = []
+    door_rows: list[tuple[str, str]] = []
+    door_uses: list[Event] = []
+    if times:
+        start, end = times[0], times[-1]
+        net_lines, net_events = network(host, start, end, verbose)
+        door_rows, door_uses = door_events(host, start, end)
     header = [
-        f"session     {flat(path.stem)}  {title(entries)}",
+        labelled("session", f"{flat(path.stem)}  {title(entries)}"),
         *compared.header(),
-        *summary(entries, project_dir),
+        *subagents_header([copied for _, copied in subagents]),
+        *summary(entries + theirs, project_dir),
         *net_lines,
-        *door_lines,
+        *(labelled(door, used) for door, used in door_rows),
         *chosen.header(),
     ]
     # Stable, so what the transcript has at the same time keeps its order
     events = sorted(
         transcript_events(entries, project_dir, verbose)
         + removed_events(compared.gone, project_dir, verbose)
+        + [
+            event
+            for of_one, copied in subagents
+            for event in transcript_events(of_one, project_dir, verbose)
+            + removed_events(copied.gone, project_dir, verbose)
+        ]
         + net_events
         + door_uses,
         key=lambda event: event.when,
@@ -714,134 +633,6 @@ def session_events(
     for event in events:
         timeline.take(event)
     return header, [event for event in events if chosen.wants(event)]
-
-
-def prefixed(start: str, texts: list[str]) -> list[str]:
-    """Whatever a value holds, no line of the output starts without its
-    prefix: a line break in one must not pass for the start of an event."""
-    return [
-        (start + line).rstrip()
-        for text in texts
-        for line in (text.splitlines() or [""])
-    ]
-
-
-def use_colour(env: Mapping[str, str]) -> bool:
-    """Whether the lines are coloured: on a terminal, unless NO_COLOR says
-    not to (no-color.org), and anywhere when FORCE_COLOR asks for it, as a
-    shell buffer of Emacs may want, which is not a terminal but shows
-    colours."""
-    if env.get("NO_COLOR"):
-        return False
-    return bool(env.get("FORCE_COLOR")) or sys.stdout.isatty()
-
-
-def painted(style: str, text: str) -> str:
-    """Text in a style, as it is without one. What is painted has been
-    through clean, it holds no escape of its own to end the style early."""
-    return f"\x1b[{style}m{text}\x1b[0m" if style and text else text
-
-
-@dataclass
-class Layout:
-    """How the lines of a trace are laid out.
-
-    For a file or a pipe every line starts with when (the date and the
-    time), who and what, so a line found by grep says it all and the
-    traces of several days can be put together.
-
-    For a reader at a terminal (compact) that is said once per event, on
-    its first line, and the lines under it are indented: where an event
-    starts is then seen at a glance. The time is that of the day, and the
-    day is on a line of its own whenever it changes.
-
-    In colour the time is dimmed and the rest of a line has the style of
-    what the event is, or of an alert."""
-
-    colour: bool = False
-    compact: bool = False
-    # The day of the event shown last, when compact
-    _day: str = ""
-
-    @classmethod
-    def for_output(cls, env: Mapping[str, str]) -> Layout:
-        """The layout for where the output goes."""
-        return cls(use_colour(env), sys.stdout.isatty())
-
-    @property
-    def columns(self) -> str:
-        """The header line that names the columns."""
-        when = "time    " if self.compact else "time               "
-        return f"{when}  {'who':<7}  {'what':<{WHAT_WIDTH}}  details"
-
-    def header(self, header: list[str]) -> list[str]:
-        lines = prefixed("# ", header)
-        return [painted(DIM, line) for line in lines] if self.colour else lines
-
-    def events(self, events: Iterable[Event]) -> list[str]:
-        """The lines of events that follow each other, see folded."""
-        return [line for event in folded(events) for line in self.event(event)]
-
-    def event(self, event: Event) -> list[str]:
-        """An event as its lines, a call that has a number named by it."""
-        clock = f"{datetime.fromtimestamp(event.when):%Y-%m-%d %H:%M:%S}"
-        lines: list[str] = []
-        if self.compact:
-            day, clock = clock.split()
-            if day != self._day:
-                self._day = day
-                lines += self.header([f"day         {day}"])
-        about = f"{event.who.value:<7}  {shown_what(event.what):<{WHAT_WIDTH}}  "
-        style = STYLES.get(event.what, "")
-        for index, line in enumerate(prefixed("", event.details)):
-            first = index == 0
-            text = f"[{event.number}] {line}" if first and event.number else line
-            if self.compact and not first:
-                # Under the first line, which said when, who and what
-                clock, about = " " * len(clock), " " * len(about)
-            rest = (about + text).rstrip()
-            if self.colour:
-                rest = painted(ALERT if alerting(event, line) else style, rest)
-                when = painted(DIM, clock) if clock.strip() else clock
-                lines.append(f"{when}  {rest}")
-            else:
-                lines.append(f"{clock}  {rest}".rstrip())
-        return lines
-
-
-def event_json(session: str, event: Event) -> str:
-    """An event as a JSON object on a line: the session, time (ISO 8601
-    with its offset), who, what, then the values of that kind of event.
-    Escaped by the encoder, which leaves no control character to reach a
-    terminal."""
-    when = datetime.fromtimestamp(event.when).astimezone()
-    about = {
-        "session": session,
-        "time": when.isoformat(timespec="milliseconds"),
-        "who": event.who.value,
-        "what": event.what,
-    }
-    try:
-        try:
-            # NaN and Infinity, which a transcript can hold, are not JSON
-            # to most of what reads it
-            return json.dumps({**about, **event.fields}, allow_nan=False)
-        except ValueError:
-            return json.dumps({**about, **finite(event.fields)})
-    except RecursionError:
-        # Nested as deep as could just be read, by either of the two
-        return json.dumps({**about, "unreadable": True})
-
-
-def finite(value: Any) -> Any:
-    """A value with null for each number that JSON has no way to write."""
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, dict):
-        return {key: finite(inner) for key, inner in value.items()}
-    if isinstance(value, list):
-        return [finite(inner) for inner in value]
-    return value
 
 
 def render(
@@ -862,10 +653,11 @@ def render_json(path: Path, host: Host, chosen: Filter = EVERYTHING) -> str:
     return "".join(event_json(path.stem, event) + "\n" for event in events)
 
 
-def list_sessions(files: list[Path]) -> str:
-    """One line per session: when it last did something, the start of its
-    id (enough to name it to --trace), its size and its title. In the
-    order of that time, the latest first, and one that has no time last."""
+def session_rows(files: list[Path]) -> list[tuple[Path, str]]:
+    """Each session with the line that tells of it: when it last did
+    something, the start of its id (enough to name it to --trace), its
+    size and its title. In the order of that time, the latest first, and
+    one that has no time last."""
     rows = []
     for path in files:
         entries = read_entries(path)
@@ -876,10 +668,15 @@ def list_sessions(files: list[Path]) -> str:
             f"{when:16}  {flat(path.stem)[:8]}  {len(prompts(entries)):3d} prompts"
             f"  {len(tool_calls(entries)):4d} calls  {title(entries)}"
         )
-        rows.append((last.timestamp() if last else 0.0, line))
+        rows.append((last.timestamp() if last else 0.0, path, line))
     # Stable: the files come the last written first
     rows.sort(key=lambda row: row[0], reverse=True)
-    return "".join(line + "\n" for _, line in rows)
+    return [(path, line) for _, path, line in rows]
+
+
+def list_sessions(files: list[Path]) -> str:
+    """One line per session, see session_rows."""
+    return "".join(line + "\n" for _, line in session_rows(files))
 
 
 def show(text: str, colour: bool = False) -> None:
@@ -928,7 +725,7 @@ def trace_options(
 
 def picked_session(files: list[Path], name: str) -> Path:
     """The one transcript whose session id starts with name."""
-    found = [path for path in files if path.stem.startswith(name)]
+    found = sessions_named(files, name)
     if len(found) != 1:
         problem = "matches several sessions" if found else "matches no session"
         raise Fatal(f"{name} {problem}, see claude-docker --trace list")

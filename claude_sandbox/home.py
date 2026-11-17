@@ -194,3 +194,13 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
         # Shown by bin/claude-statusline
         args.append(env_arg("CLAUDE_DOCKER_RW_CONFIG", 1))
     return args
+
+
+def statusline_of(settings: dict) -> str:
+    """The command a settings.json of Claude Code runs as its statusline,
+    empty for none."""
+    line = settings.get("statusLine")
+    if not isinstance(line, dict) or line.get("type") != "command":
+        return ""
+    command = line.get("command")
+    return command if isinstance(command, str) and command.strip() else ""

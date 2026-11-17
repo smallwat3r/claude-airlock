@@ -126,6 +126,19 @@ class DigestTest(LauncherTest):
         transcript = self.write_transcript("0a", [])
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
         self.assertIn("  written outside the project:\n    /home/me/.bashrc\n", said)
+
+    def test_a_write_of_a_subagent_outside_the_project_is_said(self):
+        stamp = prompts_at(time.time())[0]["timestamp"]
+        write = {"type": "tool_use", "id": "c1", "name": "Write"}
+        write["input"] = {"file_path": "/home/me/.profile", "content": "x"}
+        entry = {"type": "assistant", "timestamp": stamp, "isSidechain": True}
+        entry["message"] = {"content": [write]}
+        transcript = self.write_transcript("0a", [])
+        subagents = transcript.with_suffix("") / "subagents"
+        subagents.mkdir(parents=True)
+        theirs = subagents / "agent-a1.jsonl"
+        said = self.session(session=f"echo '{json.dumps(entry)}' >> '{theirs}'")
+        self.assertIn("  written outside the project:\n    /home/me/.profile\n", said)
         self.assertNotIn("a.txt", said)
 
     def test_a_transcript_changed_during_the_session_is_said(self):

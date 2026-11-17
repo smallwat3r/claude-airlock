@@ -23,9 +23,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .background import in_background
+from .background import in_background, wait_for
 from .docker import (
     container_label,
+    container_running,
     docker_must,
     docker_ok,
     docker_output,
@@ -60,6 +61,8 @@ SIDECAR_CONFIG_LABEL = "claude-sandbox.config"
 # overshoot, a cron in the sidecar would be the fix if that ever matters.
 EGRESS_LOG_VOLUME = "claude-egress-log"
 EGRESS_LOG_DIR = "/var/log/squid"
+# Where the proxy logs each request, in it
+EGRESS_ACCESS_LOG = f"{EGRESS_LOG_DIR}/access.log"
 EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # Filtered mode joins an internal network with no route out, open mode a
 # plain bridge network. Both are user-defined so container names resolve.
@@ -99,7 +102,7 @@ def network_name(settings: Settings) -> str:
     """The network of a session: by whether it is filtered, and by the
     socket proxy it is given, if any."""
     name = FILTER_NET if settings.net_filter else OPEN_NET
-    if socket_proxy_options(settings) is None:
+    if not has_socket_proxy(settings):
         return name
     return name + SOCKET_NET_SUFFIXES[settings.socket]
 
@@ -182,7 +185,7 @@ def isolate_network(name: str, state: NetworkState) -> NetworkState:
     for proxy in state.containers:
         docker_ok("network", "disconnect", "--force", name, proxy)
     if docker_ok("network", "rm", name) and not create_network(name, True):
-        raise Fatal(f"claude-docker: the docker network {name} was not created")
+        raise Fatal(f"the docker network {name} was not created")
     return network_state(name) or state
 
 
@@ -196,7 +199,7 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
         # Another launcher may have been first
         state = network_state(name)
         if state is None and not created:
-            raise Fatal(f"claude-docker: the docker network {name} was not created")
+            raise Fatal(f"the docker network {name} was not created")
         if state is None:
             return set()
         return set(state.containers)
@@ -211,14 +214,9 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
     return set(state.containers)
 
 
-def sidecar_running(name: str) -> bool:
-    state = docker_output("container", "inspect", "--format={{.State.Running}}", name)
-    return "true" in state
-
-
 def sidecar_current(name: str, config: str) -> bool:
     """Running, and started from the config of that hash."""
-    if not sidecar_running(name):
+    if not container_running(name):
         return False
     return container_label(name, SIDECAR_CONFIG_LABEL) == config
 
@@ -309,9 +307,7 @@ def egress_proxy_current() -> bool:
 def rotate_access_log() -> None:
     """Rotate the proxy's log out once it is over the limit. Best effort,
     a session is not held up over its proxy's housekeeping."""
-    over_limit = (
-        f'[ "$(stat -c %s {EGRESS_LOG_DIR}/access.log)" -gt {EGRESS_LOG_LIMIT} ]'
-    )
+    over_limit = f'[ "$(stat -c %s {EGRESS_ACCESS_LOG})" -gt {EGRESS_LOG_LIMIT} ]'
     docker_ok("exec", EGRESS_PROXY, "sh", "-c", f"{over_limit} && squid -k rotate")
 
 
@@ -328,14 +324,11 @@ def session_address(name: str) -> str:
 def record_address(
     name: str, owner: str, host: Host, started: float, stop: threading.Event
 ) -> None:
-    while True:
-        address = session_address(owner)
-        if address:
-            session = NetSession(name, host.project_dir, started, ip=address)
-            record_net_session(host, session)
-            return
-        if stop.wait(0.2):
-            return
+    address = wait_for(lambda: session_address(owner), stop)
+    if address:
+        record_net_session(
+            host, NetSession(name, host.project_dir, started, ip=address)
+        )
 
 
 @contextmanager
@@ -379,8 +372,7 @@ def prepare_network(settings: Settings) -> None:
     # Only the socket proxy of the session's mode belongs there. Another
     # is from before each mode had its network, and would be a way to the
     # Docker socket the session was not given.
-    given = socket_proxy_options(settings) is not None
-    mine = socket_proxy_name(settings) if given else ""
+    mine = socket_proxy_name(settings) if has_socket_proxy(settings) else ""
     for stray in on_it.intersection(SOCKET_PROXIES.values()) - {mine}:
         docker_ok("network", "disconnect", "--force", network, stray)
     if not settings.net_filter:
@@ -409,7 +401,7 @@ def sidecars_locked(host: Host) -> Iterator[None]:
 def session_proxies(settings: Settings) -> list[str]:
     """The proxies a session with these settings goes through."""
     proxies = [EGRESS_PROXY] if settings.net_filter else []
-    if socket_proxy_options(settings) is not None:
+    if has_socket_proxy(settings):
         proxies.append(socket_proxy_name(settings))
     return proxies
 
@@ -510,10 +502,15 @@ def is_socket(path: str) -> bool:
         return False
 
 
-def socket_proxy_options(settings: Settings) -> list[str] | None:
-    """What the socket proxy of the session's mode is started with, None
-    when the session gets none: not asked for, or no Docker socket on the
-    host. A write call to the host daemon (which runs as root) would let
+def has_socket_proxy(settings: Settings) -> bool:
+    """Whether the session gets a socket proxy: asked for, and there is
+    a Docker socket on the host."""
+    return settings.socket in SOCKET_PROXIES and is_socket(DOCKER_SOCK)
+
+
+def socket_proxy_options(settings: Settings) -> list[str]:
+    """What the socket proxy of the session's mode is started with, for a
+    session that has one, see has_socket_proxy. A write call to the host daemon (which runs as root) would let
     the session spawn a sibling that mounts the host filesystem, escaping
     the sandbox entirely, so writes are blocked in both modes:
       CLAUDE_DOCKER_SOCKET=1     docker ps and docker logs only, through our
@@ -534,7 +531,7 @@ def socket_proxy_options(settings: Settings) -> list[str] | None:
             ),
             env_arg("EVENTS", 0),
         ]
-    elif settings.socket == "full":
+    else:
         allowed = ("CONTAINERS", "LOG", "INFO")
         blocked = (
             *("EXEC", "POST", "IMAGES", "NETWORKS", "VOLUMES"),
@@ -542,10 +539,6 @@ def socket_proxy_options(settings: Settings) -> list[str] | None:
         )
         mode_options = [env_arg(name, 1) for name in allowed]
         mode_options += [env_arg(name, 0) for name in blocked]
-    else:
-        return None
-    if not is_socket(DOCKER_SOCK):
-        return None
     return [mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"), *mode_options]
 
 
@@ -554,9 +547,9 @@ def start_socket_proxy(settings: Settings) -> None:
     put it on the session's network, which is that of its mode alone.
     Opt-in, nothing without it. One started from other rules or another
     image is replaced, which ends the calls other sessions have open."""
-    options = socket_proxy_options(settings)
-    if options is None:
+    if not has_socket_proxy(settings):
         return
+    options = socket_proxy_options(settings)
     name = socket_proxy_name(settings)
     network = network_name(settings)
     rules = Path(DOCKERFILE_DIR, "docker-socket-proxy.cfg").read_bytes()
@@ -571,7 +564,7 @@ def start_socket_proxy(settings: Settings) -> None:
 def socket_proxy_args(settings: Settings) -> list[str]:
     """What points the session's docker CLI (the docker feature) at the
     socket proxy of start_socket_proxy, nothing without one."""
-    if socket_proxy_options(settings) is None:
+    if not has_socket_proxy(settings):
         return []
     return [
         env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),

@@ -6,9 +6,11 @@ import hashlib
 import os
 import re
 import subprocess
-from typing import IO
+from typing import IO, Any
 
 from .settings import Fatal
+
+NOT_FOUND = "docker was not found on PATH"
 
 
 def docker(
@@ -29,7 +31,20 @@ def docker(
             check=False,
         )
     except FileNotFoundError:
-        raise Fatal("docker was not found on PATH") from None
+        raise Fatal(NOT_FOUND) from None
+
+
+def docker_popen(*args: str, **options: Any) -> subprocess.Popen:
+    """Start a docker command and leave it running, with the options of
+    subprocess.Popen. Raises OSError when it cannot be started,
+    FileNotFoundError when docker is not on PATH."""
+    return subprocess.Popen(["docker", *args], **options)
+
+
+def exec_args(container: str, command: str, *, stdin: bool = False) -> list[str]:
+    """The arguments of docker that run a bash command in a container,
+    given the launcher's stdin when told."""
+    return ["exec", *(["-i"] if stdin else []), container, "bash", "-c", command]
 
 
 def docker_ok(*args: str) -> bool:
@@ -46,6 +61,12 @@ def docker_output(*args: str) -> str:
 def running_containers() -> set[str]:
     """The names of the containers that are running now."""
     return set(docker_output("ps", "--format={{.Names}}").split())
+
+
+def container_running(name: str) -> bool:
+    """Whether a container of that name is there and running."""
+    state = docker_output("container", "inspect", "--format={{.State.Running}}", name)
+    return state.strip() == "true"
 
 
 def docker_bytes(*args: str) -> bytes | None:
@@ -70,7 +91,7 @@ def docker_must(*args: str) -> None:
     """Run a docker command the session cannot do without. Its stdout (an
     id) is dropped, its own error message says what went wrong."""
     if docker(*args, stdout=subprocess.DEVNULL).returncode != 0:
-        raise Fatal(f"claude-docker: docker {' '.join(args[:2])} failed")
+        raise Fatal(f"docker {' '.join(args[:2])} failed")
 
 
 def env_arg(name: str, value: object = None) -> str:

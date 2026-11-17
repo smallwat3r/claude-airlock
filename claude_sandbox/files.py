@@ -14,8 +14,17 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO, Any, BinaryIO
+
+# How each mode of open_locked opens its file, which is made as needed
+LOCKED_MODES = {
+    "r+": os.O_RDWR,
+    "a+": os.O_RDWR | os.O_APPEND,
+    "ab": os.O_WRONLY | os.O_APPEND,
+}
 
 
 def private_dir(path: str) -> str:
@@ -91,6 +100,34 @@ def lock_file(path: str, *, shared: bool = False) -> int:
         os.close(descriptor)
         raise
     return descriptor
+
+
+@contextmanager
+def open_locked(path: str | Path, mode: str) -> Iterator[IO[Any]]:
+    """Open a file of the launcher's, made for the user alone as needed,
+    with a mode of LOCKED_MODES, and lock it alone until it is closed:
+    launchers of other sessions write there too. Text is UTF-8, what is
+    not is replaced."""
+    descriptor = os.open(path, LOCKED_MODES[mode] | os.O_CREAT, 0o600)
+    encoding, errors = (None, None) if "b" in mode else ("utf-8", "replace")
+    with os.fdopen(descriptor, mode, encoding=encoding, errors=errors) as file:
+        fcntl.flock(file, fcntl.LOCK_EX)
+        yield file
+
+
+def append_kept(path: str, line: str, kept: int) -> None:
+    """Add a line to one of the launcher's records, a file of its state
+    directory for the user alone, and let go of the oldest lines past
+    kept."""
+    private_dir(os.path.dirname(path))
+    with open_locked(path, "a+") as record:
+        record.write(line + "\n")
+        record.flush()
+        record.seek(0)
+        lines = record.readlines()
+        if len(lines) > kept:
+            record.truncate(0)
+            record.writelines(lines[-kept:])
 
 
 def try_lock_file(path: str) -> int | None:

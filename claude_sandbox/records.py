@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import bisect
 import dataclasses
-import fcntl
 import json
 import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
 
-from .files import json_object, private_dir
+from .files import append_kept, json_object
 from .settings import Host
 
 # The lines kept, the oldest go once there are more. Well past the captures
@@ -102,23 +101,6 @@ class NetSession:
         if not ip and not capture and not processes:
             return None
         return cls(name, project, start, ip, capture, processes, end)
-
-
-def append_kept(path: str, line: str, kept: int) -> None:
-    """Add a line to one of the launcher's records, a file of its state
-    directory for the user alone, and let go of the oldest lines past
-    kept. Under a lock, launchers of other sessions write there too."""
-    private_dir(os.path.dirname(path))
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(descriptor, "a+", encoding="utf-8", errors="replace") as record:
-        fcntl.flock(record, fcntl.LOCK_EX)
-        record.write(line + "\n")
-        record.flush()
-        record.seek(0)
-        lines = record.readlines()
-        if len(lines) > kept:
-            record.truncate(0)
-            record.writelines(lines[-kept:])
 
 
 def record_net_session(host: Host, session: NetSession) -> None:

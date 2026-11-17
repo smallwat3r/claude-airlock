@@ -16,6 +16,8 @@ from dataclasses import dataclass
 # transcript could otherwise drive the terminal or reorder what is shown
 _BIDI = "".join(map(chr, [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]))
 _UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f" + _BIDI + "]")
+# Of the label a header line starts with: session, network, day, chat...
+LABEL_WIDTH = 12
 
 
 class Who(enum.Enum):
@@ -66,3 +68,8 @@ def flat(value: object) -> str:
     """Cleaned and on one line, for a value that has to stay with its
     label: a line break in a path or a reason is shown, not followed."""
     return "\\n".join(clean(value).splitlines())
+
+
+def labelled(label: str, text: str) -> str:
+    """A header line: what it is about, in its column, then the text."""
+    return f"{label:<{LABEL_WIDTH}}{text}"

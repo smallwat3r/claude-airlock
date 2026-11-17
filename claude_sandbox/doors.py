@@ -35,11 +35,11 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 
-from .docker import env_arg, mount_arg
-from .files import json_object, private_dir
-from .network import session_address, socket_proxy_name, socket_proxy_options
+from .background import wait_for
+from .docker import docker_popen, env_arg, mount_arg
+from .files import append_kept, json_object, private_dir
+from .network import has_socket_proxy, session_address, socket_proxy_name
 from .reader import Cursor, NotThis
-from .records import append_kept
 from .settings import Host, Settings
 
 # The lines kept, the oldest go once there are more
@@ -402,12 +402,12 @@ class SocketWatch:
 
     def _watch(self) -> None:
         # The address is only known once the container is up
-        while not (address := session_address(self._owner)):
-            if self._stop.wait(0.2):
-                return
+        address = wait_for(lambda: session_address(self._owner), self._stop)
+        if not address:
+            return
         try:
-            self._log = subprocess.Popen(
-                ["docker", "logs", "--follow", f"--since={self._since}", self._proxy],
+            self._log = docker_popen(
+                *("logs", "--follow", f"--since={self._since}", self._proxy),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -442,7 +442,7 @@ def socket_proxy_watched(
     """While a session with a way to the Docker socket runs, note the
     calls it makes. owner is the container whose address the session has
     on its network: itself, or its capture sidecar."""
-    if socket_proxy_options(settings) is None:
+    if not has_socket_proxy(settings):
         yield
         return
     watch = SocketWatch(host, session, owner, socket_proxy_name(settings))

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -172,10 +173,16 @@ class LauncherTest(unittest.TestCase):
         fake = self.work / "bin" / "docker"
         fake.write_text(FAKE_DOCKER)
         fake.chmod(0o755)
+        # The checks that call the package directly reach the fake too, never
+        # the docker of the machine the tests run on
+        self._path = os.environ["PATH"]
+        environment = unittest.mock.patch.dict(os.environ, self.fake_docker_env())
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def fake_docker_env(self) -> dict[str, str]:
         return {
-            "PATH": f"{self.work / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{self.work / 'bin'}{os.pathsep}{self._path}",
             "FAKE_LOG": str(self.work / "log"),
             "FAKE_OUT": str(self.work / "out"),
         }
@@ -192,12 +199,14 @@ class LauncherTest(unittest.TestCase):
         """Run the launcher. Keyword arguments are its environment. Without
         the network capture and the record of processes unless asked for,
         which are on by default and would give every session here its
-        sidecars."""
+        sidecars, and without line mode, which would run claude with the
+        arguments of a chat in place of those it was given."""
         environment = {
             **self.fake_docker_env(),
             "HOME": str(self.home),
             "CLAUDE_DOCKER_NET_LOG": "0",
             "CLAUDE_DOCKER_PROC_LOG": "0",
+            "CLAUDE_DOCKER_LINE_MODE": "0",
             **env,
         }
         if session:

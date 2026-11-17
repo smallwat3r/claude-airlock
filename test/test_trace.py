@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime
 
 from harness import (
     LAUNCHER,
@@ -19,8 +20,8 @@ from harness import (
     transcript,
 )
 
-from claude_sandbox import trace as tracing
 from claude_sandbox.events import Event, Who
+from claude_sandbox.layout import Layout, event_json, folded
 
 
 class TraceTest(LauncherTest):
@@ -174,7 +175,7 @@ class TraceTest(LauncherTest):
 
         def written(depth: int) -> dict:
             event = Event(0.0, Who.CLAUDE, "bash", ["x"], {"input": nested(depth)})
-            return json.loads(tracing.event_json("0a", event))
+            return json.loads(event_json("0a", event))
 
         # What is not a number JSON has is written as null
         self.assertEqual(written(3), {**written(3), "input": [[[None]]]})
@@ -332,7 +333,7 @@ class TraceTest(LauncherTest):
             reached(6.0, "a.test"),
             reached(7.0, "a.test", outcome="refused"),
         ]
-        shown = tracing.folded(events)
+        shown = folded(events)
         self.assertEqual(
             [(event.when, event.details[0]) for event in shown],
             [
@@ -350,12 +351,12 @@ class TraceTest(LauncherTest):
         day = 24 * 3600.0
         ran = Event(day, Who.CLAUDE, "bash", ["$ make", "why: Build", ""], {})
         late = Event(2 * day, Who.USER, "prompt", ["more"], {})
-        layout = tracing.Layout(compact=True)
+        layout = Layout(compact=True)
         lines = layout.events([ran, ran, late])
         first, second = (
-            f"{tracing.datetime.fromtimestamp(d):%Y-%m-%d}" for d in (day, 2 * day)
+            f"{datetime.fromtimestamp(d):%Y-%m-%d}" for d in (day, 2 * day)
         )
-        clock = f"{tracing.datetime.fromtimestamp(day):%H:%M:%S}"
+        clock = f"{datetime.fromtimestamp(day):%H:%M:%S}"
         self.assertEqual(
             lines,
             [
@@ -371,11 +372,11 @@ class TraceTest(LauncherTest):
             ],
         )
         self.assertEqual(layout.columns.index("details"), 31)
-        coloured = tracing.Layout(colour=True, compact=True).event(ran)
+        coloured = Layout(colour=True, compact=True).event(ran)
         self.assertEqual(
             coloured[2], " " * 10 + "\x1b[33m" + " " * 21 + "why: Build\x1b[0m"
         )
-        piped = tracing.Layout().event(ran)
+        piped = Layout().event(ran)
         self.assertTrue(
             all(line.startswith(f"{first} {clock}  claude") for line in piped)
         )
@@ -400,7 +401,7 @@ class TraceTest(LauncherTest):
         ]
         self.assertEqual(listed, ["0d", "0e", "3fa9c0de"])
         self.assertIn(
-            f"{tracing.datetime.fromtimestamp(1_800_009_000):%Y-%m-%d %H:%M}  0d",
+            f"{datetime.fromtimestamp(1_800_009_000):%Y-%m-%d %H:%M}  0d",
             self.launch("--trace", "list").stdout,
         )
 
@@ -660,6 +661,54 @@ class NetworkTraceTest(LauncherTest):
     def test_a_session_without_the_filter_says_so(self):
         os.remove(self.state / "net-sessions.jsonl")
         self.assertIn("# network     not recorded", self.trace())
+
+
+class CommandTest(unittest.TestCase):
+    """A command of Claude Code's (/model sonnet), as its transcript has
+    it: the prompt in tags, and what it said in an entry of the system."""
+
+    ENTRIES = (
+        {
+            "type": "user",
+            "timestamp": "2026-01-02T10:00:00Z",
+            "message": {
+                "content": "<command-name>/model</command-name>\n   "
+                "<command-message>model</command-message>\n   "
+                "<command-args>sonnet</command-args>"
+            },
+        },
+        {
+            "type": "system",
+            "subtype": "local_command",
+            "timestamp": "2026-01-02T10:00:01Z",
+            "content": "<local-command-stdout>Set model to Sonnet\x1b[2J\n\n"
+            "for this session</local-command-stdout>",
+        },
+        # Not what a command said
+        {"type": "system", "subtype": "local_command", "content": ["x"]},
+        {"type": "system", "subtype": "compact_boundary", "content": "x"},
+    )
+
+    def test_a_command_shows_as_typed_and_with_what_it_said(self):
+        events = transcript.transcript_events(list(self.ENTRIES), "/p", False)
+        shown = [(e.who, e.what, e.details) for e in events]
+        self.assertEqual(
+            shown,
+            [
+                (Who.USER, "prompt", ["/model sonnet"]),
+                (Who.CLAUDE, "command", ["Set model to Sonnet[2J", "for this session"]),
+            ],
+        )
+
+    def test_followed_a_command_says_its_first_line_and_has_the_rest(self):
+        walk = transcript.Walk("/p", False, live=True)
+        said = [event for entry in self.ENTRIES for event in walk.take(entry)][1]
+        self.assertEqual(said.details, ["Set model to Sonnet[2J"])
+        self.assertIn("for this session", said.fields["text"])
+
+    def test_a_prompt_that_only_mentions_the_tags_is_left_as_it_is(self):
+        text = "what does <command-name>/x</command-name> mean"
+        self.assertEqual(transcript.as_typed(text), text)
 
 
 if __name__ == "__main__":

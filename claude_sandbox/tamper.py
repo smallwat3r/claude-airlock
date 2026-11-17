@@ -357,10 +357,8 @@ def save_pending_check(
     whole: a launcher that starts meanwhile reads the checks that are
     there, and drops one it cannot read."""
     private_dir(str(file.parent))
-    launcher = Launcher.current()
     pending = {
-        "pid": launcher.pid,
-        "launched": launcher.started,
+        **Launcher.current().as_fields(),
         "watched": watched,
         "claude_dir": claude_dir,
         "before": before,
@@ -375,10 +373,9 @@ def report_unchecked_sessions(directory: Path) -> None:
         try:
             pending = json.loads(file.read_text(encoding="utf-8"))
             launcher, watched, claude_dir, before = (
-                # Neither its start nor claude_dir are in a check saved
-                # by an earlier version
-                Launcher(int(pending["pid"]), str(pending.get("launched", ""))),
+                Launcher.from_fields(pending),
                 [str(watched_dir) for watched_dir in pending["watched"]],
+                # Not in a check saved by an earlier version
                 str(pending.get("claude_dir", "")),
                 {str(k): str(v) for k, v in pending["before"].items()},
             )

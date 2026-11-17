@@ -8,19 +8,23 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, TypeVar
 
-from .docker import docker_ok, docker_output
+from .docker import docker, docker_ok, docker_output
 from .files import json_object, private_dir
 from .launcher import Launcher, session_alive
 from .records import NetSession, record_net_session
 from .settings import Host
 
 SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
+
+# The processes a sidecar can have at once, it runs one program
+SIDECAR_PIDS = 16
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,9 @@ class Sidecar:
     KEPT: ClassVar[int]
     # The seconds it is given to stop, docker's own without
     STOP_SECONDS: ClassVar[int | None] = None
+    # The memory it runs with, and the capabilities it is given, of none
+    MEMORY: ClassVar[str]
+    CAPABILITIES: ClassVar[tuple[str, ...]]
 
     name: str
     project: str
@@ -73,17 +80,36 @@ class Sidecar:
 
     @property
     def label(self) -> str:
-        about = {
-            "project": self.project,
-            "start": self.start,
-            "pid": self.launcher.pid,
-            "launched": self.launcher.started,
-        }
-        return json.dumps(about)
+        about = {"project": self.project, "start": self.start}
+        return json.dumps({**about, **self.launcher.as_fields()})
 
     @property
     def label_arg(self) -> str:
         return f"--label={self.LABEL}={self.label}"
+
+    def run_args(self) -> list[str]:
+        """The options of docker run every sidecar starts with: its name
+        and label, as root with CAPABILITIES alone, never more, within its
+        bounds."""
+        return [
+            f"--name={self.name}",
+            self.label_arg,
+            "--user=0:0",
+            "--cap-drop=ALL",
+            *(f"--cap-add={capability}" for capability in self.CAPABILITIES),
+            "--security-opt=no-new-privileges",
+            f"--memory={self.MEMORY}",
+            f"--pids-limit={SIDECAR_PIDS}",
+        ]
+
+    def last_said(self, lines: int | None = None) -> str:
+        """What the sidecar wrote to its output and its errors, the last
+        lines of it when told how many."""
+        tail = [] if lines is None else [f"--tail={lines}"]
+        said = docker(
+            "logs", *tail, self.name, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        return said.stdout.strip()
 
     @classmethod
     def from_label(  # noqa: PYI019
@@ -94,8 +120,7 @@ class Sidecar:
         try:
             about = json_object(label) or {}
             project, start = str(about["project"]), float(about["start"])
-            # Not in the label of an earlier version
-            launcher = Launcher(int(about["pid"]), str(about.get("launched", "")))
+            launcher = Launcher.from_fields(about)
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
             return None
         if not name.endswith(cls.SUFFIX) or not math.isfinite(start):

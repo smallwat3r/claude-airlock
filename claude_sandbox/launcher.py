@@ -49,6 +49,17 @@ class Launcher:
     def current(cls) -> Launcher:
         return cls(os.getpid(), process_started(os.getpid()))
 
+    def as_fields(self) -> dict[str, object]:
+        """The launcher as the fields of a record of the launcher's."""
+        return {"pid": self.pid, "launched": self.started}
+
+    @classmethod
+    def from_fields(cls, fields: dict) -> Launcher:
+        """The launcher of a record, see as_fields. Raises KeyError,
+        ValueError or TypeError for a record without one."""
+        # No start in a record of an earlier version
+        return cls(int(fields["pid"]), str(fields.get("launched", "")))
+
     @property
     def alive(self) -> bool:
         # Zero and below would ask about process groups, not a process

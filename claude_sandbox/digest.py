@@ -17,37 +17,26 @@ the trace has the address."""
 
 from __future__ import annotations
 
-import fcntl
 import ipaddress
 import json
-import os
 import subprocess
 import sys
 import time
 from collections import Counter
-from pathlib import Path
 
-from .capture import cut_short
+from .capture import cut_short, session_capture
 from .door_events import door_events
-from .egress_log import logged_requests, made_by
+from .egress_log import logged_requests, requests_made
 from .events import flat
-from .files import json_object, private_dir
-from .pcap import Capture, read_capture
-from .processes import read_record
-from .projects import project_root, transcript_files
+from .files import json_object, open_locked, private_dir
+from .pcap import Capture
+from .processes import session_record
+from .projects import project_root, session_transcripts, subagent_session
 from .recorder import compare
 from .records import NetSession, recorded_sessions
 from .settings import EGRESS_PORT, Fatal, Host
 from .shown import reached, size
-from .transcript import (
-    FILE_TOOLS,
-    call_input,
-    file_path,
-    modified,
-    outside,
-    read_entries,
-    tool_calls,
-)
+from .transcript import modified, outside, read_entries, written_paths
 
 # To one destination in one session, from this many bytes on it is said
 LARGE_UPLOAD = 10_000_000
@@ -119,12 +108,9 @@ def last_reached(noted: object) -> float:
 def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
     """The destinations no session of the project was noted to reach
     before, as shown, and note them all as reached now. None of them for
-    the first session that is noted. Under a lock, launchers of other
-    sessions write here too."""
+    the first session that is noted."""
     private_dir(host.state_dir)
-    descriptor = os.open(host.destinations_file, os.O_RDWR | os.O_CREAT, 0o600)
-    with os.fdopen(descriptor, "r+", encoding="utf-8", errors="replace") as record:
-        fcntl.flock(record, fcntl.LOCK_EX)
+    with open_locked(host.destinations_file, "r+") as record:
         projects = json_object(record.read()) or {}
         recorded = projects.get(host.project_dir)
         first = not isinstance(recorded, dict)
@@ -158,18 +144,11 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
     found: dict[str, str] = {}
     filtered = any(session.ip for session in sessions)
     for session in sessions:
-        if session.processes:
-            try:
-                record = read_record(Path(host.process_records_dir, session.processes))
-            except OSError:
-                continue
-            if record.full:
-                lines.append("the record of its processes stopped at its size limit")
-        if not session.capture:
-            continue
-        try:
-            capture = read_capture(Path(host.captures_dir, session.capture))
-        except OSError:
+        record = session_record(host, session)
+        if record and record.full:
+            lines.append("the record of its processes stopped at its size limit")
+        capture = session_capture(host, session)
+        if capture is None:
             continue
         found.update(destinations(capture))
         lines += uploads(capture, filtered)
@@ -192,9 +171,8 @@ def denied_lines(sessions: list[NetSession], start: float, end: float) -> list[s
         return []
     denied = Counter(
         flat(request.url)
-        for request in logged
+        for request, _ in requests_made(logged, filtered, start, end)
         if request.denied
-        and any(made_by(request, session, start, end) for session in filtered)
     )
     return listed(
         "refused by the egress filter:",
@@ -207,18 +185,23 @@ def transcript_lines(host: Host, start: float) -> list[str]:
     written outside the project, and what was taken out of them."""
     lines: list[str] = []
     written: list[str] = []
-    for path in transcript_files(host):
+    # Those of the subagents too, what one wrote is in its own
+    for path in session_transcripts(host):
         if modified(path) < start:
             continue
         project_dir = project_root(path, host)
-        for _, block in tool_calls(read_entries(path)):
-            file = file_path(call_input(block))
-            if block.get("name") in FILE_TOOLS and file and outside(file, project_dir):
-                written.append(flat(file))
+        written.extend(
+            flat(file)
+            for file in written_paths(read_entries(path))
+            if outside(file, project_dir)
+        )
         compared = compare(host, path)
         if compared.gone or compared.rewritten:
+            # A subagent's is named by its session
+            session = subagent_session(path)
+            whose = "a subagent of " if session else ""
             lines.append(
-                f"the transcript of {flat(path.stem)[:8]} was changed:"
+                f"the transcript of {whose}{flat((session or path).stem)[:8]} was changed:"
                 f" {len(compared.gone)} lines the launcher copied are gone or altered"
             )
     return [
@@ -236,12 +219,12 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
         for found in recorded_sessions(host, start, end)
         if found.name == session and found.start >= start - 1
     ]
-    door_lines, _ = door_events(host, start, end, session)
+    door_rows, _ = door_events(host, start, end, session)
     return [
         *network_lines(host, sessions),
         *denied_lines(sessions, start, end),
         *transcript_lines(host, start),
-        *(" ".join(line.split()) for line in door_lines),
+        *(f"{door} {used}" for door, used in door_rows),
     ]
 
 

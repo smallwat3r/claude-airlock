@@ -33,9 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-from .background import in_background
-from .docker import docker, mount_arg
-from .network import sidecar_running
+from .background import in_background, wait_for
+from .docker import container_running, docker, mount_arg
 from .records import NetSession
 from .settings import Host, Settings
 from .sidecar import Sidecar
@@ -68,6 +67,9 @@ class Watcher(Sidecar):
     EXTENSION: ClassVar[str] = "jsonl"
     KEPT: ClassVar[int] = KEPT_RECORDS
     STOP_SECONDS: ClassVar[int | None] = 1
+    MEMORY: ClassVar[str] = "128m"
+    # To read as the session's user, see procwatch.py
+    CAPABILITIES: ClassVar[tuple[str, ...]] = ("SETUID", "SETGID")
 
     def directory(self, host: Host) -> str:
         return host.process_records_dir
@@ -94,17 +96,9 @@ def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watch
     docker(
         "run",
         "--detach",
-        f"--name={watcher.name}",
+        *watcher.run_args(),
         f"--pid=container:{session}",
         f"--network=container:{owner}",
-        watcher.label_arg,
-        "--user=0:0",
-        "--cap-drop=ALL",
-        "--cap-add=SETUID",
-        "--cap-add=SETGID",
-        "--security-opt=no-new-privileges",
-        "--memory=128m",
-        "--pids-limit=16",
         mount_arg(WATCHER, "/procwatch.py", "ro,z"),
         "--entrypoint=python3",
         image_tag,
@@ -130,17 +124,10 @@ def say_not_recorded(watcher: Watcher) -> None:
     runs the terminal is the session's."""
     if time.time() - watcher.start < SOON_OVER:
         return
-    said = docker(
-        "logs",
-        "--tail=5",
-        watcher.name,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
     print(
         "claude-docker: the processes of this session were not recorded,"
         " CLAUDE_DOCKER_PROC_LOG=0 runs a session without the attempt:\n"
-        f"{said.stdout.strip()}",
+        f"{watcher.last_said(5)}",
         file=sys.stderr,
     )
 
@@ -156,10 +143,8 @@ def watch_when_up(
     """Wait for the session's container, then start its watcher: a
     namespace can only be joined once it is there, by when the launcher
     is waiting on the session, hence the thread."""
-    while not sidecar_running(session):
-        if stop.wait(0.2):
-            return
-    started.append(start_watcher(host, session, owner, image_tag))
+    if wait_for(lambda: container_running(session), stop):
+        started.append(start_watcher(host, session, owner, image_tag))
 
 
 @contextmanager
@@ -304,3 +289,14 @@ def shown_lineage(lineage: list[Process]) -> str:
         command = command[: SHOWN_WIDTH - 3] + "..."
     parents = "".join(f" < {parent.name}" for parent in lineage[1:4])
     return f"[{first.pid}] {command}{parents}"
+
+
+def session_record(host: Host, session: NetSession) -> ProcessRecord | None:
+    """The record of a session's processes, none when it has none or it
+    is no longer kept."""
+    if not session.processes:
+        return None
+    try:
+        return read_record(Path(host.process_records_dir, session.processes))
+    except OSError:
+        return None

@@ -19,12 +19,16 @@ class ExtraDirsTest(LauncherTest):
             "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_DOCKER_FEATURES=""
         )
         self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", result.flags)
-        self.assertEqual(result.command, [f"--add-dir={self.ref}", "-p", "hello"])
+        unasked = "--dangerously-skip-permissions"
+        self.assertEqual(
+            result.command, [f"--add-dir={self.ref}", unasked, "-p", "hello"]
+        )
 
     def test_a_prompt_is_not_taken_for_a_directory(self):
         # --add-dir is variadic, as two arguments it would take the prompt
         result = self.launch("--add-dir", "~/ref", "hello", CLAUDE_DOCKER_FEATURES="")
-        self.assertEqual(result.command, [f"--add-dir={self.ref}", "hello"])
+        unasked = "--dangerously-skip-permissions"
+        self.assertEqual(result.command, [f"--add-dir={self.ref}", unasked, "hello"])
 
     def test_read_write_dir_and_its_secrets(self):
         (self.ref / ".env").touch()

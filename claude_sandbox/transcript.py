@@ -14,12 +14,13 @@ import difflib
 import os
 import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .events import Event, Who, clean, flat
+from .events import Event, Who, clean, flat, labelled
 from .files import json_object, open_plain
 from .projects import transcript_dirs, transcript_files
 from .settings import Fatal, Host
@@ -43,6 +44,13 @@ VERBOSE_OUTPUT = (10, 10)
 # ends it, quoted or not. Not <<<, which is a here-string.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# How Claude Code records a command the user gave it (/model sonnet): its
+# name and its arguments in tags, and what the command said in others
+_COMMAND_NAME = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+_COMMAND_SAID = re.compile(
+    r"<local-command-(stdout|stderr)>(.*?)</local-command-\1>", re.DOTALL
+)
 # What a step of the model read, as the API counts it: not cached, newly
 # put in the cache, and read from it
 INPUT_TOKENS = (
@@ -68,6 +76,11 @@ def session_files(host: Host) -> list[Path]:
         looked = ", ".join(map(str, transcript_dirs(host)))
         raise Fatal(f"no session recorded for this project (looked in {looked})")
     return files
+
+
+def sessions_named(files: list[Path], name: str) -> list[Path]:
+    """The transcripts whose session id starts with name."""
+    return [path for path in files if path.stem.startswith(name)]
 
 
 def read_entries(path: Path) -> list[dict]:
@@ -127,7 +140,14 @@ def call_input(block: dict) -> dict:
 
 
 def is_prompt(entry: dict) -> bool:
-    return entry.get("type") == "user" and not entry.get("isMeta")
+    """Whether an entry is something the user asked. Not what Claude Code
+    puts in their name, and not what a subagent is asked, which is in the
+    call that started it."""
+    return (
+        entry.get("type") == "user"
+        and not entry.get("isMeta")
+        and not entry.get("isSidechain")
+    )
 
 
 def tool_calls(entries: list[dict]) -> list[tuple[dict, dict]]:
@@ -346,9 +366,33 @@ def result_details(ended: dict, verbose: bool) -> list[str]:
     return ["result: " + ", ".join(notes), *("out: " + line for line in shown)]
 
 
+def as_typed(text: str) -> str:
+    """A prompt as the user typed it: a command of Claude Code's is
+    recorded as its name and arguments in tags, anything else as it is."""
+    name = _COMMAND_NAME.search(text)
+    if not name or not text.lstrip().startswith("<command-"):
+        return text
+    args = _COMMAND_ARGS.search(text)
+    return f"{name[1].strip()} {args[1].strip() if args else ''}".strip()
+
+
+def command_event(when: float, entry: dict, verbose: bool) -> Event | None:
+    """What a command of Claude Code's said (/model, /context), which the
+    model had no part in. None for an entry that holds nothing said."""
+    content = entry.get("content")
+    said = _COMMAND_SAID.findall(content) if isinstance(content, str) else []
+    text = "\n".join(part for _, part in said).strip()
+    lines = [line for line in clean(text).splitlines() if verbose or line.strip()]
+    if not lines:
+        return None
+    details = clip(lines, verbose, TALK_LINES)
+    return Event(when, Who.CLAUDE, "command", details, {"text": text})
+
+
 def talk_event(when: float, who: Who, block: dict, verbose: bool) -> Event | None:
     """A prompt or a reply, none for one without text."""
-    text = clean(block.get("text", "")).strip().splitlines()
+    said = clean(block.get("text", ""))
+    text = (as_typed(said) if who is Who.USER else said).strip().splitlines()
     if not verbose:
         # Paragraph breaks would use up the preview
         text = [line for line in text if line.strip()]
@@ -472,8 +516,9 @@ class OpenCall:
 
 class Walk:
     """Turns the entries of a transcript into events, an entry at a time
-    and in their order: each prompt, reply and tool call, and ahead of what
-    a step of the model did, what the step used.
+    and in their order: each prompt, reply and tool call, what a command
+    of Claude Code's said, and ahead of what a step of the model did, what
+    the step used.
 
     There are two ways to walk. Over a transcript that is all there, a call
     and its result are one event: the result is added to the event of its
@@ -517,10 +562,13 @@ class Walk:
     def take(self, entry: dict) -> list[Event]:
         """The events an entry adds."""
         kind = entry.get("type")
-        if kind not in ("user", "assistant"):
+        said_by_command = kind == "system" and entry.get("subtype") == "local_command"
+        if kind not in ("user", "assistant") and not said_by_command:
             return []
         stamp = local_time(entry)
         self._when = stamp.timestamp() if stamp else self._when
+        if said_by_command:
+            return self._command(entry)
         by_claude = kind == "assistant"
         claude = Who.AGENT if entry.get("isSidechain") else Who.CLAUDE
         events = self._step(claude, entry)
@@ -558,15 +606,28 @@ class Walk:
         return [used] if used else []
 
     def _talk(self, who: Who, block: dict) -> list[Event]:
-        # Live just its first line, when verbose too: whoever follows is after
-        # what the session does, what it says is on its own screen
-        talk = talk_event(self._when, who, block, self._verbose and not self._live)
-        if not talk:
+        return self._said(talk_event(self._when, who, block, self._whole))
+
+    def _command(self, entry: dict) -> list[Event]:
+        """What a command of Claude Code's said, as of anything said."""
+        return self._said(command_event(self._when, entry, self._whole))
+
+    @property
+    def _whole(self) -> bool:
+        """Whether what is said is shown whole. Live just its first line,
+        when verbose too: whoever follows is after what the session does,
+        what it says is on its own screen."""
+        return self._verbose and not self._live
+
+    def _said(self, said: Event | None) -> list[Event]:
+        """Something said, which ends the call before it, live its first
+        line alone."""
+        if not said:
             return []
         if self._live:
-            del talk.details[1:]
+            del said.details[1:]
         self._last_call = None
-        return [talk]
+        return [said]
 
     def _call(self, who: Who, entry: dict, block: dict) -> Event:
         event = call_event(
@@ -679,16 +740,20 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     return rows
 
 
+def written_paths(entries: list[dict]) -> Iterator[str]:
+    """The path of each file the session wrote with its tools, once for
+    every call."""
+    for _, block in tool_calls(entries):
+        if block.get("name") in FILE_TOOLS:
+            path = file_path(call_input(block))
+            if path is not None:
+                yield path
+
+
 def files_written(entries: list[dict], project_dir: str) -> list[str]:
     """Each file the session wrote with its tools and how often, flagged
     when it is outside the project."""
-    written = Counter(
-        path
-        for _, block in tool_calls(entries)
-        if block.get("name") in FILE_TOOLS
-        for path in [file_path(call_input(block))]
-        if path is not None
-    )
+    written = Counter(written_paths(entries))
     lines = ["files written"] if written else []
     for path, count in sorted(written.items()):
         lines.append(f"  {flat(path)} x{count}{outside_flag(path, project_dir)}")
@@ -716,7 +781,7 @@ def summary(entries: list[dict], project_dir: str) -> list[str]:
     """What to know before reading on."""
     rows = [("project", clean(project_dir)), *overview(entries)]
     return [
-        *(f"{name.ljust(12)}{value}" for name, value in rows),
+        *(labelled(name, value) for name, value in rows),
         *files_written(entries, project_dir),
         *pages_fetched(entries),
     ]

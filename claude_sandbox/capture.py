@@ -22,11 +22,12 @@ import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import ClassVar
 
-from .docker import docker, docker_bytes
-from .network import namespace_args, sidecar_running
-from .pcap import HTTP_METHODS, Capture
+from .docker import container_running, docker, docker_bytes
+from .network import namespace_args
+from .pcap import HTTP_METHODS, Capture, read_capture
 from .records import NetSession
 from .settings import Fatal, Host, Settings
 from .sidecar import Sidecar
@@ -108,6 +109,9 @@ class CaptureSidecar(Sidecar):
     FILE: ClassVar[str] = CAPTURE_FILE
     EXTENSION: ClassVar[str] = "pcap"
     KEPT: ClassVar[int] = KEPT_CAPTURES
+    MEMORY: ClassVar[str] = "256m"
+    # Raw sockets, and what the start-up change of user of tcpdump asks for
+    CAPABILITIES: ClassVar[tuple[str, ...]] = ("NET_RAW", "SETUID", "SETGID")
 
     def directory(self, host: Host) -> str:
         return host.captures_dir
@@ -129,17 +133,8 @@ def start_capture(
         "run",
         "--detach",
         "--init",
-        f"--name={sidecar.name}",
+        *sidecar.run_args(),
         *namespace_args(settings),
-        sidecar.label_arg,
-        "--user=0:0",
-        "--cap-drop=ALL",
-        "--cap-add=NET_RAW",
-        "--cap-add=SETUID",
-        "--cap-add=SETGID",
-        "--security-opt=no-new-privileges",
-        "--memory=256m",
-        "--pids-limit=16",
         "--entrypoint=sh",
         image_tag,
         # The script, the name it goes by, then the arguments of tcpdump
@@ -154,14 +149,12 @@ def start_capture(
     # gone. The wait also gives it the moment it takes to listen, a session
     # is slower to start than that.
     time.sleep(0.3)
-    if started.returncode != 0 or not sidecar_running(sidecar.name):
-        said = docker(
-            "logs", sidecar.name, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
+    if started.returncode != 0 or not container_running(sidecar.name):
+        said = sidecar.last_said()
         sidecar.remove()
         raise Fatal(
             "the network capture did not start, CLAUDE_DOCKER_NET_LOG=0 runs"
-            f" a session without it:\n{said.stdout.strip()}"
+            f" a session without it:\n{said}"
         )
     return sidecar
 
@@ -184,6 +177,17 @@ def cut_short(capture: Capture) -> bool:
     """Whether a capture ran into its packet limit, what came later is
     then missing."""
     return capture.packets >= PACKET_LIMIT
+
+
+def session_capture(host: Host, session: NetSession) -> Capture | None:
+    """The capture of a session, none when it has none or it is no
+    longer kept."""
+    if not session.capture:
+        return None
+    try:
+        return read_capture(Path(host.captures_dir, session.capture))
+    except OSError:
+        return None
 
 
 def running_captures(project_dir: str) -> list[tuple[str, float]]:

@@ -3,7 +3,8 @@ written as things happen and until interrupted.
 
 Four records are read as they grow. The transcripts Claude Code keeps of
 the project's sessions, every one that is written to, so a session started,
-resumed or cleared while following is picked up. The capture of each of the
+resumed or cleared while following is picked up, and those of the subagents
+of each. The capture of each of the
 project's running sessions, read out of its sidecar. For a filtered
 session the egress proxy's log. And what the launcher notes of the use of
 the SSH agent and the Docker socket (see doors.py). Not the record of the
@@ -36,20 +37,19 @@ from .docker import running_containers
 from .door_events import use_event
 from .doors import read_uses
 from .egress_log import logged_since
-from .events import Event, clean, flat
+from .events import Event, clean, flat, labelled
 from .files import json_object, open_plain
+from .layout import Layout, event_json
 from .pcap import Capture, PcapReader, take_frames
-from .projects import project_root, transcript_files
+from .projects import project_root, subagent_files, transcript_files
 from .records import recorded_sessions
 from .settings import Fatal, Host
 from .trace import (
     EVERYTHING,
     USAGE,
     Filter,
-    Layout,
     Timeline,
     capture_events,
-    event_json,
     name_container,
     picked_session,
     proxy_event,
@@ -209,7 +209,9 @@ class Round:
 
 class Follower:
     """Follows the sessions of a project, or just the one of a transcript
-    when only names it, and gives of what they do the events chosen."""
+    when only names it, and gives of what they do the events chosen. With
+    container, of the network and the doors only what the session in the
+    container of that name does, as a chat wants of its own."""
 
     def __init__(
         self,
@@ -217,12 +219,19 @@ class Follower:
         verbose: bool,
         only: Path | None = None,
         chosen: Filter = EVERYTHING,
+        container: str | None = None,
     ):
         self._host = host
         self._verbose = verbose
         self._only = only
         self._chosen = chosen
+        # The one session whose network and doors are followed, by the
+        # name of its container, when not all of the project's are
+        self._container = container
         self._tails: dict[Path, TranscriptTail] = {}
+        # The transcript of each subagent that is followed, with that of
+        # the session it is of
+        self._subagents: dict[Path, tuple[Path, TranscriptTail]] = {}
         # How long each transcript without a tail was when last looked at
         self._sizes: dict[Path, int] = {}
         self._captures: dict[tuple[str, float], CaptureTail] = {}
@@ -242,13 +251,29 @@ class Follower:
     def title(self, path: Path) -> str:
         return self._tails[path].title
 
+    def follow_only(self, path: Path) -> None:
+        """Follow the session of another transcript from here on, and no
+        longer the one before: a session that is cleared goes on in a new
+        transcript."""
+        if path != self._only:
+            self._only = path
+            self._tails.clear()
+            self._subagents.clear()
+            self._tail(path)
+
+    def _ours(self, session: str) -> bool:
+        return self._container in (None, session)
+
     def poll(self) -> Round:
         found = Round()
         if self._rounds % LOOK_EVERY == 0:
             self._look_for_transcripts(found)
+            self._look_for_subagents()
             self._look_for_sessions(found)
         for tail in self._tails.values():
             found.events += [(tail.path, event) for event in tail.poll()]
+        for session, tail in self._subagents.values():
+            found.events += [(session, event) for event in tail.poll()]
         self._poll_network(found)
         self._poll_doors(found)
         # Stable, so what a transcript has at the same time keeps its order
@@ -298,6 +323,30 @@ class Follower:
                 # Grown, or new and so read from its start
                 self._tail(path, self._sizes.get(path, 0))
 
+    def _look_for_subagents(self) -> None:
+        """Start to follow what the subagents of the followed sessions
+        do. Claude Code keeps a transcript of each next to that of its
+        session, in SESSION/subagents. At first from where they end, as
+        of a session that is not the latest."""
+        for session in list(self._tails):
+            for path in subagent_files(session):
+                if path in self._subagents:
+                    continue
+                try:
+                    size = path.lstat().st_size
+                except OSError:
+                    continue
+                # A result always names its call: the calls of a subagent
+                # are numbered on their own, as those of its session are
+                tail = TranscriptTail(
+                    path,
+                    project_root(session, self._host),
+                    self._verbose,
+                    size if self._rounds == 0 else 0,
+                    name_results=True,
+                )
+                self._subagents[path] = (session, tail)
+
     def _look_for_sessions(self, found: Round) -> None:
         """Start to follow the captures of the project's sessions that
         started, let go of those that ended, and note the addresses of its
@@ -305,24 +354,36 @@ class Follower:
         if not self._docker:
             return
         try:
-            running = running_captures(self._host.project_dir)
+            running = [
+                (sidecar, started)
+                for sidecar, started in running_captures(self._host.project_dir)
+                if self._ours(CaptureSidecar.session_of(sidecar))
+            ]
             self._addresses = self._filtered_addresses()
         except Fatal:
             self._docker = False
-            found.notes.append("network     not followed, docker was not found")
+            found.notes.append(
+                labelled("network", "not followed, docker was not found")
+            )
             return
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
-                self._captures[(sidecar, started)] = CaptureTail(sidecar, self._verbose)
-                name = clean(CaptureSidecar.session_of(sidecar))
-                found.notes.append(f"network     following the capture of {name}")
+                tail = CaptureTail(sidecar, self._verbose)
+                self._captures[(sidecar, started)] = tail
+                name = clean(tail.session)
+                found.notes.append(
+                    labelled("network", f"following the capture of {name}")
+                )
         for key in set(self._captures) - set(running):
-            name = clean(CaptureSidecar.session_of(self._captures.pop(key).sidecar))
-            found.notes.append(f"network     the capture of {name} ended")
+            name = clean(self._captures.pop(key).session)
+            found.notes.append(labelled("network", f"the capture of {name} ended"))
         if self._rounds == 0 and not running and not self._addresses:
             found.notes.append(
-                "network     no session of this project is recorded now"
-                " (none runs, CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
+                labelled(
+                    "network",
+                    "no session of this project is recorded now"
+                    " (none runs, CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)",
+                )
             )
 
     def _filtered_addresses(self) -> dict[str, str]:
@@ -339,7 +400,9 @@ class Follower:
         # captured, either way it runs while a container of its name does
         running = running_containers()
         return {
-            session.ip: session.name for session in recorded if session.name in running
+            session.ip: session.name
+            for session in recorded
+            if session.name in running and self._ours(session.name)
         }
 
     def _several(self) -> bool:
@@ -357,10 +420,13 @@ class Follower:
             name_container(events, capture.session, several)
             found.events += [(None, event) for event in events]
             if capture.newly_cut_short():
-                name = clean(CaptureSidecar.session_of(capture.sidecar))
+                name = clean(capture.session)
                 found.notes.append(
-                    f"network     the capture of {name} STOPPED at its packet"
-                    " limit, what comes later is missing"
+                    labelled(
+                        "network",
+                        f"the capture of {name} STOPPED at its packet limit,"
+                        " what comes later is missing",
+                    )
                 )
         if self._addresses:
             requests = self._proxy.poll(self._addresses, several)
@@ -370,7 +436,8 @@ class Follower:
         """The uses of the SSH agent and the Docker socket that the
         launchers of the project's sessions noted since the last time."""
         at_since = 0
-        for use in read_uses(self._host, self._doors_since, float("inf")):
+        uses = read_uses(self._host, self._doors_since, float("inf"), self._container)
+        for use in uses:
             when = float(use["t"])
             if when == self._doors_since:
                 at_since += 1
@@ -405,7 +472,7 @@ class Output:
 
     def start(self, project_dir: str, chosen: Filter) -> None:
         if self._layout:
-            about = f"following   {flat(project_dir)}, until interrupted"
+            about = labelled("following", f"{flat(project_dir)}, until interrupted")
             self._say([about, *chosen.header(), self._layout.columns])
 
     def write(self, found: Round) -> None:
@@ -418,7 +485,9 @@ class Output:
                 self._session = path
                 lines += self._shown(together)
                 together = []
-                about = f"session     {flat(path.stem)}  {self._follower.title(path)}"
+                about = labelled(
+                    "session", f"{flat(path.stem)}  {self._follower.title(path)}"
+                )
                 lines += self._layout.header([about]) if self._layout else []
             together.append(event)
         self._put(lines + self._shown(together))

@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import unittest
+from pathlib import Path
 
 from harness import ROOT, LauncherTest, settings
 
@@ -41,6 +42,38 @@ class SettingsListTest(LauncherTest):
     def test_the_readme_names_every_setting_and_no_other(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertEqual(set(NAMED.findall(readme)), self.variables)
+
+    def test_the_docs_name_no_setting_that_is_not_one(self):
+        for page in sorted((ROOT / "docs").glob("*.md")):
+            named = set(NAMED.findall(page.read_text(encoding="utf-8")))
+            self.assertLessEqual(named, self.variables, page.name)
+
+    def test_every_link_between_the_docs_leads_somewhere(self):
+        def anchors(page: Path) -> set[str]:
+            text = re.sub(
+                r"^```.*?^```", "", page.read_text(), flags=re.MULTILINE | re.DOTALL
+            )
+            headings = re.findall(r"^#{1,6} (.+)$", text, flags=re.MULTILINE)
+            return {
+                re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-")
+                for h in headings
+            }
+
+        pages = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+        for page in pages:
+            for target, anchor in re.findall(
+                r"\]\(([^)#\s]*)#([\w-]+)\)", page.read_text()
+            ):
+                linked = (page.parent / target).resolve() if target else page
+                self.assertIn(
+                    anchor, anchors(linked), f"{page.name}: {target}#{anchor}"
+                )
+            for target in re.findall(
+                r"\]\(((?:\.\./)?(?:docs/)?[\w.-]+\.(?:md|png))\)", page.read_text()
+            ):
+                self.assertTrue(
+                    (page.parent / target).exists(), f"{page.name}: {target}"
+                )
 
     def test_a_session_is_told_of_no_setting_that_is_not_one(self):
         told = (ROOT / "docker" / "CLAUDE-sandbox.md").read_text(encoding="utf-8")

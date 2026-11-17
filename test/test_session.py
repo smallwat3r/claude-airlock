@@ -62,6 +62,36 @@ class DefaultSessionTest(LauncherTest):
         ):
             self.assertIn(flag, self.flags)
 
+    def command(self, *args: str, **env: str) -> list[str]:
+        """What claude is run with by a launch of its own, after the
+        plugin of the image's language servers."""
+        (self.work / "log").unlink(missing_ok=True)
+        command = self.launch(*args, **env).command
+        return command[2:] if command[:1] == ["--plugin-dir"] else command
+
+    def test_claude_does_not_ask_before_it_uses_a_tool_unless_told_to(self):
+        unasked = "--dangerously-skip-permissions"
+        self.assertEqual(self.command(), [unasked])
+        self.assertEqual(self.command("-p", "hi"), [unasked, "-p", "hi"])
+        # Asked for, in the environment or the config file
+        self.assertEqual(self.command(CLAUDE_DOCKER_ASK="1"), [])
+        self.write_config("CLAUDE_DOCKER_ASK=1")
+        self.assertEqual(self.command("-p", "hi"), ["-p", "hi"])
+        self.assertEqual(self.command(CLAUDE_DOCKER_ASK="0"), [unasked])
+
+    def test_how_to_go_about_permissions_is_the_users_to_say(self):
+        for args in (
+            ["--permission-mode", "plan"],
+            ["--permission-mode=acceptEdits", "-p", "hi"],
+            ["--dangerously-skip-permissions"],
+            ["--allow-dangerously-skip-permissions"],
+            # No session: a command of claude's, and bash
+            ["mcp", "list"],
+            ["update"],
+        ):
+            self.assertEqual(self.command(*args), args)
+        self.assertNotIn("--dangerously-skip-permissions", self.command("--shell"))
+
     def test_the_session_is_told_its_settings(self):
         for flag in (
             "--env=CLAUDE_DOCKER_NET_FILTER=0",

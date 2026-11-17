@@ -1,22 +1,18 @@
-"""The session container: the directories mounted into it, its docker run
-options and the run itself."""
+"""The session container: its name, its docker run options and the run
+itself. What of the host is mounted into it is in mounts.py, how the
+launcher ends while it runs in ending.py."""
 
 from __future__ import annotations
 
-import fnmatch
-import json
 import os
 import shlex
-import signal
-import stat
 import subprocess
 import sys
-import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
+from .claude_args import is_a_command, says_permissions
 from .docker import (
     docker,
     docker_ok,
@@ -25,149 +21,23 @@ from .docker import (
     mount_arg,
     project_slug,
 )
-from .files import expand_home, private_dir, try_lock_file
-from .home import home_args, session_state_args
+from .ending import Ending
+from .files import expand_home, json_object, private_dir, try_lock_file
+from .home import home_args, session_state_args, statusline_of
 from .image import Image
 from .settings import (
     BIN_DIR,
     CONTAINER_CLAUDE,
     CONTAINER_HOME,
-    Fatal,
     Host,
     Settings,
 )
-
-SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
-SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
-SHADOW_PRUNED_DIRS = ("node_modules", ".git")
-# What tells the launcher to end: a kill, and a terminal that is gone (a
-# closed window, a killed Emacs buffer)
-END_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-# Seconds between two tries to stop a session the launcher was told to end
-STOP_EVERY = 0.5
-
-
-@dataclass(frozen=True)
-class ExtraDir:
-    """A host directory mounted alongside the project, at its host path."""
-
-    path: str
-    read_only: bool = False
-
-
-def refuse_unsafe_dir(path: str, host: Host) -> None:
-    """Refuse the filesystem root, the home directory or any of its parents:
-    mounting one read-write would expose the whole home and defeat the
-    sandbox. By the path as it is written and by where it leads, a link
-    to the home directory is the home directory."""
-    for home, directory in (
-        (host.home, path),
-        (os.path.realpath(host.home), os.path.realpath(path)),
-    ):
-        if (home.rstrip("/") + "/").startswith(directory.rstrip("/") + "/"):
-            raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
-
-
-def absolute_path(raw: str, host: Host) -> str:
-    """A path as written by the user made absolute, a leading ~ expanded
-    and a relative one taken from the project."""
-    expanded = expand_home(raw, host.home)
-    return os.path.normpath(os.path.join(host.project_dir, expanded))
-
-
-def resolve_dir(raw: str, host: Host) -> str:
-    """Absolute path of an existing directory."""
-    path = absolute_path(raw, host)
-    if not os.path.isdir(path):
-        raise Fatal(f"not a directory: {raw}")
-    return path
-
-
-def add_extra_dir(
-    dirs: list[ExtraDir], raw: str, host: Host, read_only: bool = False
-) -> None:
-    """Add a directory to mount. Duplicates and the project itself are
-    skipped: docker rejects a repeated mount destination, and the project is
-    already mounted. A directory already added read-write stays so."""
-    path = resolve_dir(raw, host)
-    refuse_unsafe_dir(path, host)
-    if path == host.project_dir or any(extra.path == path for extra in dirs):
-        return
-    dirs.append(ExtraDir(path, read_only))
-
-
-def configured_extra_dirs(settings: Settings, host: Host) -> list[ExtraDir]:
-    """The directories asked for by the settings, before the command line."""
-    dirs: list[ExtraDir] = []
-    # The scratch directory shared between sessions. The default is skipped
-    # when missing, one asked for by name must exist.
-    default_shared = os.path.join(host.home, "claude-shared")
-    if settings.shared_dir is None:
-        if os.path.isdir(default_shared):
-            add_extra_dir(dirs, default_shared, host)
-    elif settings.shared_dir:
-        add_extra_dir(dirs, settings.shared_dir, host)
-    for raw in settings.extra_dirs:
-        add_extra_dir(dirs, raw, host)
-    for raw in settings.extra_dirs_ro:
-        add_extra_dir(dirs, raw, host, read_only=True)
-    return dirs
 
 
 def claim_name(directory: str, name: str) -> int | None:
     """Claim a name among the launchers, none when another has it: the
     lock held on a file of that name, see lock_file."""
     return try_lock_file(os.path.join(directory, name))
-
-
-def within(path: str, root: str) -> str | None:
-    """Where a path is under a directory as that directory is mounted,
-    none when it is not under it. By where the two lead, either can be
-    reached through a link."""
-    real_path, real_root = os.path.realpath(path), os.path.realpath(root)
-    if real_path != real_root and not real_path.startswith(real_root + os.sep):
-        return None
-    return os.path.normpath(os.path.join(root, os.path.relpath(real_path, real_root)))
-
-
-def protected_dirs(
-    dirs: list[ExtraDir], settings: Settings, host: Host
-) -> tuple[list[ExtraDir], list[str]]:
-    """What CLAUDE_DOCKER_PROTECT makes of a session's mounts: the
-    directories to mount, those it names read-only, and the paths inside
-    one of them (or the project) to mount read-only on top, each as it is
-    found there. For what a session must be able to read and must not
-    change, wherever it is mounted from: the host's claude may follow
-    files that are in a directory every session can write, a kit of
-    skills in the shared directory for one. A path that is in no mounted
-    directory is not in the session at all, and passed over."""
-    dirs = list(dirs)
-    inside: list[str] = []
-    for raw in settings.protect:
-        path = absolute_path(raw, host)
-        if within(host.project_dir, path):
-            raise Fatal(
-                f"cannot protect {raw}: the project is in it, --add-dir-ro"
-                " mounts a directory read-only"
-            )
-        roots = [host.project_dir, *(extra.path for extra in dirs)]
-        found = [mounted for mounted in (within(path, r) for r in roots) if mounted]
-        if not found:
-            continue
-        if not os.path.lexists(path):
-            # It could be made from inside the session, as anything
-            raise Fatal(f"cannot protect {raw}: it does not exist")
-        for at, extra in enumerate(dirs):
-            if extra.path in found:
-                dirs[at] = ExtraDir(extra.path, read_only=True)
-        inside += [m for m in found if m not in roots and m not in inside]
-    return dirs, inside
-
-
-def protect_args(inside: list[str]) -> list[str]:
-    """The read-only mounts of protected_dirs, on top of what they are
-    in."""
-    return [mount_arg(path, path, "ro,z") for path in inside]
 
 
 @contextmanager
@@ -211,6 +81,19 @@ def telemetry_args(settings: Settings) -> list[str]:
     if settings.telemetry:
         return []
     return [env_arg("DISABLE_TELEMETRY", 1), env_arg("DISABLE_ERROR_REPORTING", 1)]
+
+
+def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
+    """Unless CLAUDE_DOCKER_ASK=1, claude is told not to ask before it
+    uses a tool: the container is what keeps a session from the host, and
+    a question for every command is no safeguard on top of it that anyone
+    reads for long. Not when its arguments say how to go about permissions
+    themselves, and not for a command of claude's that is no session. What
+    this leaves open is said in the README (Known limits): the project and
+    the network, which a session can reach without being asked."""
+    if settings.ask or is_a_command(claude_args) or says_permissions(claude_args):
+        return []
+    return ["--dangerously-skip-permissions"]
 
 
 def base_args(settings: Settings, host: Host, name: str) -> list[str]:
@@ -291,8 +174,8 @@ def configured_statusline(host: Host) -> str | None:
     """The program ~/.claude/settings.json runs as its statusline, if any."""
     try:
         text = Path(host.claude_dir, "settings.json").read_text(encoding="utf-8")
-        words = shlex.split(json.loads(text)["statusLine"]["command"])
-    except (OSError, ValueError, KeyError, TypeError):
+        words = shlex.split(statusline_of(json_object(text) or {}))
+    except (OSError, ValueError):
         return None
     program = expand_home(words[0] if words else "", host.home)
     return os.path.normpath(program) if os.path.isabs(program) else None
@@ -334,8 +217,9 @@ def session_args(action: str, env: Mapping[str, str]) -> list[str]:
     if action == "shell":
         args.append("--entrypoint=bash")
     # A TTY only when there is one, so piped and scripted runs (claude -p)
-    # work instead of failing with "the input device is not a TTY"
-    if sys.stdin.isatty() and sys.stdout.isatty():
+    # work instead of failing with "the input device is not a TTY". Never
+    # for a chat, which speaks to claude over pipes (see chat/).
+    if action != "line-mode" and sys.stdin.isatty() and sys.stdout.isatty():
         args.append("--tty")
     # Passed through when set. GH_TOKEN is how gh authenticates in here, its
     # config directory is a tmpfs.
@@ -343,24 +227,6 @@ def session_args(action: str, env: Mapping[str, str]) -> list[str]:
         if name in env:
             args.append(env_arg(name))
     return args
-
-
-def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
-    args = [
-        mount_arg(extra.path, extra.path, "ro,z" if extra.read_only else "z")
-        for extra in dirs
-    ]
-    if dirs:
-        # Read by bin/claude-statusline to list the mounted extra directories
-        shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
-        args.append(env_arg("CLAUDE_DOCKER_DIRS", shown))
-    return args
-
-
-def protect_env_args(inside: list[str]) -> list[str]:
-    """The session is told what it cannot change of what it has mounted,
-    see docker/CLAUDE-sandbox.md."""
-    return [env_arg("CLAUDE_DOCKER_PROTECT", ":".join(inside))] if inside else []
 
 
 def git_include_paths() -> list[str]:
@@ -404,122 +270,26 @@ def git_config_args(host: Host) -> list[str]:
     return args
 
 
-def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[str]:
-    """Shadow .env files (and direnv's .envrc, which commonly exports
-    secrets, plus .netrc and .pypirc, which hold nothing but credentials) so
-    they are never visible inside the container. Template files (.env.example
-    and friends) stay readable, they exist to be read and hold no secrets.
-    Regular files only: a .env directory (some virtualenvs) cannot take a
-    /dev/null bind mount and would abort the run. CLAUDE_DOCKER_SHADOW adds
-    name globs, e.g. "*.pem:.npmrc". The whole tree is walked on purpose,
-    pruning more directories would be faster but could leave a real secret
-    visible."""
-    patterns = SHADOWED_NAMES + settings.shadow
-    # By path, in the order found: a directory mounted next to the project
-    # can be inside it, and docker refuses to mount twice at one place
-    hidden: dict[str, None] = {}
-    for root in [host.project_dir] + [extra.path for extra in dirs]:
-        for directory, subdirs, files in os.walk(root):
-            subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
-            for name in sorted(files):
-                if name in SHADOW_EXEMPT:
-                    continue
-                if not any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
-                    continue
-                path = os.path.join(directory, name)
-                if stat.S_ISREG(os.lstat(path).st_mode):
-                    hidden[path] = None
-    for path in hidden:
-        if ":" in path:
-            # Not left visible, and not for docker to trip over
-            raise Fatal(
-                f"cannot hide {path}: docker takes no path with a colon,"
-                " rename or remove the file"
-            )
-    return [mount_arg("/dev/null", path, "ro") for path in hidden]
-
-
-@contextmanager
-def interrupts_held() -> Iterator[None]:
-    """Keep Ctrl-C from ending the launcher for as long as the block
-    lasts: it has to outlive the session to collect what its sidecars
-    recorded and to check what it left behind, and Ctrl-C twice is how
-    Claude Code is left. Ctrl-C still reaches docker (same foreground
-    process group) and ends the session there. Held with a handler, one
-    that is ignored would be ignored by docker too."""
-    previous = signal.signal(signal.SIGINT, lambda *_: None)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGINT, previous)
-
-
-class Ending:
-    """The launcher being told to end while it has a session, see
-    ending_passed_on."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-        # The signal that told it, none while none did
-        self.signal: int | None = None
-        self._over = threading.Event()
-
-    def told(self, number: int, _frame: object) -> None:
-        """The handler of the signals: the first one counts."""
-        if self.signal is None:
-            self.signal = number
-            threading.Thread(target=self._stop_session, daemon=True).start()
-
-    def _stop_session(self) -> None:
-        # Until the session is over, not once: its container may not be
-        # there yet, and is then started a moment later
-        while not self._over.is_set():
-            try:
-                docker_ok("stop", self._name)
-            except Fatal:
-                return
-            self._over.wait(STOP_EVERY)
-
-    def session_over(self) -> None:
-        self._over.set()
-
-    def status(self, status: int) -> int:
-        """What the launcher ends with: the session's status, or the way
-        a shell reports the signal that ended it."""
-        return status if self.signal is None else 128 + self.signal
-
-
-@contextmanager
-def ending_passed_on(name: str) -> Iterator[Ending]:
-    """For as long as the block lasts, a signal that would end the
-    launcher (see END_SIGNALS) ends the session of that name instead, and
-    the launcher then ends as it does after any session: it collects what
-    the sidecars recorded, checks what the session left behind and removes
-    the proxies no session uses any more. Ended on the spot it would leave
-    all of that for the next launch, the socket proxy and the host's
-    Docker socket it holds included. A kill that cannot be handled still
-    does, see report_unchecked_sessions and Sidecar.left_behind."""
-    ending = Ending(name)
-    previous = {number: signal.signal(number, ending.told) for number in END_SIGNALS}
-    try:
-        yield ending
-    finally:
-        ending.session_over()
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-
-
 def run_session(
-    run_args: list[str], image: Image, command_args: list[str], ending: Ending
+    run_args: list[str],
+    image: Image,
+    command_args: list[str],
+    ending: Ending,
+    through: Callable[[list[str]], int] | None = None,
 ) -> int:
     """Run the container and wait for it. Not an exec: the launcher has to
     outlive the session to check what it left behind, see interrupts_held
     and ending_passed_on. Not at all when the launcher was told to end
-    before it got here."""
+    before it got here. With through, that is given the arguments of docker
+    to run and returns how it ended, as a chat does (see chat/)."""
     try:
         if ending.signal is not None:
             return 0
-        status = docker("run", *run_args, image.tag, *command_args).returncode
+        command = ["run", *run_args, image.tag, *command_args]
+        if through:
+            status = through(command)
+        else:
+            status = docker(*command).returncode
     finally:
         ending.session_over()
     # Killed by a signal: report it the way a shell would

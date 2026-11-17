@@ -6,6 +6,15 @@ with the project directory mounted read-write and ~/.claude persisted.
 
   claude-docker [--add-dir DIR]... [--add-dir-ro DIR]... [claude args]...
   claude-docker --shell [bash args]   bash in the same sandbox, not claude
+  claude-docker --line-mode [claude args]  one session in line mode, the
+                                 default: claude without its full-screen
+                                 UI, which only adds lines: a prompt, and
+                                 what the session does as --trace shows
+                                 it, its network included. /help there
+                                 says what can be typed. With
+                                 CLAUDE_DOCKER_LINE_MODE=0 every session
+                                 has the full-screen UI, see
+                                 docs/line-mode.md
   claude-docker --rebuild        force a clean image rebuild, then exit
   claude-docker --prune          delete all sandbox images but the current one,
                                  then exit

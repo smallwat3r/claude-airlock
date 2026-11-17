@@ -12,11 +12,18 @@ from __future__ import annotations
 
 import subprocess
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .docker import docker, docker_bytes, docker_ok
-from .network import EGRESS_LOG_DIR, EGRESS_LOG_VOLUME, EGRESS_PROXY, SQUID_IMAGE
+from .network import (
+    EGRESS_ACCESS_LOG,
+    EGRESS_LOG_DIR,
+    EGRESS_LOG_VOLUME,
+    EGRESS_PROXY,
+    SQUID_IMAGE,
+)
 from .records import NetSession
 from .settings import Fatal
 
@@ -80,12 +87,23 @@ def made_by(
     )
 
 
+def requests_made(
+    logged: list[ProxyRequest], sessions: list[NetSession], start: float, end: float
+) -> Iterator[tuple[ProxyRequest, NetSession]]:
+    """Each request of the log that one of the sessions made between
+    start and end, see made_by, with the session that made it."""
+    for request in logged:
+        by = next((s for s in sessions if made_by(request, s, start, end)), None)
+        if by is not None:
+            yield request, by
+
+
 def access_log(stderr: int | None = None) -> str | None:
     """The egress proxy's log, the rotated file then the current one, None
     when it cannot be read. Read through the proxy's container, the volume
     it is in is not reachable from the host otherwise, and when the proxy
     is not running (no filtered session is) through one made for it."""
-    current = f"{EGRESS_LOG_DIR}/access.log"
+    current = EGRESS_ACCESS_LOG
     read = ("sh", "-c", f"cat {current}.0 2>/dev/null; cat {current}")
     log = docker(
         "exec", EGRESS_PROXY, *read, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
@@ -123,14 +141,15 @@ def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
     its current log file, and the offset to ask with next time. Without an
     offset none, just where the log ends now. A log that was rotated since
     is read from its start. None when the log cannot be read."""
-    file = f"{EGRESS_LOG_DIR}/access.log"
     script = (
         'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
         ' [ "$size" -lt "$from" ] && from=0;'
         ' echo "$from"; tail -c +"$((from + 1))" "$1"'
     )
     asked = [] if offset is None else [str(offset)]
-    said = docker_bytes("exec", EGRESS_PROXY, "sh", "-c", script, "sh", file, *asked)
+    said = docker_bytes(
+        "exec", EGRESS_PROXY, "sh", "-c", script, "sh", EGRESS_ACCESS_LOG, *asked
+    )
     if said is None:
         return None
     first, _, log = said.partition(b"\n")
