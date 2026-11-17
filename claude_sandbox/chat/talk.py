@@ -65,6 +65,12 @@ QUIET = 5.0
 QUIET_MOST = 60.0
 # Seconds a session is given to end before a line says how to stop it
 LEAVE_QUIET = 2.0
+# How long a session that was told to stop is waited for, docker gives it
+# ten seconds before it ends it
+STOP_WAIT = 15.0
+# The messages in a row that may fail to be taken in before the chat
+# gives up on showing what the session does
+MOST_FAILED = 5
 # What a chat shows whole of what the transcript has, see said_whole
 READ_WHOLE = ("command",)
 
@@ -134,6 +140,7 @@ class Chat:
         """Run the session of a docker command, by its arguments, and talk
         to it until the user leaves or it ends. Returns how docker ended."""
         previous = signal.signal(signal.SIGINT, self._on_interrupt)
+        agent = None
         try:
             agent = Agent(docker_args, self._session_ended)
             title = labelled("chat", flat(self._host.project_dir))
@@ -147,9 +154,23 @@ class Chat:
             self._status.refresh(self._session, self._usage)
             self._converse(agent)
             return self._leave(agent, listener)
+        except BaseException:
+            # However the chat ends, the session ends with it: what the
+            # launcher checks next is checked of a session that is over
+            if agent is not None:
+                self._abandon(agent)
+            raise
         finally:
             signal.signal(signal.SIGINT, previous)
             self._console.close()
+
+    def _abandon(self, agent: Agent) -> None:
+        """End a session the chat can no longer talk to: no more prompts
+        come, and one that does not take that for its end is stopped."""
+        agent.close()
+        if not agent.over_within(LEAVE_QUIET):
+            docker_ok("stop", self._name)
+            agent.over_within(STOP_WAIT)
 
     def _gone(self) -> bool:
         """Whether there is nobody left to ask, or to ask for."""
@@ -264,6 +285,8 @@ class Chat:
     def _listen(self, agent: Agent) -> None:
         """Take in what claude says and write what the session does,
         until claude has ended."""
+        # The messages in a row that could not be taken in
+        stumbled = 0
         try:
             while True:
                 # Nothing said within POLL is an empty message, for what is
@@ -281,9 +304,19 @@ class Chat:
                 if self._interrupt:
                     self._interrupt = False
                     self._stop(agent)
-                self._heard(agent, message)
-                self._show()
-                self._still_working()
+                try:
+                    self._heard(agent, message)
+                    self._show()
+                    self._still_working()
+                    stumbled = 0
+                except Exception as error:
+                    # One message that cannot be taken in is not the end
+                    # of the session, what it holds is claude's to write
+                    stumbled += 1
+                    if stumbled >= MOST_FAILED:
+                        raise
+                    skipped = f"FAILED to show a message: {flat(repr(error))[:200]}"
+                    self._page.say([labelled("chat", skipped)])
             self._replies.turn_over()
             self._show(now=True)
             if not self._left:
@@ -367,7 +400,7 @@ class Chat:
         if more or turn.said or turn.interrupted or ended_badly(result):
             self._page.say([turn_line(turn, result, more)])
         self._status.refresh(self._session, self._usage)
-        self._page.put([ready_line(self._page.layout.colour)])
+        self._page.put([ready_line(self._page.layout.colour, self._notices.running)])
         if not turn.interrupted and time.monotonic() - turn.started >= LONG_TURN:
             self._console.bell()
         self._console.hold(False)
@@ -570,10 +603,16 @@ def closed_as_usual(event: Event) -> bool:
     )
 
 
-def ready_line(colour: bool) -> str:
+def ready_line(colour: bool, running: int = 0) -> str:
     """What is said once a turn is over, for the eye to find where claude
-    stopped and the prompt is the user's again: bright green in colour."""
+    stopped and the prompt is the user's again: bright green in colour.
+    With tasks of claude's that still run, it says so: the turn is over
+    and the work is not, claude takes up again when one of them ends."""
     line = f"# {READY}"
+    if running:
+        tasks = "1 task still runs" if running == 1 else f"{running} tasks still run"
+        said = f"claude has paused, {tasks}, it goes on when one ends"
+        line = f"# {labelled('ready', said)}"
     return painted(READY_STYLE, line) if colour else line
 
 

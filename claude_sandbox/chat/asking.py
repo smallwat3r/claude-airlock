@@ -28,6 +28,8 @@ ALWAYS = ("a", "always")
 REFUSED = {"behavior": "deny", "message": "The user refused this call."}
 # Of what a tool is asked to do, in the question whether it may
 ABOUT_WIDTH = 200
+# Of the name of a tool in a question
+NAME_WIDTH = 80
 # A rule longer than this is not offered: it could not be read whole
 RULE_WIDTH = 500
 # Seconds between two looks at whether there is still someone to ask
@@ -56,11 +58,17 @@ class Question:
             self.answered.set()
 
 
+def is_number(typed: str) -> bool:
+    """Whether what was typed is a number as int reads one: isdigit also
+    takes digits of other scripts and a superscript, which int refuses."""
+    return typed.isascii() and typed.isdigit()
+
+
 def chosen(typed: str, options: list[dict]) -> str:
     """The answer to a question: the labels of the options named by their
     numbers, or what was typed as it is."""
     numbers = [part.strip() for part in typed.split(",")]
-    if all(n.isdigit() and 1 <= int(n) <= len(options) for n in numbers):
+    if all(is_number(n) and 1 <= int(n) <= len(options) for n in numbers):
         return ", ".join(str(options[int(n) - 1].get("label", "")) for n in numbers)
     return typed.strip()
 
@@ -131,10 +139,11 @@ class Asker:
         if question.stale:
             question.stale = False
             return False
-        question.answer(line)
-        # Over before the next line is read
+        # Over before the next line is read, and before its answer wakes
+        # the thread that puts the next question: that one must stay
         self._question = None
         self._console.ask(None)
+        question.answer(line)
         return True
 
     def give_up(self) -> None:
@@ -209,7 +218,8 @@ class Asker:
             return allowed
         details = call_details(tool, tool_input, None, self._project_dir, False)
         self._reviewed(tool, tool_input, details)
-        name = tool.lower()
+        # On one line and no longer than a name: it is claude's to give
+        name = flat(tool).lower()[:NAME_WIDTH]
         scope = rule[0] if rule else f"every call of {name}"
         self._page.note("chat", f"a: not asked again in this session for {scope}")
         call = flat(details[0])[:ABOUT_WIDTH] if details else ""

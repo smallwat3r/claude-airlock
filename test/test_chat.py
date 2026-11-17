@@ -312,6 +312,24 @@ class ChatTest(LauncherTest):
         )
         self.assertIn("unknown command[2J\n", done.stdout)
 
+    def test_what_the_session_writes_to_its_errors_is_cleaned_too(self):
+        environment = self.environment()
+        said = r"printf 'docker: no such image\033[2J\033]0;owned\007\n' >&2; exit 125"
+        done = subprocess.run(
+            [sys.executable, str(LAUNCHER), "--line-mode"],
+            cwd=self.project,
+            env={**environment, "FAKE_SESSION": said},
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertNotIn("\x1b", done.stdout + done.stderr)
+        self.assertNotIn("\x07", done.stdout + done.stderr)
+        self.assertIn("docker: no such image[2J", done.stdout + done.stderr)
+        self.assertEqual(done.returncode, 125)
+
     def test_a_turn_is_shown_as_the_lines_of_a_trace(self):
         done = self.chat("hello there\n")
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -1028,6 +1046,9 @@ class AskingTest(unittest.TestCase):
         self.assertEqual(asking.chosen("1, 2", options), "Red, Blue")
         self.assertEqual(asking.chosen("3", options), "3")
         self.assertEqual(asking.chosen(" green ", options), "green")
+        # Digits that are no number to int
+        self.assertEqual(asking.chosen("\u00b2", options), "\u00b2")
+        self.assertFalse(asking.is_number("\u0662"))
 
     def test_a_question_is_answered_once_and_not_by_a_line_typed_before_it(self):
         asker = asking.Asker(
@@ -1189,7 +1210,9 @@ class NoticesTest(unittest.TestCase):
             said.system(system("compact_boundary", compact_metadata=about))
             said.system(system("api_retry", error="overloaded\x1b[2J"))
             said.system(system("task_started", task_id="a1", description="Run it"))
+            still_running = said.running
             said.system(system("task_notification", task_id="a1", status="completed"))
+            self.assertEqual((still_running, said.running), (1, 0))
             said.system(system("task_notification", task_id=["x"]))
             said.cleared()
         self.assertEqual(
@@ -1451,6 +1474,18 @@ class StatusTest(LauncherTest):
             self.assertEqual(shown._console._head, ["Opus 5.5 [claude-test] net:open"])
         self.assertEqual(lines, ["# status      Opus 5.5 [claude-test] net:open"])
 
+    def test_no_limit_claude_tells_of_stops_the_status(self):
+        limits = status.Limits()
+        limits.heard({"rateLimitType": [], "utilization": 0.5})
+        limits.heard({"rateLimitType": {"a": 1}})
+        self.assertEqual(limits.windows, {})
+        # A time no date can be made of
+        limits.heard({"rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": 9e11})
+        parts = status.status_parts(
+            pipe.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
+        )
+        self.assertIn("5h:40% used", status.status_line(parts, colour=False))
+
     def test_the_model_chosen_with_model_is_shown_before_it_replies(self):
         session = pipe.Session(model="claude-fable-5-2", chosen="Opus 5.5")
         parts = status.status_parts(
@@ -1463,6 +1498,13 @@ class ConsoleTest(LauncherTest):
     def test_the_end_of_a_turn_is_said_in_bright_green_in_colour(self):
         self.assertEqual(talk.ready_line(False), f"# {talk.READY}")
         self.assertEqual(talk.ready_line(True), f"\x1b[1;92m# {talk.READY}\x1b[0m")
+
+    def test_a_turn_that_ends_with_tasks_still_running_says_so(self):
+        one, two = talk.ready_line(False, 1), talk.ready_line(False, 2)
+        self.assertIn("claude has paused, 1 task still runs", one)
+        self.assertIn("claude has paused, 2 tasks still run", two)
+        self.assertNotIn("has finished", one)
+        self.assertTrue(one.startswith("# ready "))
 
     def test_a_word_is_completed_to_a_command_or_a_file_of_the_project(self):
         (self.project / "src").mkdir()

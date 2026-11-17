@@ -19,6 +19,7 @@ from ..layout import DIM, painted
 from ..mounts import ExtraDir
 from ..network import has_socket_proxy
 from ..settings import Settings
+from ..transcript import LATEST
 from .console import Page
 from .pipe import Session, amount
 from .turn import Usage
@@ -60,7 +61,11 @@ class Limits:
     windows: dict[str, dict] = field(default_factory=dict)
 
     def heard(self, info: object) -> None:
-        if not isinstance(info, dict) or info.get("rateLimitType") not in WINDOWS:
+        if not isinstance(info, dict):
+            return
+        kind = info.get("rateLimitType")
+        # A name, and not what cannot be looked up as one
+        if not isinstance(kind, str) or kind not in WINDOWS:
             return
         window: dict = {}
         # A fraction of the limit, as the API says it
@@ -68,9 +73,9 @@ class Limits:
         if used is not None and used <= 1:
             window["used_percentage"] = round(used * 100, 1)
         resets = amount(info.get("resetsAt"))
-        if resets:
+        # A time that can be shown as one, see LATEST of transcript.py
+        if resets and resets <= LATEST:
             window["resets_at"] = int(resets)
-        kind = str(info["rateLimitType"])
         self.windows[kind] = {**self.windows.get(kind, {}), **window}
 
 

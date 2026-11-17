@@ -25,6 +25,13 @@ class Notices:
         # What claude last said of the limits of the account
         self._limit = "allowed"
 
+    @property
+    def running(self) -> int:
+        """How many of the tasks claude started have not ended: what it
+        left to run goes on after its turn, and it takes up again when one
+        ends."""
+        return len(self._tasks)
+
     def system(self, message: dict) -> None:
         """Take in what claude says of the session while a turn runs."""
         subtype = message.get("subtype")

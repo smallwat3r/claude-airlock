@@ -19,6 +19,7 @@ from ..events import clean, flat, labelled
 from ..settings import Host
 from ..trace import session_rows
 from ..transcript import session_files, sessions_named
+from .asking import is_number
 from .console import Page
 from .pipe import Agent, Session, is_session_id
 from .turn import Turns
@@ -235,6 +236,6 @@ class Commands:
         except KeyboardInterrupt:
             return ""
         number = (typed or "").strip()
-        if not number.isdigit() or not 1 <= int(number) <= len(rows):
+        if not is_number(number) or not 1 <= int(number) <= len(rows):
             return ""
         return rows[int(number) - 1][0].stem

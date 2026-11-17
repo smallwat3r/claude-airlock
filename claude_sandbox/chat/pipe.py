@@ -18,13 +18,14 @@ import json
 import queue
 import re
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..docker import NOT_FOUND, docker_popen
-from ..events import flat
+from ..events import clean, flat
 from ..files import json_object
 from ..projects import transcript_dirs
 from ..settings import Fatal, Host
@@ -68,6 +69,8 @@ class Agent:
                 *docker_args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                # Read and cleaned as the rest is, see _read_errors
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
         except FileNotFoundError:
@@ -80,6 +83,8 @@ class Agent:
         self.messages: queue.Queue[dict | str | None] = queue.Queue(BACKLOG)
         self.ended = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
+        self._errors = threading.Thread(target=self._read_errors, daemon=True)
+        self._errors.start()
         self._reader.start()
 
     def _read(self) -> None:
@@ -99,9 +104,31 @@ class Agent:
                 # The rest of a line that was too long goes with its start
                 dropping = not complete
         finally:
+            # What it had to say for itself as it ended comes first
+            self._errors.join(1.0)
             self.ended.set()
             self._on_end()
             self.messages.put(None)
+
+    def _read_errors(self) -> None:
+        """Pass on what the session writes to its errors, as lines that
+        are no object: docker's own word when it cannot run the session,
+        and whatever a process of the session writes there, which is not
+        to reach the terminal as it is."""
+        errors = self._process.stderr
+        while errors:
+            line = errors.readline(PLAIN_WIDTH)
+            if not line:
+                return
+            text = line.decode("utf-8", "replace").rstrip("\n")
+            if not text.strip():
+                continue
+            if not self.ended.is_set():
+                with contextlib.suppress(queue.Full):
+                    self.messages.put(text, timeout=1.0)
+                    continue
+            # Nobody listens any more, or not fast enough
+            print(clean(text), file=sys.stderr)
 
     def send(self, message: dict) -> None:
         """Say something to claude, nothing to one that has ended."""
@@ -154,6 +181,14 @@ class Agent:
 
     def status(self) -> int:
         return self._process.wait()
+
+    def over_within(self, seconds: float) -> bool:
+        """Whether the session has ended, once that long was waited."""
+        try:
+            self._process.wait(seconds)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
 
 def amount(value: object) -> float | None:
