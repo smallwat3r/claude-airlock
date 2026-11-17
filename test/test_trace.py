@@ -22,6 +22,7 @@ from harness import (
 
 from claude_sandbox.events import Event, Who
 from claude_sandbox.layout import Layout, event_json, folded
+from claude_sandbox.transcript import call_details
 
 
 class TraceTest(LauncherTest):
@@ -265,6 +266,34 @@ class TraceTest(LauncherTest):
         )
         self.assertIn(
             "$   import os\n", self.launch("--trace", "0c", "--verbose").stdout
+        )
+
+    def test_a_list_of_todos_is_said_as_how_far_it_is(self):
+        todos = [
+            {"content": "Read the config", "status": "completed"},
+            {
+                "content": "Fix the lockfile\x1b[2J",
+                "status": "in_progress",
+                "activeForm": "Fixing the lockfile\x1b[2J",
+            },
+            {"content": "Run the tests", "status": "pending"},
+            "not one",
+        ]
+        self.assertEqual(
+            call_details("TodoWrite", {"todos": todos}, None, "/p", False),
+            ["todos: 1/3 done, now: Fixing the lockfile[2J"],
+        )
+        self.assertEqual(
+            call_details("TodoWrite", {"todos": todos}, None, "/p", True)[1:],
+            [
+                "  [x] Read the config",
+                "  [>] Fix the lockfile[2J",
+                "  [ ] Run the tests",
+            ],
+        )
+        # What is no list is shown as any other argument
+        self.assertEqual(
+            call_details("TodoWrite", {"todos": "x"}, None, "/p", False), ["todos: x"]
         )
 
     def test_what_only_looks_like_a_here_document_is_left_as_it_is(self):

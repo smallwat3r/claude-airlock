@@ -306,6 +306,25 @@ def file_details(
     return [about, *changes]
 
 
+def todo_details(todos: list, verbose: bool) -> list[str]:
+    """The list of what claude set out to do, as how far it is: how many
+    are done and the one it is at. Each of them with --verbose."""
+    listed = [todo for todo in todos if isinstance(todo, dict)]
+    done = sum(todo.get("status") == "completed" for todo in listed)
+    line = f"todos: {done}/{len(listed)} done"
+    for todo in listed:
+        if todo.get("status") == "in_progress":
+            line += ", now: " + flat(todo.get("activeForm") or todo.get("content", ""))
+            break
+    if not verbose:
+        return [line]
+    marks = {"completed": "[x]", "in_progress": "[>]"}
+    return [line] + [
+        f"  {marks.get(str(todo.get('status')), '[ ]')} {flat(todo.get('content', ''))}"
+        for todo in listed
+    ]
+
+
 def call_details(
     name: str, tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
@@ -313,6 +332,8 @@ def call_details(
     path = file_path(tool_input)
     if name == "Bash":
         return bash_details(tool_input, cwd, project_dir, verbose)
+    if name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
+        return todo_details(tool_input["todos"], verbose)
     if path is not None:
         return file_details(name, path, tool_input, project_dir, verbose)
     # Any other tool: its arguments as they are
