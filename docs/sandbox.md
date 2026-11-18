@@ -16,8 +16,11 @@ What a session is given and what it is kept from.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so one
   session cannot poison another project's dependencies.
   `CLAUDE_DOCKER_CACHE=0` goes back to a tmpfs of at most 2g.
-- The git config, read-only. There is no gpg in the image, so sign the
-  commits on the host before pushing.
+- The git config, read-only. Of `~/.config/git` that is `config`, `ignore`,
+  `attributes` and `templates`, and the files the config includes: the rest
+  stays on the host, as git's `store` helper keeps passwords in clear
+  there. There is no gpg in the image, so sign the commits on the host
+  before pushing.
 
 ## What is read-only or hidden
 

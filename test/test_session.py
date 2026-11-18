@@ -54,6 +54,24 @@ class DefaultSessionTest(LauncherTest):
             # What it goes over is there, docker would make it as root
             self.assertTrue((self.base / name).is_dir())
 
+    def test_no_credentials_come_with_the_git_config(self):
+        git = self.home / ".config" / "git"
+        (git / "templates").mkdir(parents=True)
+        (git / "config").write_text("[include]\n\tpath = ~/.config/git/work\n")
+        for name in ("ignore", "work", "credentials", "credentials-nas"):
+            (git / name).write_text("\n")
+        # The second session of this test, after the one of setUp
+        calls = self.launch().calls
+        flags = [call for call in calls if call[0] == "run"][-1]
+        for name in ("config", "ignore", "templates"):
+            mount = f"--volume={git / name}:/home/sandbox/.config/git/{name}:ro,z"
+            self.assertIn(mount, flags)
+        self.assertIn(f"--volume={git / 'work'}:{git / 'work'}:ro,z", flags)
+        self.assertFalse([flag for flag in flags if "credentials" in flag])
+        self.assertFalse(
+            [flag for flag in flags if flag.startswith(f"--volume={git}:")]
+        )
+
     def test_container_is_hardened(self):
         for flag in (
             "--cap-drop=ALL",

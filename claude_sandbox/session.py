@@ -305,15 +305,28 @@ def git_include_paths() -> list[str]:
     return [line.split(" ", 1)[1] for line in result.stdout.splitlines() if " " in line]
 
 
+# What git reads of its directory in XDG_CONFIG_HOME that is forwarded. Not
+# the directory whole: git's store helper keeps passwords in clear there
+# (credentials, or the file its --file names), and whatever else is put
+# there is not known to be free of them.
+XDG_GIT_FORWARDED = ("config", "ignore", "attributes", "templates")
+
+
 def git_config_args(host: Host) -> list[str]:
-    """Forward the git config, read-only."""
+    """Forward the git config, read-only, and no credentials with it (see
+    XDG_GIT_FORWARDED)."""
     args = []
     gitconfig = os.path.join(host.home, ".gitconfig")
     if os.path.isfile(gitconfig):
         args.append(mount_arg(gitconfig, f"{CONTAINER_HOME}/.gitconfig", "ro,z"))
     xdg_git = os.path.join(host.config_home, "git")
-    if os.path.isdir(xdg_git):
-        args.append(mount_arg(xdg_git, f"{CONTAINER_HOME}/.config/git", "ro,z"))
+    forwarded = {gitconfig}
+    for name in XDG_GIT_FORWARDED:
+        path = os.path.join(xdg_git, name)
+        if os.path.exists(path):
+            target = f"{CONTAINER_HOME}/.config/git/{name}"
+            args.append(mount_arg(path, target, "ro,z"))
+            forwarded.add(path)
     # Files pulled in with include/includeIf (e.g. a work identity under
     # "gitdir:~/work/") live outside the mounts, so without this they
     # silently never apply. Mounted at their host path, the one the config
@@ -321,11 +334,12 @@ def git_config_args(host: Host) -> list[str]:
     # ~/.gitconfig is.
     for path in git_include_paths():
         # Also one that is absolute, which the join leaves as it is
-        path = os.path.join(host.home, expand_home(path, host.home))
-        if path == gitconfig or path.startswith(xdg_git + "/"):
+        path = os.path.normpath(os.path.join(host.home, expand_home(path, host.home)))
+        if path in forwarded:
             continue
         if os.path.isfile(path):
             args.append(mount_arg(path, path, "ro,z"))
+            forwarded.add(path)
     return args
 
 
