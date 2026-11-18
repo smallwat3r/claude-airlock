@@ -62,6 +62,8 @@ class Settings:
     net_log: bool = True
     proc_log: bool = True
     telemetry: bool = False
+    # Whether a session loads the connectors of the claude.ai account
+    connectors: bool = False
     ssh_agent: bool = False
     socket: SocketAccess = SocketAccess.OFF
     rw_config: bool = False
@@ -266,6 +268,9 @@ SETTINGS = (
     Setting("PROC_LOG", Kind.SWITCH, "0 stops recording the processes of a session"),
     Setting(
         "TELEMETRY", Kind.SWITCH, "1 lets Claude Code send usage and crash reports"
+    ),
+    Setting(
+        "CONNECTORS", Kind.SWITCH, "1 loads the connectors of the claude.ai account"
     ),
     Setting("SSH_AGENT", Kind.SWITCH, "1 forwards the SSH agent"),
     Setting(

@@ -113,6 +113,13 @@ class DefaultSessionTest(LauncherTest):
         for flag in off:
             self.assertNotIn(flag, allowed)
 
+    def test_the_connectors_of_the_account_are_not_loaded_unless_asked_for(self):
+        off = "--env=ENABLE_CLAUDEAI_MCP_SERVERS=false"
+        self.assertIn(off, self.flags)
+        calls = self.launch(CLAUDE_DOCKER_CONNECTORS="1").calls
+        allowed = [call for call in calls if call[0] == "run"][-1]
+        self.assertNotIn(off, allowed)
+
     def test_default_limits(self):
         for flag in ("--memory=16g", "--memory-swap=16g", "--pids-limit=512"):
             self.assertIn(flag, self.flags)

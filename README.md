@@ -132,6 +132,7 @@ The doors, all closed by default:
 | --- | --- | --- |
 | `CLAUDE_DOCKER_NET_FILTER` | `0` | `1` allows only the domains in `docker/allowed-domains.txt`, over HTTP, HTTPS and git over SSH |
 | `CLAUDE_DOCKER_SSH_AGENT` | `0` | `1` forwards your SSH agent, so git over SSH and `ssh` work with your keys |
+| `CLAUDE_DOCKER_CONNECTORS` | `0` | `1` loads the connectors of your claude.ai account (Gmail, Google Drive...), with their tools in every request |
 | `CLAUDE_DOCKER_SOCKET` | `0` | `1` allows `docker ps` and `docker logs` against the host, `full` adds `inspect`, `stats` and `top` |
 
 What is recorded, for `--trace`:

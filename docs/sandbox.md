@@ -57,6 +57,11 @@ What a session is given and what it is kept from.
 - **Without telemetry.** `DISABLE_TELEMETRY=1` and
   `DISABLE_ERROR_REPORTING=1` are set, so it sends no usage events and no
   crash reports. `CLAUDE_DOCKER_TELEMETRY=1` sends both.
+- **Without the connectors of claude.ai.** `ENABLE_CLAUDEAI_MCP_SERVERS=false`
+  is set, so the connectors of your account (Gmail, Google Drive and the
+  like) are not loaded: they reach your data from inside the sandbox, and
+  their tools and instructions take room in every request.
+  `CLAUDE_DOCKER_CONNECTORS=1` loads them.
 
 ## The check when a session ends
 

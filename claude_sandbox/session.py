@@ -85,6 +85,18 @@ def telemetry_args(settings: Settings) -> list[str]:
     return [env_arg("DISABLE_TELEMETRY", 1), env_arg("DISABLE_ERROR_REPORTING", 1)]
 
 
+def connector_args(settings: Settings) -> list[str]:
+    """Unless CLAUDE_DOCKER_CONNECTORS=1, Claude Code is told not to load
+    the connectors of the claude.ai account (Gmail, Google Drive and the
+    like). They are a way out of the sandbox with the user's own access,
+    which no other setting closes, and each brings its tools and its
+    instructions into every request of a session that has no use for
+    them."""
+    if settings.connectors:
+        return []
+    return [env_arg("ENABLE_CLAUDEAI_MCP_SERVERS", "false")]
+
+
 def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
     """Unless CLAUDE_DOCKER_ASK=1, claude is told not to ask before it
     uses a tool: the container is what keeps a session from the host, and
@@ -122,6 +134,7 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         env_arg("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", 1),
         env_arg("CLAUDE_CONFIG_DIR", CONTAINER_CLAUDE),
         *telemetry_args(settings),
+        *connector_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
         env_arg("CLAUDE_DOCKER_SANDBOX", name),
