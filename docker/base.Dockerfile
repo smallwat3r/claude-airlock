@@ -18,6 +18,7 @@
 # claude-feat-md: Python 3 with uv
 # claude-feat-md: Node.js and npm/npx, gcc/g++/make/pkg-config
 # claude-feat-md: git, gh, ssh, ripgrep, fd, jq, tree
+# claude-feat-md: ast-grep (search and rewrite code by its syntax tree, the command is ast-grep, sg is another tool here), universal-ctags (ctags, a symbol index for languages without a language server)
 
 # uv comes from its official image, as a named stage so it can be pinned by
 # digest (COPY --from cannot take a digest held in an ARG on the legacy builder)
@@ -46,6 +47,7 @@ RUN apt-get update \
     # Search and filesystem
     ripgrep \
     fd-find \
+    universal-ctags \
     tree \
     jq \
     # Build tools
@@ -54,7 +56,30 @@ RUN apt-get update \
     g++ \
     pkg-config \
     python3 \
+    # Debian ships fd as fdfind, the name fd was already taken there
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
+
+# ast-grep is not packaged by Debian, so the official zip of its GitHub
+# release is pinned and checksum-verified. The base has no unzip, Python's
+# zipfile extracts it instead. Only ast-grep is taken out of the zip: its
+# short alias sg would shadow the sg of Debian's login package.
+ARG AST_GREP_VERSION=0.51.3
+ARG AST_GREP_SHA256_AMD64=22803eb0c5bf83164fb7fd76d4721d355ecf0c8466ef47342c1ec7d80897ca47
+ARG AST_GREP_SHA256_ARM64=5b44fd68e78744934b359b07badce347d4197ed50b341d50f1f99d056ecedb08
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "${ARCH}" in \
+    amd64) AST_GREP_ARCH=x86_64; AST_GREP_SHA256="${AST_GREP_SHA256_AMD64}" ;; \
+    arm64) AST_GREP_ARCH=aarch64; AST_GREP_SHA256="${AST_GREP_SHA256_ARM64}" ;; \
+    *) echo "unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/app-${AST_GREP_ARCH}-unknown-linux-gnu.zip" \
+    -o /tmp/ast-grep.zip \
+    && printf '%s  %s\n' "${AST_GREP_SHA256}" /tmp/ast-grep.zip | sha256sum -c - \
+    && python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])' \
+    /tmp/ast-grep.zip ast-grep /usr/local/bin \
+    && chmod 755 /usr/local/bin/ast-grep \
+    && rm /tmp/ast-grep.zip
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
