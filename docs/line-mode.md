@@ -9,9 +9,10 @@ arguments, and it is the same session in the same sandbox, recorded and
 checked the same way.
 
 ![A turn in line mode at a terminal. Under each command, in cyan, the
-connections it made: the package registry and a second host during an
-install, then a database that refuses the connection, in red, during a
-test run that fails](line-mode.png)
+connections it made and how they ended: the package registry and a second
+host during an install, then a database that refuses the connection, in
+red, during a test run that fails. Between the two, what each step of the
+model used and how the sandbox is doing](line-mode.png)
 
 ## Why
 
@@ -34,10 +35,14 @@ test run that fails](line-mode.png)
   it read (each `CLAUDE.md`), a file that changed since it read it, a
   line you typed while it worked.
 - A change of the permission mode or of the model, and at the first turn
-  the MCP servers the session has, with those that are not connected.
+  the MCP servers the session has, with those that are not connected,
+  and again when they change.
 - Each reply, and what its subagents do.
-- Every connection the session opens, and how it ended when that went
-  wrong (`REFUSED`, `NO ANSWER`).
+- What each step of the model used: the tokens it wrote and read, and
+  whether it missed the cache.
+- Every connection the session opens, and how it ended: closed after how
+  long and how much it carried, or what went wrong (`REFUSED`,
+  `NO ANSWER`).
 - Each request the egress filter refused (`DENIED`), and each use of the
   SSH agent and of the Docker socket.
 - After a turn, how long it took and what it cost.

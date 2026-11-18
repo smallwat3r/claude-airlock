@@ -59,8 +59,8 @@ through your pager.
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
-- A command that changed files says which (`changed:`) and what changed
-  in each, as an edit does. See [What a command wrote](#what-a-command-wrote).
+- A command that changed files says which (`changed:`) and how many
+  lines each gained and lost. See [What a command wrote](#what-a-command-wrote).
 - A call says who allowed it when that was not the permission mode of
   the session: `allowed by you, once`, `allowed by a rule`.
 - What went wrong is in capitals: `FAILED` for a call, `REFUSED by` for
@@ -88,13 +88,12 @@ switches them off, `FORCE_COLOR=1` on wherever the output goes.
 claude   bash   $ sed -i 's/go build .\/../go build .\/.../' Makefile && echo done >> ~/.bashrc
 claude   bash   result: ok, 0.1s
 claude   bash   changed: /home/me/code/api/Makefile (+1 -1)
-claude   bash   diff: @@ -4,3 +4,3 @@
-claude   bash   diff: -	go build ./..
-claude   bash   diff: +	go build ./...
 claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
-claude   bash   diff: @@ -12,0 +13,1 @@
-claude   bash   diff: +done
 ```
+
+- What changed in each file is not shown, the diff is in `--json`.
+- Of a command that changed many files the first 50 are named, and how
+  many more there are. `--verbose` names them all.
 
 - These files are counted under `files written` in the header, and one
   outside the project is among what `--failed` keeps and what the

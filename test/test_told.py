@@ -100,7 +100,7 @@ class CommandTest(unittest.TestCase):
         entries = [call("c1", command="sed -i s/a/b/ x"), result("c1", "", **noted)]
         return events(entries)[0]
 
-    def test_a_file_a_command_changed_is_shown_with_what_changed(self):
+    def test_a_file_a_command_changed_is_shown_with_how_much_changed(self):
         file = {"filePath": "/p/x", "hunks": [hunk(" same", "-a", "+b\x1b[2J")]}
         made = {"filePath": "/p/new", "hunks": [hunk("+one")], "created": True}
         ran = self.ran(toolUseResult=changed(file, made, also=("/p/unseen",)))
@@ -108,15 +108,14 @@ class CommandTest(unittest.TestCase):
             ran.details[2:],
             [
                 "changed: /p/x (+1 -1)",
-                "diff: @@ -3,2 +3,2 @@",
-                "diff:  same",
-                "diff: -a",
-                "diff: +b[2J",
                 "changed: /p/new (created, +1 -0)",
-                "diff: @@ -3,2 +3,2 @@",
-                "diff: +one",
                 "changed: /p/unseen",
             ],
+        )
+        # What changed is whole in --json
+        self.assertEqual(
+            ran.fields["changed"][0]["diff"],
+            ["@@ -3,2 +3,2 @@", " same", "-a", "+b[2J"],
         )
         self.assertFalse(went_wrong(ran))
         self.assertEqual(
@@ -135,13 +134,24 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(went_wrong(ran))
         self.assertTrue(ran.fields["outside_project"])
 
-    def test_a_long_diff_is_cut_unless_verbose(self):
-        file = {"filePath": "/p/x", "hunks": [hunk(*(f"+{n}" for n in range(30)))]}
-        entries = [call("c1", command="x"), result("c1", toolUseResult=changed(file))]
-        self.assertIn(
-            "diff: ... 23 more lines, see --verbose", events(entries)[0].details
-        )
-        self.assertIn("diff: +29", events(entries, verbose=True)[0].details)
+    def test_of_many_files_the_first_are_named_unless_verbose(self):
+        files = [{"filePath": f"/p/{n:02}", "hunks": [hunk("+b")]} for n in range(52)]
+        beyond = {"filePath": "/etc/hosts", "hunks": [hunk("+b")]}
+        entries = [
+            call("c1", command="x"),
+            result("c1", toolUseResult=changed(*files, beyond)),
+        ]
+        ran = events(entries)[0]
+        named = [line for line in ran.details if line.startswith("changed: ")]
+        self.assertEqual(len(named), 51)
+        # One that is not named may be the one outside the project
+        last = "changed: ... 3 more files, see --verbose  OUTSIDE PROJECT"
+        self.assertEqual(named[-1], last)
+        self.assertTrue(alerting(ran, last))
+        self.assertTrue(went_wrong(ran))
+        self.assertEqual(len(ran.fields["changed"]), 53)
+        whole = events(entries, verbose=True)[0].details
+        self.assertIn("changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT", whole)
 
     def test_followed_the_result_has_what_the_command_changed(self):
         file = {"filePath": "/etc/hosts", "hunks": [hunk("+1.2.3.4 github.com")]}
@@ -437,6 +447,12 @@ class SessionTest(unittest.TestCase):
                 ("compact", ["the conversation was compacted"]),
             ],
         )
+
+    def test_a_walk_asked_for_the_steps_tells_them_without_verbose(self):
+        entry = step("m1", 1, input_tokens=500, output_tokens=90)
+        for steps, told in ((False, []), (True, ["step"])):
+            walk = transcript.Walk(PROJECT, False, live=True, steps=steps)
+            self.assertEqual([event.what for event in walk.take(entry)], told)
 
     def test_a_step_that_missed_the_cache_says_so_and_why(self):
         def read(step_id: str, second: int, cached: int, new: int) -> dict:

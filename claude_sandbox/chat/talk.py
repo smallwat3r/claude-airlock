@@ -32,7 +32,6 @@ from ..layout import (
     Layout,
     painted,
     together,
-    went_wrong,
 )
 from ..settings import Host
 from ..told import SAID_LIVE
@@ -508,7 +507,9 @@ class Chat:
         if path is None:
             self._page.note("chat", "claude did not say which session it is,")
             self._page.note("chat", "every session of the project is followed")
-        self._follower = Follower(self._host, False, path, container=self._name)
+        self._follower = Follower(
+            self._host, False, path, container=self._name, steps=True
+        )
 
     def _show(self, now: bool = False) -> None:
         """Write what the session did since the last look. Not more often
@@ -530,7 +531,7 @@ class Chat:
         for _, event in found.events:
             if event.who is Who.CLAUDE and event.fields.get("stage") == "call":
                 self._turns.current.shown += 1
-            if self._told_over_the_pipe(event) or closed_as_usual(event):
+            if self._told_over_the_pipe(event):
                 continue
             if event.what in READ_WHOLE:
                 lines += self._page.events(together) + said_whole(self._page, event)
@@ -603,20 +604,6 @@ class Chat:
             finally:
                 with self._counting:
                     self._answering -= 1
-
-
-def closed_as_usual(event: Event) -> bool:
-    """Whether an event is the end of a connection that closed as one
-    does. Claude Code keeps its own open for minutes, and the end of each
-    would bury what a turn did: a chat shows a connection when it opens,
-    and how it ended when that went wrong. A trace has them all."""
-    fields = event.fields
-    return (
-        event.what == "net"
-        and fields.get("stage") == "outcome"
-        and fields.get("outcome") == "closed"
-        and not went_wrong(event)
-    )
 
 
 def ready_line(colour: bool, running: int = 0) -> str:

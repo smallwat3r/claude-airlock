@@ -676,17 +676,6 @@ class ChatTest(LauncherTest):
             self.assertEqual(chat._console._working, "")
         self.assertEqual(lines, [])
 
-    def test_a_connection_that_closed_as_usual_is_not_shown(self):
-        def ended(outcome: str, **more) -> Event:
-            fields = {"stage": "outcome", "outcome": outcome, **more}
-            return Event(0, Who.SANDBOX, "net", ["x"], fields)
-
-        self.assertTrue(talk.closed_as_usual(ended("closed")))
-        self.assertFalse(talk.closed_as_usual(ended("refused")))
-        self.assertFalse(talk.closed_as_usual(ended("closed", flagged=True)))
-        opened = Event(0, Who.SANDBOX, "net", ["x"], {"stage": "open"})
-        self.assertFalse(talk.closed_as_usual(opened))
-
 
 class PipeTest(unittest.TestCase):
     def test_a_session_id_that_is_none_is_not_made_a_path_of(self):
@@ -1364,7 +1353,9 @@ class CommandsTest(LauncherTest):
 
         def run(*args: str, **options):
             self.assertEqual(args[:2], ("exec", "claude-test"))
-            return subprocess.Popen([sys.executable, "-c", client, *args[2:]], **options)
+            return subprocess.Popen(
+                [sys.executable, "-c", client, *args[2:]], **options
+            )
 
         def in_container(*args: str) -> bool:
             killed.append(args[-1])

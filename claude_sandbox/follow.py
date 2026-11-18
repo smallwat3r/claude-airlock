@@ -90,13 +90,16 @@ class TranscriptTail:
         verbose: bool,
         offset: int = 0,
         name_results: bool = False,
+        steps: bool = False,
     ):
         self.path = path
         self._offset = offset
         # The start of a line whose end is not written yet
         self._partial = b""
         self._dropping = False
-        self._walk = Walk(project_dir, verbose, live=True, name_results=name_results)
+        self._walk = Walk(
+            project_dir, verbose, live=True, name_results=name_results, steps=steps
+        )
         self._title: str | None = None
 
     @property
@@ -239,7 +242,8 @@ class Follower:
     """Follows the sessions of a project, or just the one of a transcript
     when only names it, and gives of what they do the events chosen. With
     container, of the network and the doors only what the session in the
-    container of that name does, as a chat wants of its own."""
+    container of that name does, as a chat wants of its own. With steps,
+    what each step of the model used is told without verbose too."""
 
     def __init__(
         self,
@@ -248,9 +252,12 @@ class Follower:
         only: Path | None = None,
         chosen: Filter = EVERYTHING,
         container: str | None = None,
+        steps: bool = False,
     ):
         self._host = host
         self._verbose = verbose
+        # Whether each step of the model is told without --verbose too
+        self._steps = steps
         self._only = only
         self._chosen = chosen
         # The one session whose network and doors are followed, by the
@@ -319,7 +326,12 @@ class Follower:
         project_dir = project_root(path, self._host)
         # With events left out a result may come without its call
         self._tails[path] = TranscriptTail(
-            path, project_dir, self._verbose, offset, name_results=bool(self._chosen)
+            path,
+            project_dir,
+            self._verbose,
+            offset,
+            name_results=bool(self._chosen),
+            steps=self._steps,
         )
         self._sizes.pop(path, None)
 
@@ -373,6 +385,7 @@ class Follower:
                     self._verbose,
                     size if self._rounds == 0 else 0,
                     name_results=True,
+                    steps=self._steps,
                 )
                 self._subagents[path] = (session, tail)
 

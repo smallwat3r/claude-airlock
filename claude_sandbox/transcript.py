@@ -34,7 +34,14 @@ from .files import UNREADABLE, bounded_lines, json_object, line_entry, open_plai
 from .projects import transcript_dirs, transcript_files
 from .settings import Fatal, Host
 from .shown import size
-from .told import Asides, counted, instructions_read, listed, typed_while_working
+from .told import (
+    MOST_COUNTED,
+    MOST_LISTED,
+    Asides,
+    counted,
+    instructions_read,
+    typed_while_working,
+)
 
 # A live walk of a transcript lets go of the oldest calls once this many
 # wait for a result, and of the oldest steps it has shown
@@ -65,13 +72,11 @@ _COMMAND_SAID = re.compile(r"<local-command-(stdout|stderr)>")
 # epoch: any other is not one a session ran at, and not one every
 # platform and time zone can show as a date
 EARLIEST, LATEST = 86400.0, 2e11
-# More than a session could use or cost: a count above it is not one
-MOST_COUNTED = 10**15
-# What a step of the model read, as the API counts it: not cached, newly
-# put in the cache, and read from it
 # A step that reads less than one in so many of what the step before read
 # from the cache has missed it
 MISS_SHARE = 2
+# What a step of the model read, as the API counts it: not cached, newly
+# put in the cache, and read from it
 INPUT_TOKENS = (
     "input_tokens",
     "cache_creation_input_tokens",
@@ -391,29 +396,35 @@ def hunk_lines(hunk: dict) -> list[str]:
     return ["@@ -{},{} +{},{} @@".format(*spans), *lines]
 
 
+def every(value: object) -> list:
+    """A list a transcript gives, empty for what is none."""
+    return value if isinstance(value, list) else []
+
+
 def files_changed(entry: dict, project_dir: str) -> list[dict]:
     """The files a command changed, as Claude Code noted with its result:
     of each its path, whether the command made it, whether it is outside
     the project, and what changed as the lines of a diff. A file the
-    command changed that Claude Code only names has no diff. This is what
-    Claude Code noticed, a command can write what it did not."""
+    command changed that Claude Code only names has no diff. All of them,
+    one past what is shown may be the one outside the project. This is
+    what Claude Code noticed, a command can write what it did not."""
     result = entry.get("toolUseResult")
     noted = result.get("bashEditDiff") if isinstance(result, dict) else None
     if not isinstance(noted, dict):
         return []
     changed: dict[str, dict] = {}
-    for file in listed(noted.get("files")):
+    for file in every(noted.get("files")):
         path = file.get("filePath") if isinstance(file, dict) else None
         if not isinstance(path, str):
             continue
-        hunks = [hunk for hunk in listed(file.get("hunks")) if isinstance(hunk, dict)]
+        hunks = [hunk for hunk in every(file.get("hunks")) if isinstance(hunk, dict)]
         changed[path] = {
             "path": path,
             "created": bool(file.get("created")),
             "outside": outside(path, project_dir),
             "diff": [line for hunk in hunks for line in hunk_lines(hunk)],
         }
-    for path in listed(noted.get("changedFiles")):
+    for path in every(noted.get("changedFiles")):
         if isinstance(path, str) and path not in changed:
             changed[path] = {
                 "path": path,
@@ -468,10 +479,13 @@ def outcome(call: dict, result: tuple[dict, dict] | None, project_dir: str) -> d
 
 
 def changed_details(changed: list[dict], verbose: bool) -> list[str]:
-    """The lines for the files a command changed: each one, flagged when
-    it is outside the project, and what changed in it."""
+    """The lines for the files a command changed: each one with how many
+    lines it gained and lost, flagged when it is outside the project. The
+    diff itself is in --json. Without --verbose the first of many, and
+    how many more there are, flagged when one of those is outside."""
+    shown = changed if verbose else changed[:MOST_LISTED]
     lines = []
-    for file in changed:
+    for file in shown:
         diff = file["diff"]
         added = sum(line.startswith("+") for line in diff)
         removed = sum(line.startswith("-") for line in diff)
@@ -479,7 +493,10 @@ def changed_details(changed: list[dict], verbose: bool) -> list[str]:
         sizes = f" ({how}+{added} -{removed})" if diff else " (created)" if how else ""
         flag = OUTSIDE_FLAG if file["outside"] else ""
         lines.append(f"changed: {flat(file['path'])}{sizes}{flag}")
-        lines += ["diff: " + line for line in clip(diff, verbose)]
+    more = changed[len(shown) :]
+    if more:
+        flag = OUTSIDE_FLAG if any(file["outside"] for file in more) else ""
+        lines.append(f"changed: ... {len(more)} more files, see --verbose{flag}")
     return lines
 
 
@@ -641,7 +658,7 @@ def step_usage(entry: dict) -> tuple[str, dict] | None:
 def tokens(usage: object, kind: str) -> int:
     """A count of tokens in what the API said was used, 0 without one."""
     count = usage.get(kind) if isinstance(usage, dict) else None
-    return count if type(count) is int and 0 < count <= MOST_COUNTED else 0
+    return counted(count) or 0
 
 
 def step_tokens(usage: dict) -> dict[str, int]:
@@ -735,9 +752,12 @@ class Walk:
         live: bool = False,
         usage: dict[str, dict] | None = None,
         name_results: bool = False,
+        steps: bool = False,
     ):
         self._project_dir = project_dir
         self._verbose = verbose
+        # Whether what each step of the model used is told
+        self._tell_steps = verbose or steps
         self._live = live
         self._name_results = name_results
         # How many calls a live walk has seen
@@ -798,7 +818,7 @@ class Walk:
     def _step(self, who: Who, entry: dict) -> list[Event]:
         """What the step an entry starts used, nothing for a later entry
         of the same step."""
-        step = step_usage(entry) if self._verbose else None
+        step = step_usage(entry) if self._tell_steps else None
         if not step or step[0] in self._steps:
             return []
         self._steps[step[0]] = None
