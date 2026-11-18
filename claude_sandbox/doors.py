@@ -247,7 +247,9 @@ class AgentDoor:
             # Only for what the session is waited on, the agent takes
             # the time its user does to confirm
             client.settimeout(AGENT_IDLE)
-            threading.Thread(target=self._serve_one, args=(client,), daemon=True).start()
+            threading.Thread(
+                target=self._serve_one, args=(client,), daemon=True
+            ).start()
 
     def _serve_one(self, client: socket.socket) -> None:
         try:

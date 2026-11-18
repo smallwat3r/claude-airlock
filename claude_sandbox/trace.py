@@ -411,7 +411,9 @@ def listener_events(record: ProcessRecord) -> list[Event]:
         detail = flat(listener.at)
         if listener.open:
             detail += "  OPEN to its network"
-        lineage = record.lineage(max(listener.pids), listener.when) if listener.pids else []
+        lineage = (
+            record.lineage(max(listener.pids), listener.when) if listener.pids else []
+        )
         if lineage:
             detail += f"  by: {flat(shown_lineage(lineage))}"
         fields = {
@@ -435,7 +437,9 @@ def watched_summary(record: ProcessRecord, verbose: bool) -> list[str]:
         )
     reachable = sum(listener.open for listener in record.listeners)
     if reachable:
-        lines.append(f"  {reachable} sockets waited for connections, OPEN to its network")
+        lines.append(
+            f"  {reachable} sockets waited for connections, OPEN to its network"
+        )
     if record.full:
         lines.append("  the record of them STOPPED at its size limit")
     if record.unreadable:

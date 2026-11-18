@@ -112,7 +112,9 @@ def columns_of(text: str) -> int:
         (
             0
             if unicodedata.combining(c)
-            else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+            else 2
+            if unicodedata.east_asian_width(c) in "WF"
+            else 1
         )
         for c in text
     )

@@ -816,7 +816,9 @@ class NetworkTraceTest(LauncherTest):
             FAKE_IP=mine,
             FAKE_ACCESS_LOG=str(self.access_log),
         )
-        self.assertIn("sent 17 MB to up.test:443 through the egress filter", ended.stderr)
+        self.assertIn(
+            "sent 17 MB to up.test:443 through the egress filter", ended.stderr
+        )
         self.assertNotIn("small.test", ended.stderr)
         self.assertNotIn("anthropic", ended.stderr)
 

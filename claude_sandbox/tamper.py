@@ -405,7 +405,9 @@ def report_build_changes(
     """Name the files of build_fingerprint that differ, the first
     MOST_NAMED of them. unchecked as for report_tampering."""
     changed = sorted(
-        path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
     )
     if not changed:
         return

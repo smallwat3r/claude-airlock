@@ -17,6 +17,7 @@ jobs:
           persist-credentials: false
       - run: shellcheck bin/claude-statusline test/smoke-test.sh
       - run: pipx run ruff check bin/claude-docker claude_sandbox test docker/update-pins.py docker/features/excalidraw/excalidraw-export
+      - run: pipx run ruff format --check bin/claude-docker claude_sandbox test docker/update-pins.py docker/features/excalidraw/excalidraw-export
       - run: pipx run mypy claude_sandbox bin/claude-docker
 
   test:

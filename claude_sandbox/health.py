@@ -36,7 +36,9 @@ def amount(count: float) -> str:
     """A number of bytes as docker writes a limit of them: 512m, 3.1g."""
     for unit, size in (("g", 2**30), ("m", 2**20), ("k", 2**10)):
         if count >= size:
-            shown = f"{count / size:.1f}" if count < 10 * size else f"{count / size:.0f}"
+            shown = (
+                f"{count / size:.1f}" if count < 10 * size else f"{count / size:.0f}"
+            )
             return shown.removesuffix(".0") + unit
     return f"{count:.0f}b"
 

@@ -91,7 +91,6 @@ class WatcherTest(unittest.TestCase):
         self.assertLessEqual(len(out.getvalue()), procwatch.MOST_BYTES + 100)
         self.assertEqual(json.loads(out.getvalue().splitlines()[-1])["note"], "full")
 
-
     def test_a_process_cannot_fill_the_record_with_its_command_line(self):
         long = b"\0".join([b"x" * 5000] * 200) + b"\0"
         kept = procwatch.command_line(long)
@@ -287,7 +286,11 @@ class HealthWatchTest(unittest.TestCase):
         quiet.start()
         self.addCleanup(quiet.stop)
         self.watch = procwatch.Watch(self.out)
-        self.watch._processes[812] = (("9", "/usr/bin/node", ["node", "build.js"]), 0, 0)
+        self.watch._processes[812] = (
+            ("9", "/usr/bin/node", ["node", "build.js"]),
+            0,
+            0,
+        )
         self.health = self.reader()
         self.session.run(1, 1)
         self.session.run(812, 900)
@@ -377,7 +380,9 @@ class HealthWatchTest(unittest.TestCase):
         self.session.set("memory.events", "oom 1\noom_kill 1")
         self.health.look([1], 101.0)
         ended = [line for line in self.said() if "oom" in line]
-        self.assertEqual(ended, [{**ended[0], "oom": 1, "gone": [[812, 900 * 2**20, "node"]]}])
+        self.assertEqual(
+            ended, [{**ended[0], "oom": 1, "gone": [[812, 900 * 2**20, "node"]]}]
+        )
         # Once, and of one that was already counted nothing
         self.health.look([1], 102.0)
         self.assertEqual(sum("oom" in line for line in self.said()), 1)
@@ -426,14 +431,16 @@ class HealthShownTest(unittest.TestCase):
         )
         self.assertEqual(event.what, "health")
         self.assertNotIn("flagged", event.fields)
-        self.assertEqual(event.fields["memory"], {"used": 3 * GIB + GIB // 10, "limit": 16 * GIB})
-        self.assertEqual(event.fields["top"][0], {"pid": 812, "rss": 2 * GIB, "name": "node"})
+        self.assertEqual(
+            event.fields["memory"], {"used": 3 * GIB + GIB // 10, "limit": 16 * GIB}
+        )
+        self.assertEqual(
+            event.fields["top"][0], {"pid": 812, "rss": 2 * GIB, "name": "node"}
+        )
 
     def test_a_limit_that_is_near_and_one_that_is_reached_are_said(self):
         near = self.sample(mem=[12 * GIB, 16 * GIB], rose=["memory"]).event()
-        self.assertEqual(
-            near.details, ["running low on memory  mem 12g of 16g (75%)"]
-        )
+        self.assertEqual(near.details, ["running low on memory  mem 12g of 16g (75%)"])
         self.assertNotIn("flagged", near.fields)
         reached = self.sample(
             mem=[15 * GIB, 16 * GIB],
@@ -459,7 +466,9 @@ class HealthShownTest(unittest.TestCase):
         self.assertEqual(event.details, ["mem 1g  pids 5  top: [9] evil[31m\\nname 1g"])
 
     def test_a_process_that_was_ended_is_said_with_the_likely_one(self):
-        ended = health.read_health(7.0, {"t": 7.0, "oom": 2, "gone": [[812, 9 * GIB, "node"]]})
+        ended = health.read_health(
+            7.0, {"t": 7.0, "oom": 2, "gone": [[812, 9 * GIB, "node"]]}
+        )
         assert ended is not None
         self.assertEqual(
             ended.event().details,
@@ -483,7 +492,9 @@ class HealthShownTest(unittest.TestCase):
 
     def test_the_header_sums_it_up(self):
         samples = [
-            self.sample(mem=[2 * GIB, 16 * GIB], cpu=100.0, seconds=30.0, pids=[10, 512]),
+            self.sample(
+                mem=[2 * GIB, 16 * GIB], cpu=100.0, seconds=30.0, pids=[10, 512]
+            ),
             self.sample(
                 mem=[9 * GIB, 16 * GIB],
                 cpu=400.0,
@@ -688,7 +699,9 @@ class SidecarTest(LauncherTest):
         # What went wrong of it is what --failed keeps, and --only picks it
         failed = self.launch("--trace", "--failed").stdout
         self.assertEqual(failed.count("sandbox  health"), 2)
-        self.assertEqual(self.launch("--trace", "--only", "health").stdout.count("  health  "), 3)
+        self.assertEqual(
+            self.launch("--trace", "--only", "health").stdout.count("  health  "), 3
+        )
         events = map(json.loads, self.launch("--trace", "--json").stdout.splitlines())
         (first, *_) = (e for e in events if e.get("what") == "health")
         self.assertEqual(first["memory"], {"used": 2 * GIB, "limit": 16 * GIB})

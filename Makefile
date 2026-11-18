@@ -26,8 +26,9 @@ help: ## List the targets
 check: lint types test ## Everything CI checks but the image build
 
 .PHONY: lint
-lint: ## ruff and shellcheck
+lint: ## ruff, its formatter and shellcheck
 	$(RUFF) check $(PYTHON_SOURCES)
+	$(RUFF) format --check $(PYTHON_SOURCES)
 	$(SHELLCHECK) $(SHELL_SOURCES)
 
 .PHONY: types

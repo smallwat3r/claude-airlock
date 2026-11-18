@@ -176,7 +176,9 @@ class RecorderTest(LauncherTest):
     def test_a_removed_transcript_is_said_when_the_session_ends(self):
         # Written to, so that it is copied, then removed
         added = json.dumps(prompts_at(time.time())[0])
-        gone = f"echo '{added}' >> '{self.transcript}'; sleep 1.2; rm '{self.transcript}'"
+        gone = (
+            f"echo '{added}' >> '{self.transcript}'; sleep 1.2; rm '{self.transcript}'"
+        )
         result = self.launch(session=gone)
         self.assertIn("the transcript of 0a was removed", result.stderr)
 

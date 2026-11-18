@@ -1543,7 +1543,10 @@ class StatusTest(LauncherTest):
 
     def test_the_sandbox_is_shown_as_the_session_was_started(self):
         settings = Settings(
-            net_filter=True, ssh_agent=True, socket=SocketAccess.FULL, shared_history=True
+            net_filter=True,
+            ssh_agent=True,
+            socket=SocketAccess.FULL,
+            shared_history=True,
         )
         dirs = [
             ExtraDir(str(self.home / "shared")),
@@ -1589,7 +1592,9 @@ class StatusTest(LauncherTest):
         limits.heard({"rateLimitType": {"a": 1}})
         self.assertEqual(limits.windows, {})
         # A time no date can be made of
-        limits.heard({"rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": 9e11})
+        limits.heard(
+            {"rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": 9e11}
+        )
         parts = status.status_parts(
             pipe.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
         )
