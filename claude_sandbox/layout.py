@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from .events import Event, labelled
-from .transcript import FILE_TOOLS
+from .transcript import FILE_TOOLS, OUTSIDE_FLAG
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -53,6 +53,11 @@ STYLES = {
     "prompt": DIM,
     "reply": DIM,
     "command": DIM,
+    # What the session was told and became, which no one did
+    "context": DIM,
+    "compact": DIM,
+    "model": DIM,
+    "task": DIM,
     # How the session is doing comes every so often, and is no act of it
     "health": DIM,
     "bash": YELLOW,
@@ -82,11 +87,13 @@ def wrong_throughout(fields: dict) -> bool:
 
 
 def went_wrong(event: Event) -> bool:
-    """Whether an event tells of something gone wrong: a call that failed,
-    a write outside the project, and what wrong_throughout names."""
+    """Whether an event tells of something gone wrong: a call that failed
+    or was not allowed to run, a write outside the project, and what
+    wrong_throughout names."""
     fields = event.fields
     return bool(
         fields.get("failed")
+        or fields.get("refused")
         or fields.get("outside_project")
         or wrong_throughout(fields)
     )
@@ -94,14 +101,24 @@ def went_wrong(event: Event) -> bool:
 
 def alerting(event: Event, line: str) -> bool:
     """Whether a line of an event is one that tells of what went wrong,
-    see went_wrong: how a failed call ended, the file of a write outside
-    the project, and every line of what is wrong throughout."""
+    see went_wrong: how a call ended that failed or was refused, the file
+    of a write outside the project, and every line of what is wrong
+    throughout."""
     fields = event.fields
+    ended_badly = fields.get("failed") or fields.get("refused")
     return bool(
-        (fields.get("failed") and line.startswith(("result: ", "out: ")))
-        or (fields.get("outside_project") and line.startswith("file: "))
+        (ended_badly and line.startswith(("result: ", "out: ")))
+        or (fields.get("outside_project") and written_outside(line))
         or wrong_throughout(fields)
     )
+
+
+def written_outside(line: str) -> bool:
+    """Whether a line of an event that wrote outside the project is the
+    one that names such a file: the file of the call, or one of those a
+    command changed."""
+    by_command = line.startswith("changed: ") and line.endswith(OUTSIDE_FLAG)
+    return line.startswith("file: ") or by_command
 
 
 def shown_what(what: str) -> str:

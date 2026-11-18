@@ -20,21 +20,27 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .brief import (
+    PREVIEW_WIDTH,
+    TALK_LINES,
+    amount,
+    between,
+    clip,
+    clip_ends,
+    shortened,
+)
 from .events import Event, Who, clean, flat, labelled
 from .files import UNREADABLE, bounded_lines, json_object, line_entry, open_plain
 from .projects import transcript_dirs, transcript_files
 from .settings import Fatal, Host
+from .shown import size
+from .told import Asides, counted, instructions_read, listed, typed_while_working
 
 # A live walk of a transcript lets go of the oldest calls once this many
 # wait for a result, and of the oldest steps it has shown
 MOST_REMEMBERED = 10_000
 # Of the call a result is named after, when other things came between
 LABEL_WIDTH = 100
-# Lines of one command, diff or output shown without --verbose, and of one
-# prompt or reply: the conversation is context, what ran is the point
-PREVIEW_LINES = 8
-TALK_LINES = 3
-PREVIEW_WIDTH = 200
 # Of the output of a call, how many lines of its start and of its end are
 # shown: when it failed, and with --verbose. The end comes first in worth, it
 # is where a command says what went wrong. All of it is in --json.
@@ -44,11 +50,14 @@ VERBOSE_OUTPUT = (10, 10)
 # ends it, quoted or not. Not <<<, which is a here-string.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# Where a hunk of a diff is, as Claude Code names it: from which line and
+# how many, of the file before and after
+HUNK_SPANS = ("oldStart", "oldLines", "newStart", "newLines")
+# What follows the name of a written file that is not in the project
+OUTSIDE_FLAG = "  OUTSIDE PROJECT"
 # How Claude Code records a command the user gave it (/model sonnet): its
 # name and its arguments in tags, and what the command said in others
-# Each is found by where it starts and where it then ends, see between: a
-# pattern that looks for the end from every start takes the square of the
-# time over a text of starts without an end, which is a session's to write
+# Each is found by where it starts and where it then ends, see between
 _COMMAND_NAME = ("<command-name>", "</command-name>")
 _COMMAND_ARGS = ("<command-args>", "</command-args>")
 _COMMAND_SAID = re.compile(r"<local-command-(stdout|stderr)>")
@@ -60,6 +69,9 @@ EARLIEST, LATEST = 86400.0, 2e11
 MOST_COUNTED = 10**15
 # What a step of the model read, as the API counts it: not cached, newly
 # put in the cache, and read from it
+# A step that reads less than one in so many of what the step before read
+# from the cache has missed it
+MISS_SHARE = 2
 INPUT_TOKENS = (
     "input_tokens",
     "cache_creation_input_tokens",
@@ -215,31 +227,7 @@ def outside(path: str, project_dir: str) -> bool:
 
 def outside_flag(path: str, project_dir: str) -> str:
     """What follows the name of a written file that is not in the project."""
-    return "  OUTSIDE PROJECT" if outside(path, project_dir) else ""
-
-
-def shortened(line: str) -> str:
-    """A line cut to the width of a preview."""
-    return line if len(line) <= PREVIEW_WIDTH else line[:PREVIEW_WIDTH] + "..."
-
-
-def clip(lines: list[str], verbose: bool, limit: int = PREVIEW_LINES) -> list[str]:
-    """Lines as shown: all of them with --verbose, else the first few."""
-    if verbose:
-        return lines
-    shown = [shortened(line) for line in lines[:limit]]
-    if len(lines) > limit:
-        shown.append(f"... {len(lines) - limit} more lines, see --verbose")
-    return shown
-
-
-def clip_ends(lines: list[str], head: int, tail: int, hint: str) -> list[str]:
-    """Lines of which both ends matter: the first and the last few, with
-    how many were left out between them and where those are to be seen."""
-    left_out = len(lines) - head - tail
-    if left_out <= 0:
-        return lines
-    return [*lines[:head], f"... {left_out} more lines, {hint}", *lines[-tail:]]
+    return OUTSIDE_FLAG if outside(path, project_dir) else ""
 
 
 def without_heredocs(lines: list[str]) -> list[str]:
@@ -360,10 +348,112 @@ def call_details(
     ]
 
 
-def outcome(call: dict, result: tuple[dict, dict] | None) -> dict:
+def decided(entry: dict) -> dict:
+    """Who let a call run or refused it, as the values of its result,
+    empty when the permission mode of the session let it run: that is
+    most calls, and the mode is told where it is set. The words for who
+    are Claude Code's, which says where a decision is from (the settings
+    or the user), of the settings what kind (the mode, a rule), and of the
+    user for how long (once)."""
+    decision = entry.get("permissionDecision")
+    if not isinstance(decision, dict):
+        return {}
+    source = decision.get("source")
+    source = source if isinstance(source, str) else "?"
+    allowed = decision.get("decision") == "accept"
+    kind = decision.get("reasonType")
+    if source == "config":
+        if allowed and kind == "mode":
+            return {}
+        kinds = {"mode": "the permission mode", "rule": "a rule"}
+        by = kinds.get(str(kind), "the settings")
+    elif source.startswith("user"):
+        by = "you"
+        scope = decision.get("grantScope")
+        if allowed and isinstance(scope, str) and scope:
+            by += ", " + flat(scope)[:PREVIEW_WIDTH]
+    else:
+        by = flat(source).replace("_", " ")[:PREVIEW_WIDTH]
+    values: dict = {
+        "permission": "accept" if allowed else "reject",
+        "permission_by": by,
+    }
+    return values if allowed else {**values, "refused": True}
+
+
+def hunk_lines(hunk: dict) -> list[str]:
+    """A hunk of a diff as its lines, under the line that says where."""
+    spans = [counted(hunk.get(key)) for key in HUNK_SPANS]
+    given = hunk.get("lines")
+    if None in spans or not isinstance(given, list):
+        return []
+    lines = [clean(line) for line in given if isinstance(line, str)]
+    return ["@@ -{},{} +{},{} @@".format(*spans), *lines]
+
+
+def files_changed(entry: dict, project_dir: str) -> list[dict]:
+    """The files a command changed, as Claude Code noted with its result:
+    of each its path, whether the command made it, whether it is outside
+    the project, and what changed as the lines of a diff. A file the
+    command changed that Claude Code only names has no diff. This is what
+    Claude Code noticed, a command can write what it did not."""
+    result = entry.get("toolUseResult")
+    noted = result.get("bashEditDiff") if isinstance(result, dict) else None
+    if not isinstance(noted, dict):
+        return []
+    changed: dict[str, dict] = {}
+    for file in listed(noted.get("files")):
+        path = file.get("filePath") if isinstance(file, dict) else None
+        if not isinstance(path, str):
+            continue
+        hunks = [hunk for hunk in listed(file.get("hunks")) if isinstance(hunk, dict)]
+        changed[path] = {
+            "path": path,
+            "created": bool(file.get("created")),
+            "outside": outside(path, project_dir),
+            "diff": [line for hunk in hunks for line in hunk_lines(hunk)],
+        }
+    for path in listed(noted.get("changedFiles")):
+        if isinstance(path, str) and path not in changed:
+            changed[path] = {
+                "path": path,
+                "created": False,
+                "outside": outside(path, project_dir),
+                "diff": [],
+            }
+    return list(changed.values())
+
+
+def command_ending(entry: dict, project_dir: str) -> dict:
+    """What Claude Code noted of how a command ended, besides its output:
+    that it was interrupted, what its exit code means when that is not a
+    failure (grep that found nothing), where its output was kept when
+    that was too long to give the model, and the files it changed."""
+    result = entry.get("toolUseResult")
+    if not isinstance(result, dict):
+        return {}
+    ended: dict = {}
+    if result.get("interrupted") is True:
+        ended["interrupted"] = True
+    meaning = result.get("returnCodeInterpretation")
+    if isinstance(meaning, str) and meaning:
+        ended["exit_meaning"] = meaning
+    kept = result.get("persistedOutputPath")
+    if isinstance(kept, str) and kept:
+        ended["output_kept"] = kept
+        ended["output_size"] = counted(result.get("persistedOutputSize"))
+    changed = files_changed(entry, project_dir)
+    if changed:
+        ended["changed"] = changed
+        ended["outside_project"] = any(file["outside"] for file in changed)
+    return ended
+
+
+def outcome(call: dict, result: tuple[dict, dict] | None, project_dir: str) -> dict:
     """How a tool call ended, empty when no result was recorded: whether it
-    failed, how long it took, its output, and the permission decision when
-    that was not a plain accept."""
+    failed, how long it took, its output, who decided that it may run when
+    that was not the mode of the session, and what Claude Code noted of a
+    command."""
     if result is None:
         return {}
     entry, block = result
@@ -374,10 +464,23 @@ def outcome(call: dict, result: tuple[dict, dict] | None) -> dict:
     started, finished = local_time(call), local_time(entry)
     if started and finished:
         ended["seconds"] = round((finished - started).total_seconds(), 3)
-    decision = entry.get("permissionDecision")
-    if isinstance(decision, dict) and decision.get("decision") != "accept":
-        ended["permission"] = str(decision.get("decision", "?"))
-    return ended
+    return {**ended, **decided(entry), **command_ending(entry, project_dir)}
+
+
+def changed_details(changed: list[dict], verbose: bool) -> list[str]:
+    """The lines for the files a command changed: each one, flagged when
+    it is outside the project, and what changed in it."""
+    lines = []
+    for file in changed:
+        diff = file["diff"]
+        added = sum(line.startswith("+") for line in diff)
+        removed = sum(line.startswith("-") for line in diff)
+        how = "created, " if file["created"] else ""
+        sizes = f" ({how}+{added} -{removed})" if diff else " (created)" if how else ""
+        flag = OUTSIDE_FLAG if file["outside"] else ""
+        lines.append(f"changed: {flat(file['path'])}{sizes}{flag}")
+        lines += ["diff: " + line for line in clip(diff, verbose)]
+    return lines
 
 
 def result_details(ended: dict, verbose: bool) -> list[str]:
@@ -390,7 +493,12 @@ def result_details(ended: dict, verbose: bool) -> list[str]:
     if "seconds" in ended:
         notes.append(f"{ended['seconds']:.1f}s")
     if "permission" in ended:
-        notes.append("permission " + clean(ended["permission"]))
+        verdict = "REFUSED" if ended.get("refused") else "allowed"
+        notes.append(f"{verdict} by {ended['permission_by']}")
+    if ended.get("interrupted"):
+        notes.append("INTERRUPTED")
+    if "exit_meaning" in ended:
+        notes.append(shortened(flat(ended["exit_meaning"])))
     output = clean(ended["output"]).splitlines()
     if output:
         notes.append(f"{len(output)} line{'s' if len(output) > 1 else ''} out")
@@ -400,15 +508,13 @@ def result_details(ended: dict, verbose: bool) -> list[str]:
     elif ended["failed"]:
         ends = clip_ends(output, *FAILED_OUTPUT, "see --verbose")
         shown = [shortened(line) for line in ends]
-    return ["result: " + ", ".join(notes), *("out: " + line for line in shown)]
-
-
-def between(text: str, opening: str, closing: str) -> str | None:
-    """What a text holds between the first of an opening tag and the
-    closing one after it, none without the two."""
-    start = text.find(opening)
-    end = text.find(closing, start + len(opening)) if start >= 0 else -1
-    return text[start + len(opening) : end] if end >= 0 else None
+    lines = ["result: " + ", ".join(notes), *("out: " + line for line in shown)]
+    if "output_kept" in ended:
+        # Too long to give the model whole: it was given the start, and
+        # where the rest is
+        kept, held = flat(ended["output_kept"]), ended.get("output_size")
+        lines.append(f"output kept: {kept}" + (f" ({size(held)})" if held else ""))
+    return lines + changed_details(ended.get("changed", []), verbose)
 
 
 def command_said(content: str) -> list[str]:
@@ -552,11 +658,16 @@ def step_tokens(usage: dict) -> dict[str, int]:
     }
 
 
-def amount(count: int) -> str:
-    """A number of tokens as shown: 950, 1.4k, 2.31M."""
-    if count < 1000:
-        return str(count)
-    return f"{count / 1e3:.1f}k" if count < 1e6 else f"{count / 1e6:.2f}M"
+def read_anew(used: dict[str, int], before: int) -> int:
+    """How much of the conversation a step read at full price that the
+    step before had left in the cache, 0 when the cache held: a step
+    reads again what the one before read, and less than half of that
+    from the cache is a miss. The conversation then changed near its
+    start (another model, thinking that was dropped), or the cache was
+    let go of over a pause. Before is what the step before read."""
+    if used["cache_read_input_tokens"] * MISS_SHARE >= before:
+        return 0
+    return sum(used[kind] for kind in INPUT_TOKENS) - used["cache_read_input_tokens"]
 
 
 def step_event(when: float, who: Who, usage: dict) -> Event | None:
@@ -599,8 +710,9 @@ class OpenCall:
 class Walk:
     """Turns the entries of a transcript into events, an entry at a time
     and in their order: each prompt, reply and tool call, what a command
-    of Claude Code's said, and ahead of what a step of the model did, what
-    the step used.
+    of Claude Code's said, ahead of what a step of the model did, what
+    the step used, and what the session was told or became besides, see
+    told.py.
 
     There are two ways to walk. Over a transcript that is all there, a call
     and its result are one event: the result is added to the event of its
@@ -640,22 +752,27 @@ class Walk:
         self._last_call: str | None = None
         # The steps of the model whose usage was shown
         self._steps: dict[str, None] = {}
+        # How much the last step of each read, which the next one of
+        # theirs finds in the cache or has missed
+        self._read: dict[Who, int] = {}
+        self._asides = Asides(verbose)
 
     def take(self, entry: dict) -> list[Event]:
         """The events an entry adds."""
         kind = entry.get("type")
         if kind == UNREADABLE:
             return [unreadable_event(self._when, entry)]
-        said_by_command = kind == "system" and entry.get("subtype") == "local_command"
-        if kind not in ("user", "assistant") and not said_by_command:
-            return []
         stamp = local_time(entry)
         self._when = stamp.timestamp() if stamp else self._when
-        if said_by_command:
+        if kind == "system" and entry.get("subtype") == "local_command":
             return self._command(entry)
+        if kind not in ("user", "assistant"):
+            return self._aside(entry)
         by_claude = kind == "assistant"
         claude = Who.AGENT if entry.get("isSidechain") else Who.CLAUDE
         events = self._step(claude, entry)
+        if not by_claude:
+            events += self._beside(self._asides.prompted(entry, self._when))
         for block in content_blocks(entry):
             part = block.get("type")
             if part == "text" and (by_claude or is_prompt(entry)):
@@ -687,7 +804,46 @@ class Walk:
         self._steps[step[0]] = None
         self._remember(self._steps)
         used = step_event(self._when, who, self._usage.get(*step))
-        return [used] if used else []
+        # Said with the step it is about, or not at all
+        why = self._asides.dropped()
+        if not used:
+            return []
+        anew = read_anew(used.fields, self._read.get(who, 0))
+        self._read[who] = sum(used.fields[kind] for kind in INPUT_TOKENS)
+        if anew:
+            said = f"  cache MISSED, {amount(anew)} read anew"
+            used.details[0] += said + (f": {why}" if why else "")
+            used.fields = {**used.fields, "cache_missed": anew, "cache_missed_why": why}
+        return [used]
+
+    def _aside(self, entry: dict) -> list[Event]:
+        """What an entry that is neither said nor done by the model adds:
+        a line the user typed while claude worked, which is a prompt, and
+        what told.py reads."""
+        typed = typed_while_working(entry)
+        if typed is None:
+            events = self._asides.take(entry, self._when)
+            if any(event.what == "compact" for event in events):
+                # What is read from here on is another conversation
+                self._read.clear()
+            return self._beside(events)
+        blocks = content_blocks({"message": {"content": typed}})
+        events = []
+        for block in blocks:
+            if block.get("type") != "text" or not isinstance(block.get("text"), str):
+                continue
+            for said in self._talk(Who.USER, block):
+                said.details[0] = f"(typed while claude worked) {said.details[0]}"
+                said.fields["queued"] = True
+                events.append(said)
+        return events
+
+    def _beside(self, events: list[Event]) -> list[Event]:
+        """Events that came between a call and its result: the result is
+        then named after its call."""
+        if events:
+            self._last_call = None
+        return events
 
     def _talk(self, who: Who, block: dict) -> list[Event]:
         return self._said(talk_event(self._when, who, block, self._whole))
@@ -739,17 +895,18 @@ class Walk:
         issued = self._open.pop(call, None)
         if issued is None:
             return []
-        ended = outcome(issued.started, (entry, block))
+        ended = outcome(issued.started, (entry, block), self._project_dir)
         lines = result_details(ended, self._verbose)
         if issued.event:
             issued.event.details += lines
-            # Whether it wrote outside the project stays the last value
-            flag = {
-                key: issued.event.fields.pop(key)
-                for key in ("outside_project",)
-                if key in issued.event.fields
-            }
-            issued.event.fields.update(ended, **flag)
+            # Whether it wrote outside the project stays the last value,
+            # and is so when the call or what it ran did
+            fields = issued.event.fields
+            key = "outside_project"
+            flags = [of.pop(key) for of in (fields, ended) if key in of]
+            fields.update(ended)
+            if flags:
+                fields["outside_project"] = any(flags)
             return []
         if self._name_results or self._last_call != call:
             lines.insert(0, "of: " + issued.label)
@@ -826,22 +983,30 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     rows.append(("tool calls", f"{len(calls)} ({counts})" if calls else "0"))
     results = tool_results(entries).values()
     rows.append(("failed", str(sum(bool(b.get("is_error")) for _, b in results))))
+    refused = sum(bool(decided(entry).get("refused")) for entry, _ in results)
+    if refused:
+        rows.append(("refused", f"{refused} calls were not allowed to run"))
     return rows
 
 
 def written_paths(entries: list[dict]) -> Iterator[str]:
-    """The path of each file the session wrote with its tools, once for
-    every call."""
+    """The path of each file the session wrote, once for every call that
+    did: with a tool of its, or by a command that Claude Code saw change
+    the file, see files_changed."""
     for _, block in tool_calls(entries):
         if block.get("name") in FILE_TOOLS:
             path = file_path(call_input(block))
             if path is not None:
                 yield path
+    for entry in entries:
+        if entry.get("type") == "user":
+            for file in files_changed(entry, ""):
+                yield file["path"]
 
 
 def files_written(entries: list[dict], project_dir: str) -> list[str]:
-    """Each file the session wrote with its tools and how often, flagged
-    when it is outside the project."""
+    """Each file the session wrote and how often, flagged when it is
+    outside the project."""
     written = Counter(written_paths(entries))
     lines = ["files written"] if written else []
     for path, count in sorted(written.items()):
@@ -871,6 +1036,7 @@ def summary(entries: list[dict], project_dir: str) -> list[str]:
     rows = [("project", flat(project_dir)), *overview(entries)]
     return [
         *(labelled(name, value) for name, value in rows),
+        *instructions_read(entries),
         *files_written(entries, project_dir),
         *pages_fetched(entries),
     ]

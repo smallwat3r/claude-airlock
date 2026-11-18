@@ -11,6 +11,9 @@ network, in the order it happened.
 # permissions bypassPermissions
 # tool calls  12 (Bash 9, Edit 2, Read 1)
 # failed      1
+# instructions read
+#   /home/me/.claude/CLAUDE.md (User)
+#   /home/me/code/api/CLAUDE.md (Project)
 # files written
 #   /home/me/code/api/Makefile x2
 # network
@@ -41,9 +44,9 @@ through your pager.
 | --- | --- |
 | `list` | The project's sessions, the latest first |
 | `3fa9` | The session whose id starts so, instead of the latest |
-| `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process |
+| `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process, what the language server reported |
 | `--only bash,net` | The events of the kinds named, by what the `what` column says |
-| `--failed` | What went wrong: a failed call, a write outside the project, a refused request or connection, a lookup that stands out, what was taken out of the transcript, a line of it that cannot be read |
+| `--failed` | What went wrong: a call that failed or was not allowed to run, a write outside the project, a refused request or connection, a request the API did not answer, a lookup that stands out, what was taken out of the transcript, a line of it that cannot be read |
 | `--json` | JSON Lines, see [As JSON](#as-json) |
 | `--follow` | The sessions as they run, see [Following a session](#following-a-session) |
 
@@ -52,13 +55,20 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
-- What went wrong is in capitals: `FAILED` for a call, `OUTSIDE PROJECT`
-  for a file written there, `DENIED` for a request the egress filter
-  refused.
+- A command that changed files says which (`changed:`) and what changed
+  in each, as an edit does. See [What a command wrote](#what-a-command-wrote).
+- A call says who allowed it when that was not the permission mode of
+  the session: `allowed by you, once`, `allowed by a rule`.
+- What went wrong is in capitals: `FAILED` for a call, `REFUSED by` for
+  one that was not allowed to run, `INTERRUPTED` for one that was cut
+  short, `OUTSIDE PROJECT` for a file written there, `DENIED` for a
+  request the egress filter refused.
+- A prompt typed while claude worked says so, claude was given it with
+  the next result.
 - Long commands, diffs and replies are cut to a few lines, and the output
   of a call is shown only when it failed. `--verbose` shows more.
 - The same thing on the network several times in a row is one line with
@@ -71,6 +81,67 @@ On a terminal the colours make what the session did out of your sight
 stand out: commands are yellow, files it wrote magenta, the network cyan,
 what went wrong bold red, and the conversation is dimmed. `NO_COLOR=1`
 switches them off, `FORCE_COLOR=1` on wherever the output goes.
+
+## What a command wrote
+
+```
+claude   bash   $ sed -i 's/go build .\/../go build .\/.../' Makefile && echo done >> ~/.bashrc
+claude   bash   result: ok, 0.1s
+claude   bash   changed: /home/me/code/api/Makefile (+1 -1)
+claude   bash   diff: @@ -4,3 +4,3 @@
+claude   bash   diff: -	go build ./..
+claude   bash   diff: +	go build ./...
+claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
+claude   bash   diff: @@ -12,0 +13,1 @@
+claude   bash   diff: +done
+```
+
+- These files are counted under `files written` in the header, and one
+  outside the project is among what `--failed` keeps and what the
+  launcher says [when a session ends](#when-a-session-ends).
+- It is what Claude Code noticed of the command, not all a command can
+  write: a file it had not seen before may be missing. The record of
+  [what ran](#what-ran) says which processes there were.
+- A result also says what an exit code means when that is no failure
+  (`No matches found`), and where the output is kept when it was too
+  long to give claude whole (`output kept:`).
+
+## Besides the calls
+
+Some lines tell of nothing claude did, they say why it did what it did:
+
+```
+claude   context  instructions: /home/me/.claude/CLAUDE.md (User, 1.2k chars)
+claude   context  instructions: /home/me/code/api/CLAUDE.md (Project, 4.0k chars)
+claude   context  MCP server instructions: github
+claude   context  skills: 12 listed
+claude   context  changed since claude read it: /home/me/code/api/main.go
+claude   mode     permissions: bypassPermissions  was: default
+claude   model    claude-opus-5-5, effort high  was: claude-fable-5-2, effort medium
+claude   api      API error: No response from API, tried again after 0.5s (retry 1 of 10)
+claude   compact  the conversation was compacted (auto), 152.3k tokens before
+claude   task     completed: Agent "review" finished
+```
+
+| `what` | Says |
+| --- | --- |
+| `context` | What Claude Code put before the model next to the prompt: each file of instructions it read (a `CLAUDE.md`, its memory) with where it is from, the MCP servers that brought instructions, the skills it listed, a file that changed since claude read it. With `--verbose` what the language server reported after an edit |
+| `mode` | The permission mode changed. The one the session started in is in the header |
+| `model` | Another model, or another effort, than the request before |
+| `api` | A request the API did not answer or refused, which Claude Code tried again |
+| `compact` | The conversation was summed up to make room: from there on claude knows what came before by the summary |
+| `task` | A subagent, or a command left to run, ended |
+
+- A file of instructions steers a session as a prompt does, and a
+  `Project` one came with the repository. The header lists them all
+  (`instructions read`), a line comes when the set of them changes.
+- With `--verbose` a step that could not read the conversation from the
+  cache says so, with how much it read at full price and why when the
+  transcript tells:
+
+```
+claude   step   754 tokens out, 405.1k in (372.4k new)  cache MISSED, 372.4k read anew: 107 thinking blocks dropped, model mismatch
+```
 
 ## As JSON
 
@@ -137,6 +208,8 @@ compares the two. The header says what came of it:
 ```
 
 - The third line is that of a session run outside the sandbox.
+- All of [Besides the calls](#besides-the-calls), who allowed a call and
+  what a command changed are the transcript's word too.
 - A session that removed its transcript is still listed and traced, from
   the launcher's copy, for as long as that is kept.
 - A line that holds no entry is not Claude Code's doing: half a line

