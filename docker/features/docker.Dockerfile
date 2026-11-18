@@ -11,3 +11,6 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
+
+# No "What's next" suggestions after a command
+ENV DOCKER_CLI_HINTS=false

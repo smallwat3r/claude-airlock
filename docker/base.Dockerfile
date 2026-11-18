@@ -94,3 +94,12 @@ ENV UV_TOOL_DIR=/home/sandbox/.cache/uv-tools \
     UV_TOOL_BIN_DIR=/home/sandbox/.cache/bin \
     NPM_CONFIG_CACHE=/home/sandbox/.cache/npm
 ENV PATH="/home/sandbox/.cache/bin:${PATH}"
+
+# Turn off notices that say nothing about what a command did: funding and
+# new version notices of npm and pip, usage hints of git
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    GH_NO_UPDATE_NOTIFIER=1
+RUN git config --system advice.detachedHead false \
+    && git config --system advice.statusHints false
