@@ -149,6 +149,16 @@ def pin_typst(pins: Pins) -> None:
     print("typst", typst)
 
 
+def pin_ast_grep(pins: Pins) -> None:
+    ast_grep = github_latest_tag("ast-grep/ast-grep")
+    url = f"https://github.com/ast-grep/ast-grep/releases/download/{ast_grep}"
+    pins.set_arg("AST_GREP_VERSION", ast_grep)
+    for arg_arch, zip_arch in [("AMD64", "x86_64"), ("ARM64", "aarch64")]:
+        sha = fetch_sha256(f"{url}/app-{zip_arch}-unknown-linux-gnu.zip")
+        pins.set_arg(f"AST_GREP_SHA256_{arg_arch}", sha)
+    print("ast-grep", ast_grep)
+
+
 def pin_mcap(pins: Pins) -> None:
     # mcap releases share a repo with the language libraries, so filter for
     # the CLI's release train rather than taking the repo's latest release
@@ -270,6 +280,7 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"node:\d+-[a-z]+-slim", pin_node),
     (arg_marker("GO_VERSION"), pin_go),
     (arg_marker("TYPST_VERSION"), pin_typst),
+    (arg_marker("AST_GREP_VERSION"), pin_ast_grep),
     (arg_marker("MCAP_VERSION"), pin_mcap),
     (arg_marker("TERRAFORM_VERSION"), pin_terraform),
     (arg_marker("TERRAFORM_LS_VERSION"), pin_terraform_ls),
