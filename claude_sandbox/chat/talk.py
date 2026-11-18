@@ -35,6 +35,7 @@ from ..layout import (
     went_wrong,
 )
 from ..settings import Host
+from ..told import SAID_LIVE
 from .asking import Asker
 from .commands import LOCAL, Commands, Did, Handover
 from .console import Console, Page
@@ -382,6 +383,7 @@ class Chat:
         self._console.commands = sorted({*LOCAL, *self._session.commands})
         # The prompt has the status from the first turn on
         self._status.refresh(self._session, self._usage)
+        self._notices.servers(self._session.servers)
         self._follow()
         self._begin()
 
@@ -538,12 +540,14 @@ class Chat:
         self._page.put(lines + self._page.events(together))
 
     def _told_over_the_pipe(self, event: Event) -> bool:
-        """Whether an event is a reply of claude's that the chat wrote, or
-        will, from what claude says over the pipe (see ReplyStream): any
-        since the chat started. One from before is the history of a
+        """Whether an event is one the chat wrote, or will, from what
+        claude says over the pipe: a reply of claude's (see ReplyStream),
+        and what claude says of the session as it happens (see Notices).
+        Any since the chat started, one from before is the history of a
         session that is resumed, which only the transcript has."""
         claudes = event.who is Who.CLAUDE and event.what == "reply"
-        return claudes and event.when >= self._started
+        said = claudes or event.what in SAID_LIVE
+        return said and event.when >= self._started
 
     def _settle(self, patience: float = SETTLE) -> None:
         """Show what a turn did up to now, for what comes next to be

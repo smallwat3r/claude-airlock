@@ -275,7 +275,7 @@ class Session:
         self.chosen = ""
         self.version = flat(message.get("claude_code_version") or self.version)
         self.commands = command_names(message.get("slash_commands"))
-        self.servers = servers_of(message.get("mcp_servers")) or self.servers
+        self.servers = servers_of(message.get("mcp_servers"))
         return True
 
     def replied(self, message: dict) -> None:

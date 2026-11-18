@@ -600,6 +600,23 @@ class ChatTest(LauncherTest):
                 chat._told_over_the_pipe(Event(now.when, who, what, [], {}))
             )
 
+    def test_what_claude_says_of_the_session_live_is_not_said_again(self):
+        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        soon = time.time() + 1
+        # A retry, a compaction and a task that ended come over the pipe
+        for what in ("api", "compact", "task"):
+            self.assertTrue(
+                chat._told_over_the_pipe(Event(soon, Who.CLAUDE, what, ["x"], {}))
+            )
+            self.assertFalse(
+                chat._told_over_the_pipe(Event(1.0, Who.CLAUDE, what, ["x"], {}))
+            )
+        # What only the transcript has is shown from it
+        for what in ("context", "mode", "model", "prompt"):
+            self.assertFalse(
+                chat._told_over_the_pipe(Event(soon, Who.CLAUDE, what, ["x"], {}))
+            )
+
     def test_ctrl_c_is_for_the_turn_that_runs_else_for_the_line(self):
         chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
         chat._reading = True
@@ -705,6 +722,9 @@ class PipeTest(unittest.TestCase):
         self.assertEqual(session.servers, [("docs", "connected")])
         session.heard({**init, "session_id": SESSION})
         self.assertEqual(session.id, SESSION)
+        # The last server that goes is gone
+        session.heard({**init, "mcp_servers": []})
+        self.assertEqual(session.servers, [])
 
     def test_the_model_of_the_session_is_the_one_that_last_replied(self):
         session = pipe.Session()
@@ -1256,6 +1276,27 @@ class NoticesTest(unittest.TestCase):
                 said.limit({"status": "allowed_warning", "rateLimitType": "five_hour"})
         self.assertEqual(
             lines, ["# chat        usage limit: allowed_warning five hour"]
+        )
+
+
+class ServersTest(unittest.TestCase):
+    def test_the_mcp_servers_are_said_at_the_start_and_when_they_change(self):
+        said = notices.Notices(page())
+        servers = [("docs", "connected"), ("mail", "needs-auth"), ("db", "failed")]
+        with written() as lines:
+            said.servers([])
+            said.servers(servers)
+            said.servers(servers)
+            said.servers([("docs", "connected"), ("mail", "connected")])
+            said.servers([])
+        others = "mail (needs-auth), db (failed)"
+        self.assertEqual(
+            lines,
+            [
+                f"# chat        MCP servers: 1 connected, NOT connected: {others}",
+                "# chat        MCP servers: 2 connected",
+                "# chat        MCP servers: none any more",
+            ],
         )
 
 

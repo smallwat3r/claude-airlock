@@ -1,6 +1,7 @@
 """What claude does besides answering, said in a line each: a conversation
 being compacted, a request to the API tried again, a task of its that
-starts or ends, a limit of the account that is near."""
+starts or ends, a limit of the account that is near, the MCP servers it
+has and how each is."""
 
 from __future__ import annotations
 
@@ -15,6 +16,23 @@ from .turn import tokens
 ABOUT_WIDTH = 200
 # The tasks remembered to name them when they end
 MOST_TASKS = 1000
+# How claude says an MCP server is when it can be used
+CONNECTED = "connected"
+
+
+def servers_line(servers: list[tuple[str, str]]) -> str:
+    """The MCP servers of a session in a line: how many can be used, and
+    each one that cannot with how it is (failed, needs-auth, pending). A
+    server brings tools and instructions of its own, and one that is not
+    there is a tool claude does not have."""
+    if not servers:
+        return "MCP servers: none any more"
+    usable = sum(status == CONNECTED for _, status in servers)
+    others = [f"{name} ({status})" for name, status in servers if status != CONNECTED]
+    said = [f"{usable} connected"] if usable else []
+    if others:
+        said.append("NOT connected: " + ", ".join(others))
+    return "MCP servers: " + ", ".join(said)
 
 
 class Notices:
@@ -24,6 +42,8 @@ class Notices:
         self._tasks: dict[str, str] = {}
         # What claude last said of the limits of the account
         self._limit = "allowed"
+        # The MCP servers claude last said it has, as they were told
+        self._servers: list[tuple[str, str]] = []
 
     @property
     def running(self) -> int:
@@ -47,6 +67,15 @@ class Notices:
             self._task_started(message)
         elif subtype == "task_notification":
             self._task_ended(message)
+
+    def servers(self, servers: list[tuple[str, str]]) -> None:
+        """Say which MCP servers the session has, when that is another
+        than what was said last: at its first turn, and when one of them
+        comes or goes, the last one too."""
+        if servers == self._servers:
+            return
+        self._servers = list(servers)
+        self._page.note("chat", servers_line(servers)[:ABOUT_WIDTH])
 
     def cleared(self) -> None:
         self._page.note("chat", "a new conversation, the one before is cleared")

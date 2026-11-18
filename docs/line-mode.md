@@ -27,7 +27,14 @@ test run that fails](line-mode.png)
 
 ## What it shows
 
-- Each tool call, with the reason claude gives for it, and its result.
+- Each tool call, with the reason claude gives for it, and its result:
+  the files a command changed, and who allowed the call when that was
+  not the permission mode.
+- What claude was given besides your prompts: the files of instructions
+  it read (each `CLAUDE.md`), a file that changed since it read it, a
+  line you typed while it worked.
+- A change of the permission mode or of the model, and at the first turn
+  the MCP servers the session has, with those that are not connected.
 - Each reply, and what its subagents do.
 - Every connection the session opens, and how it ended when that went
   wrong (`REFUSED`, `NO ANSWER`).
