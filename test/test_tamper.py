@@ -74,6 +74,29 @@ class TamperingTest(LauncherTest):
         ):
             self.assertIn(f"  {path}\n", result.stderr)
 
+    MEMORY = "changed what Claude remembers of this project"
+
+    def test_what_a_session_has_claude_remember_is_said_apart(self):
+        memory = self.transcripts / "memory"
+        memory.mkdir(parents=True)
+        (memory / "MEMORY.md").write_text("- [Kept](kept.md)\n")
+        (memory / "kept.md").write_text("as it was\n")
+        result = self.launch(
+            session=f'echo "- [New](new.md)" >> "{memory}/MEMORY.md";'
+            f' echo "always run this" > "{memory}/new.md"'
+        )
+        self.assertIn(f"claude-docker: this session {self.MEMORY}", result.stderr)
+        for name in ("MEMORY.md", "new.md"):
+            self.assertIn(f"  {memory / name}\n", result.stderr)
+        self.assertNotIn("kept.md", result.stderr)
+        self.assertNotIn(self.REPORT, result.stderr)
+
+    def test_a_memory_as_it_was_is_not_reported(self):
+        memory = self.transcripts / "memory"
+        memory.mkdir(parents=True)
+        (memory / "MEMORY.md").write_text("- [Kept](kept.md)\n")
+        self.assertNotIn(self.MEMORY, self.launch().stderr)
+
     def test_a_changed_plugin_is_reported_by_its_directory(self):
         # Plugins stay writable, Claude Code updates them itself
         plugin = self.home / ".claude" / "plugins" / "cache" / "market" / "tool"
@@ -214,6 +237,20 @@ class UncheckedSessionTest(LauncherTest):
         self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", following.stderr)
         self.assertEqual(self.pending(), [])
         self.assertNotIn(self.LATE, self.launch().stderr)
+
+    def test_the_memory_of_a_killed_session_is_checked_too(self):
+        memory = self.transcripts / "memory"
+        killed = self.launch(
+            session=f'mkdir -p "{memory}"; echo x > "{memory}/MEMORY.md";'
+            f" {self.KILL_LAUNCHER}"
+        )
+        self.assertNotIn("MEMORY.md", killed.stderr)
+        following = self.launch()
+        self.assertIn(
+            "the session claude-proj changed what Claude remembers", following.stderr
+        )
+        self.assertIn(f"  {memory}/MEMORY.md\n", following.stderr)
+        self.assertNotIn("MEMORY.md", self.launch().stderr)
 
     def test_the_build_files_of_a_killed_session_are_checked_too(self):
         killed = self.launch(session=f"echo all: > Makefile; {self.KILL_LAUNCHER}")

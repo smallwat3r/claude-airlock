@@ -18,6 +18,8 @@ from .settings import CONTAINER_HOME, Host
 MOST_SUBAGENTS = 1000
 # Where Claude Code keeps the transcripts of a session's subagents, in SESSION/
 SUBAGENTS_DIR = "subagents"
+# The directory of what Claude Code remembers of a project, by its transcripts
+MEMORY_DIR = "memory"
 # What a transcript's name ends with, and that of a subagent starts with
 TRANSCRIPT_SUFFIX = ".jsonl"
 SUBAGENT_PREFIX = "agent-"
@@ -73,6 +75,12 @@ def transcript_dirs(host: Host) -> list[Path]:
     return list(
         dict.fromkeys(transcript_dir(host, root) for root in project_roots(host))
     )
+
+
+def memory_dirs(host: Host) -> list[str]:
+    """Where Claude Code keeps what it remembers of the project from one
+    session to the next, next to the transcripts."""
+    return [str(directory / MEMORY_DIR) for directory in transcript_dirs(host)]
 
 
 def plain_files(directory: Path) -> tuple[list[str], set[str]]:

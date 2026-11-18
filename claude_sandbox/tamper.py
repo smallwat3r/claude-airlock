@@ -9,7 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from .files import expand_home, private_dir, write_whole
@@ -97,6 +97,9 @@ WORKTREES = os.path.join(".claude", "worktrees")
 MOST_BUILD_FILES = 5000
 # The changed ones that are named, the others are counted
 MOST_NAMED = 20
+# No more of what Claude remembers of a project is watched than this many
+# files, a session can write any number
+MOST_MEMORY_FILES = 1000
 # The files whose commands are followed to the scripts they name
 COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
 # No more of a file than this is read. Which files are hashed is partly up
@@ -293,7 +296,7 @@ def claude_files(
 
 
 def host_exec_fingerprint(
-    directories: list[str], claude_dir: str = ""
+    directories: list[str], claude_dir: str = "", memory: Sequence[str] = ()
 ) -> dict[str, str]:
     """Hashes, by path, of the files a session can write that run commands
     on the host once it is over, or that Claude follows there. In each
@@ -303,7 +306,9 @@ def host_exec_fingerprint(
     most of which is read-only in a session, and the plugins, which are
     not and are told apart by file_stamp. They have to stay writable for
     git and claude to work, so instead of locking them the launcher compares
-    this before and after a session (see report_tampering). Not seen: a
+    this before and after a session (see report_tampering). With them
+    what Claude remembers of the project, the files of the memory
+    directories, which is said apart (see report_memory). Not seen: a
     CLAUDE.md below the top of a project, and what a script goes on to
     run."""
     fingerprint = {}
@@ -322,6 +327,8 @@ def host_exec_fingerprint(
     if claude_dir:
         files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
         watched += claude_files(claude_dir, files, CONFIG_TREES, ("settings.json",))
+    for directory in memory:
+        watched += tree_files(directory)[:MOST_MEMORY_FILES]
     for path in watched:
         if os.path.isfile(path) or os.path.islink(path):
             fingerprint[path] = file_hash(path)
@@ -447,22 +454,50 @@ def named_changes(changed: list[str], claude_dir: str) -> list[str]:
     ]
 
 
+def report_memory(changed: list[str], unchecked: str = "") -> None:
+    """Name the changed files of what Claude remembers of the project.
+    Said apart from the rest: a session writes there in the ordinary way
+    of things, when it is told something to keep. But what is there is
+    given to every later session as the user's own notes, so what a
+    session read can have it leave instructions for the next ones."""
+    if not changed:
+        return
+    more = len(changed) - MOST_NAMED
+    whose = f"the session {unchecked}" if unchecked else "this session"
+    print(
+        f"claude-docker: {whose} changed what Claude remembers of this project,"
+        " which every later session here is told:",
+        *(f"  {path}" for path in changed[:MOST_NAMED]),
+        *([f"  and {more} more"] if more > 0 else []),
+        "Read them, a later session follows what they say.",
+        sep="\n",
+        file=sys.stderr,
+    )
+
+
 def report_tampering(
     before: dict[str, str],
     after: dict[str, str],
     unchecked: str = "",
     claude_dir: str = "",
+    memory: Sequence[str] = (),
 ) -> None:
-    """Name the files that differ, see named_changes for how. unchecked
-    is the name of an earlier session that ended without this check, when
-    the report is the late one for it."""
+    """Name the files that differ, see named_changes for how, those of
+    the memory directories apart (see report_memory). unchecked is the
+    name of an earlier session that ended without this check, when the
+    report is the late one for it."""
+    differing = sorted(
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    )
+    roots = tuple(directory + os.sep for directory in memory)
+    remembered = [
+        path for path in differing if path in memory or path.startswith(roots)
+    ]
+    report_memory(remembered, unchecked)
     changed = named_changes(
-        sorted(
-            path
-            for path in before.keys() | after.keys()
-            if before.get(path) != after.get(path)
-        ),
-        claude_dir,
+        [path for path in differing if path not in remembered], claude_dir
     )
     if not changed:
         return
@@ -492,6 +527,7 @@ def save_pending_check(
     claude_dir: str,
     before: dict[str, str],
     build: dict[str, str] | None = None,
+    memory: Sequence[str] = (),
 ) -> None:
     """Keep a session's starting fingerprint on disk until its check has
     run. A launcher that dies with its terminal (a killed Emacs buffer, a
@@ -507,6 +543,7 @@ def save_pending_check(
         "before": before,
         # What build_fingerprint gave
         "build": build or {},
+        "memory": list(memory),
     }
     write_whole(str(file), json.dumps(pending))
 
@@ -530,6 +567,8 @@ def report_unchecked_sessions(directory: Path) -> None:
                 if "build" in pending
                 else None
             )
+            # Not in a check saved by an earlier version
+            memory = [str(directory) for directory in pending.get("memory", [])]
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Said out loud, a check must not vanish without a word
             print(
@@ -540,8 +579,8 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         if session_alive(launcher, file.stem):
             continue
-        after = host_exec_fingerprint(watched, claude_dir)
-        report_tampering(before, after, unchecked=file.stem, claude_dir=claude_dir)
+        after = host_exec_fingerprint(watched, claude_dir, memory)
+        report_tampering(before, after, file.stem, claude_dir, memory)
         if build is not None:
             report_build_changes(build, build_fingerprint(watched), file.stem)
         file.unlink(missing_ok=True)

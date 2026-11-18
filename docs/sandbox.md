@@ -93,7 +93,15 @@ Said apart, as something to read before you build, test or commit there:
   subdirectory, and the config and hooks of a repository that is there, or
   that a session planted there.
 
-Both name a file however it was changed, by a command as by an edit, and
+Said apart too, as something to read before the next session here:
+
+- What Claude remembers of the project, the `memory` directory next to its
+  transcripts in `~/.claude/projects`. A session writes there when you
+  tell it something to keep, and what is there is given to every later
+  session as your own notes: something a session read can have it leave
+  instructions for the next ones.
+
+All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:
 `node_modules`, `.venv`, and the working trees of `--worktree`, each the
 whole project again.

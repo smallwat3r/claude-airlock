@@ -47,6 +47,7 @@ from .network import (
     start_egress_proxy,
 )
 from .processes import Watcher, processes_recorded
+from .projects import memory_dirs
 from .recorder import transcripts_copied
 from .session import (
     base_args,
@@ -244,9 +245,10 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
     watched = [host.project_dir] + [extra.path for extra in dirs]
     pending = Path(host.pending_checks_dir, name + ".json")
     report_unchecked_sessions(pending.parent)
-    before = host_exec_fingerprint(watched, host.claude_dir)
+    memory = memory_dirs(host)
+    before = host_exec_fingerprint(watched, host.claude_dir, memory)
     build = build_fingerprint(watched)
-    save_pending_check(pending, watched, host.claude_dir, before, build)
+    save_pending_check(pending, watched, host.claude_dir, before, build, memory)
     # What sessions that ended without their launcher left behind
     CaptureSidecar.collect_left_behind(host)
     Watcher.collect_left_behind(host)
@@ -289,8 +291,8 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
             report_session(host, name, started, hit.lines())
         finally:
             # Whatever became of the digest: this check matters more
-            after = host_exec_fingerprint(watched, host.claude_dir)
-            report_tampering(before, after, claude_dir=host.claude_dir)
+            after = host_exec_fingerprint(watched, host.claude_dir, memory)
+            report_tampering(before, after, claude_dir=host.claude_dir, memory=memory)
             report_build_changes(build, build_fingerprint(watched))
             pending.unlink(missing_ok=True)
     return status
