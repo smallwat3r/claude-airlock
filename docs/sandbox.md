@@ -49,6 +49,11 @@ What a session is given and what it is kept from.
 - What a session installs in `~/.cache` (`uv tool install`, `go install`)
   comes last in `PATH`: the cache outlives the session, and a command left
   there cannot stand in for one of the image.
+- What a session installs in `~/.cache` (`uv tool install`, `go install`)
+  comes last in `PATH`: the cache outlives the session, and a command left
+  there cannot stand in for one of the image.
+- No program of the image is setuid or setgid, and a process that crashes
+  leaves no core dump.
 - Writable space is the mounts, the cache volume and a few size-capped
   tmpfs (`/tmp`, `~/.npm`, `~/.config`).
 - Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`

@@ -41,6 +41,11 @@ RUN mkdir -p /home/sandbox/.cache \
     && rm -rf /home/sandbox/.cache/npm \
     && chmod 1777 /home/sandbox/.cache
 
+# No program of the image runs as another user than the one that starts
+# it. A session cannot gain privileges this way as it is (see
+# no-new-privileges in claude_sandbox/session.py), this holds without it.
+RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} +
+
 USER sandbox
 WORKDIR /home/sandbox
 
