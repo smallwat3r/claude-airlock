@@ -79,10 +79,16 @@ def telemetry_args(settings: Settings) -> list[str]:
     """Unless CLAUDE_DOCKER_TELEMETRY=1, Claude Code is told to keep its
     usage events and crash reports to itself. They go to third parties
     (Datadog for one) outside of any tool call, with what they hold not
-    the user's to see. Nothing a session does depends on them."""
+    the user's to see. Nothing a session does depends on them. DO_NOT_TRACK
+    says the same to the tools a session runs that go by it, on top of
+    those the image names (see base.Dockerfile)."""
     if settings.telemetry:
         return []
-    return [env_arg("DISABLE_TELEMETRY", 1), env_arg("DISABLE_ERROR_REPORTING", 1)]
+    return [
+        env_arg("DISABLE_TELEMETRY", 1),
+        env_arg("DISABLE_ERROR_REPORTING", 1),
+        env_arg("DO_NOT_TRACK", 1),
+    ]
 
 
 def connector_args(settings: Settings) -> list[str]:

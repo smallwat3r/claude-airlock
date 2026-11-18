@@ -103,3 +103,17 @@ ENV NPM_CONFIG_FUND=false \
     GH_NO_UPDATE_NOTIFIER=1
 RUN git config --system advice.detachedHead false \
     && git config --system advice.statusHints false
+
+# No usage reports from gh, nor from what a project commonly installs. Each
+# is named, as DO_NOT_TRACK would also bind Claude Code, whose reports are
+# for CLAUDE_DOCKER_TELEMETRY to decide (see session.py).
+ENV GH_TELEMETRY=false \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NUXT_TELEMETRY_DISABLED=1 \
+    ASTRO_TELEMETRY_DISABLED=1 \
+    GATSBY_TELEMETRY_DISABLED=1 \
+    STORYBOOK_DISABLE_TELEMETRY=1 \
+    TURBO_TELEMETRY_DISABLED=1 \
+    NG_CLI_ANALYTICS=false \
+    SCARF_ANALYTICS=false \
+    HF_HUB_DISABLE_TELEMETRY=1

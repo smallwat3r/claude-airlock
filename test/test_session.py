@@ -104,7 +104,11 @@ class DefaultSessionTest(LauncherTest):
             self.assertIn(flag, self.flags)
 
     def test_claude_code_reports_nothing_unless_allowed_to(self):
-        off = ["--env=DISABLE_TELEMETRY=1", "--env=DISABLE_ERROR_REPORTING=1"]
+        off = [
+            "--env=DISABLE_TELEMETRY=1",
+            "--env=DISABLE_ERROR_REPORTING=1",
+            "--env=DO_NOT_TRACK=1",
+        ]
         for flag in off:
             self.assertIn(flag, self.flags)
         # The second session of this test, after the one of setUp

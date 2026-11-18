@@ -56,7 +56,10 @@ What a session is given and what it is kept from.
   sandbox, and a `--permission-mode` of your own is left alone.
 - **Without telemetry.** `DISABLE_TELEMETRY=1` and
   `DISABLE_ERROR_REPORTING=1` are set, so it sends no usage events and no
-  crash reports. `CLAUDE_DOCKER_TELEMETRY=1` sends both.
+  crash reports. `CLAUDE_DOCKER_TELEMETRY=1` sends both. `DO_NOT_TRACK=1`
+  is set with them, for the tools a session runs that go by it, and the
+  image turns off the usage reports of gh and of common frameworks (Next.js,
+  Nuxt, Astro and the like) whatever the setting.
 - **Without the connectors of claude.ai.** `ENABLE_CLAUDEAI_MCP_SERVERS=false`
   is set, so the connectors of your account (Gmail, Google Drive and the
   like) are not loaded: they reach your data from inside the sandbox, and
