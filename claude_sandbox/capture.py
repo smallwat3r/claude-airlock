@@ -140,6 +140,11 @@ def start_capture(
         # The script, the name it goes by, then the arguments of tcpdump
         *("-c", CAPTURE_SCRIPT, "sh"),
         *("-i", "any", "-p", "-n", "-U", "-Z", "root"),
+        # Each packet is handed over as it comes. Without, the kernel holds
+        # them back for up to a second, and tcpdump does not read what is
+        # held when it is told to stop: the last connections of a session
+        # would be missing.
+        "--immediate-mode",
         *("-s", str(SNAP_LENGTH), "-c", str(PACKET_LIMIT)),
         *("-w", CAPTURE_FILE, PACKET_FILTER),
         stdout=subprocess.DEVNULL,
