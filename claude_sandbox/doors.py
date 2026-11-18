@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import enum
 import hashlib
+import ipaddress
 import os
 import re
 import socket
@@ -400,8 +401,16 @@ def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
     found = _PROXY_LINE.match(line.strip())
     if not found:
         return None
+    try:
+        address = ipaddress.ip_address(found["address"])
+    except ValueError:
+        return None
+    # The proxy listens on both families at once, and then logs an IPv4
+    # caller as ::ffff:172.20.0.5. session_address has it as 172.20.0.5.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
     return (
-        found["address"],
+        str(address),
         found["method"],
         found["path"],
         int(found["status"]),

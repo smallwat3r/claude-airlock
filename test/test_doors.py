@@ -328,6 +328,22 @@ class SocketWatchTest(LauncherTest):
         )
         self.assertIsNone(calls[3])
 
+    def test_an_ipv4_caller_logged_as_ipv6_is_read_as_ipv4(self):
+        # What the proxy logs when it listens on both families at once
+        line = (
+            "::ffff:172.21.0.5:51848 [18/Nov/2026:23:29:05.413] dockerfrontend "
+            "dockerfrontend/<NOSRV> 0/-1/-1/-1/0 403 0 - - PR-- 1/1/0/0/0 0/0 "
+            '"GET /v1.56/volumes HTTP/1.1"'
+        )
+        self.assertEqual(
+            doors.parse_proxy_call(line),
+            ("172.21.0.5", "GET", "/v1.56/volumes", 403),
+        )
+        self.assertEqual(
+            doors.parse_proxy_call(line.replace("::ffff:172.21.0.5", "fd00::5"))[0],
+            "fd00::5",
+        )
+
     def watched(self) -> list[dict]:
         """The uses noted of a session whose proxy logged PROXY_LOG. Called
         directly, the socket path is a constant of the network module."""
