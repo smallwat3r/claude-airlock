@@ -587,6 +587,29 @@ class ChatTest(LauncherTest):
         # What is not an id changes nothing
         self.assertEqual([path.stem for path in chat._follower._tails], [other])
 
+    def test_a_file_asked_about_is_outside_the_project_as_the_session_knows_it(self):
+        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        asked: list[str] = []
+
+        def ask(prompt: str) -> str | None:
+            asked.append(prompt)
+            return "y"
+
+        chat._asker.ask = ask  # type: ignore[method-assign]
+        # The project is under the home of the container for the session,
+        # whose paths these are, wherever it is on the host
+        for path in ("/home/sandbox/proj/a.py", "/etc/hosts"):
+            edit = {"file_path": path, "old_string": "a", "new_string": "b"}
+            with written():
+                chat._asker.decide({"tool_name": "Edit", "input": edit})
+        self.assertEqual(
+            asked,
+            [
+                "allow edit file: /home/sandbox/proj/a.py? [y/a/N] ",
+                "allow edit file: /etc/hosts  OUTSIDE PROJECT? [y/a/N] ",
+            ],
+        )
+
     def test_a_reply_of_before_the_chat_is_history_one_since_is_told_by_the_pipe(self):
         chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
         now = Event(time.time() + 1, Who.CLAUDE, "reply", ["x"], {})

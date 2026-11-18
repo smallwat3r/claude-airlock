@@ -38,6 +38,12 @@ def project_roots(host: Host) -> list[str]:
     return roots
 
 
+def sandboxed_root(host: Host) -> str:
+    """The project directory as a sandboxed session knows it, what the
+    paths such a session names are to be compared with."""
+    return project_roots(host)[-1]
+
+
 def transcript_dir(host: Host, root: str) -> Path:
     """Where Claude Code keeps the transcripts of the sessions that knew
     the project as root: named after the path, everything but letters and

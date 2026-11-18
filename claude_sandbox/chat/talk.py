@@ -33,6 +33,7 @@ from ..layout import (
     painted,
     together,
 )
+from ..projects import sandboxed_root
 from ..settings import Host
 from ..told import SAID_LIVE
 from .asking import Asker
@@ -111,8 +112,14 @@ class Chat:
         self._replies = ReplyStream(self._page, lambda: self._show(now=True))
         # Set when a turn ends, a question is put or claude ends
         self._wake = threading.Event()
+        # The paths claude asks about are those of the sandbox: the project
+        # is the one the session knows, not where it is on the host
         self._asker = Asker(
-            self._page, self._console, host.project_dir, self._gone, self._wake.set
+            self._page,
+            self._console,
+            sandboxed_root(host),
+            self._gone,
+            self._wake.set,
         )
         self._status = StatusLine(self._page, sandbox)
         self._commands = Commands(
