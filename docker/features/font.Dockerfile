@@ -1,5 +1,5 @@
 # claude-feat: font
-# claude-feat-md: Font tooling: fontforge (headless, scriptable with -script or the Python fontforge module), fonttools (ttx, pyftsubset, pyftmerge, WOFF2 support), ttfautohint, woff2 (woff2_compress, woff2_decompress), fontconfig (fc-list, fc-scan, fc-query)
+# claude-feat-md: Font tooling: fontforge (headless, -script or its Python module), fonttools, ttfautohint, woff2, fontconfig
 # claude-feat-md: Ocrab font (system font, usable from Typst and Chromium)
 
 # fontforge-nox is the build without the X11 GUI, the sandbox has no display.

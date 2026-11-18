@@ -3,15 +3,12 @@
 
 usage: excalidraw-export SCENE OUTPUT [--scale N]
 
-SCENE is an .excalidraw file, a list of element skeletons as Excalidraw's
-convertToExcalidrawElements takes them (both JSON), or a PNG or SVG that
-was exported with its scene inside. OUTPUT ends in .png or .svg for a
-picture, in .excalidraw or .json for the scene alone, which is how the
-scene of a picture is taken out to be edited.
+What SCENE and OUTPUT can be, and what to keep in mind when drawing, is
+in GUIDE below, which --help prints: it is what a session reads in place
+of a longer entry in the tool list of the image.
 
-The same scene always gives the same file. Nothing is fetched from the
-network: the page, the bundle and the fonts are served from
-/opt/excalidraw and every other request is refused."""
+Nothing is fetched from the network: the page, the bundle and the fonts
+are served from /opt/excalidraw and every other request is refused."""
 
 import argparse
 import base64
@@ -22,6 +19,34 @@ from pathlib import Path
 
 from playwright.sync_api import Error, Route, sync_playwright
 
+# Shown below the options by --help
+GUIDE = """\
+The picture is drawn with Excalidraw's own code and holds its scene, so
+excalidraw.com opens it for editing. The same scene always gives the same
+file.
+
+SCENE is one of:
+  an .excalidraw file
+  a JSON list of element skeletons, as convertToExcalidrawElements takes
+    them: rectangle, ellipse, diamond, text, arrow and line, each with x,
+    y, width and height, a label of {"text": ...}, and for an arrow a
+    start and an end of {"id": ...}
+  a PNG or SVG that was exported with its scene inside
+
+OUTPUT ends in .png or .svg for a picture, in .excalidraw or .json for
+the scene alone.
+
+To edit an existing picture, take its scene out, change it and render it
+again:
+  excalidraw-export picture.png scene.excalidraw
+  excalidraw-export scene.excalidraw picture.png
+
+Habits:
+  Prefer PNG for a README, a viewer may not load the fonts embedded in an
+  SVG.
+  An arrow's label is wrapped to the arrow's length, in the middle of a
+  word if need be: put a long label on a short arrow in a text element
+  next to it."""
 ASSETS = Path("/opt/excalidraw")
 # A name that resolves nowhere, the page only exists in the routes below
 ORIGIN = "http://excalidraw.invalid"
@@ -155,7 +180,11 @@ def render(source: dict, output_format: str, scale: float) -> bytes:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        epilog=GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("scene", type=Path, help="JSON, or a PNG or SVG holding one")
     parser.add_argument("output", type=Path, help=".png, .svg, .excalidraw or .json")
     parser.add_argument("--scale", type=float, default=2, help="of a PNG, default 2")

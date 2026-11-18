@@ -1,5 +1,5 @@
 # claude-feat: docker
-# claude-feat-md: docker CLI, only when the session was started with CLAUDE_DOCKER_SOCKET: docker ps and docker logs work (not for containers run with a TTY), inspect returns a stub and everything else is denied. CLAUDE_DOCKER_SOCKET=full adds real inspect, stats and top. Never run or build.
+# claude-feat-md: docker CLI, for what CLAUDE_DOCKER_SOCKET allows (see above). docker logs does not work for containers run with a TTY, and without full inspect returns a stub
 
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
     -o /usr/share/keyrings/docker-archive-keyring.asc \

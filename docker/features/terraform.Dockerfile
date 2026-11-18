@@ -1,5 +1,5 @@
 # claude-feat: terraform
-# claude-feat-md: Terraform with terraform-ls. No cloud credentials are here, so init, validate, fmt and plan against local or mocked state work, anything that reaches a real provider account needs the user. Never run apply, destroy, import or state changes unless the user asks for that exact command
+# claude-feat-md: Terraform with terraform-ls, without cloud credentials: init, validate, fmt and plan work against local or mocked state. Never run apply, destroy, import or state changes unless the user asks for that exact command
 # claude-feat-lsp: {"terraform-ls": {"command": "terraform-ls", "args": ["serve"], "extensionToLanguage": {".tf": "terraform", ".tfvars": "terraform-vars"}}}
 
 # Official zips from releases.hashicorp.com (apt would need HashiCorp's own

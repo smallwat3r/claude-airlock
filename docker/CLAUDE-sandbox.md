@@ -1,90 +1,77 @@
 # Docker sandbox
-You are running inside a sandboxed Docker image. The container is read-only
-(no sudo, no apt), writable space is /tmp, ~/.cache, ~/.npm and the mounted
-project. ~/.cache usually persists between sessions of the same project,
-everything else outside the project is gone when the session ends. For extra
-Python packages create a venv (e.g. uv venv /tmp/venv), npm packages install
-locally into the project.
+You run in a sandboxed Docker container. It is read-only (no sudo, no apt),
+writable are /tmp, ~/.cache, ~/.npm and the mounted project. Outside the
+project only ~/.cache outlives the session. Extra Python packages go in a
+venv (uv venv /tmp/venv), npm packages in the project.
 
 ## Settings of this session
-The user starts the sandbox with CLAUDE_DOCKER_* settings, which decide what
-you can do here. They are set on the host and fixed for the session: you
-cannot change them, and you must not work around what they block. When
-something fails because of one, do not retry it another way. Say what you
-could not do, and name the setting and the value that would allow it, so
-the user can restart the session with it if they want to (in their shell,
-or in ~/.config/claude-sandbox/config for every session).
+The user's CLAUDE_DOCKER_* settings decide what you can do here. They are
+set on the host and fixed for the session: never work around what they
+block, and do not retry another way. Say what you could not do and name the
+setting and the value that would allow it, for the user to restart with (in
+their shell, or in ~/.config/claude-sandbox/config for every session).
 
-Check the values with `env | grep CLAUDE_DOCKER_`. A switch that is not
-listed there is off.
+`env | grep CLAUDE_DOCKER_` gives the values, a switch not listed is off.
 
-- CLAUDE_DOCKER_NET_FILTER (off unless 1). If on, egress goes through a
-  proxy that only allows listed domains, and only HTTP, HTTPS and git over
-  SSH get out: direct connections, DNS lookups and other protocols (a
-  database, say) fail. A 403 from the proxy means the domain is blocked,
-  tell the user which domain to add to docker/allowed-domains.txt of their
-  claude-sandbox checkout. If off, the network is open.
-- CLAUDE_DOCKER_NET_LOG (on unless 0). If on, every connection you open,
-  whatever you send by UDP or as a ping and every name you look up is
-  recorded for the user to review. It blocks nothing.
-- CLAUDE_DOCKER_PROC_LOG (on unless 0). If on, the processes that run here
-  and the one behind each connection are recorded for the user to review.
-  The root-owned python3 process you can see is that recorder, it is not
-  yours to stop. It blocks nothing.
-- CLAUDE_DOCKER_SHARED_HISTORY (off unless 1). If off, what Claude Code
+- CLAUDE_DOCKER_NET_FILTER (off unless 1). On, egress goes through a proxy
+  that allows listed domains only, over HTTP, HTTPS and git over SSH:
+  direct connections, DNS lookups and other protocols (a database, say)
+  fail. A 403 from the proxy is a blocked domain, tell the user to add it
+  to docker/allowed-domains.txt of their claude-sandbox checkout.
+- CLAUDE_DOCKER_NET_LOG and CLAUDE_DOCKER_PROC_LOG (on unless 0) record
+  for the user's review every connection, UDP send, ping and name lookup,
+  and the processes that run. They block nothing. The root-owned python3
+  process is that recorder, not yours to stop.
+- CLAUDE_DOCKER_SHARED_HISTORY (off unless 1). Off, what Claude Code
   remembers of other projects is not here: their directories under
-  ~/.claude/projects are empty and read-only, and the prompt history, the
-  paste cache and the file history are this project's own. That is not a
-  bug, do not go looking for them elsewhere. If on, all of it is here.
-- CLAUDE_DOCKER_SSH_AGENT (off unless 1). If on, the user's SSH agent is
-  forwarded, git over SSH and ssh work with their keys, and each use of a
-  key is recorded for the user to review. Only listing the keys and signing
-  work: adding or removing a key and locking the agent are refused, do not
-  try another way. If off, there are
-  no SSH keys here: a push or fetch over SSH ends in "Permission denied
-  (publickey)". If the user set it and it is still not listed, no agent was
-  running on the host.
-- CLAUDE_DOCKER_SOCKET (off unless 1 or full). If 1, docker ps and docker
-  logs work against the host's daemon, full adds inspect, stats and top.
-  Every other docker call is denied in both, never run or build, and every
-  call is recorded for the user to review. If off,
-  no Docker daemon can be reached at all. The docker CLI itself comes with
-  the docker feature of the image.
-- ~/.claude is the sandbox's own, shared by the sandboxed sessions and not
-  with the host: what the host's Claude Code keeps there (its sessions,
-  jobs, logs) is not here, that is not a bug. From the host's ~/.claude
-  come settings.json, CLAUDE.md, hooks, commands, skills, agents, rules,
-  plugins and projects, and the login is kept the same as the host's.
-- CLAUDE_DOCKER_RW_CONFIG (off unless 1). If off, settings.json, CLAUDE.md,
-  hooks, commands, skills, agents and rules of ~/.claude are read-only, a
-  change to them fails with "Read-only file system". Ask the user to make
-  it on the host. If on, they are writable.
-- CLAUDE_DOCKER_CACHE (on unless 0). If on, ~/.cache persists between
-  sessions of this project. If off, it is a tmpfs of at most 2g that is gone when the
-  session ends, and large downloads can fill it.
-- CLAUDE_DOCKER_MEMORY and CLAUDE_DOCKER_PIDS, the container's memory and
-  process limits. A process killed without a reason of its own (exit code
-  137) ran into the first, "Resource temporarily unavailable" or a failure
-  to fork into the second. Say which limit and its current value.
-- CLAUDE_DOCKER_CPUS (no limit unless listed), how many CPUs the container
-  can use at most. nproc still counts every CPU of the host, and what
-  runs on more than the limit is held back, not ended: give builds and
-  tests that many jobs (make -j4 for 4), not nproc's count.
-- CLAUDE_DOCKER_DIRS, the directories mounted next to the project. One
-  marked (ro) is read-only, the user mounts it writable with --add-dir. Any
-  other path of the host is not here at all, that takes --add-dir too.
-- CLAUDE_DOCKER_PROTECT, paths inside the project or a mounted directory
-  that are read-only: a change to one fails with "Read-only file system".
-  Ask the user to make it on the host.
+  ~/.claude/projects are empty and read-only, and the prompt history, paste
+  cache and file history are this project's own. Not a bug, do not look
+  for them elsewhere.
+- CLAUDE_DOCKER_SSH_AGENT (off unless 1). On, git over SSH and ssh work
+  with the user's keys, each use recorded for review. Only listing keys
+  and signing work, adding or removing a key and locking the agent are
+  refused. Off, there are no SSH keys: SSH ends in "Permission denied
+  (publickey)". Set by the user but not listed: no agent ran on the host.
+- CLAUDE_DOCKER_SOCKET (off unless 1 or full). 1 allows docker ps and
+  docker logs against the host's daemon, full adds inspect, stats and top.
+  Everything else is denied, never run or build, and every call is
+  recorded. Off, no daemon can be reached. The docker CLI comes with the
+  docker feature of the image.
+- CLAUDE_DOCKER_CONNECTORS (off unless 1, not listed in the environment).
+  Off, the connectors of the user's claude.ai account (Gmail, Google Drive
+  and the like) are not loaded.
+- ~/.claude is the sandbox's own, shared by the sandboxed sessions: the
+  sessions, jobs and logs of the host's Claude Code are not here, not a
+  bug. From the host come settings.json, CLAUDE.md, hooks, commands,
+  skills, agents, rules, plugins, projects and the login.
+- CLAUDE_DOCKER_RW_CONFIG (off unless 1). Off, settings.json, CLAUDE.md,
+  hooks, commands, skills, agents and rules of ~/.claude are read-only
+  ("Read-only file system"), ask the user to change them on the host.
+- CLAUDE_DOCKER_CACHE (on unless 0). On, ~/.cache persists between
+  sessions of this project. Off, it is a tmpfs of at most 2g that large
+  downloads can fill.
+- CLAUDE_DOCKER_MEMORY and CLAUDE_DOCKER_PIDS, the memory and process
+  limits. Exit code 137 without a reason of its own is the first,
+  "Resource temporarily unavailable" or a failed fork the second. Say
+  which limit and its value.
+- CLAUDE_DOCKER_CPUS (no limit unless listed), the CPUs the container can
+  use. nproc still counts all of the host's and work beyond the limit is
+  held back: give builds and tests that many jobs (make -j4 for 4).
+- CLAUDE_DOCKER_DIRS, the directories mounted next to the project, (ro)
+  marks a read-only one. --add-dir mounts one writable, or any other path
+  of the host, none of which is here.
+- CLAUDE_DOCKER_PROTECT, paths of the project or a mounted directory that
+  are read-only ("Read-only file system"), ask the user to change them on
+  the host.
 - ~/.claude/shell-snapshots and ~/.claude/session-env are this session's
-  own and start empty, those of other sessions are not here.
+  own and start empty.
 - MCP servers the user set up on the host for every project are not here.
-  One you need is added with `claude mcp add`, ask the user first.
+  Ask the user before adding one with `claude mcp add`.
 - CLAUDE_DOCKER_SHADOW (not listed in the environment). Files named .env,
-  .env.*, .envrc, .netrc and .pypirc, and what the user added with this
-  setting, read as empty: the secrets stay on the host. That is not a bug,
-  do not recreate or fill them. Templates such as .env.example are
-  readable. If you need a value from one, ask the user.
+  .env.*, .envrc, .netrc and .pypirc, and those this setting adds, read as
+  empty: the secrets stay on the host. Not a bug, do not recreate or fill
+  them, ask the user for a value you need. Templates such as .env.example
+  are readable.
 - CLAUDE_DOCKER_FEATURES (not listed in the environment), the tools built
   into this image, named below. If one you need is missing and cannot be
   installed in /tmp or the project, say so: the user adds its feature and

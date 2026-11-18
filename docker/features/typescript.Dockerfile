@@ -1,5 +1,5 @@
 # claude-feat: typescript
-# claude-feat-md: TypeScript: typescript-language-server (the language server behind Claude Code's typescript-lsp plugin, for TypeScript and JavaScript) and tsc 6. A project's own typescript in node_modules is used when it has one
+# claude-feat-md: TypeScript: typescript-language-server and tsc 6, a project's own typescript in node_modules is used when it has one
 # claude-feat-lsp: {"typescript": {"command": "typescript-language-server", "args": ["--stdio"], "extensionToLanguage": {".ts": "typescript", ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact", ".mts": "typescript", ".cts": "typescript", ".mjs": "javascript", ".cjs": "javascript"}}}
 
 # From npm. The server drives tsserver, which TypeScript 7, the native

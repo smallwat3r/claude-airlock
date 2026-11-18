@@ -18,7 +18,7 @@
 # claude-feat-md: Python 3 with uv
 # claude-feat-md: Node.js and npm/npx, gcc/g++/make/pkg-config
 # claude-feat-md: git, gh, ssh, ripgrep, fd, jq, tree
-# claude-feat-md: ast-grep (search and rewrite code by its syntax tree, the command is ast-grep, sg is another tool here), universal-ctags (ctags, a symbol index for languages without a language server)
+# claude-feat-md: ast-grep (the command is ast-grep, sg is another tool here), universal-ctags (ctags)
 
 # uv comes from its official image, as a named stage so it can be pinned by
 # digest (COPY --from cannot take a digest held in an ARG on the legacy builder)
