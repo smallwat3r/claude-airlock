@@ -77,6 +77,7 @@ class DefaultSessionTest(LauncherTest):
             "--cap-drop=ALL",
             "--read-only",
             "--security-opt=no-new-privileges",
+            "--ulimit=core=0",
         ):
             self.assertIn(flag, self.flags)
 

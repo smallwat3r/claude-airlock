@@ -175,6 +175,10 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--read-only",
+        # No core of a process that crashed: it holds what the process had
+        # in memory, and goes to a file in the project or to the host's own
+        # collector, whichever the host's kernel is set for
+        "--ulimit=core=0",
         *scratch_args(settings, host),
         f"--pids-limit={settings.pids}",
         # Same value for swap, otherwise docker allows as much swap again on top
