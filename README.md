@@ -33,7 +33,7 @@ Contents:
 - [What the sandbox does](#what-the-sandbox-does) and its
   [known limits](#known-limits)
 - [Reviewing a session](#reviewing-a-session) with `--trace`
-- [Line mode](#line-mode), Claude Code without its full-screen UI
+- [Line mode](#line-mode), Claude Code without its native UI
 - [The image](#the-image) and its features
 - [Statusline](#statusline), [Editor integration](#editor-integration)
   and [Tests](#tests)
@@ -102,7 +102,7 @@ claude-docker --trace --only bash,net   # just the commands and the network
 claude-docker --trace --failed      # just what went wrong
 claude-docker --trace --follow      # what the sessions here do, as they do it
 
-# Claude Code's full-screen UI in place of line mode, see "Line mode"
+# Claude Code's native UI in place of line mode, see "Line mode"
 CLAUDE_DOCKER_LINE_MODE=0 claude-docker  # or in the config file, for every session
 ```
 
@@ -145,7 +145,7 @@ How Claude Code runs:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `CLAUDE_DOCKER_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's full-screen UI |
+| `CLAUDE_DOCKER_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's native UI |
 | `CLAUDE_DOCKER_ASK` | `0` | `1` has Claude Code ask before it uses a tool, as it does outside the sandbox |
 | `CLAUDE_DOCKER_TELEMETRY` | `0` | `1` lets Claude Code send usage events and crash reports |
 
@@ -238,7 +238,7 @@ A session runs in line mode by default: Claude Code with a simpler UI.
 You get a prompt and, above it, what the session does in the lines of
 `--trace`, the network included. Lines are only added, never
 redrawn, so it works in a terminal, an Emacs shell buffer or a file alike.
-`CLAUDE_DOCKER_LINE_MODE=0` gives the full-screen UI back. See
+`CLAUDE_DOCKER_LINE_MODE=0` gives the native UI back. See
 [docs/line-mode.md](docs/line-mode.md).
 
 ![A turn in line mode at a terminal](docs/line-mode.png)
@@ -252,7 +252,7 @@ pinned.
 
 ## Statusline
 
-For Claude Code's full-screen UI. `bin/claude-statusline` shows the model,
+For Claude Code's native UI. `bin/claude-statusline` shows the model,
 the 5h and 7d usage limits, and inside the sandbox the container name, the
 network mode, the doors that are open and the extra mounts. Enable it in
 `~/.claude/settings.json`:

@@ -295,7 +295,7 @@ SETTINGS = (
     Setting("CACHE", Kind.SWITCH, "0 keeps ~/.cache on a tmpfs, nothing persists"),
     Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc for gVisor"),
     Setting("ASK", Kind.SWITCH, "1 has Claude Code ask before it uses a tool"),
-    Setting("LINE_MODE", Kind.SWITCH, "0 runs Claude Code with its full-screen UI"),
+    Setting("LINE_MODE", Kind.SWITCH, "0 runs Claude Code with its native UI"),
     Setting(
         "SHARED_DIR",
         Kind.NAME,

@@ -1,4 +1,4 @@
-"""Line mode, Claude Code without its full-screen UI
+"""Line mode, Claude Code without its native UI
 (CLAUDE_DOCKER_LINE_MODE, or --line-mode for one session): the same session
 in the same sandbox, run with the same arguments. A prompt is read a line at a
 time, and what the session does with it is written under it in the lines

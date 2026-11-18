@@ -21,7 +21,7 @@ model used and how the sandbox is doing](line-mode.png)
   running at the time. Here the install reaches a second host besides the
   registry, and the tests fail because the database refuses the
   connection.
-- **It works anywhere.** Claude Code's full-screen UI redraws itself as it
+- **It works anywhere.** Claude Code's native UI redraws itself as it
   goes, which needs a terminal that keeps up with it. Line mode only adds
   lines, so it works in a terminal, a shell buffer of Emacs (`M-x shell`)
   or a file alike.
@@ -80,7 +80,7 @@ they made.
 ## Switching it off
 
 `CLAUDE_DOCKER_LINE_MODE=0 claude-docker` is one session with Claude Code's
-full-screen UI. With that setting in the config file every session has it,
+native UI. With that setting in the config file every session has it,
 and `claude-docker --line-mode` is then one session in line mode.
 
 What has no conversation runs as it always did: `-p`, a command of

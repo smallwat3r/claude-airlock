@@ -136,7 +136,7 @@ def main(argv: list[str], usage: str = "") -> int:
         return 0
 
     if action == "run" and settings.line_mode and has_a_conversation(claude_args):
-        # Line mode, Claude Code without its full-screen UI, see chat/
+        # Line mode, Claude Code without its native UI, see chat/
         action = "line-mode"
     image = prepare_image(settings, host)
     if action == "dockerfile":
