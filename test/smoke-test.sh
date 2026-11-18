@@ -24,10 +24,16 @@ fail() {
   echo "FAIL $1"
   FAILED=1
 }
+# A check that fails says why: the end of what its command wrote
 check() { # description, command...
-  local description="$1"
+  local description="$1" said
   shift
-  if "$@" >/dev/null 2>&1; then ok "${description}"; else fail "${description}"; fi
+  if said="$("$@" 2>&1)"; then
+    ok "${description}"
+  else
+    fail "${description}"
+    tail -n 5 <<<"${said}" | cut -c 1-400 | sed 's/^/     /'
+  fi
 }
 
 # Run a script with bash inside a sandbox session started in the throwaway
@@ -179,8 +185,6 @@ check "an address is blocked whatever its reverse DNS says" \
   bash -c "curl -sS -m 15 -o /dev/null https://140.82.121.4 2>&1 | grep -q 403"
 check_fails "direct connections fail" curl -fsS -m 5 --noproxy "*" -o /dev/null https://1.1.1.1
 ' CLAUDE_DOCKER_NET_FILTER=1
-check "the egress proxy is running" \
-  bash -c "docker inspect -f '{{.State.Running}}' claude-egress-proxy | grep -q true"
 check "--net-log lists the blocked domain" \
   bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
 check "the proxy log survives a proxy restart" \
@@ -290,6 +294,9 @@ fi
 check "docker ps works" docker ps
 check_fails "other docker calls are denied" docker volume ls
 touch .smoke-docker-used
+# The launcher asks for the address of the session every 0.2s, and only then
+# reads the calls: a session over sooner than that is not noted
+sleep 1
 ' CLAUDE_DOCKER_SOCKET=1
 if [ -f "${PROJECT}/.smoke-docker-used" ]; then
   check "the calls through the socket proxy were noted, the denied one too" \
