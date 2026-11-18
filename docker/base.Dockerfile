@@ -93,7 +93,9 @@ RUN groupmod --new-name sandbox node \
 ENV UV_TOOL_DIR=/home/sandbox/.cache/uv-tools \
     UV_TOOL_BIN_DIR=/home/sandbox/.cache/bin \
     NPM_CONFIG_CACHE=/home/sandbox/.cache/npm
-ENV PATH="/home/sandbox/.cache/bin:${PATH}"
+# After the image's own directories: ~/.cache outlives a session, and a
+# command put there must not stand in for git or npm in the next one
+ENV PATH="${PATH}:/home/sandbox/.cache/bin"
 
 # Turn off notices that say nothing about what a command did: funding and
 # new version notices of npm and pip, usage hints of git

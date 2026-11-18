@@ -46,6 +46,9 @@ What a session is given and what it is kept from.
 - Runs as your user, with a read-only root filesystem, all capabilities
   dropped, `no-new-privileges`, and PID and memory limits. A CPU limit with
   `CLAUDE_DOCKER_CPUS`.
+- What a session installs in `~/.cache` (`uv tool install`, `go install`)
+  comes last in `PATH`: the cache outlives the session, and a command left
+  there cannot stand in for one of the image.
 - Writable space is the mounts, the cache volume and a few size-capped
   tmpfs (`/tmp`, `~/.npm`, `~/.config`).
 - Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -111,6 +112,16 @@ class ImageTest(LauncherTest):
         result = self.launch("--dockerfile")
         self.assertEqual(result.status, 0)
         self.assertRegex(result.stdout, r"(?m)^ENTRYPOINT")
+
+    def test_what_outlives_a_session_comes_last_in_the_path(self):
+        # A command left in ~/.cache must not stand in for one of the image
+        paths = re.findall(r'(?m)^ENV PATH="(.*)"$', self.launch("--dockerfile").stdout)
+        kept = [path for path in paths if "/.cache/" in path]
+        self.assertTrue(kept)
+        for path in kept:
+            before, _, after = path.partition("${PATH}")
+            self.assertNotIn("/.cache/", before)
+            self.assertIn("/.cache/", after)
 
 
 class InstallTest(LauncherTest):
