@@ -11,13 +11,16 @@ subagents work on is not held up by a question nobody has answered yet."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import queue
 import signal
 import threading
 import time
+from collections.abc import Callable
 
+from ..changes import note_change
 from ..docker import docker_ok, project_slug
 from ..events import Event, Who, clean, flat, labelled
 from ..files import private_dir
@@ -39,12 +42,25 @@ from ..told import SAID_LIVE
 from .asking import Asker
 from .commands import LOCAL, Commands, Did, Handover
 from .console import Console, Page
+from .drift import Drift
 from .notices import Notices
 from .pipe import Agent, Session, own, transcript_of
 from .reply import ReplyStream, said_whole
 from .status import Sandbox, StatusLine
 from .turn import Turns, Usage, ended_badly, turn_line, working_line
 
+# The messages of claude a chat knows and has no use for
+PASSED_OVER = frozenset(
+    {
+        "auth_status",
+        "control_cancel_request",
+        "keep_alive",
+        "prompt_suggestion",
+        "tool_progress",
+        "tool_use_summary",
+        "update_environment_variables",
+    }
+)
 PROMPT = "> "
 # After a line that ended with a backslash, which takes the next one too
 MORE = ". "
@@ -105,9 +121,12 @@ class Chat:
         self._console.commands = sorted(LOCAL)
         self._page = Page(self._console, layout)
         self._handover = handover
-        self._session = Session()
+        # Told what claude no longer says as a chat reads it, by what
+        # reads it
+        self._drift = Drift()
+        self._session = Session(drift=self._drift)
         self._turns = Turns()
-        self._usage = Usage()
+        self._usage = Usage(self._drift)
         self._notices = Notices(self._page)
         self._replies = ReplyStream(self._page, lambda: self._show(now=True))
         # Set when a turn ends, a question is put or claude ends
@@ -121,7 +140,7 @@ class Chat:
             self._gone,
             self._wake.set,
         )
-        self._status = StatusLine(self._page, sandbox)
+        self._status = StatusLine(self._page, sandbox, self._drift)
         self._commands = Commands(
             self._page,
             host,
@@ -133,6 +152,18 @@ class Chat:
             lambda: self._status.show(self._session, self._usage),
         )
         self._follower: Follower | None = None
+        # What takes in each kind of message claude says
+        self._takes: dict[str, Callable[[Agent, dict], None]] = {
+            "system": lambda _, message: self._system(message),
+            "control_request": self._answer,
+            "control_response": lambda _, message: self._answered(message),
+            "conversation_reset": lambda _, _message: self._notices.cleared(),
+            "rate_limit_event": lambda _, message: self._limited(message),
+            "stream_event": lambda _, message: self._piece(message),
+            "result": lambda _, message: self._turn_over(message),
+            "assistant": lambda _, message: self._said(message),
+            "user": lambda _, message: self._said(message),
+        }
         # When what is followed was last looked at, and when the chat
         # started: what the transcript has of before is its history
         self._looked = 0.0
@@ -353,34 +384,56 @@ class Chat:
             self._asked.put(None)
 
     def _heard(self, agent: Agent, message: dict) -> None:
-        """Take in one thing claude said."""
+        """Take in one thing claude said, by its kind, then say what of
+        it was not as a chat reads it (see Drift). Not of the empty one
+        that stands for nothing said, see _listen."""
         kind = message.get("type")
-        if kind == "system":
-            if self._session.heard(message):
-                self._turn_started()
-            self._notices.system(message)
-        elif kind == "control_request":
-            self._answer(agent, message)
-        elif kind == "control_response":
-            self._commands.answered(message)
-            # The mode may have changed
-            self._status.refresh(self._session, self._usage)
-            self._wake.set()
-        elif kind == "conversation_reset":
-            self._notices.cleared()
-        elif kind == "rate_limit_event":
-            self._notices.limit(message.get("rate_limit_info"))
-            self._status.limits.heard(message.get("rate_limit_info"))
-        elif kind == "stream_event":
-            self._piece(message)
-        elif kind == "result":
-            self._turn_over(message)
-        elif kind in ("assistant", "user"):
-            self._turns.current.heard(message)
-            if kind == "assistant" and own(message):
-                self._session.replied(message)
-                self._usage.step(message)
-                self._replies.whole(message)
+        take = self._takes.get(kind) if isinstance(kind, str) else None
+        try:
+            if take:
+                take(agent, message)
+        finally:
+            # Also of one that could not be taken in, which may be why.
+            # What fails here is not to stand in for what failed there
+            if message:
+                with contextlib.suppress(Exception):
+                    self._changed(message)
+
+    def _changed(self, message: dict) -> None:
+        """Say what of a message was not as a chat reads it, and note it
+        for a trace of the session, which has no other way to know."""
+        known = PASSED_OVER.union(self._takes)
+        change = self._drift.told(message, known, self._session.version)
+        if not change:
+            return
+        self._page.note("chat", change.said)
+        # A record that cannot be written is no reason to stop
+        with contextlib.suppress(OSError):
+            note_change(self._host, self._name, change.said)
+
+    def _system(self, message: dict) -> None:
+        if self._session.heard(message):
+            self._turn_started()
+        self._notices.system(message)
+
+    def _answered(self, message: dict) -> None:
+        self._commands.answered(message)
+        # The mode may have changed
+        self._status.refresh(self._session, self._usage)
+        self._wake.set()
+
+    def _limited(self, message: dict) -> None:
+        self._notices.limit(message.get("rate_limit_info"))
+        self._status.limits.heard(message.get("rate_limit_info"))
+
+    def _said(self, message: dict) -> None:
+        """Take in what claude or a subagent of its said, or was given:
+        a reply, a tool call or its result."""
+        self._turns.current.heard(message)
+        if message.get("type") == "assistant" and own(message):
+            self._session.replied(message)
+            self._usage.step(message)
+            self._replies.whole(message)
 
     def _turn_started(self) -> None:
         """Claude said that a turn starts, and which session it is of:
@@ -396,14 +449,19 @@ class Chat:
     def _piece(self, message: dict) -> None:
         """Take in a piece of what claude itself is making: its reply,
         and whether it thinks."""
-        event = message.get("event")
-        if not own(message) or not isinstance(event, dict):
+        if not own(message):
             return
+        event = self._drift.field(message, "event", dict)
+        if event is None:
+            return
+        kind = event.get("type")
+        if not isinstance(kind, str):
+            self._drift.missed("event.type")
         block = event.get("content_block")
-        if event.get("type") == "content_block_start" and isinstance(block, dict):
+        if kind == "content_block_start" and isinstance(block, dict):
             self._turns.current.thinking = block.get("type") == "thinking"
             self._turns.current.stepped()
-        elif event.get("type") == "content_block_stop":
+        elif kind == "content_block_stop":
             self._turns.current.thinking = False
             self._turns.current.stepped()
         self._replies.piece(event)

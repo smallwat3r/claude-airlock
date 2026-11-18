@@ -55,7 +55,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker` or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -327,6 +327,7 @@ log:
 | `transcripts` | The launcher's copy of each transcript | For 30 days |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
+| `claude-code-changes.jsonl` | A line per change line mode found in what Claude Code says | The latest 1000 |
 | `destinations.json` | What each project is known to reach | 2000 destinations per project |
 
 The directory also holds what is not a record: the launcher's locks, the

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .brief import PREVIEW_WIDTH, amount, between, shortened
+from .changes import CHANGED
 from .events import Event, Who, clean, flat
 
 # Of one list a transcript gives (files, names, messages), how much is
@@ -33,8 +34,9 @@ SEVERITIES = ("Error", "Warning", "Info", "Hint")
 # The mode in which a line typed while claude works is a prompt
 PROMPT_MODE = "prompt"
 # The events a chat is told of by claude itself as they happen, which it
-# says in its own words (see chat/notices.py)
-SAID_LIVE = frozenset({"api", "compact", "task"})
+# says in its own words (see chat/notices.py), and the one it notes
+# itself (see changes.py)
+SAID_LIVE = frozenset({"api", "compact", "task", CHANGED})
 
 Reader = Callable[[dict, float, Who], list[Event]]
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from ..events import flat, labelled
 from ..transcript import content_blocks
+from .drift import Drift
 from .pipe import amount, own
 
 # Of what a turn used, what was read: new, written to the cache and read
@@ -123,7 +124,9 @@ class Usage:
     """What the session used, taken from what claude says as it goes, for
     the line at the end of each turn."""
 
-    def __init__(self) -> None:
+    def __init__(self, drift: Drift | None = None) -> None:
+        # Told what claude does not say of what it used any more
+        self._drift = drift or Drift()
         # What the session cost up to the last turn
         self._spent = 0.0
         # What the last step of claude read, and how much its model can
@@ -149,9 +152,15 @@ class Usage:
 
     def step(self, message: dict) -> None:
         """Take in a step of claude's own: what it read is how full its
-        context is, the whole conversation up to it."""
-        inner = message.get("message")
-        usage = inner.get("usage") if isinstance(inner, dict) else None
+        context is, the whole conversation up to it. The model says
+        so of what it wrote, not Claude Code of what it wrote in its
+        place (<synthetic>)."""
+        inner = self._drift.field(message, "message", dict) or {}
+        model = inner.get("model")
+        if isinstance(model, str) and model and not model.startswith("<"):
+            usage = self._drift.field(inner, "usage", dict)
+        else:
+            usage = inner.get("usage")
         self._context = sum(read_by(usage)) or self._context
 
     def parts(self, result: dict, model: str) -> list[str]:
@@ -161,9 +170,16 @@ class Usage:
         parts = used(result, self._spent)
         total = amount(result.get("total_cost_usd"))
         self._spent = self._spent if total is None else total
-        self._window = window_of(result, model) or self._window
+        window = window_of(result, model)
+        self._window = window or self._window
         if not parts:
             return []
+        # The model was asked: a turn that went well says how much each
+        # one can read
+        asked = not window and not ended_badly(result)
+        models = self._drift.field(result, "modelUsage", dict) if asked else None
+        if models:
+            self._drift.missed("contextWindow of a model")
         if self._context and self._window:
             parts.append(f"context {100 * self._context / self._window:.0f}%")
         if model and model != self._named:

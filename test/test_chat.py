@@ -24,10 +24,12 @@ from pathlib import Path
 from harness import LAUNCHER, LauncherTest
 
 from claude_sandbox import claude_args
+from claude_sandbox.changes import change_events
 from claude_sandbox.chat import (
     asking,
     commands,
     console,
+    drift,
     notices,
     pipe,
     status,
@@ -36,7 +38,7 @@ from claude_sandbox.chat import (
 )
 from claude_sandbox.chat import reply as replying
 from claude_sandbox.events import Event, Who
-from claude_sandbox.follow import Follower
+from claude_sandbox.follow import Follower, Round
 from claude_sandbox.layout import Layout
 from claude_sandbox.mounts import ExtraDir
 from claude_sandbox.settings import Host, Settings, SocketAccess
@@ -71,6 +73,10 @@ def told():
 
 def say(message):
     print(json.dumps(message), flush=True)
+
+# What claude says of a session besides its id, nothing of it known here
+ABOUT = {"model": "", "permissionMode": "", "claude_code_version": ""}
+ABOUT.update(slash_commands=[], mcp_servers=[])
 
 def record(kind, content):
     now = datetime.now(timezone.utc).isoformat()
@@ -124,7 +130,7 @@ while True:
         say({"type": "control_response", "response": answer})
         continue
     asked = said["message"]["content"][0]["text"]
-    say({"type": "system", "subtype": "init", "session_id": os.environ["FAKE_ID"]})
+    say({"type": "system", "subtype": "init", "session_id": os.environ["FAKE_ID"], **ABOUT})
     record("user", asked)
     if asked.startswith("later"):
         time.sleep(1.5)
@@ -138,6 +144,7 @@ while True:
     if not asked.startswith("/"):
         # The model was asked, not so for a command of Claude Code's
         over["usage"] = {"input_tokens": 10, "output_tokens": 5}
+        over["modelUsage"] = {}
     say(over)
 """
 
@@ -586,6 +593,181 @@ class ChatTest(LauncherTest):
                 )
         # What is not an id changes nothing
         self.assertEqual([path.stem for path in chat._follower._tails], [other])
+
+    def said_by(self, *messages: dict) -> list[str]:
+        """What a chat writes of what claude says, the lines about what
+        changed in it."""
+        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        with written() as lines:
+            for message in messages:
+                chat._heard(None, message)
+        return [line for line in lines if "CHANGED" in line]
+
+    def test_a_chat_says_nothing_of_what_claude_says_as_it_reads_it(self):
+        init = {"type": "system", "subtype": "init", "session_id": SESSION}
+        init.update(model="claude-opus-5-5", permissionMode="default")
+        init.update(claude_code_version="2.1.0", slash_commands=[], mcp_servers=[])
+        usage = {"input_tokens": 10, "output_tokens": 5}
+        limit = {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 9}
+        windows = {"five_hour": {"utilization": 0.2}, "seven_day": {"utilization": 0.1}}
+        over = {"type": "result", "subtype": "success", "is_error": False}
+        changed = self.said_by(
+            init,
+            {"type": "system", "subtype": "status", "status": "compacting"},
+            {"type": "keep_alive"},
+            {"type": "stream_event", "event": {"type": "message_stop"}},
+            # Of a subagent, whose pieces are not written
+            {"type": "stream_event", "parent_tool_use_id": "t1"},
+            {"type": "assistant", "message": {"content": [], "model": "<synthetic>"}},
+            {
+                "type": "assistant",
+                "message": {"content": [], "model": "claude-opus-5-5", "usage": usage},
+            },
+            {"type": "user", "message": {"content": []}},
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {**limit, "utilization": 0.4},
+            },
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {**limit, "unifiedWindows": windows},
+            },
+            # A window that is not shown says nothing of those that are
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed", "rateLimitType": "overage"},
+            },
+            {
+                **over,
+                "usage": usage,
+                "modelUsage": {"claude-opus-5-5": {"contextWindow": 200_000}},
+            },
+            # A command of Claude Code's, the model was not asked
+            over,
+            # Windows that are not shown say nothing of those that are
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": "allowed",
+                    "unifiedWindows": {"overage": {"status": "allowed"}},
+                },
+            },
+            # A turn that did not go well may not say what its model reads
+            {"type": "result", "subtype": "error_during_execution", "usage": usage},
+            {},
+        )
+        self.assertEqual(changed, [])
+
+    def test_a_chat_says_what_changed_in_what_claude_says(self):
+        usage = {"input_tokens": 10, "output_tokens": 5}
+        for message, what in (
+            ({"type": "new_thing"}, "a message line mode does not know, new_thing"),
+            # As it came the day the status lost its limits
+            (
+                {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "status": "allowed",
+                        "rateLimitType": "five_hour",
+                    },
+                },
+                "no utilization in rate_limit_event",
+            ),
+            (
+                {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "status": "allowed",
+                        "unifiedWindows": {"seven_day": {"status": "allowed"}},
+                    },
+                },
+                "no utilization in rate_limit_event",
+            ),
+            ({"type": "stream_event", "event": "x"}, "no event in stream_event"),
+            ({"type": "stream_event", "event": {}}, "no event.type in stream_event"),
+            ({"type": "assistant", "message": "x"}, "no message in assistant"),
+            (
+                {"type": "assistant", "message": {"content": [], "model": "claude-x"}},
+                "no usage in assistant",
+            ),
+            (
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "usage": usage,
+                },
+                "no modelUsage in result success",
+            ),
+            (
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "usage": usage,
+                    "modelUsage": {"m": {}},
+                },
+                "no contextWindow of a model in result success",
+            ),
+        ):
+            # Twice, said once
+            changed = self.said_by(message, message)
+            self.assertEqual(len(changed), 1, message)
+            self.assertIn(what, changed[0])
+        init = {"type": "system", "subtype": "init", "session_id": SESSION}
+        init.update(model=7, claude_code_version="2.2.0", slash_commands=[])
+        (line,) = self.said_by(init)
+        self.assertIn("Claude Code 2.2.0", line)
+        for missing in ("model", "permissionMode", "mcp_servers"):
+            self.assertIn(f"no {missing} in system init", line)
+        self.assertNotIn("no slash_commands", line)
+        # The mode is also said in between, where the rest is not
+        self.assertEqual(self.said_by({"type": "system", "subtype": "status"}), [])
+
+    def test_a_chat_notes_what_changed_for_a_trace_of_the_session(self):
+        host = self.host()
+        chat = talk.Chat(host, status.Sandbox("claude-test"), Layout())
+        # A moment ago, as it is when claude first says something
+        chat._started -= 1
+        mine = Follower(host, verbose=False, container="claude-test")
+        others = Follower(host, verbose=False, container="claude-other")
+
+        def followed(follower: Follower) -> list[Event]:
+            found = Round()
+            follower._poll_notes(found)
+            return [event for _, event in found.events]
+
+        # A note is of the thousandth of a second it was added in
+        time.sleep(0.002)
+        with written():
+            for _ in range(2):
+                chat._heard(None, {"type": "new_thing", "text": "secret"})
+        rows, events = change_events(host, 0, float("inf"))
+        self.assertEqual(
+            rows,
+            [
+                (
+                    "claude code",
+                    "CHANGED what it says, 1 noted: line mode may have shown less",
+                )
+            ],
+        )
+        (event,) = events
+        self.assertEqual((event.who, event.what), (Who.CLAUDE, "changed"))
+        self.assertIn("a message line mode does not know, new_thing", event.details[0])
+        self.assertNotIn("secret", event.details[0])
+        # Of that session, by its container
+        self.assertEqual(change_events(host, 0, float("inf"), "claude-other")[1], [])
+        self.assertEqual(len(change_events(host, 0, float("inf"), "claude-test")[1]), 1)
+        # The chat said it itself, it is not written again as it follows
+        self.assertTrue(chat._told_over_the_pipe(event))
+        # Nor is what was noted before a session is followed, a trace's
+        time.sleep(0.002)
+        self.assertEqual(followed(Follower(host, verbose=False)), [])
+        with written():
+            chat._heard(None, {"type": "another_thing"})
+        self.assertEqual([event.what for event in followed(mine)], ["changed"] * 2)
+        self.assertEqual(followed(mine) + followed(others), [])
 
     def test_a_file_asked_about_is_outside_the_project_as_the_session_knows_it(self):
         chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
@@ -1599,6 +1781,98 @@ class StatusTest(LauncherTest):
             line.show(session, usage)
             self.assertEqual(shown._console._head, ["Opus 5.5 [claude-test] net:open"])
         self.assertEqual(lines, ["# status      Opus 5.5 [claude-test] net:open"])
+
+    def test_the_limits_are_read_where_claude_now_says_them(self):
+        # All the windows by name, the figures no longer beside the type
+        limits = status.Limits()
+        limits.heard(
+            {
+                "status": "allowed",
+                "rateLimitType": "five_hour",
+                "resetsAt": 9,
+                "unifiedWindows": {
+                    "five_hour": {"utilization": 0.24, "resetsAt": 9},
+                    "seven_day": {"utilization": 0.22, "resetsAt": 99},
+                    "overage": {"utilization": 0.5},
+                    "opus": "not a window",
+                },
+            }
+        )
+        parts = status.status_parts(
+            pipe.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
+        )
+        reset = f"{datetime.fromtimestamp(9):%H:%M}"
+        self.assertEqual(
+            status.status_line(parts, colour=False),
+            f"5h:24% used {reset} 7d:22% used [claude-test] net:open",
+        )
+        self.assertEqual(set(limits.windows), {"five_hour", "seven_day"})
+        # Not a set of windows: what is beside the type still counts
+        limits.heard({"rateLimitType": "seven_day", "unifiedWindows": [1]})
+        limits.heard({"rateLimitType": "seven_day", "utilization": 0.5})
+        self.assertEqual(limits.windows["seven_day"]["used_percentage"], 50.0)
+
+    def test_a_field_that_is_missed_is_said_once_with_the_shape_of_its_message(self):
+        seen = drift.Drift()
+        message = {"type": "result", "subtype": "success", "session_id": "secret"}
+        message.update(usage={"output_tokens": 5}, model=7)
+        self.assertEqual(seen.field(message, "usage", dict), {"output_tokens": 5})
+        self.assertIsNone(seen.told(message, {"result"}))
+        self.assertIsNone(seen.field(message, "modelUsage", dict))
+        # There, and not of its kind
+        self.assertIsNone(seen.field(message, "model", str))
+        self.assertIsNone(seen.field("no message", "model", str))
+        change = seen.told(message, {"result"}, "2.1.0")
+        self.assertEqual(
+            change.differs,
+            ("no modelUsage in result success", "no model in result success"),
+        )
+        self.assertIn(
+            "CHANGED in what Claude Code 2.1.0 says: no modelUsage", change.said
+        )
+        # Its fields and their kinds, none of what they hold
+        self.assertIn("usage: {output_tokens: int}", change.shape)
+        self.assertNotIn("secret", change.said)
+        # Not said again, and what was missed of one message is not said
+        # of the next
+        seen.field(message, "modelUsage", dict)
+        self.assertIsNone(seen.told(message, {"result"}))
+        self.assertIsNone(seen.told({"type": "keep_alive"}, {"keep_alive"}))
+        # What nobody asks about does not pile up
+        for number in range(1000):
+            seen.missed(f"field{number}")
+        self.assertEqual(len(seen._missed), drift.MOST_MISSED)
+
+    def test_a_message_of_no_known_kind_is_said_at_no_great_length(self):
+        seen = drift.Drift()
+        for message, what in (
+            ({"type": "new_thing", "text": "x\x1b[2J"}, "does not know, new_thing"),
+            ({"text": "x"}, "a message without a type"),
+        ):
+            said = seen.told(message, {"result"}).said
+            self.assertIn(what, said)
+            self.assertNotIn("\x1b", said)
+        # A type that is no name is none, and not looked up as one
+        change = drift.Drift().told({"type": ["x"]}, {"result"})
+        self.assertEqual(change.differs, ("a message without a type",))
+        # Its version as the message says it, cleaned
+        init = {"type": "system", "subtype": "init", "claude_code_version": "2\x1b[2J"}
+        seen.missed("model")
+        said = seen.told(init, {"system"}, "1.0").said
+        self.assertIn("Claude Code 2[2J says: no model in system init", said)
+        self.assertNotIn("\x1b", said)
+        said = seen.told({"type": "t" * 5000, "subtype": "s"}, ()).said
+        self.assertLess(len(said), 400)
+        deep = {"type": "odd", "a": {"b": {"c": {"d": 1}}}}
+        deep.update({f"field{n}": n for n in range(200)})
+        said = seen.told(deep, ()).said
+        self.assertIn("a: {b: {c: dict}}", said)
+        self.assertLess(len(said), 700)
+        # Nor are changes without end
+        many = [seen.told({"type": f"kind{n}"}, ()) for n in range(100)]
+        self.assertLess(len(list(filter(None, many))), drift.MOST_SAID)
+        self.assertEqual(len(seen._said), drift.MOST_SAID)
+        self.assertIsNone(seen.told({"type": "one_more"}, ()))
 
     def test_no_limit_claude_tells_of_stops_the_status(self):
         limits = status.Limits()

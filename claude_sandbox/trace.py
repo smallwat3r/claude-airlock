@@ -33,12 +33,12 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import cut_short, session_capture
-from .door_events import door_events
 from .egress_log import ProxyRequest, logged_requests, requests_made
 from .events import Event, Who, clean, flat, labelled
 from .files import UNREADABLE
 from .health import health_summary
 from .layout import Layout, event_json, shown_what, went_wrong
+from .noted import noted_events
 from .pcap import Capture, Connection, Flow, Lookup, Request
 from .processes import ProcessRecord, session_record, shown_lineage
 from .projects import project_root, subagent_files
@@ -679,12 +679,14 @@ def session_events(
     unreadable = sum(e.get("type") == UNREADABLE for e in [*entries, *theirs])
     net_lines: list[str] = []
     net_events: list[Event] = []
-    door_rows: list[tuple[str, str]] = []
-    door_uses: list[Event] = []
+    # What the launchers noted of the sessions: the uses of the doors,
+    # and what a chat found changed in what Claude Code says
+    noted_rows: list[tuple[str, str]] = []
+    noted: list[Event] = []
     if times:
         start, end = min(times), max(times)
         net_lines, net_events = network(host, start, end, verbose)
-        door_rows, door_uses = door_events(host, start, end)
+        noted_rows, noted = noted_events(host, start, end)
     header = [
         labelled("session", f"{flat(path.stem)}  {title(entries_known)}"),
         *compared.header(),
@@ -702,7 +704,7 @@ def session_events(
         ),
         *summary(entries_known + theirs, project_dir),
         *net_lines,
-        *(labelled(door, used) for door, used in door_rows),
+        *(labelled(about, said) for about, said in noted_rows),
         *chosen.header(),
     ]
     # Stable, so what the transcript has at the same time keeps its order
@@ -716,7 +718,7 @@ def session_events(
             + removed_events(copied.gone, project_dir, verbose)
         ]
         + net_events
-        + door_uses,
+        + noted,
         key=lambda event: event.when,
     )
     timeline = Timeline()

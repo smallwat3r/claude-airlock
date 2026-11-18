@@ -153,6 +153,11 @@ class Host:
         return os.path.join(self.state_dir, "door-use.jsonl")
 
     @property
+    def changes_file(self) -> str:
+        # What chats found changed in what Claude Code says, see changes.py
+        return os.path.join(self.state_dir, "claude-code-changes.jsonl")
+
+    @property
     def agent_sockets_dir(self) -> str:
         # Where the sessions' way to the SSH agent listens, see doors.py
         return os.path.join(self.state_dir, "agents")

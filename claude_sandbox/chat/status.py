@@ -21,6 +21,7 @@ from ..network import has_socket_proxy
 from ..settings import Settings, SocketAccess
 from ..transcript import LATEST
 from .console import Page
+from .drift import Drift
 from .pipe import Session, amount
 from .turn import Usage
 
@@ -56,24 +57,48 @@ class Limits:
     """What claude said of the limits of the account, by window."""
 
     windows: dict[str, dict] = field(default_factory=dict)
+    # Told when claude says nothing of how much of a window is used
+    drift: Drift = field(default_factory=Drift, repr=False, compare=False)
 
     def heard(self, info: object) -> None:
+        """Take in what claude said of the limits. It names the window
+        the message is about, with its figures beside the name, and since
+        a later version all the windows by name under unifiedWindows,
+        where the figures then are. A message about a window that is
+        shown says how much of one is used: none is missed."""
         if not isinstance(info, dict):
             return
-        kind = info.get("rateLimitType")
+        about = info.get("rateLimitType")
+        windows = info.get("unifiedWindows")
+        said = [(about, info)]
+        if isinstance(windows, dict):
+            said += windows.items()
+        # All of them are kept, not only up to the first that has a figure
+        used = [self._window(kind, figures) for kind, figures in said]
+        shown = any(isinstance(kind, str) and kind in WINDOWS for kind, _ in said)
+        if shown and not any(used):
+            self.drift.missed("utilization")
+
+    def _window(self, kind: object, said: object) -> bool:
+        """Keep what is said of one window, of those that are shown.
+        Whether that says how much of it is used."""
         # A name, and not what cannot be looked up as one
         if not isinstance(kind, str) or kind not in WINDOWS:
-            return
+            return False
+        if not isinstance(said, dict):
+            # Not the figures of a window
+            return False
         window: dict = {}
         # A fraction of the limit, as the API says it
-        used = amount(info.get("utilization"))
+        used = amount(said.get("utilization"))
         if used is not None and used <= 1:
             window["used_percentage"] = round(used * 100, 1)
-        resets = amount(info.get("resetsAt"))
+        resets = amount(said.get("resetsAt"))
         # A time that can be shown as one, see LATEST of transcript.py
         if resets and resets <= LATEST:
             window["resets_at"] = int(resets)
         self.windows[kind] = {**self.windows.get(kind, {}), **window}
+        return "used_percentage" in window
 
 
 @dataclass(frozen=True)
@@ -200,10 +225,10 @@ def status_line(parts: list[Part], colour: bool) -> str:
 class StatusLine:
     """The status of a chat, see the module."""
 
-    def __init__(self, page: Page, sandbox: Sandbox):
+    def __init__(self, page: Page, sandbox: Sandbox, drift: Drift | None = None):
         self._page = page
         self._sandbox = sandbox
-        self.limits = Limits()
+        self.limits = Limits(drift=drift or Drift())
 
     def refresh(self, session: Session, usage: Usage) -> str:
         """Make the status and keep it above the prompt. Returns it."""

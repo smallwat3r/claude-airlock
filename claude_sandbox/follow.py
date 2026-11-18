@@ -35,12 +35,11 @@ from pathlib import Path
 
 from .capture import CaptureSidecar, captured_since, cut_short, running_captures
 from .docker import running_containers
-from .door_events import use_event
-from .doors import read_uses
 from .egress_log import logged_since
 from .events import Event, clean, flat, labelled
 from .files import line_entry, open_plain
 from .layout import Layout, event_json
+from .noted import NewlyNoted
 from .pcap import Capture, PcapReader, take_frames
 from .processes import Watcher, running_watchers, said_since
 from .projects import project_root, subagent_files, transcript_files
@@ -278,11 +277,10 @@ class Follower:
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
-        # The uses of the SSH agent and the Docker socket are shown from now:
-        # the time of the one shown last, and how many of that very time
-        # were shown, several can be noted in one moment
-        self._doors_since = time.time()
-        self._doors_shown = 0
+        # What the launchers note of the sessions, shown from now: the
+        # uses of the SSH agent and the Docker socket, and what a chat
+        # found changed in what Claude Code says
+        self._noted = NewlyNoted(host, container)
 
     def title(self, path: Path) -> str:
         return self._tails[path].title
@@ -311,7 +309,7 @@ class Follower:
         for session, tail in self._subagents.values():
             found.events += [(session, event) for event in tail.poll()]
         self._poll_network(found)
-        self._poll_doors(found)
+        self._poll_notes(found)
         # Stable, so what a transcript has at the same time keeps its order
         found.events.sort(key=lambda shown: shown[1].when)
         for _, event in found.events:
@@ -490,24 +488,10 @@ class Follower:
             name_container(events, health.session, several)
             found.events += [(None, event) for event in events]
 
-    def _poll_doors(self, found: Round) -> None:
-        """The uses of the SSH agent and the Docker socket that the
-        launchers of the project's sessions noted since the last time."""
-        at_since = 0
-        uses = read_uses(self._host, self._doors_since, float("inf"), self._container)
-        for use in uses:
-            when = float(use["t"])
-            if when == self._doors_since:
-                at_since += 1
-                if at_since <= self._doors_shown:
-                    continue
-                self._doors_shown = at_since
-            elif when > self._doors_since:
-                self._doors_since, self._doors_shown, at_since = when, 1, 1
-            # One noted out of order is shown, the place is kept
-            event = use_event(use)
-            if event:
-                found.events.append((None, event))
+    def _poll_notes(self, found: Round) -> None:
+        """What the launchers of the project's sessions noted since the
+        last time: the uses of the doors, and the changes chats found."""
+        found.events += [(None, event) for event in self._noted.poll()]
 
     @staticmethod
     def _keep_latest(found: Round) -> None:

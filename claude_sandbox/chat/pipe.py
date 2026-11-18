@@ -30,6 +30,7 @@ from ..files import json_object
 from ..projects import transcript_dirs
 from ..settings import Fatal, Host
 from ..transcript import content_blocks
+from .drift import Drift
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
 # about permissions asked over the same pipe, and a reply told as it is made
@@ -261,21 +262,32 @@ class Session:
     version: str = ""
     servers: list[tuple[str, str]] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
+    # Told what claude does not say of the session any more, see heard
+    drift: Drift = field(default_factory=Drift, repr=False, compare=False)
 
     def heard(self, message: dict) -> bool:
         """Take in something claude says of the session. Whether it is
-        the start of a turn."""
-        self.mode = flat(message.get("permissionMode") or self.mode)
+        the start of a turn, which says all of it: what is not there then
+        is missed."""
+        starts = message.get("subtype") == "init"
+        read = self.drift.field
+        # Said in between too, when it changes
+        mode = (
+            read(message, "permissionMode", str)
+            if starts
+            else message.get("permissionMode")
+        )
+        self.mode = flat(mode or self.mode)
         self.first_mode = self.first_mode or self.mode
-        if message.get("subtype") != "init":
+        if not starts:
             return False
-        session = message.get("session_id")
-        self.id = session if is_session_id(session) else ""  # type: ignore[assignment]
-        self.model = flat(message.get("model") or self.model)
+        session = read(message, "session_id", str)
+        self.id = session if session and is_session_id(session) else ""
+        self.model = flat(read(message, "model", str) or self.model)
         self.chosen = ""
-        self.version = flat(message.get("claude_code_version") or self.version)
-        self.commands = command_names(message.get("slash_commands"))
-        self.servers = servers_of(message.get("mcp_servers"))
+        self.version = flat(read(message, "claude_code_version", str) or self.version)
+        self.commands = command_names(read(message, "slash_commands", list))
+        self.servers = servers_of(read(message, "mcp_servers", list))
         return True
 
     def replied(self, message: dict) -> None:

@@ -25,10 +25,10 @@ import time
 from collections import Counter
 
 from .capture import cut_short, session_capture
-from .door_events import door_events
 from .egress_log import logged_requests, requests_made
 from .events import flat
 from .files import UNREADABLE, json_object, open_locked, private_dir
+from .noted import noted_events
 from .pcap import Capture
 from .processes import session_record
 from .projects import project_root, session_transcripts, subagent_session
@@ -262,12 +262,12 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
         for found in recorded_sessions(host, start, end)
         if found.name == session and found.start >= start - 1
     ]
-    door_rows, _ = door_events(host, start, end, session)
+    noted_rows, _ = noted_events(host, start, end, session)
     return [
         *network_lines(host, sessions),
         *denied_lines(sessions, start, end),
         *transcript_lines(host, start),
-        *(f"{door} {used}" for door, used in door_rows),
+        *(f"{about} {said}" for about, said in noted_rows),
     ]
 
 

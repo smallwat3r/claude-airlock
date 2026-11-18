@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import enum
 import hashlib
-import json
 import os
 import re
 import socket
@@ -38,8 +37,9 @@ from contextlib import contextmanager, suppress
 
 from .background import wait_for
 from .docker import docker_popen, env_arg, mount_arg
-from .files import append_kept, json_object, private_dir
+from .files import private_dir
 from .network import has_socket_proxy, session_address, socket_proxy_name
+from .notes import Notes
 from .reader import Cursor, NotThis
 from .settings import Host, Settings
 
@@ -108,18 +108,14 @@ _PROXY_LINE = re.compile(
 )
 
 
+def door_record(host: Host) -> Notes:
+    """The record of the uses of the doors."""
+    return Notes(host.doors_file, KEPT_USES)
+
+
 def note_use(host: Host, project: str, session: str, door: str, **said: object) -> None:
     """Add a use of a door to the record, the oldest go past KEPT_USES."""
-    line = json.dumps(
-        {
-            "t": round(time.time(), 3),
-            "project": project,
-            "session": session,
-            "door": door,
-            **said,
-        }
-    )
-    append_kept(host.doors_file, line, KEPT_USES)
+    door_record(host).add(project, session, door=door, **said)
 
 
 def read_uses(
@@ -128,24 +124,7 @@ def read_uses(
     """The uses of a door by this project's sessions between two times,
     in the order they were noted. Those of one session when it is named,
     by its container."""
-    found = []
-    try:
-        with open(host.doors_file, encoding="utf-8", errors="replace") as record:
-            for line in record:
-                said = json_object(line) or {}
-                try:
-                    when = float(said["t"])
-                except (ValueError, KeyError, TypeError):
-                    continue
-                if (
-                    said.get("project") == host.project_dir
-                    and start <= when <= end
-                    and session in (None, said.get("session"))
-                ):
-                    found.append(said)
-    except OSError:
-        return []
-    return found
+    return door_record(host).read(host.project_dir, start, end, session)
 
 
 def fingerprint(key: bytes) -> str:

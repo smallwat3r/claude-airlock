@@ -92,3 +92,8 @@ Claude Code runs in its print mode and speaks JSON Lines over its standard
 input and output, the protocol of the Agent SDK. What the session did
 comes from the same records as `--trace --follow`, so the two never
 disagree. The code is the `claude_sandbox/chat` package.
+
+A new version of Claude Code may move or rename what it says. Line mode
+checks each message against what it reads of it, and says once when
+something is missing or new (`CHANGED in what Claude Code says`), with the
+fields of the message and none of their values. `--trace` shows it too.
