@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -234,6 +235,7 @@ class AgentDoorTest(LauncherTest):
         self.assertIn("REFUSED by the launcher", event.details[0])
         self.assertEqual(event.fields["error"], "refused by the launcher")
 
+    @unittest.skipIf(sys.platform == "darwin", "no socket of the host mounts there")
     def test_the_door_is_the_users_alone_and_gone_with_the_session(self):
         flags = self.launch(
             session="true",
@@ -245,6 +247,22 @@ class AgentDoorTest(LauncherTest):
         self.assertFalse(os.path.exists(door))
         self.assertEqual((self.state / "agents").stat().st_mode & 0o777, 0o700)
 
+    def test_on_macos_the_agent_is_the_one_inside_the_machine(self):
+        # Whatever the host has: the path is the machine's, not the host's
+        for env in ({}, {"SSH_AUTH_SOCK": "/private/tmp/agent.sock"}):
+            self.assertEqual(
+                doors.agent_socket(env, "darwin"),
+                ("/run/host-services/ssh-auth.sock", False),
+            )
+
+    def test_elsewhere_the_agent_is_the_hosts_behind_the_launcher(self):
+        self.assertEqual(
+            doors.agent_socket({"SSH_AUTH_SOCK": "/tmp/agent.sock"}, "linux"),
+            ("/tmp/agent.sock", True),
+        )
+        self.assertIsNone(doors.agent_socket({}, "linux"))
+
+    @unittest.skipIf(sys.platform == "darwin", "the agent is the machine's there")
     def test_without_an_agent_nothing_is_forwarded(self):
         flags = self.launch(CLAUDE_DOCKER_SSH_AGENT="1").flags
         self.assertFalse([flag for flag in flags if "ssh-agent" in flag])

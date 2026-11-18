@@ -304,8 +304,11 @@ if [ -S "${SSH_AUTH_SOCK:-}" ]; then
 # It lists the keys, or says there are none: either way the agent answered
 check "the agent answers through the launcher" bash -c "ssh-add -l; [ \$? -le 1 ]"
 ' CLAUDE_DOCKER_SSH_AGENT=1
-  check "the use of the agent was noted" \
-    python3 -c "${READ_USES}" "${STATE}/door-use.jsonl" "${PROJECT}" ssh-agent
+  # On macOS the session has the agent of Docker's machine, not noted
+  if [ "$(uname)" != Darwin ]; then
+    check "the use of the agent was noted" \
+      python3 -c "${READ_USES}" "${STATE}/door-use.jsonl" "${PROJECT}" ssh-agent
+  fi
 fi
 
 echo

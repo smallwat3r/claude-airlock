@@ -99,6 +99,7 @@ BY_LAUNCHER = "launcher"
 USERAUTH_REQUEST = 50
 # Where the session finds the agent
 AGENT_TARGET = "/tmp/ssh-agent.sock"
+# Where Docker Desktop on macOS has the host's agent, inside its machine
 MACOS_AGENT = "/run/host-services/ssh-auth.sock"
 # A line of the socket proxy's log (HAProxy's httplog): the address and
 # port it came from, then further on the status and, quoted, the request
@@ -334,12 +335,16 @@ def read_exactly(connection: socket.socket, count: int) -> bytes | None:
     return data
 
 
-def agent_socket(env: Mapping[str, str]) -> tuple[str, bool] | None:
-    """The agent's socket on the host and whether the launcher can listen
-    in front of it, none without an agent. Docker Desktop on macOS exposes
-    the host's agent at a fixed path inside its machine, where the host's
-    SSH_AUTH_SOCK is not mountable, and neither is a socket of ours."""
-    if sys.platform == "darwin" and os.path.exists(MACOS_AGENT):
+def agent_socket(
+    env: Mapping[str, str], platform: str = sys.platform
+) -> tuple[str, bool] | None:
+    """The agent's socket as the daemon finds it and whether the launcher
+    can listen in front of it, none without an agent. On macOS the daemon
+    runs in a machine of its own, where no socket of the host can be
+    mounted, the agent's or ours. Docker Desktop exposes the host's agent
+    at a fixed path inside that machine: a path of the machine's, which
+    the host does not have and cannot check."""
+    if platform == "darwin":
         return MACOS_AGENT, False
     if env.get("SSH_AUTH_SOCK"):
         return env["SSH_AUTH_SOCK"], True

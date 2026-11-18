@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import sys
 import unittest
 
 from harness import (
@@ -26,9 +27,6 @@ class OptionsTest(LauncherTest):
             CLAUDE_DOCKER_RUNTIME="runsc",
         ).flags
         self.assertIn("--env=SSH_AUTH_SOCK=/tmp/ssh-agent.sock", flags)
-        # Not the agent's own socket, one of the launcher's in front of it
-        (agent,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
-        self.assertIn(f"--volume={self.state / 'agents'}/", agent)
         self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
         self.assertFalse(
             [flag for flag in flags if "/.claude/" in flag and flag.endswith(":ro,z")]
@@ -41,6 +39,15 @@ class OptionsTest(LauncherTest):
             )
         self.assertIn("--tmpfs=/home/sandbox/.cache:exec,size=2g", flags)
         self.assertIn("--runtime=runsc", flags)
+
+    @unittest.skipIf(sys.platform == "darwin", "no socket of the host mounts there")
+    def test_the_agent_is_reached_through_the_launcher(self):
+        flags = self.launch(
+            SSH_AUTH_SOCK="/tmp/agent.sock", CLAUDE_DOCKER_SSH_AGENT="1"
+        ).flags
+        # Not the agent's own socket, one of the launcher's in front of it
+        (agent,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
+        self.assertIn(f"--volume={self.state / 'agents'}/", agent)
 
     def test_a_flag_must_be_0_or_1(self):
         result = self.launch(CLAUDE_DOCKER_NET_FILTER="true")
