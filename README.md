@@ -294,7 +294,7 @@ Point your editor's Claude Code integration at `claude-docker` instead of
 ```
 make check          # ruff, shellcheck, mypy and the tests, as CI runs them
 make test K=trace   # the tests with trace in their name
-make smoke          # test/smoke-test.sh
+make smoke          # test/smoke/run.sh
 make upgrade        # refresh the pins, then rebuild the image
 ```
 
@@ -306,8 +306,10 @@ make upgrade        # refresh the pins, then rebuild the image
   many at a time. Each file also runs on its own, and `pytest test` works.
 - **CI** runs them on Python 3.9 and the latest, with ruff, mypy,
   shellcheck and a small image build.
-- **The smoke test** (`test/smoke-test.sh`) is run by hand on the host
+- **The smoke test** (`test/smoke/run.sh`) is run by hand on the host
   against a real Docker daemon. It starts open, filtered and socket-proxy
   sessions in a throwaway project and checks the sandbox from the inside.
+  The scripts that run inside a session are in `test/smoke/inside`, and
+  the checks of what a session left on the host in `test/smoke/checks`.
   Run it after changing the launcher, the Dockerfile parts or the sidecar
   configuration, or after moving the checkout.

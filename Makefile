@@ -13,7 +13,8 @@ SHELLCHECK ?= shellcheck
 LAUNCHER := bin/claude-docker
 PYTHON_SOURCES := $(LAUNCHER) claude_sandbox test docker/update-pins.py \
 	docker/features/excalidraw/excalidraw-export
-SHELL_SOURCES := bin/claude-statusline test/smoke-test.sh
+SHELL_SOURCES := bin/claude-statusline test/smoke/run.sh \
+	$(wildcard test/smoke/inside/*.sh)
 
 .DEFAULT_GOAL := help
 
@@ -41,7 +42,7 @@ test: ## The unit tests, without Docker. One topic: make test K=trace
 
 .PHONY: smoke
 smoke: ## The end-to-end test, on the host against a real Docker daemon
-	test/smoke-test.sh
+	test/smoke/run.sh
 
 .PHONY: rebuild
 rebuild: ## Rebuild the image from scratch, without the layer cache
