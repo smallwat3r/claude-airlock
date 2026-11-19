@@ -48,6 +48,7 @@ from .network import (
     socket_proxy_args,
     start_egress_proxy,
 )
+from .plugins import enabled_plugins
 from .processes import Watcher, processes_recorded
 from .projects import memory_dirs
 from .recorder import transcripts_copied
@@ -306,7 +307,12 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
                 # How the sandbox is started, noted for a trace and what
                 # follows the sessions, and for a chat to say first
                 start = Start.of(
-                    settings, runtime, image.tag, dirs, ssh_agent=forwarded
+                    settings,
+                    runtime,
+                    image.tag,
+                    dirs,
+                    ssh_agent=forwarded,
+                    plugins=enabled_plugins(host.claude_dir, host.project_dir),
                 )
                 said = note_start(host, name, start)
                 through = None

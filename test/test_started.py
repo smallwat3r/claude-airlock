@@ -73,6 +73,7 @@ class StartTest(unittest.TestCase):
             "recorded": ["connections"],
             "open": ["ssh-agent"],
             "dirs": ["/srv/\x1b[31mdata"],
+            "plugins": ["tool@market 1.2.0", "other@market"],
         }
         event = started.start_event(said)
         self.assertEqual(
@@ -88,6 +89,7 @@ class StartTest(unittest.TestCase):
                 "open: ssh-agent",
                 # Cleaned, a path is not the launcher's to choose
                 "mounted: /srv/[31mdata",
+                "plugins: tool@market 1.2.0, other@market",
             ],
         )
         self.assertEqual(event.fields["container"], "claude-proj")
@@ -156,6 +158,65 @@ class LaunchTest(LauncherTest):
         self.assertEqual(start["image"], result.image)
         # Not worth a word when the session ends
         self.assertNotIn("of this session", result.stderr)
+
+    def test_the_plugins_switched_on_are_noted_with_their_versions(self):
+        claude = self.home / ".claude"
+        (claude / "plugins").mkdir(parents=True, exist_ok=True)
+        (claude / "settings.json").write_text(
+            json.dumps(
+                {
+                    "enabledPlugins": {
+                        "tool@market": True,
+                        "off@market": False,
+                        "local@market": True,
+                        "gone@market": True,
+                    }
+                }
+            )
+        )
+        installs = {
+            "tool@market": [
+                {"scope": "user", "version": "1.2.0"},
+                {
+                    "scope": "project",
+                    "projectPath": str(self.project),
+                    "version": "1.3.0",
+                },
+            ],
+            "off@market": [{"scope": "user", "version": "2.0.0"}],
+            "local@market": [{"scope": "user", "version": "0.1.0"}],
+        }
+        (claude / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": installs})
+        )
+        # The project's settings are over the user's, its own over both
+        (self.project / ".claude").mkdir(exist_ok=True)
+        (self.project / ".claude" / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"off@market": True, "local@market": True}})
+        )
+        (self.project / ".claude" / "settings.local.json").write_text(
+            json.dumps({"enabledPlugins": {"local@market": False}})
+        )
+        self.launch()
+        start, _ = self.noted()
+        self.assertEqual(
+            start["plugins"], ["gone@market", "off@market 2.0.0", "tool@market 1.3.0"]
+        )
+
+    def test_settings_that_cannot_be_read_switch_no_plugin_on(self):
+        claude = self.home / ".claude"
+        (claude / "plugins").mkdir(parents=True, exist_ok=True)
+        (claude / "plugins" / "installed_plugins.json").write_text("[1, 2")
+        (self.project / ".claude").mkdir(exist_ok=True)
+        (self.project / ".claude" / "settings.json").write_text(
+            json.dumps({"enabledPlugins": ["tool@market"]})
+        )
+        (self.project / ".claude" / "settings.local.json").write_text(
+            json.dumps({"enabledPlugins": {"tool@market": "yes", "": True}})
+        )
+        self.launch()
+        start, _ = self.noted()
+        self.assertEqual(start["plugins"], [])
 
     def test_a_trace_shows_how_the_session_was_started(self):
         self.launch(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_INFO=INFO)

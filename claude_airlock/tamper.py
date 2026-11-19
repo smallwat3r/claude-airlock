@@ -12,8 +12,9 @@ import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from .files import expand_home, private_dir, write_whole
+from .files import expand_home, private_dir, settings_object, write_whole
 from .launcher import Launcher, session_alive
+from .plugins import INSTALLED
 from .settings import CONFIG_FILES, CONFIG_TREES
 
 # What Claude follows or starts in a project, on the host as in a session:
@@ -46,7 +47,7 @@ PROJECT_TREES = (
 PLUGIN_CACHE = "plugins/cache"
 CONFIG_WATCHED_TREES = (PLUGIN_CACHE, "plugins/marketplaces")
 CONFIG_WATCHED_FILES = (
-    "plugins/installed_plugins.json",
+    INSTALLED,
     "plugins/known_marketplaces.json",
 )
 # A plugin is many files, and an update changes most of them: the changed
@@ -112,9 +113,6 @@ COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.j
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
 HASHED_BYTES = 64 * 1024 * 1024
-# A settings file past this is not read for the scripts it names. It is
-# hashed like any other, so the change that made it this large still shows.
-SETTINGS_BYTES = 1024 * 1024
 
 
 def sha256_hex(data: bytes) -> str:
@@ -276,14 +274,9 @@ def named_files(settings_file: str, base: str) -> list[str]:
     from base, which catches the usual "path/to/script arguments" and
     misses a path a shell would have to work out. A file a session made
     too large or nested too deep to read names nothing, the check goes on
-    without it."""
-    try:
-        if os.path.getsize(settings_file) > SETTINGS_BYTES:
-            return []
-        settings = json.loads(Path(settings_file).read_text(encoding="utf-8"))
-        commands = list(commands_in(settings))
-    except (OSError, ValueError, RecursionError):
-        return []
+    without it: it is hashed like any other, so the change that made it
+    so still shows."""
+    commands = list(commands_in(settings_object(settings_file)))
     home = os.path.expanduser("~")
     found = []
     for command in commands:

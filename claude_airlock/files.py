@@ -22,6 +22,9 @@ from typing import IO, Any, BinaryIO
 # What a session can write is read a line at a time, and no line longer
 # than this is held in memory
 LINE_LIMIT = 32 << 20
+# A settings file of Claude Code past this is not read, the project's
+# ones are a session's to write
+SETTINGS_BYTES = 1024 * 1024
 # The kind of the entry that stands for a line of a transcript that holds
 # no entry, and how much of such a line is kept to be shown
 UNREADABLE = "unreadable-line"
@@ -217,6 +220,18 @@ def json_object(text: str | bytes) -> dict | None:
     except (ValueError, RecursionError):
         return None
     return found if isinstance(found, dict) else None
+
+
+def settings_object(path: str | Path) -> dict:
+    """What a settings file of Claude Code holds, nothing for one that is
+    not there, not to be read, or that a session made too large or nested
+    too deep to read."""
+    try:
+        if os.path.getsize(path) > SETTINGS_BYTES:
+            return {}
+        return json_object(Path(path).read_bytes()) or {}
+    except OSError:
+        return {}
 
 
 def expand_home(path: str, home: str) -> str:

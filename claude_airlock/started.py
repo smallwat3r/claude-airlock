@@ -1,7 +1,8 @@
 """How the sandbox of each session was started: the runtime it runs under,
 its image, its limits of memory, processes and CPUs, whether its network
 is filtered, what is recorded of it, what is open to it beyond the
-defaults and what is mounted next to the project.
+defaults, what is mounted next to the project and the plugins switched on
+for it.
 
 The launcher notes it as a session starts, and notes when the session is
 over, in a record of its own (see notes.py). A chat says it first,
@@ -38,9 +39,12 @@ ALL_HISTORY = "history:all"
 CONNECTORS = "connectors"
 TELEMETRY = "telemetry"
 SOCKET_SHOWN = {SocketAccess.LIMITED: DOCKER_PS, SocketAccess.FULL: DOCKER_FULL}
+# The lists of a note that are said when they hold anything, each with
+# what it is said as
+SAID_WHEN_ANY = (("open", "open"), ("mounted", "dirs"), ("plugins", "plugins"))
 # The values of a note that are text, and those that are lists of texts
 TEXTS = ("runtime", "image", "memory", "pids", "cpus")
-LISTS = ("recorded", "open", "dirs")
+LISTS = ("recorded", "open", "dirs", "plugins")
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,8 @@ class Start:
     open: tuple[str, ...] = ()
     # What is mounted next to the project, (ro) after a read-only one
     dirs: tuple[str, ...] = ()
+    # The plugins switched on, each with its version, see plugins.py
+    plugins: tuple[str, ...] = ()
 
     @classmethod
     def of(
@@ -74,10 +80,11 @@ class Start:
         dirs: Iterable[ExtraDir],
         *,
         ssh_agent: bool,
+        plugins: Iterable[str] = (),
     ) -> Start:
         """The start of a session with those settings, under that runtime
         and in a container of that image, the SSH agent forwarded or
-        not."""
+        not, with those plugins switched on."""
         recorded = []
         if settings.net_log:
             recorded.append("connections")
@@ -108,6 +115,7 @@ class Start:
             dirs=tuple(
                 extra.path + (" (ro)" if extra.read_only else "") for extra in dirs
             ),
+            plugins=tuple(plugins),
         )
 
 
@@ -175,7 +183,7 @@ def _shown(said: dict) -> Event:
         # Said when there is any
         *(
             f"{label}: " + ", ".join(lists[key])
-            for label, key in (("open", "open"), ("mounted", "dirs"))
+            for label, key in SAID_WHEN_ANY
             if lists[key]
         ),
     ]

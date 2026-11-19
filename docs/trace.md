@@ -296,6 +296,7 @@ sandbox  started  network: filtered to the allowed domains
 sandbox  started  recorded: connections, memory and CPU use
 sandbox  started  open: ssh-agent, docker:ps
 sandbox  started  mounted: /home/me/code/lib (ro)
+sandbox  started  plugins: gopls-lsp@claude-plugins-official 1.0.0, diagram-design@diagram-design 2.6.17
 ```
 
 | Line | Says |
@@ -306,9 +307,13 @@ sandbox  started  mounted: /home/me/code/lib (ro)
 | `recorded` | What the launcher kept of the session from outside it: its connections, its processes, or under gVisor its memory and CPU use alone |
 | `open` | What was open that is closed by default: the SSH agent, the Docker socket, a writable `~/.claude` config, the history of other projects, the connectors, telemetry. Not there when nothing was |
 | `mounted` | The directories mounted next to the project. Not there without any |
+| `plugins` | The plugins switched on in `~/.claude/settings.json` and the settings of the project, each as `name@marketplace` with the version installed. Not there without any |
 
 - It is of the session, not of the settings: the SSH agent is only named
   when the host had one to forward.
+- The plugins are those the settings switch on as the session starts,
+  not what Claude Code went on to load: a plugin switched on or off in
+  the session (`/plugin`) is not told, nor one given with `--plugin-dir`.
 - A session that goes on in a new container (`--resume`) has a start for
   each, and so has each of several sessions that ran at the same time.
 - `--trace --follow` shows a start when a session starts, line mode
