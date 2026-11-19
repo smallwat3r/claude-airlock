@@ -17,7 +17,11 @@ moment of one is not covered either.
 It runs as root, the session can neither stop it nor reach the record,
 which stays in the sidecar until the launcher copies it out. The session
 never depends on it: a watcher that did not get to watch is said when the
-session is over, and that is all."""
+session is over, and that is all.
+
+Under some runtimes, such as gVisor, a sidecar cannot see into the
+session. The launcher then records only memory and CPU use, from outside
+the session, see host_health.py."""
 
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +40,7 @@ from typing import ClassVar
 from .background import in_background, wait_for
 from .docker import container_running, docker, docker_output, mount_arg
 from .health import Ended, Sample, read_health
+from .procwatch import Note
 from .records import NetSession
 from .settings import Host, Settings
 from .sidecar import Sidecar
@@ -125,8 +130,15 @@ def said_since(watcher: str, since: float) -> list[Sample | Ended]:
     it aloud: the record itself stays in the sidecar until the session is
     over, and a command run there to read it would be noted as one of the
     session's. Nothing when it cannot be asked."""
+    said = docker_output("logs", f"--since={since:.3f}", watcher)
+    return health_said(said.splitlines(), since)
+
+
+def health_said(lines: Iterable[str], since: float) -> list[Sample | Ended]:
+    """The health readings in the lines of a record that are later than
+    the given time. Lines that are not valid are skipped."""
     found = []
-    for line in docker_output("logs", f"--since={since:.3f}", watcher).splitlines():
+    for line in lines:
         try:
             said = json.loads(line)
             when = float(said["t"])
@@ -142,7 +154,7 @@ def watcher_started(record: Path) -> bool:
     """Whether a watcher got as far as to watch: it says so first."""
     try:
         with open(record, encoding="utf-8", errors="replace") as file:
-            return '"started"' in file.readline()
+            return f'"{Note.STARTED.value}"' in file.readline()
     except OSError:
         return False
 
@@ -266,6 +278,10 @@ class ProcessRecord:
     # which process holds a socket
     full: bool = False
     unreadable: bool = False
+    # The runtime's name when the launcher wrote the record from outside
+    # the session, with memory and CPU use only (see host_health.py).
+    # Empty for a watcher's record.
+    outside: str = ""
     _by_pid: dict[int, list[Process]] = field(default_factory=dict, repr=False)
 
     def take(self, line: str) -> None:
@@ -276,8 +292,10 @@ class ProcessRecord:
             said = json.loads(line)
             when = float(said["t"])
             if "note" in said:
-                self.full |= said["note"] == "full"
-                self.unreadable |= said["note"] == "unreadable"
+                self.full |= said["note"] == Note.FULL
+                self.unreadable |= said["note"] == Note.UNREADABLE
+                if said["note"] == Note.STARTED:
+                    self.outside = str(said.get("outside", ""))
             elif "limit" in said:
                 if said["limit"] == "pids":
                     self.process_limit = max(self.process_limit, int(said["hits"]))

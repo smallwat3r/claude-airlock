@@ -9,6 +9,7 @@ import io
 import os
 import sys
 import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -18,12 +19,13 @@ from .chat import CHAT_ARGS, Handover, Sandbox, chat
 from .claude_args import has_a_conversation, resumed_args
 from .digest import report_session
 from .docker import docker_ok
-from .doors import socket_proxy_watched, ssh_agent_door
+from .doors import refuse_unreachable_agent, socket_proxy_watched, ssh_agent_door
 from .egress_log import net_log
 from .ending import Ending, ending_passed_on, interrupts_held
 from .follow import follow
 from .history import history_args
 from .home import prepare_home, protect_config_args
+from .host_health import collect_left_behind, health_recorded
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
 from .limits import LimitsHit, limits_watched
 from .login import login_shared
@@ -49,6 +51,7 @@ from .network import (
 from .processes import Watcher, processes_recorded
 from .projects import memory_dirs
 from .recorder import transcripts_copied
+from .runtime import Runtime, say_runtime_notes, session_runtime
 from .session import (
     base_args,
     container_name,
@@ -198,18 +201,38 @@ def session(plan: Plan) -> int:
         if status != 0:
             return status
     prepare_home(host)
+    # Refuse or report what the runtime cannot provide before anything is
+    # started for the session
+    runtime = session_runtime(settings)
+    refuse_unreachable_agent(settings, os.environ, runtime)
+    say_runtime_notes(runtime, settings)
     # The name, then the network and the proxies a session leans on, before
     # the arguments that name them
     with container_name(host, os.environ) as name, ending_passed_on(name) as ending:
         with session_network(settings, host):
-            status = named_session(plan, name, ending)
+            status = named_session(plan, name, ending, runtime)
         return ending.status(status)
 
 
-def named_session(plan: Plan, name: str, ending: Ending) -> int:
+def session_watched(
+    plan: Plan, name: str, owner: str, runtime: Runtime
+) -> AbstractContextManager[None]:
+    """The recorder for CLAUDE_DOCKER_PROC_LOG while a session runs. It
+    is normally a sidecar that records the session's processes and its
+    memory and CPU use. Under a runtime where a sidecar cannot see into
+    the session, the launcher records memory and CPU use from outside
+    instead. owner is the container whose network namespace the session
+    is in."""
+    settings, host = plan.settings, plan.host
+    if settings.proc_log and not runtime.JOINABLE:
+        return health_recorded(host, name, runtime.shown)
+    return processes_recorded(settings, host, name, owner, plan.image.tag)
+
+
+def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> int:
     """The session of a plan in the container of a name, with its network
-    there. It is ended when the launcher is told to end, see
-    ending_passed_on."""
+    there, under the given runtime. It is ended when the launcher is told
+    to end, see ending_passed_on."""
     settings, host, image = plan.settings, plan.host, plan.image
     action, dirs, protected = plan.action, plan.dirs, plan.protected
     claude_args = plan.claude_args
@@ -217,7 +240,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
     run_args = [
-        *base_args(settings, host, name),
+        *base_args(settings, host, name, runtime),
         *session_args(action, env),
         *protect_config_args(settings, host),
         *history_args(settings, host),
@@ -252,6 +275,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
     # What sessions that ended without their launcher left behind
     CaptureSidecar.collect_left_behind(host)
     Watcher.collect_left_behind(host)
+    collect_left_behind(host)
     # The container whose network namespace the session is in
     owner = capture or name
     started = time.time()
@@ -266,7 +290,7 @@ def named_session(plan: Plan, name: str, ending: Ending) -> int:
                     session_captured(settings, host, name, image.tag),
                     session_address_recorded(settings, host, name, owner),
                     socket_proxy_watched(settings, host, name, owner),
-                    processes_recorded(settings, host, name, owner, image.tag),
+                    session_watched(plan, name, owner, runtime),
                     transcripts_copied(host),
                     login_shared(host),
                 ):

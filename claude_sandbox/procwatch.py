@@ -39,12 +39,13 @@ capability."""
 from __future__ import annotations
 
 import ctypes
+import enum
 import ipaddress
 import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 # Seconds between two looks
 INTERVAL = 0.04
@@ -97,6 +98,18 @@ NAME_LENGTH = 64
 CGROUP = "sys/fs/cgroup"
 PAGE = os.sysconf("SC_PAGE_SIZE")
 _CAPABILITY_VERSION_3 = 0x20080522
+
+
+class Note(str, enum.Enum):
+    """The notes a record can hold about itself, as the value of "note"
+    in a line."""
+
+    # The first line: the watcher got as far as watching
+    STARTED = "started"
+    # The record reached its size limit
+    FULL = "full"
+    # The watcher could not see which process holds a socket
+    UNREADABLE = "unreadable"
 
 
 def take_identity(uid: int, gid: int) -> None:
@@ -279,21 +292,16 @@ def percent(used: float, of: float | None) -> int | None:
     return int(100 * used / of) if of else None
 
 
-class Health:
-    """Reads how the session is doing from the cgroup of its container
-    and from /proc. Each figure on its own: what cannot be read (another
-    kernel, cgroup v1) is left out, the rest is still told. Given what
-    it notes a line with, and what says how a process is called."""
+class CgroupHealth:
+    """Reads the health of a session from the cgroup of its container
+    alone: memory, CPU, and the time it waited for memory, CPU or disk.
+    This is all that can be read from outside the session (see
+    host_health.py). Each figure is read independently, so one that cannot
+    be read (another kernel, cgroup v1) is left out and the others are
+    still reported. note is the function that writes a line."""
 
-    def __init__(
-        self,
-        note: Callable[..., None],
-        name_of: Callable[[int], str],
-        proc: str = "/proc",
-    ) -> None:
+    def __init__(self, note: Callable[..., None]) -> None:
         self._note = note
-        self._name_of = name_of
-        self._proc = proc
         # What the counters that only grow said at the last line, and when
         self._counted: dict[str, int] = {}
         self._counted_at = 0.0
@@ -304,19 +312,14 @@ class Health:
         self._levels: dict[str, int] = {}
         # How often a process was ended for want of memory, as last read
         self._ended: int | None = None
-        # The largest processes as last seen: pid, bytes and name
-        self._largest: list[tuple[int, int, str]] = []
         # What came nearer a limit and is still to be said
         self._rose: list[str] = []
 
-    def look(self, pids: list[int], now: float) -> None:
-        if not pids:
-            return
-        first = f"{self._proc}/{min(pids)}"
-        cgroup = f"{first}/root/{CGROUP}"
-        self._look_for_the_ended(cgroup, set(pids))
-        self._largest = self._sized(pids)
-        said, limited = self._used(first, cgroup)
+    def look_at(self, cgroup: str, now: float) -> None:
+        """Read the cgroup in the given directory, and write a health
+        line when one is due."""
+        self._look_for_the_ended(cgroup)
+        said, limited = self._used(cgroup)
         self._rose += [name for name in self._risen(limited) if name not in self._rose]
         rose = self._rose
         counted = self._count(cgroup)
@@ -333,42 +336,38 @@ class Health:
             said["rose"] = rose
             self._rose = []
             self._out_of_turn_at = now
-        if self._largest:
-            said["top"] = [list(process) for process in self._largest]
-        self._note(aloud=True, health=said)
+        said.update(self._seen_too())
+        self._note(health=said)
 
-    def _look_for_the_ended(self, cgroup: str, pids: set[int]) -> None:
+    def _look_for_the_ended(self, cgroup: str) -> None:
         """Note that a process was ended for want of memory since the
-        last look, with the large ones that are gone: the kernel ends the
-        one that holds the most, it does not say which."""
+        last look: the kernel ends the one that holds the most, it does
+        not say which."""
         try:
             ended = keyed(f"{cgroup}/memory.events").get("oom_kill", 0)
         except OSError:
             return
         if self._ended is not None and ended > self._ended:
-            gone = [list(p) for p in self._largest if p[0] not in pids]
-            self._note(aloud=True, oom=ended, gone=gone)
+            self._note(oom=ended, gone=self._gone())
         self._ended = ended
 
-    def _sized(self, pids: list[int]) -> list[tuple[int, int, str]]:
-        sized = []
-        for pid in pids:
-            try:
-                pages = int(read(f"{self._proc}/{pid}/statm").split()[1])
-            except (OSError, IndexError, ValueError):
-                continue
-            if pages:
-                sized.append((pages * PAGE, pid))
-        sized.sort(reverse=True)
-        return [(pid, size, self._name_of(pid)) for size, pid in sized[:LARGEST]]
+    def _gone(self) -> list[list]:
+        """The large processes that have gone since the previous look.
+        Empty here, because the cgroup alone does not show processes."""
+        return []
+
+    def _seen_too(self) -> dict[str, object]:
+        """Extra fields for a health line, from sources other than the
+        cgroup. None here."""
+        return {}
 
     def _used(
-        self, first: str, cgroup: str
+        self, cgroup: str
     ) -> tuple[dict[str, object], dict[str, tuple[int, int | None]]]:
         """What the session uses now, as a line says it, and of that what
         has a limit to be near, each as what is used and the most there
-        can be (none for no limit): memory without what the kernel keeps
-        of files and gives back when asked, processes, and each tmpfs."""
+        can be (none for no limit): memory, without what the kernel keeps
+        of files and gives back when asked."""
         said: dict[str, object] = {}
         limited: dict[str, tuple[int, int | None]] = {}
         try:
@@ -380,28 +379,11 @@ class Health:
         except (OSError, ValueError):
             pass
         try:
-            most = limit(read(f"{cgroup}/pids.max").decode().strip())
-            limited["pids"] = (int(read(f"{cgroup}/pids.current")), most)
-            said["pids"] = list(limited["pids"])
-        except (OSError, ValueError):
-            pass
-        try:
             quota, period = read(f"{cgroup}/cpu.max").decode().split()
             if quota != "max":
                 said["cpus"] = round(int(quota) / int(period), 2)
         except (OSError, ValueError):
             pass
-        tmpfs = {}
-        try:
-            for place in session_tmpfs(f"{first}/mounts"):
-                about = os.statvfs(f"{first}/root{place}")
-                size = about.f_blocks * about.f_frsize
-                limited[place] = (size - about.f_bfree * about.f_frsize, size)
-                tmpfs[place] = list(limited[place])
-        except OSError:
-            pass
-        if tmpfs:
-            said["tmpfs"] = tmpfs
         return said, limited
 
     def _risen(self, limited: dict[str, tuple[int, int | None]]) -> list[str]:
@@ -467,6 +449,90 @@ class Health:
         return said
 
 
+class Health(CgroupHealth):
+    """Reads the health of a session from inside its process namespace,
+    as the watcher does. To what the cgroup gives, it adds the process
+    count, the use of each tmpfs and the largest processes, read from
+    /proc. note is the function that writes a line, name_of the one that
+    names a process."""
+
+    def __init__(
+        self,
+        note: Callable[..., None],
+        name_of: Callable[[int], str],
+        proc: str = "/proc",
+    ) -> None:
+        super().__init__(note)
+        self._name_of = name_of
+        self._proc = proc
+        # The pids seen at the last look, and the /proc directory of the
+        # first of them
+        self._pids: Sequence[int] = ()
+        self._first = ""
+        # The largest processes as last seen: pid, bytes and name
+        self._largest: list[tuple[int, int, str]] = []
+
+    def look(self, pids: list[int], now: float) -> None:
+        """Read the health of the session, given its pids. The cgroup is
+        found through the root of the first process."""
+        if not pids:
+            return
+        self._pids, self._first = pids, f"{self._proc}/{min(pids)}"
+        self.look_at(f"{self._first}/root/{CGROUP}", now)
+
+    def _look_for_the_ended(self, cgroup: str) -> None:
+        super()._look_for_the_ended(cgroup)
+        # Updated only now, because finding what has gone needs the
+        # largest processes of the previous look
+        self._largest = self._sized(self._pids)
+
+    def _gone(self) -> list[list]:
+        seen = set(self._pids)
+        return [list(process) for process in self._largest if process[0] not in seen]
+
+    def _seen_too(self) -> dict[str, object]:
+        if not self._largest:
+            return {}
+        return {"top": [list(process) for process in self._largest]}
+
+    def _sized(self, pids: Sequence[int]) -> list[tuple[int, int, str]]:
+        sized = []
+        for pid in pids:
+            try:
+                pages = int(read(f"{self._proc}/{pid}/statm").split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            if pages:
+                sized.append((pages * PAGE, pid))
+        sized.sort(reverse=True)
+        return [(pid, size, self._name_of(pid)) for size, pid in sized[:LARGEST]]
+
+    def _used(
+        self, cgroup: str
+    ) -> tuple[dict[str, object], dict[str, tuple[int, int | None]]]:
+        """Adds the process count against its limit and the use of each
+        tmpfs to what the cgroup says of memory."""
+        said, limited = super()._used(cgroup)
+        try:
+            most = limit(read(f"{cgroup}/pids.max").decode().strip())
+            limited["pids"] = (int(read(f"{cgroup}/pids.current")), most)
+            said["pids"] = list(limited["pids"])
+        except (OSError, ValueError):
+            pass
+        tmpfs = {}
+        try:
+            for place in session_tmpfs(f"{self._first}/mounts"):
+                about = os.statvfs(f"{self._first}/root{place}")
+                size = about.f_blocks * about.f_frsize
+                limited[place] = (size - about.f_bfree * about.f_frsize, size)
+                tmpfs[place] = list(limited[place])
+        except OSError:
+            pass
+        if tmpfs:
+            said["tmpfs"] = tmpfs
+        return said, limited
+
+
 class Holders:
     """Finds the processes that hold sockets, by what their descriptors
     link to."""
@@ -515,7 +581,7 @@ class Watch:
         # and when that was last looked at
         self._limit_hits = 0
         self._limits_seen = 0.0
-        self._health = Health(self.note, self.name_of)
+        self._health = Health(self.say, self.name_of)
 
     def name_of(self, pid: int) -> str:
         """What a process is called for short: its program, else what it
@@ -543,7 +609,7 @@ class Watch:
         if not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
             self._full = True
             aloud = False
-            line = json.dumps({"t": round(time.time(), 3), "note": "full"}) + "\n"
+            line = json.dumps({"t": round(time.time(), 3), "note": Note.FULL}) + "\n"
         self._written += len(line)
         self._out.write(line)
         self._out.flush()
@@ -554,6 +620,11 @@ class Watch:
             except (OSError, ValueError):
                 # Nobody listens, the record has it
                 pass
+
+    def say(self, **said: object) -> None:
+        """Write a line to the record and to the watcher's output, see
+        note. The line does not use the reserved part of the record."""
+        self.note(False, True, **said)
 
     def look(self) -> None:
         now = time.monotonic()
@@ -619,7 +690,7 @@ class Watch:
             )
         if not self._holders.readable and not self._said_unreadable:
             self._said_unreadable = True
-            self.note(reserved=True, note="unreadable")
+            self.note(reserved=True, note=Note.UNREADABLE)
 
     def _look_at_limits(self, pids: list[int]) -> None:
         """Note that the session ran into its limit of processes since
@@ -656,7 +727,7 @@ def main(args: list[str]) -> int:
         if len(args) > 1:
             take_identity(int(args[1]), int(args[2]))
         watch = Watch(out)
-        watch.note(reserved=True, note="started")
+        watch.note(reserved=True, note=Note.STARTED)
         while True:
             watch.look()
             time.sleep(INTERVAL)

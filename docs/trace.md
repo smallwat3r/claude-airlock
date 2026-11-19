@@ -253,6 +253,10 @@ sandbox  health  ALMOST OUT OF memory  mem 15g of 16g (93%)  cpu 96%  pids 91 of
 sandbox  health  OUT OF MEMORY, a process was ended for it  gone since: [812] node 14g
 ```
 
+Under [gVisor](sandbox.md#gvisor) there is no such sidecar. Processes are
+not recorded, and the launcher records the memory and CPU use of the
+session itself, along with the time it waited for memory, CPU or disk.
+
 - A line comes out of turn when the session first uses 70% of its
   memory, its processes or a tmpfs (`running low on`), and 90% (`ALMOST
   OUT OF`). At 90%, and when it spent a tenth of the time waiting for

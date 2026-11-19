@@ -223,12 +223,13 @@ class FakeSession:
     """What a watcher reads of a session, made up in a directory: the
     cgroup of its container and its processes."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, cgroup: Path | None = None):
         self.proc = root
         self.first = root / "1"
-        self.cgroup = self.first / "root" / "sys" / "fs" / "cgroup"
+        # Under the root of the first process, unless another place is given
+        self.cgroup = cgroup or self.first / "root" / "sys" / "fs" / "cgroup"
         self.cgroup.mkdir(parents=True)
-        (self.first / "root" / "tmp").mkdir()
+        (self.first / "root" / "tmp").mkdir(parents=True)
         (self.first / "mounts").write_text(
             "proc /proc proc rw 0 0\n"
             "tmpfs /dev tmpfs rw 0 0\n"
@@ -298,7 +299,7 @@ class HealthWatchTest(unittest.TestCase):
 
     def reader(self) -> procwatch.Health:
         return procwatch.Health(
-            self.watch.note, self.watch.name_of, str(self.session.proc)
+            self.watch.say, self.watch.name_of, str(self.session.proc)
         )
 
     def said(self) -> list[dict]:

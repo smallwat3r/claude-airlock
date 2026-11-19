@@ -429,6 +429,10 @@ def listener_events(record: ProcessRecord) -> list[Event]:
 def watched_summary(record: ProcessRecord, verbose: bool) -> list[str]:
     """The lines of the header on what a session's watcher noted: its
     processes, and how it was doing."""
+    if record.outside:
+        under = clean(record.outside)
+        said = f"  processes not recorded under {under}, only memory and CPU use"
+        return [said, *health_summary(record.samples, record.ended)]
     hint = "" if verbose else ", each one shown with --verbose"
     lines = [f"  processes {len(record.processes)} seen to run{hint}"]
     if record.process_limit:

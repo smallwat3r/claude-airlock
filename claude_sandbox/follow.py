@@ -29,8 +29,9 @@ from __future__ import annotations
 import os
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from .capture import CaptureSidecar, captured_since, cut_short, running_captures
@@ -38,6 +39,8 @@ from .docker import running_containers
 from .egress_log import logged_since
 from .events import Event, clean, flat, labelled
 from .files import line_entry, open_plain
+from .health import Ended, Sample
+from .host_health import running_health, said_in
 from .layout import Layout, event_json
 from .noted import NewlyNoted
 from .pcap import Capture, PcapReader, take_frames
@@ -183,13 +186,18 @@ class CaptureTail:
         return True
 
 
-class HealthTail:
-    """How one session is doing, asked of its watcher every so often
-    from when the following began."""
+# A function that returns a session's health readings later than a time
+SaidSince = Callable[[float], list[Sample | Ended]]
 
-    def __init__(self, watcher: str) -> None:
-        self.watcher = watcher
-        self.session = Watcher.session_of(watcher)
+
+class HealthTail:
+    """The health readings of one session, polled at intervals from the
+    moment the following began. said_since returns the readings later
+    than a given time, see Follower._health_sources."""
+
+    def __init__(self, session: str, said_since: SaidSince) -> None:
+        self.session = session
+        self._said_since = said_since
         self._since = time.time()
         self._asked = 0.0
 
@@ -198,7 +206,7 @@ class HealthTail:
         if now - self._asked < HEALTH_EVERY:
             return []
         self._asked = now
-        found = said_since(self.watcher, self._since)
+        found = self._said_since(self._since)
         if found:
             self._since = max(one.when for one in found)
         return [one.event() for one in found]
@@ -400,11 +408,7 @@ class Follower:
                 if self._ours(CaptureSidecar.session_of(sidecar))
             ]
             self._addresses = self._filtered_addresses()
-            watched = [
-                (watcher, started)
-                for watcher, started in running_watchers(self._host.project_dir)
-                if self._ours(Watcher.session_of(watcher))
-            ]
+            watched = self._health_sources()
         except Fatal:
             self._docker = False
             found.notes.append(
@@ -425,9 +429,9 @@ class Follower:
         # How each is doing, without a word on the following of it
         for key in set(self._health) - set(watched):
             del self._health[key]
-        for key in watched:
+        for key, (session, said) in watched.items():
             if key not in self._health:
-                self._health[key] = HealthTail(key[0])
+                self._health[key] = HealthTail(session, said)
         if self._rounds == 0 and not running and not self._addresses:
             found.notes.append(
                 labelled(
@@ -436,6 +440,20 @@ class Follower:
                     " (none runs, CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)",
                 )
             )
+
+    def _health_sources(self) -> dict[tuple[str, float], tuple[str, SaidSince]]:
+        """The source of health readings for each running session of the
+        project: its watcher sidecar, or the record its launcher writes
+        when there is no watcher (see host_health.py). Each key is the
+        watcher's name or the record's path, with the start time. Each
+        value is the session's name and the function that reads it."""
+        sources: dict[tuple[str, float], tuple[str, SaidSince]] = {}
+        for watcher, started in running_watchers(self._host.project_dir):
+            session = Watcher.session_of(watcher)
+            sources[(watcher, started)] = (session, partial(said_since, watcher))
+        for record, session, started in running_health(self._host):
+            sources[(record, started)] = (session, partial(said_in, record))
+        return {key: asked for key, asked in sources.items() if self._ours(asked[0])}
 
     def _filtered_addresses(self) -> dict[str, str]:
         """The addresses of the project's filtered sessions that are
