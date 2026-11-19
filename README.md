@@ -1,8 +1,12 @@
 # claude-airlock
 
 Run [Claude Code](https://claude.com/claude-code) inside a hardened Docker
-container, with only the current project mounted. Works from any shell, and
-from editors that can launch a custom `claude` program.
+container, with only the current project mounted, and see everything it
+does there. Every connection and process of a session is recorded from
+outside it, where the session cannot tamper with the record. You see them
+as they happen, under the tool call that made them, and can review them
+later. When the session ends, what it changed is checked. Works from any
+shell, and from editors that can launch a custom `claude` program.
 
 ![The launcher on the host starts the session container, a capture sidecar
 and a process sidecar that share one network namespace, the egress proxy,
