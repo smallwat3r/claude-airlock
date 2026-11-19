@@ -9,7 +9,7 @@ import sys
 
 from records import only_file, require
 
-from claude_airlock.processes import read_record
+from claude_airlock.recording.processes import read_record
 
 file = only_file(sys.argv[1])
 require(file.endswith(".jsonl"), f"the record was not finished: {file}")

@@ -9,7 +9,7 @@ import sys
 
 from records import only_file, require
 
-from claude_airlock.pcap import read_capture
+from claude_airlock.recording.pcap import read_capture
 
 capture = read_capture(only_file(sys.argv[1]))
 connected = {(made.address, made.port) for made in capture.connections}

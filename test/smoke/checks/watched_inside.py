@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 
-from claude_airlock.runtime import session_runtime
+from claude_airlock.sandbox.runtime import session_runtime
 from claude_airlock.settings import detect_host, load_settings
 
 config = os.path.join(detect_host(os.environ).user_conf, "config")
