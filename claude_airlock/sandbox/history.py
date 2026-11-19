@@ -105,16 +105,6 @@ def own_prompts(host: Host) -> list[str]:
     except OSError:
         pass
     return kept
-    try:
-        with history:
-            for line in bounded_lines(history):
-                said = json_object(line) if line is not None else None
-                project = said.get("project") if said else None
-                if line is not None and isinstance(project, str) and project in roots:
-                    kept.append(line.rstrip(b"\n").decode("utf-8", "replace") + "\n")
-    except OSError:
-        pass
-    return kept
 
 
 def prepare_store(host: Host) -> Path:
