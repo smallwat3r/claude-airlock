@@ -31,8 +31,7 @@ What you get:
 Contents:
 
 - [Requirements](#requirements), [Install](#install) and [Usage](#usage),
-  with the [settings](#settings) and what changed for those
-  [coming from claude-sandbox](#coming-from-claude-sandbox)
+  with the [settings](#settings)
 - [What the sandbox does](#what-the-sandbox-does) and its
   [known limits](#known-limits)
 - [Reviewing a session](#reviewing-a-session) with `--trace`
@@ -188,30 +187,6 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
   accepted there, extra directories belong to one project.
 - `CLAUDE_AIRLOCK_SHADOW` and `CLAUDE_AIRLOCK_PROTECT` add up: what the file
   names and what the environment names both count.
-
-### Coming from claude-sandbox
-
-The project was claude-sandbox, with a `claude-docker` command and
-`CLAUDE_DOCKER_*` settings. What you have under those names still works,
-and the launcher says at each start which of them it found:
-
-| Before | Now |
-| --- | --- |
-| `claude-docker` | `claude-airlock`, the old command is a link to it |
-| `CLAUDE_DOCKER_*` | `CLAUDE_AIRLOCK_*`, in the environment and in the config file |
-| `CLAUDE_DOCKER_SOCKET` | `CLAUDE_AIRLOCK_DOCKER_SOCKET` |
-| `~/.config/claude-sandbox` | `~/.config/claude-airlock`, the old one is read until you rename it |
-| `~/.local/state/claude-sandbox` | `~/.local/state/claude-airlock`, moved at the first start, a link is left |
-
-- When a setting is there under both names, the new one is read.
-- Make the change when no session of before is running: one with the
-  egress filter would lose its proxy to the first session started after.
-- A symlink to `bin/claude-docker` keeps working, until the checkout
-  itself moves.
-- The image builds again under its new name, `claude-airlock --prune`
-  removes the images of before too.
-- The Docker networks of before are left, `docker network ls` shows them
-  as `claude-docker-*` and `docker network rm` removes them.
 
 ## What the sandbox does
 

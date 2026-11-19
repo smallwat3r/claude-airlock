@@ -27,7 +27,6 @@ from .history import history_args
 from .home import prepare_home, protect_config_args
 from .host_health import collect_left_behind, health_recorded
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
-from .legacy import adopt_legacy_dirs, legacy_command
 from .limits import LimitsHit, limits_watched
 from .login import login_shared
 from .mounts import (
@@ -128,13 +127,8 @@ def main(argv: list[str], usage: str = "") -> int:
         print(usage.strip() + "\n\n" + settings_help())
         return 0
     env = os.environ
-    # Each name of before the rename that is still in use, see legacy.py
-    told: list[str] = []
-    legacy_command(sys.argv[0], told)
-    host = adopt_legacy_dirs(detect_host(env), told)
-    settings = load_settings(env, os.path.join(host.user_conf, "config"), told)
-    for line in told:
-        print(f"{NAME}: {line}", file=sys.stderr)
+    host = detect_host(env)
+    settings = load_settings(env, os.path.join(host.user_conf, "config"))
 
     # What needs neither the image nor the directories of a session
     if action == "net-log":

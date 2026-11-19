@@ -16,9 +16,6 @@ from .docker import docker, docker_ok, docker_output
 from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 
 IMAGE_NAME = "claude-airlock"
-# What the images were called before the rename, for --prune to find those
-# that are left
-LEGACY_IMAGE_NAME = "claude-code-sandbox"
 # The lines of a part that the launcher reads. One of the first kind is a
 # bullet of the image's CLAUDE.md, one of the second names the features a
 # fragment cannot do without.
@@ -254,13 +251,9 @@ def prune_images(current: str) -> int:
     a container still uses is kept, docker refuses to remove it. Another
     project's image, of other features, goes too: it is built again from
     the layers the build cache has, the next time it is asked for."""
-    listed = [
-        tag
-        for name in (IMAGE_NAME, LEGACY_IMAGE_NAME)
-        for tag in docker_output(
-            "images", "--format={{.Repository}}:{{.Tag}}", name
-        ).split()
-    ]
+    listed = docker_output(
+        "images", "--format={{.Repository}}:{{.Tag}}", IMAGE_NAME
+    ).split()
     removed = 0
     for tag in sorted(set(listed).difference([current])):
         if docker_ok("rmi", tag):
