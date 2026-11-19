@@ -1,8 +1,8 @@
 """How the sandbox of each session was started: the runtime it runs under,
 its image, its limits of memory, processes and CPUs, whether its network
 is filtered, what is recorded of it, what is open to it beyond the
-defaults, what is mounted next to the project and the plugins switched on
-for it.
+defaults, what is mounted next to the project, the plugins switched on
+for it and the language servers its image gives it.
 
 The launcher notes it as a session starts, and notes when the session is
 over, in a record of its own (see notes.py). A chat says it first,
@@ -41,10 +41,15 @@ TELEMETRY = "telemetry"
 SOCKET_SHOWN = {SocketAccess.LIMITED: DOCKER_PS, SocketAccess.FULL: DOCKER_FULL}
 # The lists of a note that are said when they hold anything, each with
 # what it is said as
-SAID_WHEN_ANY = (("open", "open"), ("mounted", "dirs"), ("plugins", "plugins"))
+SAID_WHEN_ANY = (
+    ("open", "open"),
+    ("mounted", "dirs"),
+    ("plugins", "plugins"),
+    ("language servers", "servers"),
+)
 # The values of a note that are text, and those that are lists of texts
 TEXTS = ("runtime", "image", "memory", "pids", "cpus")
-LISTS = ("recorded", "open", "dirs", "plugins")
+LISTS = ("recorded", "open", "dirs", "plugins", "servers")
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,9 @@ class Start:
     dirs: tuple[str, ...] = ()
     # The plugins switched on, each with its version, see plugins.py
     plugins: tuple[str, ...] = ()
+    # The language servers of the image, given to claude as a plugin of
+    # the launcher's own that no settings switch on, see image.py
+    servers: tuple[str, ...] = ()
 
     @classmethod
     def of(
@@ -81,10 +89,12 @@ class Start:
         *,
         ssh_agent: bool,
         plugins: Iterable[str] = (),
+        servers: Iterable[str] = (),
     ) -> Start:
         """The start of a session with those settings, under that runtime
         and in a container of that image, the SSH agent forwarded or
-        not, with those plugins switched on."""
+        not, with those plugins switched on and those language servers
+        of the image."""
         recorded = []
         if settings.net_log:
             recorded.append("connections")
@@ -116,6 +126,7 @@ class Start:
                 extra.path + (" (ro)" if extra.read_only else "") for extra in dirs
             ),
             plugins=tuple(plugins),
+            servers=tuple(servers),
         )
 
 

@@ -313,6 +313,8 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
                     dirs,
                     ssh_agent=forwarded,
                     plugins=enabled_plugins(host.claude_dir, host.project_dir),
+                    # A --shell session runs bash, which is given no plugin
+                    servers=() if action == "shell" else image.language_servers,
                 )
                 said = note_start(host, name, start)
                 through = None

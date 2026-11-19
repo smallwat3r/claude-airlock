@@ -74,6 +74,7 @@ class StartTest(unittest.TestCase):
             "open": ["ssh-agent"],
             "dirs": ["/srv/\x1b[31mdata"],
             "plugins": ["tool@market 1.2.0", "other@market"],
+            "servers": ["gopls", "pyright"],
         }
         event = started.start_event(said)
         self.assertEqual(
@@ -90,6 +91,7 @@ class StartTest(unittest.TestCase):
                 # Cleaned, a path is not the launcher's to choose
                 "mounted: /srv/[31mdata",
                 "plugins: tool@market 1.2.0, other@market",
+                "language servers: gopls, pyright",
             ],
         )
         self.assertEqual(event.fields["container"], "claude-proj")
@@ -202,6 +204,15 @@ class LaunchTest(LauncherTest):
         self.assertEqual(
             start["plugins"], ["gone@market", "off@market 2.0.0", "tool@market 1.3.0"]
         )
+
+    def test_the_language_servers_of_the_image_are_noted(self):
+        self.launch(CLAUDE_AIRLOCK_FEATURES="python go typst")
+        self.assertEqual(self.noted()[0]["servers"], ["gopls", "pyright"])
+        # None for an image without any, nor for bash, given no plugin
+        for args, features in (((), "typst"), (("--shell",), "go")):
+            (self.state / "session-starts.jsonl").unlink()
+            self.launch(*args, CLAUDE_AIRLOCK_FEATURES=features)
+            self.assertEqual(self.noted()[0]["servers"], [])
 
     def test_settings_that_cannot_be_read_switch_no_plugin_on(self):
         claude = self.home / ".claude"

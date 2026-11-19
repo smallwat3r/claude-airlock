@@ -41,10 +41,14 @@ class Image:
     claude_md: str
     # Directories copied into the build context, by their name there
     context_dirs: dict[str, Path]
-    # The manifest of the plugin at PLUGIN_DIR, and whether it has language
-    # servers, without which claude is not given the plugin
+    # The manifest of the plugin at PLUGIN_DIR, and the language servers it
+    # has by name, without any claude is not given the plugin
     plugin: str
-    has_language_servers: bool
+    language_servers: tuple[str, ...]
+
+    @property
+    def has_language_servers(self) -> bool:
+        return bool(self.language_servers)
 
 
 def text_lines(text: str) -> list[str]:
@@ -209,7 +213,9 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     servers = language_servers(parts, texts)
     tag = image_tag(host, dockerfile, claude_md, context_dirs)
     plugin = lsp_plugin(servers)
-    return Image(tag, dockerfile, claude_md, context_dirs, plugin, bool(servers))
+    return Image(
+        tag, dockerfile, claude_md, context_dirs, plugin, tuple(sorted(servers))
+    )
 
 
 def build_image(image: Image, host: Host, *build_options: str) -> int:
