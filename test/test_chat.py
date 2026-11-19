@@ -843,8 +843,10 @@ class ChatTest(LauncherTest):
     def test_ctrl_c_is_for_the_turn_that_runs_else_for_the_line(self):
         chat = a_chat(self.host())
         chat._reading = True
-        with self.assertRaises(KeyboardInterrupt):
-            chat._on_interrupt(2, None)
+        # Raised where the line is waited for, see Console.interrupt
+        chat._on_interrupt(2, None)
+        with written(), self.assertRaises(KeyboardInterrupt):
+            chat._console.read("> ")
         chat._turns.begin()
         chat._on_interrupt(2, None)
         self.assertTrue(chat._interrupt)
@@ -2066,6 +2068,49 @@ class ConsoleTest(LauncherTest):
             out.getvalue(),
             "\none\n> \nmodel y\nctx 3%\n> \ntwo\n> \nallow? ",
         )
+
+    def test_ctrl_c_ends_the_wait_for_a_line_with_the_console_let_go_of(self):
+        screen = console.Console(str(self.project))
+
+        def interrupted(_prompt: str) -> str:
+            screen.interrupt()
+            return "never"
+
+        with written(), unittest.mock.patch("builtins.input", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                screen.read("> ")
+            self.assertFalse(screen._lock.locked())
+            # Would wait forever for a lock that was left held
+            screen.end_line()
+
+    def test_ctrl_c_ahead_of_the_wait_for_a_line_is_raised_once_there(self):
+        screen = console.Console(str(self.project))
+        # Where the lock may be held: kept, not raised
+        screen.interrupt()
+        with written(), unittest.mock.patch("builtins.input", return_value="hello"):
+            with self.assertRaises(KeyboardInterrupt):
+                screen.read("> ")
+            # For that line alone
+            self.assertEqual(screen.read("> "), "hello")
+
+    def test_ctrl_c_is_not_raised_while_readline_has_the_console_write(self):
+        screen = console.Console(str(self.project))
+        screen._entering, screen._waiting = "> ", True
+        held = []
+
+        def above() -> str:
+            # As the handler of the signal would, with the lock held
+            held.append(screen._lock.locked())
+            screen.interrupt()
+            return ""
+
+        with written(), unittest.mock.patch.object(screen, "_above", above):
+            screen._prompted()
+        self.assertTrue(held and all(held))
+        self.assertFalse(screen._lock.locked())
+        # The wait goes on, and can be ended
+        with self.assertRaises(KeyboardInterrupt):
+            screen.interrupt()
 
     def test_a_line_without_a_head_has_none_above_its_prompt(self):
         screen = console.Console(str(self.project))

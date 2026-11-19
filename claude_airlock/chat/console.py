@@ -170,6 +170,11 @@ class Console:
         # hold, and whether it is what was written last, the cursor after it
         self._held = False
         self._on_screen = False
+        # Whether the thread that reads waits for a line with nothing of
+        # the console held, and whether Ctrl-C came for the line while it
+        # did not, see interrupt
+        self._waiting = False
+        self._interrupted = False
         self.interactive = sys.stdin.isatty()
         # Whether the line being typed can be erased and written again
         self._redrawn = bool(
@@ -219,11 +224,32 @@ class Console:
                 readline.read_history_file(self._history)
 
     def _complete(self, word: str, state: int) -> str | None:
-        """Asked by readline for each of what a word may become in turn."""
-        if state == 0:
-            first = readline.get_begidx() == 0
-            self._offered = completions(word, first, self.commands, self._root)
-        return self._offered[state] if state < len(self._offered) else None
+        """Asked by readline for each of what a word may become in turn.
+        Not interrupted meanwhile: readline drops what is raised here, and
+        the line could then no longer be interrupted, see interrupt."""
+        self._waiting = False
+        try:
+            if state == 0:
+                first = readline.get_begidx() == 0
+                self._offered = completions(word, first, self.commands, self._root)
+            return self._offered[state] if state < len(self._offered) else None
+        finally:
+            self._waiting = True
+
+    def interrupt(self) -> None:
+        """End the wait for the line being read as KeyboardInterrupt. For
+        the handler of a signal, which runs in the thread that reads,
+        between any two steps of it. Raised while that thread holds a
+        lock, the lock can stay held: a with does not let go of one that
+        was taken in the step before. Whatever needs it next, that thread
+        first, would then wait forever. So it is raised only where the
+        thread waits for the line and holds nothing, once: one that comes
+        a moment before is raised when it gets there, one that comes
+        after is dropped with the line."""
+        if self._waiting:
+            self._waiting = False
+            raise KeyboardInterrupt
+        self._interrupted = True
 
     def close(self) -> None:
         """Keep the lines typed for the next chat, for the user alone."""
@@ -245,7 +271,7 @@ class Console:
         head above its prompt when headed. Not kept among the lines typed
         when keep says so once it is read, as the answer to a question is
         not. Ctrl-C ends it as KeyboardInterrupt when the handler of the
-        signal raises it."""
+        signal asks for it, see interrupt."""
         line: str | None = None
         try:
             line = self._line(prompt, headed)
@@ -262,6 +288,8 @@ class Console:
                     # Enter went to the next line
                     self._on_screen = False
                 self._reading = self._entering = None
+            # One that came once the line was entered is not for the next
+            self._interrupted = False
         if not self.interactive:
             # Nobody typed it: said here, for what is written to read as
             # a conversation and to start on a line of its own
@@ -294,7 +322,18 @@ class Console:
                     self._on_screen = True
         # Readline counts the columns of the last line of a prompt alone,
         # the head's escapes of colour are all above it
-        return input(above + shown if self._redrawn else "")
+        return self._typed(above + shown if self._redrawn else "")
+
+    def _typed(self, prompt: str) -> str:
+        """Wait for a line, the one place Ctrl-C ends as
+        KeyboardInterrupt, see interrupt."""
+        try:
+            self._waiting = True
+            if self._interrupted:
+                raise KeyboardInterrupt
+            return input(prompt)
+        finally:
+            self._waiting = False
 
     def _with_paste(self, line: str, prompt: str, headed: bool) -> str:
         """A line with what came with it: what was pasted without the
@@ -391,18 +430,24 @@ class Console:
     def _prompted(self) -> None:
         """Told by readline once it has written the prompt of a line. A
         question that was put in the moment before, or a head that changed,
-        has the prompt written again as it now is."""
-        with self._lock:
-            if self._entering is None:
-                return
-            self._reading, self._entering = self._entering, None
-            prompt = self._reading if self._asked is None else self._asked
-            if self._filled:
-                readline.insert_text(self._filled)
-                self._filled = ""
-                readline.redisplay()
-            if self._above() + prompt != self._shown:
-                self._put("", prompt)
+        has the prompt written again as it now is. Called within the wait
+        for a line, and not interrupted while it holds the lock, see
+        interrupt."""
+        self._waiting = False
+        try:
+            with self._lock:
+                if self._entering is None:
+                    return
+                self._reading, self._entering = self._entering, None
+                prompt = self._reading if self._asked is None else self._asked
+                if self._filled:
+                    readline.insert_text(self._filled)
+                    self._filled = ""
+                    readline.redisplay()
+                if self._above() + prompt != self._shown:
+                    self._put("", prompt)
+        finally:
+            self._waiting = True
 
     @property
     def redrawn(self) -> bool:

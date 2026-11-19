@@ -240,7 +240,8 @@ class Chat:
             # What claude asked is refused with it
             self._asker.give_up()
         elif self._reading:
-            raise KeyboardInterrupt
+            # Where the wait for the line can be ended, see there
+            self._console.interrupt()
 
     def _session_ended(self) -> None:
         """Told by the thread that reads claude. A wait for a line would
