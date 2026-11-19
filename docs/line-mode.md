@@ -12,7 +12,7 @@ checked the same way.
 connections it made and how they ended: the package registry and a second
 host during an install, then a database that refuses the connection, in
 red, during a test run that fails. Between the two, what each step of the
-model used and how the sandbox is doing](line-mode.png)
+model used and how the sandbox is doing](img/line-mode.png)
 
 ## Why
 

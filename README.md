@@ -7,7 +7,7 @@ from editors that can launch a custom `claude` program.
 ![The launcher on the host starts the session container, a capture sidecar
 and a process sidecar that share one network namespace, the egress proxy,
 the Docker socket proxy, the SSH agent and the gVisor runtime are
-opt-in](docs/architecture.excalidraw.png)
+opt-in](docs/img/architecture.excalidraw.png)
 
 What you get:
 
@@ -244,7 +244,7 @@ redrawn, so it works in a terminal, an Emacs shell buffer or a file alike.
 `CLAUDE_AIRLOCK_LINE_MODE=0` gives the native UI back. See
 [docs/line-mode.md](docs/line-mode.md).
 
-![A turn in line mode at a terminal](docs/line-mode.png)
+![A turn in line mode at a terminal](docs/img/line-mode.png)
 
 ## The image
 
