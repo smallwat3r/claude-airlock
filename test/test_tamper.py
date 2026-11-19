@@ -115,6 +115,37 @@ class TamperingTest(LauncherTest):
         )
         self.assertNotIn("hooks.json", result.stderr)
 
+    def test_the_note_of_a_session_using_a_plugin_is_not_reported(self):
+        # Claude Code writes one for each session and removes it again
+        version = (
+            self.home / ".claude" / "plugins" / "cache" / "market" / "tool" / "1.0"
+        )
+        (version / ".in_use").mkdir(parents=True)
+        (version / ".in_use" / "old").write_text("")
+        result = self.launch(
+            session=f'rm "{version}/.in_use/old"; echo x > "{version}/.in_use/new"'
+        )
+        self.assertNotIn(self.REPORT, result.stderr)
+
+    def test_only_the_notes_at_the_top_of_a_plugin_version_are_left_out(self):
+        version = (
+            self.home / ".claude" / "plugins" / "cache" / "market" / "tool" / "1.0"
+        )
+        (version / "hooks").mkdir(parents=True)
+        result = self.launch(
+            session=f'mkdir "{version}/hooks/.in_use";'
+            f' echo x > "{version}/hooks/.in_use/run.sh"'
+        )
+        self.assertIn(f"  {version.parent}/ (1 files)\n", result.stderr)
+
+    def test_a_link_in_place_of_the_notes_of_a_plugin_is_reported(self):
+        version = (
+            self.home / ".claude" / "plugins" / "cache" / "market" / "tool" / "1.0"
+        )
+        version.mkdir(parents=True)
+        result = self.launch(session=f'ln -s / "{version}/.in_use"')
+        self.assertIn(f"  {version.parent}/ (1 files)\n", result.stderr)
+
     def test_a_link_to_a_directory_is_reported_and_not_followed(self):
         result = self.launch(session="mkdir .claude; ln -s / .claude/skills")
         self.assertIn(f"  {self.project}/.claude/skills\n", result.stderr)

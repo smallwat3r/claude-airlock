@@ -43,7 +43,8 @@ PROJECT_TREES = (
 # plugins as installed, where they are installed from, and the two files
 # that say which those are. Not the rest of plugins, which is what Claude
 # Code notes for itself and rewrites in every session.
-CONFIG_WATCHED_TREES = ("plugins/cache", "plugins/marketplaces")
+PLUGIN_CACHE = "plugins/cache"
+CONFIG_WATCHED_TREES = (PLUGIN_CACHE, "plugins/marketplaces")
 CONFIG_WATCHED_FILES = (
     "plugins/installed_plugins.json",
     "plugins/known_marketplaces.json",
@@ -53,6 +54,12 @@ CONFIG_WATCHED_FILES = (
 # with how many they are. That is the plugin: where it is from, then its
 # name.
 WATCHED_TREE_DEPTH = 2
+# Where Claude Code notes the sessions that use a plugin, a file for each
+# in this directory at the top of an installed version, written when a
+# session starts and removed when it ends. Nothing runs or follows them,
+# so they are not watched: every session with a plugin would be reported.
+PLUGIN_USE_MARKERS = ".in_use"
+PLUGIN_VERSION_DEPTH = 3
 # What the tools of a project run on the host, by the name of the file,
 # wherever in the project it is: what make, a package manager, a test
 # runner, a hook manager or direnv is told to do. Not what git and Claude
@@ -180,6 +187,19 @@ def tree_files(root: str) -> list[str]:
         ]
         found += [os.path.join(directory, name) for name in (*files, *links)]
     return found
+
+
+def is_plugin_use_marker(path: str, cache: str) -> bool:
+    """Whether a file of the plugin cache is one of the notes of the
+    sessions using a plugin (see PLUGIN_USE_MARKERS). Only inside that
+    directory at the top of a version: one of that name further down is
+    the plugin's own, and a link put in its place is listed as itself, not
+    as what is inside, so both are still watched."""
+    parts = os.path.relpath(path, cache).split(os.sep)
+    return (
+        len(parts) > PLUGIN_VERSION_DEPTH + 1
+        and parts[PLUGIN_VERSION_DEPTH] == PLUGIN_USE_MARKERS
+    )
 
 
 def module_git_dirs(directory: str) -> Iterator[str]:
@@ -333,7 +353,10 @@ def host_exec_fingerprint(
         if os.path.isfile(path) or os.path.islink(path):
             fingerprint[path] = file_hash(path)
     for name in CONFIG_WATCHED_TREES if claude_dir else ():
-        for path in tree_files(os.path.join(claude_dir, name)):
+        root = os.path.join(claude_dir, name)
+        for path in tree_files(root):
+            if name == PLUGIN_CACHE and is_plugin_use_marker(path, root):
+                continue
             fingerprint[path] = file_stamp(path)
     return fingerprint
 
