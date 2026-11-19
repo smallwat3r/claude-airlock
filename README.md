@@ -23,8 +23,11 @@ What you get:
   removed. `--trace` shows it all.
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook or a Makefile say.
-- **Line mode.** Claude Code with a simpler UI: a prompt, and above it
-  what the session does, the network included.
+- **Line mode.** Claude Code with a simpler UI that shows more than the
+  native one: a prompt, and above it what the session does as it does it.
+  Under each command the connections it made and how they ended, the
+  files it changed, who allowed it, what each step cost, how much memory
+  and CPU the sandbox uses, and each use of an opt-in door.
 - **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
   each off until you switch it on.
 
@@ -239,12 +242,32 @@ reached on the network. `--trace --follow` shows it as it happens. See
 
 A session runs in line mode by default: Claude Code with a simpler UI.
 You get a prompt and, above it, what the session does in the lines of
-`--trace`, the network included. Lines are only added, never
-redrawn, so it works in a terminal, an Emacs shell buffer or a file alike.
+`--trace`, as it happens. Why it is the default:
+
+- **You see what a command did, not only that it ran.** Under each
+  command are the connections made while it ran and how each ended, the
+  files it changed, and who allowed it. The native UI shows none of
+  that, a host an install reaches besides the registry goes unseen there.
+- **It is the launcher's word, not the session's.** The network, the
+  resource use and the doors are recorded from outside the sandbox, the
+  session cannot leave them out.
+- **What went wrong stands out.** A refused connection, a denied
+  request, a failed command and a write outside the project are in bold
+  red and in capitals.
+- **The cost is in sight.** Each step says the tokens it wrote and read,
+  each turn its time and price, and the sandbox says every so often how
+  much memory and CPU it uses.
+- **It works anywhere.** Lines are only added, never redrawn, so it reads
+  the same in a terminal, an Emacs shell buffer or a file, and scrolls
+  back like any output.
+
 `CLAUDE_AIRLOCK_LINE_MODE=0` gives the native UI back. See
 [docs/line-mode.md](docs/line-mode.md).
 
-![A turn in line mode at a terminal](docs/img/line-mode.png)
+![Two turns in line mode at a terminal: how the sandbox was started, then
+under each command the connections it made, the use of the Docker socket
+and of the SSH agent, and the memory and CPU the sandbox
+uses](docs/img/line-mode.png)
 
 ## The image
 

@@ -8,23 +8,40 @@ It is the default. Nothing else changes: `claude-airlock` takes the same
 arguments, and it is the same session in the same sandbox, recorded and
 checked the same way.
 
-![A turn in line mode at a terminal. Under each command, in cyan, the
-connections it made and how they ended: the package registry and a second
-host during an install, then a database that refuses the connection, in
-red, during a test run that fails. Between the two, what each step of the
-model used and how the sandbox is doing](img/line-mode.png)
+![Two turns in line mode at a terminal. First, dimmed, how the sandbox was
+started. Under each command, in cyan, the connections it made and how
+they ended: the package registry and a second host during an install,
+then a database that refuses the connection, in red, during a test run
+that fails. In the second turn the uses of the Docker socket, one of them
+denied, in red, and of the SSH agent during a push. Between them, what
+each step of the model used and the memory and CPU the sandbox
+uses](img/line-mode.png)
 
 ## Why
 
-- **It shows more.** The cyan lines are what Claude Code's own UI does not
-  show: every connection the session opens, under the command that was
-  running at the time. Here the install reaches a second host besides the
-  registry, and the tests fail because the database refuses the
-  connection.
+- **You see what a command did, not only that it ran.** The cyan lines
+  are what Claude Code's own UI does not show: every connection the
+  session opens, under the command that was running at the time, and how
+  it ended. Here the install reaches a second host besides the registry,
+  and the tests fail because the database refuses the connection. A
+  command also says which files it changed and who allowed it.
+- **It is the launcher's word, not the session's.** The network, the
+  memory and CPU use and the doors are recorded from outside the
+  sandbox. Here the session lists the containers of the host through the
+  Docker socket, is denied when it tries to start one, and the push
+  signs with a key of the SSH agent: each is a line, whatever the
+  session says of it.
+- **What went wrong stands out.** `REFUSED`, `DENIED`, `FAILED` and a
+  write `OUTSIDE PROJECT` are in bold red, among lines that are not.
+- **The cost is in sight.** Each step says the tokens it wrote and read
+  and whether it missed the cache, each turn how long it took and what
+  it cost, and the status above the prompt how full the context and the
+  limits of your account are.
 - **It works anywhere.** Claude Code's native UI redraws itself as it
   goes, which needs a terminal that keeps up with it. Line mode only adds
   lines, so it works in a terminal, a shell buffer of Emacs (`M-x shell`)
-  or a file alike.
+  or a file alike, and what was written stays where it was to scroll
+  back to or search.
 
 ## What it shows
 
