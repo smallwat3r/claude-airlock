@@ -157,6 +157,16 @@ def todo_details(todos: list, verbose: bool) -> list[str]:
     ]
 
 
+def question_details(questions: list) -> list[str]:
+    """What claude asks the user, a line for each question: its options
+    are put with it where it is answered, and are in --json."""
+    return [
+        f"question: {flat(question.get('question', ''))}"
+        for question in questions
+        if isinstance(question, dict)
+    ]
+
+
 def call_details(
     name: str, tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
@@ -168,6 +178,8 @@ def call_details(
         return todo_details(tool_input["todos"], verbose)
     if path is not None:
         return file_details(name, path, tool_input, project_dir, verbose)
+    if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
+        return question_details(tool_input["questions"])
     # Any other tool: its arguments as they are
     return [
         line

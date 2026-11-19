@@ -37,6 +37,8 @@ CYAN = "36"
 BRIGHT_GREEN = "92"
 BRIGHT_MAGENTA = "95"
 BRIGHT_CYAN = "96"
+# What a header line starts with, which is no event
+HEADER_START = "# "
 
 
 def together(*styles: str) -> str:
@@ -216,7 +218,7 @@ class Layout:
         return f"{when}  {'who':<7}  {'what':<{WHAT_WIDTH}}  details"
 
     def header(self, header: list[str]) -> list[str]:
-        lines = prefixed("# ", header)
+        lines = prefixed(HEADER_START, header)
         return [painted(DIM, line) for line in lines] if self.colour else lines
 
     def events(self, events: Iterable[Event]) -> list[str]:

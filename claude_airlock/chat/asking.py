@@ -24,9 +24,17 @@ from typing import Protocol
 
 from ..events import clean, flat, labelled
 from ..report.calls import call_details
-from ..report.layout import CYAN, GREEN, RED, WHAT_WIDTH, painted, prefixed
+from ..report.layout import (
+    CYAN,
+    GREEN,
+    HEADER_START,
+    RED,
+    WHAT_WIDTH,
+    painted,
+    prefixed,
+)
 from .console import Console, Page
-from .reply import reply_lines
+from .reply import reply_lines, wrapped
 from .said import is_number
 
 # What the question whether a tool may be used is answered with
@@ -46,6 +54,9 @@ LOOK_EVERY = 0.2
 # it could be read: it is not the answer, a yes among them would allow a
 # tool unseen
 TOO_SOON = 1.0
+# The least room the text of a question or an option is wrapped to,
+# however far in it starts
+NARROWEST_TEXT = 20
 # In colour, of the diff of an edit shown whole, the lines it takes out
 # and those it puts in, by how they start
 DIFF_STYLES = {"  diff: -": RED, "  diff: +": GREEN, "  diff: @": CYAN}
@@ -78,6 +89,17 @@ def chosen(typed: str, options: list[dict]) -> str:
     if all(is_number(n) and 1 <= int(n) <= len(options) for n in numbers):
         return ", ".join(str(options[int(n) - 1].get("label", "")) for n in numbers)
     return typed.strip()
+
+
+def laid_out(start: str, text: str, width: int | None) -> list[str]:
+    """A text after what it starts with, as the lines that fit a width,
+    those that follow as far in as the first. A line as long as it is
+    without a width, see Page.width. The lines are said as header lines,
+    whose prefix takes room too."""
+    if width is None or not text:
+        return [(start + text).rstrip()]
+    room = max(len(start) + NARROWEST_TEXT, width - len(HEADER_START))
+    return wrapped(start + text, room, " " * len(start))
 
 
 def suggested_rule(request: dict) -> tuple[str, dict] | None:
@@ -257,10 +279,14 @@ class Asker:
             options = question.get("options")
             options = [o for o in options or [] if isinstance(o, dict)]
             text = str(question.get("question", ""))
-            lines = [labelled("question", flat(text))]
+            width = self._page.width
+            lines = laid_out(labelled("question", ""), flat(text), width)
             for number, option in enumerate(options, 1):
-                label, more = option.get("label", ""), option.get("description", "")
-                lines.append(f"  {number}. {flat(label)}  {flat(more)}".rstrip())
+                start = f"  {number}. "
+                lines += laid_out(start, flat(option.get("label", "")), width)
+                more = flat(option.get("description", ""))
+                if more:
+                    lines += laid_out(" " * len(start), more, width)
             self._page.say(lines)
             typed = self.ask("answer (a number, several with commas, or in words): ")
             if typed is None:

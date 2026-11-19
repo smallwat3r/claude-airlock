@@ -42,10 +42,10 @@ _CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 _BOLD_SPAN = re.compile(r"(?<![\w*])\*\*(\S(?:.*?\S)?)\*\*(?![\w*])")
 
 
-def wrapped(line: str, width: int) -> list[str]:
-    """A line of a reply as the lines that fit a width, each indented as
-    it is."""
-    indent = line[: len(line) - len(line.lstrip())]
+def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
+    """A line as the lines that fit a width, each indented as it is, or
+    those after the first by what they are to be under."""
+    indent = line[: len(line) - len(line.lstrip())] if under is None else under
     return textwrap.wrap(
         line,
         width,

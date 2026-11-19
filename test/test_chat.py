@@ -43,6 +43,7 @@ from claude_airlock.events import Event, Who
 from claude_airlock.recording import started
 from claude_airlock.recording.changes import change_events
 from claude_airlock.report import entries
+from claude_airlock.report.calls import call_details
 from claude_airlock.report.follow import Follower, Round
 from claude_airlock.report.layout import Layout
 from claude_airlock.sandbox import claude_args
@@ -1500,6 +1501,44 @@ class AskingTest(unittest.TestCase):
                 {"tool_name": "AskUserQuestion", "input": {"questions": questions}}
             )
         self.assertEqual(refused, asking.REFUSED)
+
+    def test_a_question_and_its_options_are_wrapped_to_the_terminal(self):
+        about = "A rule for every session, and a scanner on the host"
+        questions = [
+            {
+                "question": "Where should the check of what a session reads live?",
+                "options": [
+                    {"label": "Both layers", "description": about},
+                    {"label": "Neither"},
+                ],
+            }
+        ]
+        request = {"tool_name": "AskUserQuestion", "input": {"questions": questions}}
+        width = unittest.mock.PropertyMock(return_value=40)
+        narrow = unittest.mock.patch.object(console.Page, "width", width)
+        with narrow, written() as lines:
+            self.asker(["1"]).decide(request)
+        self.assertEqual(
+            lines,
+            [
+                "# question    Where should the check of",
+                "#             what a session reads live?",
+                "#   1. Both layers",
+                "#      A rule for every session, and a",
+                "#      scanner on the host",
+                "#   2. Neither",
+            ],
+        )
+        self.assertLessEqual(max(map(len, lines)), 40)
+        # In a file a line is as long as it is, an option still on its own
+        with written() as lines:
+            self.asker(["1"]).decide(request)
+        self.assertEqual(lines[1:3], ["#   1. Both layers", f"#      {about}"])
+        # The call says what is asked, not its options as JSON
+        self.assertEqual(
+            call_details("AskUserQuestion", request["input"], None, "/p", False),
+            ["question: Where should the check of what a session reads live?"],
+        )
 
 
 class NoticesTest(unittest.TestCase):
