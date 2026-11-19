@@ -10,10 +10,10 @@ import unittest
 
 from harness import LauncherTest
 
-from claude_airlock import summary, transcript
 from claude_airlock.events import Event, Who
-from claude_airlock.layout import Layout, alerting, event_json, went_wrong
-from claude_airlock.transcript import WalkOptions
+from claude_airlock.report import summary, transcript
+from claude_airlock.report.layout import Layout, alerting, event_json, went_wrong
+from claude_airlock.report.transcript import WalkOptions
 
 PROJECT = "/p"
 

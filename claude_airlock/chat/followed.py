@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 
 from ..events import Event, Kind, Stage, Who
-from ..follow import Follower
+from ..report.follow import Follower
 from ..settings import Host
 from .console import Page
 from .reply import said_whole

@@ -11,10 +11,11 @@ import unittest
 from harness import LauncherTest, prompts_at, settings
 from test_runtime import INFO, gvisor
 
-from claude_airlock import runtime, started
 from claude_airlock.events import Who
-from claude_airlock.mounts import ExtraDir
-from claude_airlock.noted import NewlyNoted, noted_events
+from claude_airlock.recording import started
+from claude_airlock.report.noted import NewlyNoted, noted_events
+from claude_airlock.sandbox import runtime
+from claude_airlock.sandbox.mounts import ExtraDir
 
 
 def note(when: float, session: str, did: str = started.STARTED) -> dict:

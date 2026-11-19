@@ -18,7 +18,8 @@ from unittest import mock
 
 from harness import LauncherTest, follow, network, prompts_at, settings
 
-from claude_airlock import door_events, doors, socket_watch, ssh_agent
+from claude_airlock.recording import doors, socket_watch, ssh_agent
+from claude_airlock.report import door_events
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (

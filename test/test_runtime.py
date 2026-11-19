@@ -15,8 +15,9 @@ from unittest import mock
 from harness import LauncherTest, prompts_at, settings
 from test_processes import GIB, FakeSession
 
-from claude_airlock import host_health, processes, runtime
 from claude_airlock.launcher import Launcher
+from claude_airlock.recording import host_health, processes
+from claude_airlock.sandbox import runtime
 
 HOSTNET = ["--network=host", "--host-uds=open"]
 CONTAINER = "0a1b2c3d4e5f"

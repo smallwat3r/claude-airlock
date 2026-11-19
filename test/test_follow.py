@@ -20,7 +20,7 @@ from unittest import mock
 from harness import LAUNCHER, LauncherTest, follow, pcap
 from test_capture import answer, pcap_file, sample_capture, tcp
 
-from claude_airlock.transcript import WalkOptions
+from claude_airlock.report.transcript import WalkOptions
 
 # Marks the last thing a test wrote: what came before it has been shown
 # once this is

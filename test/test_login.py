@@ -10,7 +10,7 @@ import unittest
 
 from harness import LauncherTest, settings
 
-login = importlib.import_module("claude_airlock.login")
+login = importlib.import_module("claude_airlock.sandbox.login")
 
 LOGIN = ".credentials.json"
 

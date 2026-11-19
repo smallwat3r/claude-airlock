@@ -19,7 +19,7 @@ from unittest import mock
 from harness import LauncherTest, prompts_at
 from test_capture import pcap_file, tcp
 
-from claude_airlock import health, processes, procwatch
+from claude_airlock.recording import health, processes, procwatch
 
 SIDECAR = "claude-proj.procs"
 

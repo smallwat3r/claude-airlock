@@ -22,9 +22,9 @@ import time
 from collections.abc import Callable
 from typing import Protocol
 
-from ..calls import call_details
 from ..events import clean, flat, labelled
-from ..layout import CYAN, GREEN, RED, WHAT_WIDTH, painted, prefixed
+from ..report.calls import call_details
+from ..report.layout import CYAN, GREEN, RED, WHAT_WIDTH, painted, prefixed
 from .console import Console, Page
 from .reply import reply_lines
 from .said import is_number

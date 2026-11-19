@@ -83,10 +83,18 @@ if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
 
 
 sys.path.insert(0, str(ROOT))
-MODULES = ("capture", "follow", "image", "launcher", "network", "pcap", "records")
+MODULES = (
+    "recording.capture",
+    "report.follow",
+    "sandbox.image",
+    "launcher",
+    "sandbox.network",
+    "recording.pcap",
+    "recording.records",
+)
 capture, follow, image, launcher, network, pcap, records, settings, transcript = (
     importlib.import_module(f"claude_airlock.{name}")
-    for name in (*MODULES, "settings", "transcript")
+    for name in (*MODULES, "settings", "report.transcript")
 )
 
 

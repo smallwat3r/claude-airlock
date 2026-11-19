@@ -55,7 +55,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from ..events import Event, labelled
-from ..layout import Layout, painted
+from ..report.layout import Layout, painted
 from .screen import SGR, cursor_back, erased
 
 try:

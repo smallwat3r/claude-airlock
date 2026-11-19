@@ -9,9 +9,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..entries import content_blocks
 from ..events import flat
 from ..projects import transcript_dirs
+from ..report.entries import content_blocks
 from ..settings import Host
 from .drift import Drift
 

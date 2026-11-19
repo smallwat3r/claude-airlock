@@ -23,8 +23,6 @@ from pathlib import Path
 
 from harness import LAUNCHER, LauncherTest
 
-from claude_airlock import claude_args, entries, started
-from claude_airlock.changes import change_events
 from claude_airlock.chat import (
     asking,
     commands,
@@ -42,10 +40,14 @@ from claude_airlock.chat import reply as replying
 from claude_airlock.chat import said as saying
 from claude_airlock.chat import screen as screens
 from claude_airlock.events import Event, Who
-from claude_airlock.follow import Follower, Round
-from claude_airlock.layout import Layout
-from claude_airlock.mounts import ExtraDir
-from claude_airlock.runtime import DOCKERS_OWN
+from claude_airlock.recording import started
+from claude_airlock.recording.changes import change_events
+from claude_airlock.report import entries
+from claude_airlock.report.follow import Follower, Round
+from claude_airlock.report.layout import Layout
+from claude_airlock.sandbox import claude_args
+from claude_airlock.sandbox.mounts import ExtraDir
+from claude_airlock.sandbox.runtime import DOCKERS_OWN
 from claude_airlock.settings import Host, Settings, SocketAccess
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"

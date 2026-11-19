@@ -16,10 +16,10 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..entries import session_files, sessions_named
 from ..events import flat, labelled
+from ..report.entries import session_files, sessions_named
+from ..report.trace import session_rows
 from ..settings import Host
-from ..trace import session_rows
 from .console import Page
 from .said import Session, is_number, is_session_id
 from .turn import Turns

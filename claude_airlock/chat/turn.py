@@ -10,9 +10,9 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .. import brief
-from ..entries import INPUT_TOKENS, content_blocks, measured
 from ..events import flat, labelled
+from ..report import brief
+from ..report.entries import INPUT_TOKENS, content_blocks, measured
 from .console import Page
 from .drift import Drift
 from .said import own

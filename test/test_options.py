@@ -13,7 +13,7 @@ from harness import (
     Result,
 )
 
-from claude_airlock import session
+from claude_airlock.sandbox import session
 
 
 class OptionsTest(LauncherTest):

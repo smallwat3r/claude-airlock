@@ -15,22 +15,29 @@ from functools import partial
 from typing import NamedTuple
 
 from .action import Action
-from .capture import CaptureSidecar, session_captured
 from .chat import CHAT_ARGS, Handover, Sandbox, chat
-from .claude_args import has_a_conversation, resumed_args
-from .digest import report_session
 from .docker import docker_ok
-from .egress_log import net_log
-from .ending import Ending, ending_passed_on, interrupts_held
 from .errors import Fatal
-from .follow import follow
-from .history import history_args
-from .home import prepare_home, protect_config_args
-from .host_health import collect_left_behind, health_recorded
-from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
-from .limits import limits_watched
-from .login import login_shared
-from .mounts import (
+from .recording.address import session_address_recorded
+from .recording.capture import CaptureSidecar, session_captured
+from .recording.egress_log import net_log
+from .recording.host_health import collect_left_behind, health_recorded
+from .recording.processes import Watcher, processes_recorded
+from .recording.recorder import transcripts_copied
+from .recording.socket_watch import socket_proxy_watched
+from .recording.ssh_agent import refuse_unreachable_agent, ssh_agent_door
+from .recording.started import Start, note_end, note_start
+from .report.digest import report_session
+from .report.follow import follow
+from .report.trace import trace
+from .sandbox.claude_args import has_a_conversation, resumed_args
+from .sandbox.ending import Ending, ending_passed_on, interrupts_held
+from .sandbox.history import history_args
+from .sandbox.home import prepare_home, protect_config_args
+from .sandbox.image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
+from .sandbox.limits import limits_watched
+from .sandbox.login import login_shared
+from .sandbox.mounts import (
     ExtraDir,
     add_extra_dir,
     configured_extra_dirs,
@@ -41,19 +48,16 @@ from .mounts import (
     refuse_unsafe_dir,
     shadow_args,
 )
-from .network import (
+from .sandbox.network import (
     network_args,
-    session_address_recorded,
     session_network,
     sidecars_locked,
     socket_proxy_args,
     start_egress_proxy,
 )
-from .plugins import enabled_plugins
-from .processes import Watcher, processes_recorded
-from .recorder import transcripts_copied
-from .runtime import Runtime, say_runtime_notes, session_runtime
-from .session import (
+from .sandbox.plugins import enabled_plugins
+from .sandbox.runtime import Runtime, say_runtime_notes, session_runtime
+from .sandbox.session import (
     base_args,
     container_name,
     git_config_args,
@@ -61,12 +65,8 @@ from .session import (
     run_session,
     session_args,
 )
+from .sandbox.tamper import PendingCheck
 from .settings import NAME, Host, Settings, detect_host, load_settings, settings_help
-from .socket_watch import socket_proxy_watched
-from .ssh_agent import refuse_unreachable_agent, ssh_agent_door
-from .started import Start, note_end, note_start
-from .tamper import PendingCheck
-from .trace import trace
 
 
 class ParsedArgs(NamedTuple):

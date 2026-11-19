@@ -24,11 +24,12 @@ import threading
 import time
 from collections.abc import Callable
 
-from ..changes import note_change
 from ..docker import docker_ok, project_slug
 from ..events import Event, Kind, clean, flat, labelled
 from ..files import private_dir
-from ..layout import (
+from ..projects import sandboxed_root
+from ..recording.changes import note_change
+from ..report.layout import (
     BOLD,
     BRIGHT_CYAN,
     BRIGHT_GREEN,
@@ -39,7 +40,6 @@ from ..layout import (
     painted,
     together,
 )
-from ..projects import sandboxed_root
 from ..settings import Host
 from .asking import Asked, Asker
 from .commands import LOCAL, Commands, Did, Handover, Resume

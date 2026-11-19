@@ -21,12 +21,14 @@ from harness import (
     transcript,
 )
 
-from claude_airlock import egress_log, files, settings, trace
-from claude_airlock.calls import call_details, call_label
-from claude_airlock.entries import read_entries
+from claude_airlock import files, settings
 from claude_airlock.events import Event, Who
-from claude_airlock.layout import Layout, event_json, folded
-from claude_airlock.transcript import WalkOptions
+from claude_airlock.recording import egress_log
+from claude_airlock.report import trace
+from claude_airlock.report.calls import call_details, call_label
+from claude_airlock.report.entries import read_entries
+from claude_airlock.report.layout import Layout, event_json, folded
+from claude_airlock.report.transcript import WalkOptions
 
 
 class TraceTest(LauncherTest):

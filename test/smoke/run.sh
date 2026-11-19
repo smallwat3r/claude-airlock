@@ -204,7 +204,7 @@ egress_filter() {
 # The capture and the record of processes. Under a runtime where a watcher
 # sidecar cannot see into the session, such as gVisor, no watcher is started
 # and the launcher records memory and CPU use from outside instead (see
-# claude_airlock/runtime.py).
+# claude_airlock/sandbox/runtime.py).
 capture_and_processes() {
   local captured="${STATE}/captures/${CONTAINER}.capture-"
   local watched="${STATE}/processes/${CONTAINER}.procs-"

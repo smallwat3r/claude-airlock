@@ -13,7 +13,7 @@ from pathlib import Path
 
 from harness import LauncherTest, prompts_at, settings
 
-from claude_airlock import recorder
+from claude_airlock.recording import recorder
 
 
 def call(number: int, when: float, command: str) -> list[dict]:

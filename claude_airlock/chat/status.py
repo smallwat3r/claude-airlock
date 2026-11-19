@@ -14,10 +14,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from ..entries import LATEST, measured
 from ..events import flat, labelled
-from ..layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
-from ..started import (
+from ..recording.started import (
     ALL_HISTORY,
     DOCKER_FULL,
     DOCKER_PS,
@@ -25,6 +23,8 @@ from ..started import (
     SSH_AGENT,
     Start,
 )
+from ..report.entries import LATEST, measured
+from ..report.layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
 from .console import Page
 from .drift import Drift
 from .said import Session

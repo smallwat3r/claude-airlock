@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import time
 
-from ..entries import measured
 from ..events import flat, labelled
+from ..report.entries import measured
 from .console import Page
 from .turn import tokens
 

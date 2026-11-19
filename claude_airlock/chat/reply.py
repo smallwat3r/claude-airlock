@@ -22,9 +22,9 @@ import textwrap
 import time
 from collections.abc import Callable
 
-from ..entries import content_blocks
 from ..events import Event, Kind, Who, clean
-from ..layout import BOLD, GREEN, painted
+from ..report.entries import content_blocks
+from ..report.layout import BOLD, GREEN, painted
 from .console import Page
 
 CODE = GREEN
