@@ -8,9 +8,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code: exact version from npm
-ARG CLAUDE_CODE_VERSION=2.1.326
-
 # The host's ~/.claude is shared into the container, but its config stores
 # absolute paths under the host home (e.g. plugin marketplace locations).
 # Symlink the host home to /home/sandbox so those paths resolve, and the
@@ -28,15 +25,20 @@ RUN if [ "$HOST_HOME" != /home/sandbox ]; then \
 # the literal $HOME/.local/bin (the host home), so add it to silence the warning.
 ENV PATH="${HOST_HOME}/.local/bin:${PATH}"
 
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+# Claude Code: exact version from npm. Declared here and not further up, a
+# new version then rebuilds from this layer on only. The cache npm fills is
+# cleaned in the same layer, removed in a later one it would stay in the image.
+ARG CLAUDE_CODE_VERSION=2.1.326
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
 
 # ~/.cache is mounted as a named volume (see cache_arg in
 # claude_airlock/session.py). A new volume
 # takes the owner and mode of the directory it covers, so create it open to
 # whichever host user the container runs as, the way /tmp is.
-# The npm installs above ran as root and left their cache there, which the
-# volume would start out with: npm in a session then fails on a cache
-# directory it cannot write.
+# The npm installs above ran as root and, their cache cleaned, still leave
+# its directory and logs there, which the volume would start out with: npm
+# in a session then fails on a cache directory it cannot write.
 RUN mkdir -p /home/sandbox/.cache \
     && rm -rf /home/sandbox/.cache/npm \
     && chmod 1777 /home/sandbox/.cache
