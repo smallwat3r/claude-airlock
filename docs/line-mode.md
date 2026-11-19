@@ -12,10 +12,10 @@ checked the same way.
 started. Under each command, in cyan, the connections it made and how
 they ended: the package registry and a second host during an install,
 then a database that refuses the connection, in red, during a test run
-that fails. In the second turn the uses of the Docker socket, one of them
-denied, in red, and of the SSH agent during a push. Between them, what
-each step of the model used and the memory and CPU the sandbox
-uses](img/line-mode.png)
+that fails. In the second turn another install, which fetches from a
+second host too, the files it changed, and an edit with its diff, in
+magenta. Between them, what each step of the model used and the memory
+and CPU the sandbox uses](img/line-mode.png)
 
 ## Why
 
@@ -24,13 +24,13 @@ uses](img/line-mode.png)
   session opens, under the command that was running at the time, and how
   it ended. Here the install reaches a second host besides the registry,
   and the tests fail because the database refuses the connection. A
-  command also says which files it changed and who allowed it.
-- **It is the launcher's word, not the session's.** The network, the
-  memory and CPU use and the doors are recorded from outside the
-  sandbox. Here the session lists the containers of the host through the
-  Docker socket, is denied when it tries to start one, and the push
-  signs with a key of the SSH agent: each is a line, whatever the
-  session says of it.
+  command also says which files it changed and who allowed it, and an
+  edit comes with its diff.
+- **It is the launcher's word, not the session's.** The network and the
+  memory and CPU use are recorded from outside the sandbox, and so is
+  each use of the SSH agent and of the Docker socket when you opened
+  one: each is a line, whatever the session says of it. Here the second
+  install downloads 9 MB from a host that its output never names.
 - **What went wrong stands out.** `REFUSED`, `DENIED`, `FAILED` and a
   write `OUTSIDE PROJECT` are in bold red, among lines that are not.
 - **The cost is in sight.** Each step says the tokens it wrote and read

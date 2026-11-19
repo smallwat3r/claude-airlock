@@ -265,8 +265,8 @@ You get a prompt and, above it, what the session does in the lines of
 [docs/line-mode.md](docs/line-mode.md).
 
 ![Two turns in line mode at a terminal: how the sandbox was started, then
-under each command the connections it made, the use of the Docker socket
-and of the SSH agent, and the memory and CPU the sandbox
+under each command the connections it made and the files it changed, an
+edit with its diff, and the memory and CPU the sandbox
 uses](docs/img/line-mode.png)
 
 ## The image
