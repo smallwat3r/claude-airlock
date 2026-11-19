@@ -31,6 +31,7 @@ from .brief import (
 )
 from .events import Event, Who, clean, flat, labelled
 from .files import UNREADABLE, bounded_lines, json_object, line_entry, open_plain
+from .plugins import plugin_server, skill_plugin
 from .projects import transcript_dirs, transcript_files
 from .settings import Fatal, Host
 from .shown import size
@@ -57,6 +58,9 @@ VERBOSE_OUTPUT = (10, 10)
 # ends it, quoted or not. Not <<<, which is a here-string.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# What tells the plugin a call is of, each value of the event with what
+# its line starts with
+PLUGIN_SAID = {"plugin": "plugin", "plugin_server": "plugin server"}
 # Where a hunk of a diff is, as Claude Code names it: from which line and
 # how many, of the file before and after
 HUNK_SPANS = ("oldStart", "oldLines", "newStart", "newLines")
@@ -615,7 +619,22 @@ def call_event(
     path = file_path(tool_input)
     if name in FILE_TOOLS and path is not None:
         fields["outside_project"] = outside(path, project_dir)
+    # After the arguments, a call is named by the first of its lines
+    for key, plugin in plugin_called(name, tool_input).items():
+        fields[key] = plugin
+        details.append(f"{PLUGIN_SAID[key]}: {plugin}")
     return Event(when, who, name.lower(), details, fields)
+
+
+def plugin_called(name: str, tool_input: dict) -> dict[str, str]:
+    """The plugin a tool call is of, by what tells it: the plugin of the
+    skill it runs, or the server of a plugin whose tool it is. Empty for
+    a call that is of none. As the session named them, like the call."""
+    said = {
+        "plugin": skill_plugin(name, tool_input),
+        "plugin_server": plugin_server(name),
+    }
+    return {key: flat(plugin) for key, plugin in said.items() if plugin}
 
 
 def unreadable_event(when: float, entry: dict) -> Event:

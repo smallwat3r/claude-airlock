@@ -349,6 +349,33 @@ class TraceTest(LauncherTest):
         named = self.launch("--trace", "0c", "--json").stdout
         self.assertIn('"what": "mcp__docs__create_document"', named)
 
+    def test_a_call_of_a_plugin_names_it(self):
+        entries = [
+            self.call("s1", "Skill", skill="diagrams:export", args="a.html"),
+            self.call("s2", "Skill", skill="review"),
+            # A skill kept for a directory of the project, not a plugin's
+            self.call("s3", "Skill", skill="apps/web:deploy"),
+            self.call("m1", "mcp__plugin_diagrams_render__draw", title="x"),
+            self.call("m2", "mcp__docs__create_document", title="x"),
+        ]
+        self.write_transcript("0d", entries)
+        stdout = self.launch("--trace", "0d").stdout
+        self.assertIn("claude   skill       plugin: diagrams\n", stdout)
+        self.assertIn("claude   draw        plugin server: diagrams_render\n", stdout)
+        self.assertEqual(stdout.count("  plugin"), 2)
+        calls = {
+            call["id"]: call
+            for call in map(
+                json.loads, self.launch("--trace", "0d", "--json").stdout.splitlines()
+            )
+            if "id" in call
+        }
+        self.assertEqual(calls["s1"]["plugin"], "diagrams")
+        self.assertEqual(calls["m1"]["plugin_server"], "diagrams_render")
+        for other in ("s2", "s3", "m2"):
+            self.assertNotIn("plugin", calls[other])
+            self.assertNotIn("plugin_server", calls[other])
+
     def test_the_same_thing_on_the_network_again_is_said_once(self):
         def reached(when: float, where: str, **fields: object) -> Event:
             return Event(when, Who.SANDBOX, "net", [f"tcp/https {where}:443"], fields)

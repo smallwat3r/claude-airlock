@@ -82,6 +82,20 @@ through your pager.
   one has what the others did on the network too, each of those lines
   starting with the name of its container (`[claude-api-2]`).
 
+- A call that is of a plugin names it in a line after its arguments,
+  and in `--json` as a value of its own: `plugin` for a skill a plugin
+  brought (`skill: diagram-design:export-diagram`), `plugin_server` for
+  a tool of a server a plugin brought, the plugin and the server as
+  Claude Code joins them. `--only=skill` keeps the skills that ran. The
+  hooks of a plugin are not told: what they ran is among
+  [what ran](#what-ran), without the plugin it is of.
+
+```
+claude   skill    skill: diagram-design:export-diagram
+claude   skill    args: docs/flow.html
+claude   skill    plugin: diagram-design
+```
+
 On a terminal the colours make what the session did out of your sight
 stand out: commands are yellow, files it wrote magenta, the network cyan,
 what went wrong bold red, and the conversation is dimmed. `NO_COLOR=1`
