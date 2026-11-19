@@ -9,5 +9,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # HCI, L2CAP, ATT and SMP dissection and crafting from Python
-RUN uv pip install --system --break-system-packages \
+RUN uv pip install --system --break-system-packages --no-cache \
     scapy==2.8.0

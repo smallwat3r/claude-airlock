@@ -15,7 +15,7 @@ RUN apt-get update \
 
 # From PyPI, bookworm's fonttools is years behind. brotli is what gives
 # fonttools its WOFF2 support.
-RUN uv pip install --system --break-system-packages \
+RUN uv pip install --system --break-system-packages --no-cache \
     fonttools==4.68.0 \
     brotli==1.2.1
 

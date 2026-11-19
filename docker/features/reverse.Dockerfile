@@ -21,7 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Disassembly and executable parsing (ELF, PE, Mach-O) from Python
-RUN uv pip install --system --break-system-packages \
+RUN uv pip install --system --break-system-packages --no-cache \
     capstone==5.0.9 \
     lief==1.0.0 \
     pyelftools==0.33

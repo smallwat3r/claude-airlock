@@ -4,7 +4,7 @@
 
 # Python 3 and uv are already in the base image, other features rely on them,
 # so nothing is installed for the interpreter here, only the dev tooling
-RUN uv pip install --system --break-system-packages \
+RUN uv pip install --system --break-system-packages --no-cache \
     mypy==2.4.1 \
     ruff==0.17.5 \
     black==26.10.1 \
