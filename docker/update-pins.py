@@ -199,14 +199,6 @@ def pin_terraform_ls(pins: Pins) -> None:
     pin_hashicorp(pins, "terraform-ls", "TERRAFORM_LS")
 
 
-def pin_ocrab(pins: Pins) -> None:
-    ocrab = github_latest_tag("smallwat3r/ocrab-font")
-    url = f"https://raw.githubusercontent.com/smallwat3r/ocrab-font/{ocrab}/fonts/ocrab.otf"
-    pins.set_arg("OCRAB_VERSION", ocrab)
-    pins.set_arg("OCRAB_SHA256", fetch_sha256(url))
-    print("ocrab", ocrab)
-
-
 def pin_uv(pins: Pins) -> None:
     uv = github_latest_tag("astral-sh/uv")
     pins.substitute(r"astral-sh/uv:[0-9.]+", f"astral-sh/uv:{uv}", "uv")
@@ -284,7 +276,6 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (arg_marker("MCAP_VERSION"), pin_mcap),
     (arg_marker("TERRAFORM_VERSION"), pin_terraform),
     (arg_marker("TERRAFORM_LS_VERSION"), pin_terraform_ls),
-    (arg_marker("OCRAB_VERSION"), pin_ocrab),
     (r"astral-sh/uv:[0-9.]+", pin_uv),
     *((arg_marker(arg), pin_npm(packages)) for arg, packages in NPM_PINS.items()),
     (arg_marker("GOPLS_VERSION"), pin_gopls),

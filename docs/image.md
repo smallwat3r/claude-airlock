@@ -17,7 +17,7 @@ with a directory of the same name holding files the fragment copies in:
 | `docker` | Docker CLI, for `CLAUDE_AIRLOCK_DOCKER_SOCKET` |
 | `docs` | pandoc, poppler-utils, qpdf, gnuplot |
 | `excalidraw` | `excalidraw-export`, renders an [Excalidraw](https://excalidraw.com) scene to PNG or SVG offline, and takes the scene back out of one. Brings in `playwright` for its headless Chromium |
-| `font` | fontforge, fonttools, ttfautohint, woff2, fontconfig and the Ocrab font |
+| `font` | fontforge, fonttools, ttfautohint, woff2, fontconfig and the common monospace fonts (DejaVu Sans Mono, Liberation Mono, Noto Mono, JetBrains Mono, Fira Code, Hack, Inconsolata, Anonymous Pro, Courier Prime, Mononoki, Go Mono) |
 | `go` | Go, gopls |
 | `kicad` | KiCad 9 with `kicad-cli` |
 | `loadtest` | wrk, hey, for HTTP load testing |
