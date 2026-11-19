@@ -6,7 +6,7 @@ from editors that can launch a custom `claude` program.
 
 ![The launcher on the host starts the session container, a capture sidecar
 and a process sidecar that share one network namespace, the egress proxy,
-the Docker socket proxy and the SSH agent are
+the Docker socket proxy, the SSH agent and the gVisor runtime are
 opt-in](docs/architecture.excalidraw.png)
 
 What you get:
@@ -14,6 +14,8 @@ What you get:
 - **A contained session.** Only the project is mounted, as your user, on a
   read-only root filesystem with all capabilities dropped. Secrets in
   `.env` files read as empty, and Claude's own configuration is read-only.
+  On Linux it can run on [gVisor](docs/sandbox.md#gvisor), a kernel of its
+  own, instead of the host's.
 - **A record of what it did.** Every connection, DNS lookup and process is
   recorded from outside the session, so the session cannot tamper with
   it. Its tool calls come from its own transcript, which the launcher
