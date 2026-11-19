@@ -452,7 +452,10 @@ class CaptureSessionTest(LauncherTest):
 
     def captured(self, *args: str, **env: str) -> Result:
         return self.launch(
-            *args, CLAUDE_DOCKER_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file), **env
+            *args,
+            CLAUDE_AIRLOCK_NET_LOG="1",
+            FAKE_CAPTURE=str(self.capture_file),
+            **env,
         )
 
     def test_the_session_joins_a_sidecar_that_captures(self):
@@ -460,7 +463,7 @@ class CaptureSessionTest(LauncherTest):
         self.assertIn(f"--network=container:{self.SIDECAR}", result.flags)
         sidecar = result.sidecar(self.SIDECAR)
         for flag in (
-            "--network=claude-docker-open-net",
+            "--network=claude-airlock-open-net",
             "--cap-drop=ALL",
             "--cap-add=NET_RAW",
             "--entrypoint=sh",
@@ -479,9 +482,9 @@ class CaptureSessionTest(LauncherTest):
         )
 
     def test_a_filtered_session_is_captured_inside_the_filter(self):
-        result = self.captured(CLAUDE_DOCKER_NET_FILTER="1", FAKE_IP="172.20.0.5")
+        result = self.captured(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_IP="172.20.0.5")
         sidecar = result.sidecar(self.SIDECAR)
-        self.assertIn("--network=claude-docker-net", sidecar)
+        self.assertIn("--network=claude-airlock-net", sidecar)
         self.assertIn("--dns=127.0.0.1", sidecar)
         self.assertIn(f"--network=container:{self.SIDECAR}", result.flags)
         self.assertNotIn("--dns=127.0.0.1", result.flags)
@@ -495,7 +498,7 @@ class CaptureSessionTest(LauncherTest):
     def test_switched_off_nothing_is_captured(self):
         result = self.launch()
         self.assertIsNone(result.sidecar(self.SIDECAR))
-        self.assertIn("--network=claude-docker-open-net", result.flags)
+        self.assertIn("--network=claude-airlock-open-net", result.flags)
 
     def test_the_capture_is_copied_out_and_the_sidecar_removed(self):
         result = self.captured()

@@ -439,7 +439,7 @@ class Follower:
                 labelled(
                     "network",
                     "no session of this project is recorded now"
-                    " (none runs, CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)",
+                    " (none runs, CLAUDE_AIRLOCK_NET_LOG=0, or not sandboxed)",
                 )
             )
 
@@ -520,7 +520,7 @@ class Follower:
         earlier = len(found.events) - HISTORY
         if earlier > 0:
             del found.events[:earlier]
-            found.notes.append(f"{earlier} earlier events, see claude-docker --trace")
+            found.notes.append(f"{earlier} earlier events, see claude-airlock --trace")
 
 
 class Output:

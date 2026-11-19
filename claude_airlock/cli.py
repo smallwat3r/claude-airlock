@@ -27,6 +27,7 @@ from .history import history_args
 from .home import prepare_home, protect_config_args
 from .host_health import collect_left_behind, health_recorded
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
+from .legacy import adopt_legacy_dirs, legacy_command
 from .limits import LimitsHit, limits_watched
 from .login import login_shared
 from .mounts import (
@@ -61,6 +62,7 @@ from .session import (
     session_args,
 )
 from .settings import (
+    NAME,
     Fatal,
     Host,
     Settings,
@@ -126,8 +128,13 @@ def main(argv: list[str], usage: str = "") -> int:
         print(usage.strip() + "\n\n" + settings_help())
         return 0
     env = os.environ
-    host = detect_host(env)
-    settings = load_settings(env, os.path.join(host.user_conf, "config"))
+    # Each name of before the rename that is still in use, see legacy.py
+    told: list[str] = []
+    legacy_command(sys.argv[0], told)
+    host = adopt_legacy_dirs(detect_host(env), told)
+    settings = load_settings(env, os.path.join(host.user_conf, "config"), told)
+    for line in told:
+        print(f"{NAME}: {line}", file=sys.stderr)
 
     # What needs neither the image nor the directories of a session
     if action == "net-log":
@@ -218,7 +225,7 @@ def session(plan: Plan) -> int:
 def session_watched(
     plan: Plan, name: str, owner: str, runtime: Runtime
 ) -> AbstractContextManager[None]:
-    """The recorder for CLAUDE_DOCKER_PROC_LOG while a session runs. It
+    """The recorder for CLAUDE_AIRLOCK_PROC_LOG while a session runs. It
     is normally a sidecar that records the session's processes and its
     memory and CPU use. Under a runtime where a sidecar cannot see into
     the session, the launcher records memory and CPU use from outside
@@ -336,7 +343,7 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
 def cli(usage: str = "") -> int:
     """Run the launcher on the arguments of the command line. usage is
     the text --help prints ahead of the settings, the docstring of
-    bin/claude-docker."""
+    bin/claude-airlock."""
     try:
         # Whatever a session wrote, showing it must not be what fails: a
         # character the terminal's encoding has none for is written as
@@ -349,7 +356,7 @@ def cli(usage: str = "") -> int:
         sys.stdout.flush()
         return status
     except Fatal as err:
-        print(f"claude-docker: {err}", file=sys.stderr)
+        print(f"{NAME}: {err}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

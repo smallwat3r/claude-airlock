@@ -15,7 +15,10 @@ from pathlib import Path
 from .docker import docker, docker_ok, docker_output
 from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
 
-IMAGE_NAME = "claude-code-sandbox"
+IMAGE_NAME = "claude-airlock"
+# What the images were called before the rename, for --prune to find those
+# that are left
+LEGACY_IMAGE_NAME = "claude-code-sandbox"
 # The lines of a part that the launcher reads. One of the first kind is a
 # bullet of the image's CLAUDE.md, one of the second names the features a
 # fragment cannot do without.
@@ -28,7 +31,7 @@ LSP_MARKER = "# claude-feat-lsp: "
 # With a dot, which a feature's name cannot have, a feature's directory goes
 # into the context by that name.
 PLUGIN_CONTEXT = "claude.plugin"
-PLUGIN_DIR = "/opt/claude-sandbox-plugin"
+PLUGIN_DIR = "/opt/claude-airlock-plugin"
 # What the first was called, in fragments written before. Refused, so that a
 # tool does not drop out of what Claude is told without a word.
 FORMER_CLAUDE_MD_MARKER = "# claude: "
@@ -69,8 +72,8 @@ def available_features(host: Host) -> list[str]:
 
 def selected_features(settings: Settings, host: Host) -> list[str]:
     """Names of the selected features. First match wins:
-    CLAUDE_DOCKER_FEATURES (set but empty selects none), then
-    ~/.config/claude-sandbox/features.txt (one name per line, # comments),
+    CLAUDE_AIRLOCK_FEATURES (set but empty selects none), then
+    ~/.config/claude-airlock/features.txt (one name per line, # comments),
     then everything available. Sorted, so the same set always generates the
     same Dockerfile whatever order it was written in. Toggling a feature
     rebuilds the ones sorted after it, name a heavy one early if that hurts."""
@@ -135,7 +138,7 @@ def lsp_plugin(servers: dict) -> str:
     """The manifest of the plugin that gives a session the language
     servers of its image."""
     manifest = {
-        "name": "claude-sandbox-lsp",
+        "name": "claude-airlock-lsp",
         "description": "The language servers built into this sandbox image",
         "version": "1.0.0",
         "lspServers": servers,
@@ -155,7 +158,7 @@ def sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
                 f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'
                 f' "{CLAUDE_MD_MARKER}", rename them'
             )
-    template = Path(DOCKERFILE_DIR, "CLAUDE-sandbox.md").read_text(encoding="utf-8")
+    template = Path(DOCKERFILE_DIR, "CLAUDE-airlock.md").read_text(encoding="utf-8")
     lines = [
         line for line in text_lines(template) if not line.startswith("- _Placeholder:")
     ]
@@ -251,9 +254,13 @@ def prune_images(current: str) -> int:
     a container still uses is kept, docker refuses to remove it. Another
     project's image, of other features, goes too: it is built again from
     the layers the build cache has, the next time it is asked for."""
-    listed = docker_output(
-        "images", "--format={{.Repository}}:{{.Tag}}", IMAGE_NAME
-    ).split()
+    listed = [
+        tag
+        for name in (IMAGE_NAME, LEGACY_IMAGE_NAME)
+        for tag in docker_output(
+            "images", "--format={{.Repository}}:{{.Tag}}", name
+        ).split()
+    ]
     removed = 0
     for tag in sorted(set(listed).difference([current])):
         if docker_ok("rmi", tag):

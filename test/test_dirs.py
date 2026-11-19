@@ -16,7 +16,7 @@ class ExtraDirsTest(LauncherTest):
 
     def test_read_only_dir(self):
         result = self.launch(
-            "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_DOCKER_FEATURES=""
+            "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_AIRLOCK_FEATURES=""
         )
         self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", result.flags)
         unasked = "--dangerously-skip-permissions"
@@ -26,7 +26,7 @@ class ExtraDirsTest(LauncherTest):
 
     def test_a_prompt_is_not_taken_for_a_directory(self):
         # --add-dir is variadic, as two arguments it would take the prompt
-        result = self.launch("--add-dir", "~/ref", "hello", CLAUDE_DOCKER_FEATURES="")
+        result = self.launch("--add-dir", "~/ref", "hello", CLAUDE_AIRLOCK_FEATURES="")
         unasked = "--dangerously-skip-permissions"
         self.assertEqual(result.command, [f"--add-dir={self.ref}", unasked, "hello"])
 
@@ -40,9 +40,9 @@ class ExtraDirsTest(LauncherTest):
         kit = self.shared / "kit"
         kit.mkdir(parents=True)
         (self.project / "docs").mkdir()
-        self.write_config(f"CLAUDE_DOCKER_PROTECT=~/claude-shared/kit:{self.ref}")
+        self.write_config(f"CLAUDE_AIRLOCK_PROTECT=~/claude-shared/kit:{self.ref}")
         flags = self.launch(
-            "--add-dir", "~/ref", CLAUDE_DOCKER_PROTECT="docs:~/not-mounted"
+            "--add-dir", "~/ref", CLAUDE_AIRLOCK_PROTECT="docs:~/not-mounted"
         ).flags
         # In the shared directory and in the project, on top of them
         self.assertIn(f"--volume={self.shared}:{self.shared}:z", flags)
@@ -54,13 +54,13 @@ class ExtraDirsTest(LauncherTest):
         # What is not mounted is not brought in
         self.assertFalse([flag for flag in flags if "not-mounted" in flag])
         self.assertIn(
-            f"--env=CLAUDE_DOCKER_PROTECT={kit}:{self.project / 'docs'}", flags
+            f"--env=CLAUDE_AIRLOCK_PROTECT={kit}:{self.project / 'docs'}", flags
         )
 
     def test_a_protected_path_that_could_be_made_inside_is_refused(self):
-        result = self.launch(CLAUDE_DOCKER_PROTECT="docs")
+        result = self.launch(CLAUDE_AIRLOCK_PROTECT="docs")
         self.assert_refused(result, "cannot protect docs: it does not exist")
-        result = self.launch(CLAUDE_DOCKER_PROTECT=str(self.home / "proj"))
+        result = self.launch(CLAUDE_AIRLOCK_PROTECT=str(self.home / "proj"))
         self.assert_refused(result, "the project is in it")
 
     def test_home_directory_is_refused(self):
@@ -96,17 +96,17 @@ class ExtraDirsTest(LauncherTest):
 
     def test_shared_dir_can_be_moved(self):
         self.shared.mkdir()
-        flags = self.launch(CLAUDE_DOCKER_SHARED_DIR=str(self.ref)).flags
+        flags = self.launch(CLAUDE_AIRLOCK_SHARED_DIR=str(self.ref)).flags
         self.assertIn(f"--volume={self.ref}:{self.ref}:z", flags)
         self.assertFalse([flag for flag in flags if "claude-shared" in flag])
 
     def test_empty_shared_dir_setting_mounts_none(self):
         self.shared.mkdir()
-        flags = self.launch(CLAUDE_DOCKER_SHARED_DIR="").flags
+        flags = self.launch(CLAUDE_AIRLOCK_SHARED_DIR="").flags
         self.assertFalse([flag for flag in flags if "claude-shared" in flag])
 
     def test_a_missing_named_shared_dir_aborts(self):
-        result = self.launch(CLAUDE_DOCKER_SHARED_DIR="/nonexistent")
+        result = self.launch(CLAUDE_AIRLOCK_SHARED_DIR="/nonexistent")
         self.assert_refused(result, "not a directory: /nonexistent")
 
 

@@ -1,6 +1,6 @@
 # Sandboxed environment for running Claude Code via Docker.
 #
-# This is the first of three parts: claude_sandbox/image.py concatenates
+# This is the first of three parts: claude_airlock/image.py concatenates
 # base.Dockerfile, the selected features/*.Dockerfile and tail.Dockerfile
 # into the Dockerfile it builds. Lines starting with "# claude-feat-md: " are
 # collected into the image's /etc/claude-code/CLAUDE.md, so the tool list
@@ -42,7 +42,7 @@ RUN apt-get update \
     git \
     openssh-client \
     gh \
-    # SSH-over-proxy tunnel for the egress allowlist (see claude_sandbox/network.py)
+    # SSH-over-proxy tunnel for the egress allowlist (see claude_airlock/network.py)
     netcat-openbsd \
     # Search and filesystem
     ripgrep \
@@ -108,7 +108,7 @@ RUN git config --system advice.detachedHead false \
 
 # No usage reports from gh, nor from what a project commonly installs. Each
 # is named, as DO_NOT_TRACK would also bind Claude Code, whose reports are
-# for CLAUDE_DOCKER_TELEMETRY to decide (see session.py).
+# for CLAUDE_AIRLOCK_TELEMETRY to decide (see session.py).
 ENV GH_TELEMETRY=false \
     NEXT_TELEMETRY_DISABLED=1 \
     NUXT_TELEMETRY_DISABLED=1 \

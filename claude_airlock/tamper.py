@@ -36,7 +36,7 @@ PROJECT_TREES = (
 )
 # The same of ~/.claude is CONFIG_FILES and CONFIG_TREES of settings.py.
 # Most of it is mounted read-only and cannot differ, unless
-# CLAUDE_DOCKER_RW_CONFIG=1 leaves it writable.
+# CLAUDE_AIRLOCK_RW_CONFIG=1 leaves it writable.
 # What is watched there and cannot be protected: Claude Code updates its
 # plugins itself, so they stay writable, and a plugin brings hooks, servers
 # and instructions that the host's claude runs and follows too. The
@@ -421,7 +421,7 @@ def report_build_changes(
     more = len(changed) - MOST_NAMED
     whose = f"the session {unchecked} started" if unchecked else "this session started"
     print(
-        f"claude-docker: since {whose}, these files that your tools run on the"
+        f"claude-airlock: since {whose}, these files that your tools run on the"
         " host (make, a package manager, a test runner, a hook manager, an"
         " editor), or that git and Claude follow below the top of the"
         " project, have changed:",
@@ -465,7 +465,7 @@ def report_memory(changed: list[str], unchecked: str = "") -> None:
     more = len(changed) - MOST_NAMED
     whose = f"the session {unchecked}" if unchecked else "this session"
     print(
-        f"claude-docker: {whose} changed what Claude remembers of this project,"
+        f"claude-airlock: {whose} changed what Claude remembers of this project,"
         " which every later session here is told:",
         *(f"  {path}" for path in changed[:MOST_NAMED]),
         *([f"  and {more} more"] if more > 0 else []),
@@ -503,13 +503,13 @@ def report_tampering(
         return
     if unchecked:
         heading = (
-            f"claude-docker: the session {unchecked} ended without its check. Since"
+            f"claude-airlock: the session {unchecked} ended without its check. Since"
             " it started, by its doing or yours, these files that can run commands"
             " on the host, or that Claude follows there, have changed:"
         )
     else:
         heading = (
-            "claude-docker: this session changed files that can run commands"
+            "claude-airlock: this session changed files that can run commands"
             " on the host, or that Claude follows there:"
         )
     print(
@@ -572,7 +572,7 @@ def report_unchecked_sessions(directory: Path) -> None:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Said out loud, a check must not vanish without a word
             print(
-                f"claude-docker: dropping an unreadable pending check: {file}",
+                f"claude-airlock: dropping an unreadable pending check: {file}",
                 file=sys.stderr,
             )
             file.unlink(missing_ok=True)

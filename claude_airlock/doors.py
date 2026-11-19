@@ -1,6 +1,6 @@
 """Noting each use of the two doors a session can be given out of the
-sandbox: the SSH agent (CLAUDE_DOCKER_SSH_AGENT=1) and the Docker socket
-(CLAUDE_DOCKER_SOCKET), for --trace to show.
+sandbox: the SSH agent (CLAUDE_AIRLOCK_SSH_AGENT=1) and the Docker socket
+(CLAUDE_AIRLOCK_DOCKER_SOCKET), for --trace to show.
 
 The agent signs as the user towards every host their keys reach, and says
 nothing of it. So the session is not given the agent's socket but one of
@@ -363,7 +363,7 @@ def refuse_unreachable_agent(
         raise Fatal(
             f"the SSH agent cannot be reached under {runtime.shown}:"
             f" {runtime.no_host_sockets}, see docs/sandbox.md."
-            " CLAUDE_DOCKER_SSH_AGENT=0 runs without the agent."
+            " CLAUDE_AIRLOCK_SSH_AGENT=0 runs without the agent."
         )
 
 
@@ -372,7 +372,7 @@ def ssh_agent_door(
     settings: Settings, host: Host, session: str, env: Mapping[str, str]
 ) -> Iterator[list[str]]:
     """Forward the SSH agent for as long as a session runs, opt-in with
-    CLAUDE_DOCKER_SSH_AGENT=1: the agent lets the container authenticate
+    CLAUDE_AIRLOCK_SSH_AGENT=1: the agent lets the container authenticate
     as you to every host your keys reach, not only the git remote. Loading
     keys with ssh-add -c makes each use ask first. Gives the options the
     session is run with. What the session is given is a socket of the
@@ -390,7 +390,7 @@ def ssh_agent_door(
             door = AgentDoor(host, session, agent)
         except OSError as problem:
             print(
-                f"claude-docker: the use of the SSH agent is not recorded: {problem}",
+                f"claude-airlock: the use of the SSH agent is not recorded: {problem}",
                 file=sys.stderr,
             )
     mount = (
@@ -403,7 +403,7 @@ def ssh_agent_door(
             mount,
             env_arg("SSH_AUTH_SOCK", AGENT_TARGET),
             # Shown by bin/claude-statusline
-            env_arg("CLAUDE_DOCKER_SSH_AGENT", 1),
+            env_arg("CLAUDE_AIRLOCK_SSH_AGENT", 1),
         ]
     finally:
         if door:

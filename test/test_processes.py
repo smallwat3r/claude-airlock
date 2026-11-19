@@ -19,7 +19,7 @@ from unittest import mock
 from harness import LauncherTest, prompts_at
 from test_capture import pcap_file, tcp
 
-from claude_sandbox import health, processes, procwatch
+from claude_airlock import health, processes, procwatch
 
 SIDECAR = "claude-proj.procs"
 
@@ -548,7 +548,7 @@ class SidecarTest(LauncherTest):
         return self.launch(
             *args,
             session=session,
-            CLAUDE_DOCKER_PROC_LOG="1",
+            CLAUDE_AIRLOCK_PROC_LOG="1",
             FAKE_RUNNING="claude-proj",
             FAKE_PROCESSES=str(self.record_file),
             **env,
@@ -576,7 +576,7 @@ class SidecarTest(LauncherTest):
 
     def test_it_joins_the_network_of_the_capture(self):
         result = self.watched(
-            CLAUDE_DOCKER_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file)
+            CLAUDE_AIRLOCK_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file)
         )
         self.assertIn(
             "--network=container:claude-proj.capture", result.sidecar(SIDECAR)
@@ -619,7 +619,7 @@ class SidecarTest(LauncherTest):
         )
 
     def trace(self, *args: str) -> str:
-        self.watched(CLAUDE_DOCKER_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file))
+        self.watched(CLAUDE_AIRLOCK_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file))
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         result = self.launch("--trace", *args)
         self.assertEqual(result.status, 0, result.stderr)
@@ -629,7 +629,7 @@ class SidecarTest(LauncherTest):
         with open(self.record_file, "a") as record:
             record.write(json.dumps({"t": self.now + 3, "limit": "pids", "hits": 4}))
             record.write("\n")
-        ended = self.watched(FAKE_EVENTS="oom\noom", CLAUDE_DOCKER_MEMORY="2g")
+        ended = self.watched(FAKE_EVENTS="oom\noom", CLAUDE_AIRLOCK_MEMORY="2g")
         self.assertIn("ran into its limit of processes 4 times", ended.stderr)
         self.assertIn("ran into its memory limit of 2g 2 times", ended.stderr)
         self.assertIn(

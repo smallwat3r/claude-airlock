@@ -93,10 +93,10 @@ class DefaultSessionTest(LauncherTest):
         self.assertEqual(self.command(), [unasked])
         self.assertEqual(self.command("-p", "hi"), [unasked, "-p", "hi"])
         # Asked for, in the environment or the config file
-        self.assertEqual(self.command(CLAUDE_DOCKER_ASK="1"), [])
-        self.write_config("CLAUDE_DOCKER_ASK=1")
+        self.assertEqual(self.command(CLAUDE_AIRLOCK_ASK="1"), [])
+        self.write_config("CLAUDE_AIRLOCK_ASK=1")
         self.assertEqual(self.command("-p", "hi"), ["-p", "hi"])
-        self.assertEqual(self.command(CLAUDE_DOCKER_ASK="0"), [unasked])
+        self.assertEqual(self.command(CLAUDE_AIRLOCK_ASK="0"), [unasked])
 
     def test_how_to_go_about_permissions_is_the_users_to_say(self):
         for args in (
@@ -113,12 +113,12 @@ class DefaultSessionTest(LauncherTest):
 
     def test_the_session_is_told_its_settings(self):
         for flag in (
-            "--env=CLAUDE_DOCKER_NET_FILTER=0",
-            "--env=CLAUDE_DOCKER_NET_LOG=0",
-            "--env=CLAUDE_DOCKER_PROC_LOG=0",
-            "--env=CLAUDE_DOCKER_CACHE=1",
-            "--env=CLAUDE_DOCKER_MEMORY=16g",
-            "--env=CLAUDE_DOCKER_PIDS=512",
+            "--env=CLAUDE_AIRLOCK_NET_FILTER=0",
+            "--env=CLAUDE_AIRLOCK_NET_LOG=0",
+            "--env=CLAUDE_AIRLOCK_PROC_LOG=0",
+            "--env=CLAUDE_AIRLOCK_CACHE=1",
+            "--env=CLAUDE_AIRLOCK_MEMORY=16g",
+            "--env=CLAUDE_AIRLOCK_PIDS=512",
         ):
             self.assertIn(flag, self.flags)
 
@@ -131,7 +131,7 @@ class DefaultSessionTest(LauncherTest):
         for flag in off:
             self.assertIn(flag, self.flags)
         # The second session of this test, after the one of setUp
-        calls = self.launch(CLAUDE_DOCKER_TELEMETRY="1").calls
+        calls = self.launch(CLAUDE_AIRLOCK_TELEMETRY="1").calls
         allowed = [call for call in calls if call[0] == "run"][-1]
         for flag in off:
             self.assertNotIn(flag, allowed)
@@ -139,7 +139,7 @@ class DefaultSessionTest(LauncherTest):
     def test_the_connectors_of_the_account_are_not_loaded_unless_asked_for(self):
         off = "--env=ENABLE_CLAUDEAI_MCP_SERVERS=false"
         self.assertIn(off, self.flags)
-        calls = self.launch(CLAUDE_DOCKER_CONNECTORS="1").calls
+        calls = self.launch(CLAUDE_AIRLOCK_CONNECTORS="1").calls
         allowed = [call for call in calls if call[0] == "run"][-1]
         self.assertNotIn(off, allowed)
 
@@ -150,10 +150,10 @@ class DefaultSessionTest(LauncherTest):
     def test_every_cpu_unless_a_limit_is_set(self):
         self.assertNotIn("cpus", "\n".join(self.flags).lower())
         # The second session of this test, after the one of setUp
-        calls = self.launch(CLAUDE_DOCKER_CPUS="1.5").calls
+        calls = self.launch(CLAUDE_AIRLOCK_CPUS="1.5").calls
         limited = [call for call in calls if call[0] == "run"][-1]
         self.assertIn("--cpus=1.5", limited)
-        self.assertIn("--env=CLAUDE_DOCKER_CPUS=1.5", limited)
+        self.assertIn("--env=CLAUDE_AIRLOCK_CPUS=1.5", limited)
 
     def test_opt_in_doors_are_closed(self):
         text = "\n".join(self.flags)
@@ -165,11 +165,11 @@ class DefaultSessionTest(LauncherTest):
             "--dns",
         ):
             self.assertNotIn(marker, text)
-        self.assertIsNone(self.result.sidecar("claude-docker-ps-proxy"))
+        self.assertIsNone(self.result.sidecar("claude-airlock-ps-proxy"))
         self.assertIsNone(self.result.sidecar("claude-egress-proxy"))
 
     def test_egress_is_open(self):
-        self.assertIn("--network=claude-docker-open-net", self.flags)
+        self.assertIn("--network=claude-airlock-open-net", self.flags)
 
     def test_cache_is_a_per_project_volume(self):
         pattern = r"^--volume=claude-cache-proj-[0-9a-f]{8}:/home/sandbox/\.cache$"
@@ -179,7 +179,7 @@ class DefaultSessionTest(LauncherTest):
         self.assertNotIn("--tty", self.flags)
 
     def test_image_tag_is_a_content_hash(self):
-        self.assertRegex(self.result.image, r"^claude-code-sandbox:[0-9a-f]{12}$")
+        self.assertRegex(self.result.image, r"^claude-airlock:[0-9a-f]{12}$")
 
 
 class HomeTest(LauncherTest):
@@ -225,7 +225,7 @@ class HomeTest(LauncherTest):
             self.assertIn(f"--volume={claude / name}:{self.CLAUDE}/{name}:z", flags)
 
     def test_every_mount_in_it_has_something_to_go_over(self):
-        for extra in ({}, {"CLAUDE_DOCKER_SHARED_HISTORY": "1"}):
+        for extra in ({}, {"CLAUDE_AIRLOCK_SHARED_HISTORY": "1"}):
             flags = self.launch(**extra).flags
             (self.work / "log").unlink()
             inside = [
@@ -270,7 +270,7 @@ class SocketProxyTest(LauncherTest):
             self.addCleanup(patch.stop)
 
     def sidecar_for(self, mode: settings.SocketAccess) -> tuple[list[str], list[str]]:
-        asked = settings.Settings(socket=mode)
+        asked = settings.Settings(docker_socket=mode)
         network.start_socket_proxy(asked)
         args = network.socket_proxy_args(asked)
         sidecars = [call for call in self.calls() if call[0] == "run"]
@@ -279,18 +279,18 @@ class SocketProxyTest(LauncherTest):
 
     def test_mode_1_uses_the_limited_sidecar(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
-        self.assertIn("--name=claude-docker-ps-proxy", sidecar)
+        self.assertIn("--name=claude-airlock-ps-proxy", sidecar)
         self.assertTrue(any("docker-socket-proxy.cfg" in arg for arg in sidecar))
         # No allow switches, the stock rules deny containers
         self.assertNotIn("--env=CONTAINERS=1", sidecar)
-        self.assertIn("--env=DOCKER_HOST=tcp://claude-docker-ps-proxy:2375", args)
+        self.assertIn("--env=DOCKER_HOST=tcp://claude-airlock-ps-proxy:2375", args)
 
     def test_mode_full_uses_its_own_sidecar_and_blocks_writes(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
-        self.assertIn("--name=claude-docker-proxy", sidecar)
+        self.assertIn("--name=claude-airlock-proxy", sidecar)
         for switch in ("CONTAINERS=1", "POST=0", "EXEC=0"):
             self.assertIn(f"--env={switch}", sidecar)
-        self.assertIn("--env=DOCKER_HOST=tcp://claude-docker-proxy:2375", args)
+        self.assertIn("--env=DOCKER_HOST=tcp://claude-airlock-proxy:2375", args)
 
     def test_the_socket_is_mounted_read_only(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
@@ -304,28 +304,28 @@ class SocketProxyTest(LauncherTest):
 
     def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
         names = {
-            mode: network.network_name(settings.Settings(socket=mode))
+            mode: network.network_name(settings.Settings(docker_socket=mode))
             for mode in settings.SocketAccess
         }
         self.assertEqual(
             names,
             {
-                settings.SocketAccess.OFF: "claude-docker-open-net",
-                settings.SocketAccess.LIMITED: "claude-docker-open-net-ps",
-                settings.SocketAccess.FULL: "claude-docker-open-net-full",
+                settings.SocketAccess.OFF: "claude-airlock-open-net",
+                settings.SocketAccess.LIMITED: "claude-airlock-open-net-ps",
+                settings.SocketAccess.FULL: "claude-airlock-open-net-full",
             },
         )
         _, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
-        self.assertIn("--network=claude-docker-open-net-full", sidecar)
+        self.assertIn("--network=claude-airlock-open-net-full", sidecar)
         self.assertNotIn(
-            ["network", "connect", "claude-docker-open-net", "claude-docker-proxy"],
+            ["network", "connect", "claude-airlock-open-net", "claude-airlock-proxy"],
             self.calls(),
         )
 
     def test_a_proxy_is_labelled_with_what_it_was_started_from(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         self.assertTrue(
-            [arg for arg in sidecar if arg.startswith("--label=claude-sandbox.config=")]
+            [arg for arg in sidecar if arg.startswith("--label=claude-airlock.config=")]
         )
 
 

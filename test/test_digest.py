@@ -10,7 +10,7 @@ import unittest
 from harness import LauncherTest, prompts_at
 from test_capture import answer, dns_failure, dns_response, ipv4, pcap_file, tcp, udp
 
-HEADING = "claude-docker: of this session"
+HEADING = "claude-airlock: of this session"
 
 
 def uploaded(address: str, port: int, megabytes: int) -> list[bytes]:
@@ -39,7 +39,7 @@ class DigestTest(LauncherTest):
         )
         return self.launch(
             session=session,
-            CLAUDE_DOCKER_NET_LOG="1",
+            CLAUDE_AIRLOCK_NET_LOG="1",
             FAKE_CAPTURE=str(self.capture_file),
             **env,
         ).stderr

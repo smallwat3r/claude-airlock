@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code statusline. Shows the model, the used session limits (5h and
-# 7d rate-limit windows), and inside a claude-docker container a sandbox
-# badge (the container name, exported by bin/claude-docker), the network
+# 7d rate-limit windows), and inside a claude-airlock container a sandbox
+# badge (the container name, exported by bin/claude-airlock), the network
 # mode, the opt-in doors that are open and the extra mounted directories. Outside the sandbox those are simply absent.
 
 set -u
@@ -38,10 +38,10 @@ limit_part() { # label used_pct [resets_epoch]
 limit_part 5h "${five_used}" "${five_resets}"
 limit_part 7d "${seven_used}"
 
-if [ -n "${CLAUDE_DOCKER_SANDBOX:-}" ]; then
-  parts+=("$(printf '\033[1;32m[%s]\033[0m' "${CLAUDE_DOCKER_SANDBOX}")")
+if [ -n "${CLAUDE_AIRLOCK_SANDBOX:-}" ]; then
+  parts+=("$(printf '\033[1;32m[%s]\033[0m' "${CLAUDE_AIRLOCK_SANDBOX}")")
   # Network mode: dim when egress is filtered, yellow when open
-  if [ "${CLAUDE_DOCKER_NET_FILTER:-0}" = "1" ]; then
+  if [ "${CLAUDE_AIRLOCK_NET_FILTER:-0}" = "1" ]; then
     parts+=("$(printf '\033[2mnet:filtered\033[0m')")
   else
     parts+=("$(printf '\033[33mnet:open\033[0m')")
@@ -49,21 +49,21 @@ if [ -n "${CLAUDE_DOCKER_SANDBOX:-}" ]; then
   # The doors this session was started with, absent when closed. Yellow for
   # the ones that widen what a session can reach, red for full inspect,
   # which exposes the environment of every container on the host.
-  if [ "${CLAUDE_DOCKER_SSH_AGENT:-0}" = "1" ]; then
+  if [ "${CLAUDE_AIRLOCK_SSH_AGENT:-0}" = "1" ]; then
     parts+=("$(printf '\033[33mssh-agent\033[0m')")
   fi
-  case "${CLAUDE_DOCKER_SOCKET:-0}" in
+  case "${CLAUDE_AIRLOCK_DOCKER_SOCKET:-0}" in
     1) parts+=("$(printf '\033[33mdocker:ps\033[0m')") ;;
     full) parts+=("$(printf '\033[31mdocker:full\033[0m')") ;;
   esac
-  if [ "${CLAUDE_DOCKER_RW_CONFIG:-0}" = "1" ]; then
+  if [ "${CLAUDE_AIRLOCK_RW_CONFIG:-0}" = "1" ]; then
     parts+=("$(printf '\033[33mconfig:rw\033[0m')")
   fi
-  if [ "${CLAUDE_DOCKER_SHARED_HISTORY:-0}" = "1" ]; then
+  if [ "${CLAUDE_AIRLOCK_SHARED_HISTORY:-0}" = "1" ]; then
     parts+=("$(printf '\033[33mhistory:all\033[0m')")
   fi
-  if [ -n "${CLAUDE_DOCKER_DIRS:-}" ]; then
-    dirs="${CLAUDE_DOCKER_DIRS//:/ }"
+  if [ -n "${CLAUDE_AIRLOCK_DIRS:-}" ]; then
+    dirs="${CLAUDE_AIRLOCK_DIRS//:/ }"
     dirs="${dirs//${HOME}/\~}"
     parts+=("$(printf '\033[2mdirs: %s\033[0m' "${dirs}")")
   fi

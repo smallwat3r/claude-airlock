@@ -1,4 +1,4 @@
-"""Recording what a session connects to (CLAUDE_DOCKER_NET_LOG, on unless
+"""Recording what a session connects to (CLAUDE_AIRLOCK_NET_LOG, on unless
 set to 0), and reading the capture of a running session for --trace
 --follow. What a capture says is read by pcap.py.
 
@@ -33,7 +33,7 @@ from .settings import Fatal, Host, Settings
 from .sidecar import Sidecar
 
 CAPTURE_SUFFIX = ".capture"
-CAPTURE_LABEL = "claude-sandbox.capture"
+CAPTURE_LABEL = "claude-airlock.capture"
 CAPTURE_FILE = "/capture.pcap"
 # tcpdump stops after this many packets, of at most SNAP_LENGTH bytes each,
 # which bounds what a session can make the sidecar write. --trace says so
@@ -158,7 +158,7 @@ def start_capture(
         said = sidecar.last_said()
         sidecar.remove()
         raise Fatal(
-            "the network capture did not start, CLAUDE_DOCKER_NET_LOG=0 runs"
+            "the network capture did not start, CLAUDE_AIRLOCK_NET_LOG=0 runs"
             f" a session without it:\n{said}"
         )
     return sidecar

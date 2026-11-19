@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# A session with the socket proxy (CLAUDE_DOCKER_SOCKET=1).
+# A session with the socket proxy (CLAUDE_AIRLOCK_DOCKER_SOCKET=1).
 
 if ! command -v docker >/dev/null; then
   echo "skip the docker feature is not in this image"

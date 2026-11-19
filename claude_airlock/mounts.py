@@ -98,7 +98,7 @@ def within(path: str, root: str) -> str | None:
 def protected_dirs(
     dirs: list[ExtraDir], settings: Settings, host: Host
 ) -> tuple[list[ExtraDir], list[str]]:
-    """What CLAUDE_DOCKER_PROTECT makes of a session's mounts: the
+    """What CLAUDE_AIRLOCK_PROTECT makes of a session's mounts: the
     directories to mount, those it names read-only, and the paths inside
     one of them (or the project) to mount read-only on top, each as it is
     found there. For what a session must be able to read and must not
@@ -143,14 +143,14 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
     if dirs:
         # Read by bin/claude-statusline to list the mounted extra directories
         shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
-        args.append(env_arg("CLAUDE_DOCKER_DIRS", shown))
+        args.append(env_arg("CLAUDE_AIRLOCK_DIRS", shown))
     return args
 
 
 def protect_env_args(inside: list[str]) -> list[str]:
     """The session is told what it cannot change of what it has mounted,
-    see docker/CLAUDE-sandbox.md."""
-    return [env_arg("CLAUDE_DOCKER_PROTECT", ":".join(inside))] if inside else []
+    see docker/CLAUDE-airlock.md."""
+    return [env_arg("CLAUDE_AIRLOCK_PROTECT", ":".join(inside))] if inside else []
 
 
 def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[str]:
@@ -159,7 +159,7 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
     they are never visible inside the container. Template files (.env.example
     and friends) stay readable, they exist to be read and hold no secrets.
     Regular files only: a .env directory (some virtualenvs) cannot take a
-    /dev/null bind mount and would abort the run. CLAUDE_DOCKER_SHADOW adds
+    /dev/null bind mount and would abort the run. CLAUDE_AIRLOCK_SHADOW adds
     name globs, e.g. "*.pem:.npmrc". The whole tree is walked on purpose,
     pruning more directories would be faster but could leave a real secret
     visible."""

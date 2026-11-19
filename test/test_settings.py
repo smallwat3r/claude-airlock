@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The one list of the CLAUDE_DOCKER_* settings, and what has to keep up
+"""The one list of the CLAUDE_AIRLOCK_* settings, and what has to keep up
 with it: the fields their values are read into, --help, the README and
 what a session is told of them."""
 
@@ -12,10 +12,10 @@ from pathlib import Path
 
 from harness import ROOT, LauncherTest, settings
 
-NAMED = re.compile(r"CLAUDE_DOCKER_[A-Z_]+")
+NAMED = re.compile(r"CLAUDE_AIRLOCK_[A-Z_]+")
 # What a session is told that is not a setting: its container's name, and
 # the directories mounted next to its project
-TOLD_TO_A_SESSION = {"CLAUDE_DOCKER_SANDBOX", "CLAUDE_DOCKER_DIRS"}
+TOLD_TO_A_SESSION = {"CLAUDE_AIRLOCK_SANDBOX", "CLAUDE_AIRLOCK_DIRS"}
 
 
 class SettingsListTest(LauncherTest):
@@ -38,10 +38,12 @@ class SettingsListTest(LauncherTest):
             ("1", settings.SocketAccess.LIMITED),
             ("full", settings.SocketAccess.FULL),
         ):
-            read = settings.load_settings({"CLAUDE_DOCKER_SOCKET": said}, missing)
-            self.assertIs(read.socket, access)
+            read = settings.load_settings(
+                {"CLAUDE_AIRLOCK_DOCKER_SOCKET": said}, missing
+            )
+            self.assertIs(read.docker_socket, access)
         with self.assertRaises(settings.Fatal):
-            settings.load_settings({"CLAUDE_DOCKER_SOCKET": "all"}, missing)
+            settings.load_settings({"CLAUDE_AIRLOCK_DOCKER_SOCKET": "all"}, missing)
 
     def test_the_config_file_takes_all_but_the_per_project_ones(self):
         left_out = {s.name for s in settings.SETTINGS} - settings.CONFIG_FILE_SETTINGS
@@ -88,31 +90,31 @@ class SettingsListTest(LauncherTest):
                 )
 
     def test_a_session_is_told_of_no_setting_that_is_not_one(self):
-        told = (ROOT / "docker" / "CLAUDE-sandbox.md").read_text(encoding="utf-8")
+        told = (ROOT / "docker" / "CLAUDE-airlock.md").read_text(encoding="utf-8")
         named = set(NAMED.findall(told)) - TOLD_TO_A_SESSION
         self.assertLessEqual(named, self.variables)
 
     def test_a_session_is_told_of_every_setting_it_is_given(self):
-        told = (ROOT / "docker" / "CLAUDE-sandbox.md").read_text(encoding="utf-8")
+        told = (ROOT / "docker" / "CLAUDE-airlock.md").read_text(encoding="utf-8")
         (self.project / "docs").mkdir()
         flags = self.launch(
             "--add-dir-ro",
             "~/ref",
             SSH_AUTH_SOCK="/tmp/agent.sock",
-            CLAUDE_DOCKER_SSH_AGENT="1",
-            CLAUDE_DOCKER_RW_CONFIG="1",
-            CLAUDE_DOCKER_SHARED_HISTORY="1",
-            CLAUDE_DOCKER_PROTECT="docs",
-            CLAUDE_DOCKER_CPUS="2",
+            CLAUDE_AIRLOCK_SSH_AGENT="1",
+            CLAUDE_AIRLOCK_RW_CONFIG="1",
+            CLAUDE_AIRLOCK_SHARED_HISTORY="1",
+            CLAUDE_AIRLOCK_PROTECT="docs",
+            CLAUDE_AIRLOCK_CPUS="2",
         ).flags
         given = {
             NAMED.match(flag[len("--env=") :]).group()
             for flag in flags
-            if flag.startswith("--env=CLAUDE_DOCKER_")
+            if flag.startswith("--env=CLAUDE_AIRLOCK_")
         }
-        self.assertLessEqual({"CLAUDE_DOCKER_PROTECT", "CLAUDE_DOCKER_DIRS"}, given)
+        self.assertLessEqual({"CLAUDE_AIRLOCK_PROTECT", "CLAUDE_AIRLOCK_DIRS"}, given)
         self.assertLessEqual(
-            given - {"CLAUDE_DOCKER_SANDBOX"}, set(NAMED.findall(told))
+            given - {"CLAUDE_AIRLOCK_SANDBOX"}, set(NAMED.findall(told))
         )
 
 

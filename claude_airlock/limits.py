@@ -1,4 +1,4 @@
-"""Noticing that a session ran into its memory limit (CLAUDE_DOCKER_MEMORY).
+"""Noticing that a session ran into its memory limit (CLAUDE_AIRLOCK_MEMORY).
 
 The kernel then ends a process of the session, or the session itself, and
 all that is left of it is an exit status of 137 from a container that is
@@ -6,7 +6,7 @@ removed as it ends. Docker says so as it happens, as an event of the
 container: the launcher listens for those while a session runs, from
 outside it, and says what it heard when the session is over.
 
-That a session ran into its limit of processes (CLAUDE_DOCKER_PIDS) is no
+That a session ran into its limit of processes (CLAUDE_AIRLOCK_PIDS) is no
 event of docker's. The sidecar that notes the processes reads it from the
 session's own count, see procwatch.py."""
 
@@ -39,7 +39,7 @@ class LimitsHit:
         times = "" if self.out_of_memory == 1 else f" {self.out_of_memory} times"
         said = (
             f"ran into its memory limit of {self.memory}{times}, what it ran was"
-            " ended for it: CLAUDE_DOCKER_MEMORY sets the limit"
+            " ended for it: CLAUDE_AIRLOCK_MEMORY sets the limit"
         )
         return [said]
 

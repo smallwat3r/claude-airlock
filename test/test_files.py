@@ -9,7 +9,7 @@ import unittest
 
 from harness import LauncherTest
 
-from claude_sandbox import files
+from claude_airlock import files
 
 
 class FilesTest(LauncherTest):

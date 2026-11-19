@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""claude-airlock - Run Claude Code inside a sandboxed Docker container.
+
+Builds the sandbox image on first use, then runs claude inside a container
+with the project directory mounted read-write and ~/.claude persisted.
+
+  claude-airlock [--add-dir DIR]... [--add-dir-ro DIR]... [claude args]...
+  claude-airlock --shell [bash args]   bash in the same sandbox, not claude
+  claude-airlock --line-mode [claude args]  one session in line mode, the
+                                 default: claude without its native
+                                 UI, which only adds lines: a prompt, and
+                                 what the session does as --trace shows
+                                 it, its network included. /help there
+                                 says what can be typed. With
+                                 CLAUDE_AIRLOCK_LINE_MODE=0 every session
+                                 has the native UI, see
+                                 docs/line-mode.md
+  claude-airlock --rebuild       force a clean image rebuild, then exit
+  claude-airlock --prune         delete all sandbox images but the current one,
+                                 then exit
+  claude-airlock --dockerfile    print the generated Dockerfile, then exit
+  claude-airlock --net-log       domains the egress filter denied, then exit
+  claude-airlock --net-reload    restart the egress filter, then exit
+  claude-airlock --trace [list | SESSION] [--follow] [--verbose | --json]
+                [--only KIND,...] [--failed]
+                                 what the latest session of this project
+                                 did, or the one whose id starts with
+                                 SESSION, list lists them, --json gives
+                                 JSON Lines, --follow shows what the
+                                 sessions do as they do it, --only shows
+                                 the kinds of event named (bash, net),
+                                 --failed what went wrong
+  claude-airlock --worktree [NAME]   second session on its own checkout
+  claude-airlock --help, -h      this text, then exit. For claude's own:
+                                 claude-airlock --shell -c "claude --help"
+
+--worktree is claude's own flag, forwarded like any other claude arg: it
+creates a git worktree and branch under .claude/worktrees/ in the project,
+which the project mount already covers, so parallel sessions do not share
+a working tree or index.
+
+Extra project directories (e.g. the frontend repo next to this backend)
+are mounted read-write at their host path, get their .env files shadowed
+like the main project's, and are forwarded to claude via --add-dir. Also
+accepted, colon-separated: CLAUDE_AIRLOCK_EXTRA_DIRS=~/code/frontend
+--add-dir-ro (or CLAUDE_AIRLOCK_EXTRA_DIRS_RO) does the same read-only, for
+reference code the session should read but never change.
+
+The image is assembled from docker: base.Dockerfile, the
+selected features/*.Dockerfile, then tail.Dockerfile.
+"""
+
+# The text above is what --help prints, followed by the settings, which are
+# listed once, in claude_airlock/settings.py. The code is the claude_airlock
+# package next to this directory, each module says what it is for in its
+# first lines: cli.py is where a session starts and ends. Standard library
+# only, and no syntax newer than Python 3.9, the version macOS ships.
+
+import os
+import sys
+
+
+def main() -> int:
+    # The package sits next to bin/ in the checkout, it is not installed.
+    # realpath, so this script can be symlinked into a directory on PATH.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    from claude_airlock.cli import cli
+
+    return cli(__doc__ or "")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

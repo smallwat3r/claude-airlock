@@ -85,7 +85,9 @@ class Start:
             # Under a runtime no sidecar can see into, see host_health.py
             seen = runtime.JOINABLE
             recorded.append("processes" if seen else "memory and CPU use")
-        socket = settings.socket if has_socket_proxy(settings) else SocketAccess.OFF
+        socket = (
+            settings.docker_socket if has_socket_proxy(settings) else SocketAccess.OFF
+        )
         switches = (
             (ssh_agent, SSH_AGENT),
             (socket in SOCKET_SHOWN, SOCKET_SHOWN.get(socket, "")),

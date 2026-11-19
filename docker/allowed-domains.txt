@@ -1,7 +1,7 @@
 # Egress allowlist for the Claude sandbox (squid dstdomain format).
 # A leading dot matches the domain and all subdomains.
 # An edit is picked up by the next filtered session, or at once with
-# claude-docker --net-reload.
+# claude-airlock --net-reload.
 .anthropic.com
 .claude.ai
 .claude.com

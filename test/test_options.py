@@ -13,18 +13,18 @@ from harness import (
     Result,
 )
 
-from claude_sandbox import session
+from claude_airlock import session
 
 
 class OptionsTest(LauncherTest):
     def test_opt_ins(self):
         flags = self.launch(
             SSH_AUTH_SOCK="/tmp/agent.sock",
-            CLAUDE_DOCKER_SSH_AGENT="1",
-            CLAUDE_DOCKER_SHADOW="*.pem",
-            CLAUDE_DOCKER_RW_CONFIG="1",
-            CLAUDE_DOCKER_CACHE="0",
-            CLAUDE_DOCKER_RUNTIME="runsc",
+            CLAUDE_AIRLOCK_SSH_AGENT="1",
+            CLAUDE_AIRLOCK_SHADOW="*.pem",
+            CLAUDE_AIRLOCK_RW_CONFIG="1",
+            CLAUDE_AIRLOCK_CACHE="0",
+            CLAUDE_AIRLOCK_RUNTIME="runsc",
         ).flags
         self.assertIn("--env=SSH_AUTH_SOCK=/tmp/ssh-agent.sock", flags)
         self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
@@ -43,15 +43,15 @@ class OptionsTest(LauncherTest):
     @unittest.skipIf(sys.platform == "darwin", "no socket of the host mounts there")
     def test_the_agent_is_reached_through_the_launcher(self):
         flags = self.launch(
-            SSH_AUTH_SOCK="/tmp/agent.sock", CLAUDE_DOCKER_SSH_AGENT="1"
+            SSH_AUTH_SOCK="/tmp/agent.sock", CLAUDE_AIRLOCK_SSH_AGENT="1"
         ).flags
         # Not the agent's own socket, one of the launcher's in front of it
         (agent,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
         self.assertIn(f"--volume={self.state / 'agents'}/", agent)
 
     def test_a_flag_must_be_0_or_1(self):
-        result = self.launch(CLAUDE_DOCKER_NET_FILTER="true")
-        self.assert_refused(result, "CLAUDE_DOCKER_NET_FILTER must be 0 or 1")
+        result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="true")
+        self.assert_refused(result, "CLAUDE_AIRLOCK_NET_FILTER must be 0 or 1")
 
     def test_shell_runs_bash_without_claude_arguments(self):
         result = self.launch("--shell", "--add-dir", str(self.home / "ref"), "-c", "ls")
@@ -59,8 +59,8 @@ class OptionsTest(LauncherTest):
         self.assertEqual(result.command, ["-c", "ls"])
 
     def test_filtered_egress(self):
-        result = self.launch(CLAUDE_DOCKER_NET_FILTER="1")
-        self.assertIn("--network=claude-docker-net", result.flags)
+        result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1")
+        self.assertIn("--network=claude-airlock-net", result.flags)
         self.assertIn("--dns=127.0.0.1", result.flags)
         self.assertIn("--env=HTTPS_PROXY=http://claude-egress-proxy:3128", result.flags)
         # Without the host on it, which would be a way around the filter
@@ -69,7 +69,7 @@ class OptionsTest(LauncherTest):
             for version in (4, 6)
         ]
         self.assertIn(
-            ["network", "create", "--internal", *isolated, "claude-docker-net"],
+            ["network", "create", "--internal", *isolated, "claude-airlock-net"],
             result.calls,
         )
         # Waited for, a session must not start ahead of its proxy
@@ -77,49 +77,51 @@ class OptionsTest(LauncherTest):
             [c for c in result.calls if c[:2] == ["exec", "claude-egress-proxy"]]
         )
         proxy = result.sidecar("claude-egress-proxy")
-        self.assertIn("--network=claude-docker-net", proxy)
+        self.assertIn("--network=claude-airlock-net", proxy)
         self.assertTrue(any("allowed-domains.txt" in arg for arg in proxy))
 
     def test_the_filter_network_is_never_made_with_a_route_out(self):
-        result = self.launch(CLAUDE_DOCKER_NET_FILTER="1")
+        result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1")
         made = [call for call in result.calls if call[:2] == ["network", "create"]]
         self.assertTrue(made)
         for call in made:
             self.assertIn("--internal", call)
 
     def test_a_filter_network_with_a_route_out_is_refused(self):
-        result = self.launch(CLAUDE_DOCKER_NET_FILTER="1", FAKE_NETWORK="false")
-        self.assert_refused(result, "claude-docker-net is not internal")
+        result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_NETWORK="false")
+        self.assert_refused(result, "claude-airlock-net is not internal")
 
     def test_a_socket_proxy_left_on_the_network_is_taken_off_it(self):
-        result = self.launch(FAKE_NETWORK="false claude-docker-proxy claude-other")
+        result = self.launch(FAKE_NETWORK="false claude-airlock-proxy claude-other")
         off = [call for call in result.calls if call[:2] == ["network", "disconnect"]]
         self.assertEqual(
             off,
             [
                 [
                     *("network", "disconnect", "--force"),
-                    *("claude-docker-open-net", "claude-docker-proxy"),
+                    *("claude-airlock-open-net", "claude-airlock-proxy"),
                 ]
             ],
         )
 
     def test_a_filter_network_the_host_is_on_is_made_anew_once_free(self):
-        made_anew = ["network", "rm", "claude-docker-net"]
+        made_anew = ["network", "rm", "claude-airlock-net"]
         # From before the host was kept off it, with its proxy alone on it
         old = "true mode= claude-egress-proxy"
 
         def filtered(network: str, version: str) -> Result:
             (self.work / "log").unlink(missing_ok=True)
             result = self.launch(
-                CLAUDE_DOCKER_NET_FILTER="1", FAKE_NETWORK=network, FAKE_VERSION=version
+                CLAUDE_AIRLOCK_NET_FILTER="1",
+                FAKE_NETWORK=network,
+                FAKE_VERSION=version,
             )
             self.assertEqual(result.status, 0, result.stderr)
             return result
 
         calls = filtered(old, "29.1.0").calls
         self.assertIn(made_anew, calls)
-        off = ["network", "disconnect", "--force", "claude-docker-net"]
+        off = ["network", "disconnect", "--force", "claude-airlock-net"]
         self.assertIn([*off, "claude-egress-proxy"], calls)
         # Not under a session, which is said
         busy = filtered(old + " claude-other.capture", "29.1.0")
@@ -130,7 +132,7 @@ class OptionsTest(LauncherTest):
         self.assertNotIn(made_anew, filtered("true mode=isolated", "29.1.0").calls)
 
     def test_a_proxy_is_removed_with_the_last_session_that_uses_it(self):
-        proxies = "claude-docker-ps-proxy\nclaude-egress-proxy\nclaude-other"
+        proxies = "claude-airlock-ps-proxy\nclaude-egress-proxy\nclaude-other"
 
         def removed(**env: str) -> list[str]:
             (self.work / "log").unlink(missing_ok=True)
@@ -138,14 +140,14 @@ class OptionsTest(LauncherTest):
             return [call[-1] for call in calls if call[:2] == ["rm", "--force"]]
 
         # Whichever session started them, and nothing that is not a proxy
-        self.assertEqual(removed(), ["claude-docker-ps-proxy", "claude-egress-proxy"])
+        self.assertEqual(removed(), ["claude-airlock-ps-proxy", "claude-egress-proxy"])
         # Not under a session on a network of theirs
         self.assertEqual(removed(FAKE_NETWORK="false claude-other.capture"), [])
         # Nor while another launcher says it uses one, its session yet to start
         in_use = self.state / "proxies" / "claude-egress-proxy"
         with open(in_use, "w") as held:
             fcntl.flock(held, fcntl.LOCK_SH)
-            self.assertEqual(removed(), ["claude-docker-ps-proxy"])
+            self.assertEqual(removed(), ["claude-airlock-ps-proxy"])
 
     def test_two_launchers_do_not_take_the_same_name(self):
         self.assertIn("--name=claude-proj", self.launch().flags)
@@ -222,7 +224,7 @@ class ScratchTest(LauncherTest):
         )
 
     def test_it_takes_no_more_than_half_of_a_small_memory_limit(self):
-        sizes = self.sizes(CLAUDE_DOCKER_MEMORY="2g", CLAUDE_DOCKER_CACHE="0")
+        sizes = self.sizes(CLAUDE_AIRLOCK_MEMORY="2g", CLAUDE_AIRLOCK_CACHE="0")
         self.assertEqual(len(sizes), 6)
         self.assertIn(".cache", sizes)
         # What Claude Code keeps for the session is of them
@@ -246,52 +248,52 @@ class ScratchTest(LauncherTest):
             self.assertIsNone(session.memory_megabytes(said), said)
 
     def test_none_is_without_a_limit_however_little_memory_there_is(self):
-        sizes = self.sizes(CLAUDE_DOCKER_MEMORY="6m")
+        sizes = self.sizes(CLAUDE_AIRLOCK_MEMORY="6m")
         self.assertEqual(sizes[".config"], "1m")
 
     def test_no_memory_limit_leaves_them_as_large_as_they_are(self):
         self.assertIn(
-            "--tmpfs=/tmp:exec,size=4g", self.launch(CLAUDE_DOCKER_MEMORY="0").flags
+            "--tmpfs=/tmp:exec,size=4g", self.launch(CLAUDE_AIRLOCK_MEMORY="0").flags
         )
 
     def test_a_limit_that_is_not_read_is_left_to_docker(self):
-        launched = self.launch(CLAUDE_DOCKER_MEMORY="lots")
+        launched = self.launch(CLAUDE_AIRLOCK_MEMORY="lots")
         self.assertIn("--memory=lots", launched.flags)
         self.assertIn("--tmpfs=/tmp:exec,size=4g", launched.flags)
 
 
 class ConfigFileTest(LauncherTest):
     def test_sets_a_default(self):
-        self.write_config("# limits", "", "CLAUDE_DOCKER_MEMORY=8g")
+        self.write_config("# limits", "", "CLAUDE_AIRLOCK_MEMORY=8g")
         self.assertIn("--memory=8g", self.launch().flags)
 
     def test_environment_wins(self):
-        self.write_config("CLAUDE_DOCKER_MEMORY=8g")
-        self.assertIn("--memory=4g", self.launch(CLAUDE_DOCKER_MEMORY="4g").flags)
+        self.write_config("CLAUDE_AIRLOCK_MEMORY=8g")
+        self.assertIn("--memory=4g", self.launch(CLAUDE_AIRLOCK_MEMORY="4g").flags)
 
     def test_an_empty_switch_does_not_undo_the_file(self):
-        self.write_config("CLAUDE_DOCKER_NET_FILTER=1")
-        flags = self.launch(CLAUDE_DOCKER_NET_FILTER="").flags
-        self.assertIn("--network=claude-docker-net", flags)
+        self.write_config("CLAUDE_AIRLOCK_NET_FILTER=1")
+        flags = self.launch(CLAUDE_AIRLOCK_NET_FILTER="").flags
+        self.assertIn("--network=claude-airlock-net", flags)
 
     def test_what_the_file_hides_the_environment_does_not_show(self):
         (self.project / "notes.secret").touch()
-        self.write_config("CLAUDE_DOCKER_SHADOW=*.pem")
-        flags = self.launch(CLAUDE_DOCKER_SHADOW="*.secret").flags
+        self.write_config("CLAUDE_AIRLOCK_SHADOW=*.pem")
+        flags = self.launch(CLAUDE_AIRLOCK_SHADOW="*.secret").flags
         for name in ("key.pem", "notes.secret"):
             self.assertIn(f"--volume=/dev/null:{self.project / name}:ro", flags)
 
     def test_an_empty_list_does_not_undo_the_file(self):
-        self.write_config("CLAUDE_DOCKER_SHADOW=*.pem")
-        flags = self.launch(CLAUDE_DOCKER_SHADOW="").flags
+        self.write_config("CLAUDE_AIRLOCK_SHADOW=*.pem")
+        flags = self.launch(CLAUDE_AIRLOCK_SHADOW="").flags
         self.assertIn(f"--volume=/dev/null:{self.project / 'key.pem'}:ro", flags)
 
     def test_rejects_an_unknown_setting(self):
-        self.write_config("CLAUDE_DOCKER_NET_FILTR=1")
+        self.write_config("CLAUDE_AIRLOCK_NET_FILTR=1")
         self.assert_refused(self.launch(), "not a known setting")
 
     def test_rejects_per_project_settings(self):
-        self.write_config("CLAUDE_DOCKER_EXTRA_DIRS=/tmp")
+        self.write_config("CLAUDE_AIRLOCK_EXTRA_DIRS=/tmp")
         self.assert_refused(self.launch(), "not a known setting")
 
     def test_rejects_other_variables(self):
@@ -299,7 +301,7 @@ class ConfigFileTest(LauncherTest):
         self.assert_refused(self.launch(), "not a known setting")
 
     def test_values_are_not_evaluated(self):
-        self.write_config("CLAUDE_DOCKER_RUNTIME=$(echo pwned)")
+        self.write_config("CLAUDE_AIRLOCK_RUNTIME=$(echo pwned)")
         self.assertIn("--runtime=$(echo pwned)", self.launch().flags)
 
 

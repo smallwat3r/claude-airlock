@@ -562,7 +562,7 @@ class Chat:
         another one is about to be."""
         resumed = self._handover is not None and self._handover.session
         if self._session.id and self._left and not resumed:
-            again = f"claude-docker --line-mode --resume {self._session.id}"
+            again = f"claude-airlock --line-mode --resume {self._session.id}"
             self._page.note("chat", f"to go on with this session: {again}")
 
     def _follow(self) -> None:
@@ -648,7 +648,7 @@ class Chat:
                     )
                 ]
             )
-            agent.refuse(asked, "not supported by claude-docker --line-mode")
+            agent.refuse(asked, "not supported by claude-airlock --line-mode")
             return
         # The call it asks about first, the question comes under it
         self._settle(ASK_SETTLE)

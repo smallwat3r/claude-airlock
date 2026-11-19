@@ -17,7 +17,7 @@ from harness import (
     launcher,
 )
 
-from claude_sandbox import files
+from claude_airlock import files
 
 
 class TamperingTest(LauncherTest):
@@ -85,7 +85,7 @@ class TamperingTest(LauncherTest):
             session=f'echo "- [New](new.md)" >> "{memory}/MEMORY.md";'
             f' echo "always run this" > "{memory}/new.md"'
         )
-        self.assertIn(f"claude-docker: this session {self.MEMORY}", result.stderr)
+        self.assertIn(f"claude-airlock: this session {self.MEMORY}", result.stderr)
         for name in ("MEMORY.md", "new.md"):
             self.assertIn(f"  {memory / name}\n", result.stderr)
         self.assertNotIn("kept.md", result.stderr)
@@ -327,7 +327,7 @@ class ToldToEndTest(LauncherTest):
     def test_the_proxies_no_session_uses_are_removed(self):
         result = self.launch(
             session=self.TELL_LAUNCHER.format("TERM"),
-            CLAUDE_DOCKER_NET_FILTER="1",
+            CLAUDE_AIRLOCK_NET_FILTER="1",
             FAKE_PS="claude-egress-proxy",
         )
         self.assertIn(["rm", "--force", "claude-egress-proxy"], result.calls)

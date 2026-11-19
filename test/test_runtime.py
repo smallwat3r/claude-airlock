@@ -15,8 +15,8 @@ from unittest import mock
 from harness import LauncherTest, prompts_at, settings
 from test_processes import GIB, FakeSession
 
-from claude_sandbox import host_health, processes, runtime
-from claude_sandbox.launcher import Launcher
+from claude_airlock import host_health, processes, runtime
+from claude_airlock.launcher import Launcher
 
 HOSTNET = ["--network=host", "--host-uds=open"]
 CONTAINER = "0a1b2c3d4e5f"
@@ -99,14 +99,14 @@ class RuntimeTest(unittest.TestCase):
 
 class LaunchTest(LauncherTest):
     def test_under_another_runtime_nothing_changes(self):
-        result = self.launch(CLAUDE_DOCKER_RUNTIME="runc", FAKE_INFO=INFO)
+        result = self.launch(CLAUDE_AIRLOCK_RUNTIME="runc", FAKE_INFO=INFO)
         self.assertIn("--pids-limit=512", result.flags)
         self.assertNotIn("gVisor", result.stderr)
 
     def test_under_gvisor_the_launcher_says_what_a_session_lacks(self):
         result = self.launch(
-            CLAUDE_DOCKER_RUNTIME="runsc-hostnet",
-            CLAUDE_DOCKER_PROC_LOG="1",
+            CLAUDE_AIRLOCK_RUNTIME="runsc-hostnet",
+            CLAUDE_AIRLOCK_PROC_LOG="1",
             FAKE_INFO=INFO,
             FAKE_RUNNING="claude-proj",
             session="sleep 0.5",
@@ -118,7 +118,7 @@ class LaunchTest(LauncherTest):
         self.assertNotIn("do not resolve", result.stderr)
         self.assertIn("--pids-limit=1088", result.flags)
         # The session is still told the limit from the setting
-        self.assertIn("--env=CLAUDE_DOCKER_PIDS=512", result.flags)
+        self.assertIn("--env=CLAUDE_AIRLOCK_PIDS=512", result.flags)
         # No watcher is started: it would see gVisor's kernel, not the session
         self.assertIsNone(result.sidecar("claude-proj.procs"))
 
@@ -127,18 +127,18 @@ class LaunchTest(LauncherTest):
         self.assertIn("under gVisor (runsc)", self.launch(FAKE_INFO=info).stderr)
 
     def test_the_launcher_warns_that_names_do_not_resolve_on_gvisors_own_stack(self):
-        result = self.launch(CLAUDE_DOCKER_RUNTIME="runsc", FAKE_INFO=INFO)
+        result = self.launch(CLAUDE_AIRLOCK_RUNTIME="runsc", FAKE_INFO=INFO)
         self.assertEqual(result.status, 0, result.stderr)
         self.assertIn("names do not resolve", result.stderr)
         self.assertIn("--network=host", result.stderr)
 
     def test_the_agent_is_refused_when_host_sockets_cannot_be_reached(self):
-        agent = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "CLAUDE_DOCKER_SSH_AGENT": "1"}
-        refused = self.launch(CLAUDE_DOCKER_RUNTIME="runsc", FAKE_INFO=INFO, **agent)
+        agent = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "CLAUDE_AIRLOCK_SSH_AGENT": "1"}
+        refused = self.launch(CLAUDE_AIRLOCK_RUNTIME="runsc", FAKE_INFO=INFO, **agent)
         self.assert_refused(refused, "the SSH agent cannot be reached under gVisor")
         self.assertIn("--host-uds=open", refused.stderr)
         reached = self.launch(
-            CLAUDE_DOCKER_RUNTIME="runsc-hostnet", FAKE_INFO=INFO, **agent
+            CLAUDE_AIRLOCK_RUNTIME="runsc-hostnet", FAKE_INFO=INFO, **agent
         )
         self.assertEqual(reached.status, 0, reached.stderr)
 

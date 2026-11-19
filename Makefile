@@ -10,8 +10,8 @@ RUFF ?= $(call python_tool,ruff)
 MYPY ?= $(call python_tool,mypy)
 SHELLCHECK ?= shellcheck
 
-LAUNCHER := bin/claude-docker
-PYTHON_SOURCES := $(LAUNCHER) claude_sandbox test docker/update-pins.py \
+LAUNCHER := bin/claude-airlock
+PYTHON_SOURCES := $(LAUNCHER) claude_airlock test docker/update-pins.py \
 	docker/features/excalidraw/excalidraw-export
 SHELL_SOURCES := bin/claude-statusline test/smoke/run.sh \
 	$(wildcard test/smoke/inside/*.sh)
@@ -34,7 +34,7 @@ lint: ## ruff, its formatter and shellcheck
 
 .PHONY: types
 types: ## mypy
-	$(MYPY) claude_sandbox $(LAUNCHER)
+	$(MYPY) claude_airlock $(LAUNCHER)
 
 .PHONY: test
 test: ## The unit tests, without Docker. One topic: make test K=trace

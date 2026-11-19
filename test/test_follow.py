@@ -65,7 +65,7 @@ class Following:
         environment = {
             **test.fake_docker_env(),
             "HOME": str(test.home),
-            "CLAUDE_DOCKER_NET_LOG": "0",
+            "CLAUDE_AIRLOCK_NET_LOG": "0",
             **env,
         }
         self.process: subprocess.Popen = subprocess.Popen(
@@ -176,7 +176,7 @@ class FollowTest(LauncherTest):
     def test_only_the_latest_of_what_came_before_is_shown(self):
         add(self.file, *(prompt(f"number {n}", n) for n in range(1, 21)))
         shown = Following(self).until("number 20")
-        self.assertIn("# 11 earlier events, see claude-docker --trace", shown)
+        self.assertIn("# 11 earlier events, see claude-airlock --trace", shown)
         self.assertNotIn("number 10\n", shown)
         self.assertIn("number 11\n", shown)
 
@@ -274,7 +274,7 @@ class FollowTest(LauncherTest):
     def test_a_list_cannot_be_followed(self):
         result = self.launch("--trace", "--follow", "list")
         self.assertEqual(result.status, 1)
-        self.assertIn("usage: claude-docker --trace", result.stderr)
+        self.assertIn("usage: claude-airlock --trace", result.stderr)
 
     def test_nothing_is_asked_of_docker_about_another_project(self):
         about = {"project": "/elsewhere", "start": 5, "pid": 1}

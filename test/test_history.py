@@ -77,9 +77,9 @@ class HistoryTest(LauncherTest):
         self.assertIn("-somewhere-else", self.covered(flags))
 
     def test_shared_when_asked_for(self):
-        flags = self.launch(CLAUDE_DOCKER_SHARED_HISTORY="1").flags
+        flags = self.launch(CLAUDE_AIRLOCK_SHARED_HISTORY="1").flags
         self.assertEqual(self.covered(flags), [])
-        self.assertIn("--env=CLAUDE_DOCKER_SHARED_HISTORY=1", flags)
+        self.assertIn("--env=CLAUDE_AIRLOCK_SHARED_HISTORY=1", flags)
         # The host's, which are no longer there with all of its ~/.claude
         shared = self.home / ".claude"
         for name in ("file-history", "paste-cache", "history.jsonl"):

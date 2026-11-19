@@ -7,7 +7,7 @@ command output and file that was read. So do three things Claude Code
 keeps in ~/.claude for all projects at once: the prompts typed anywhere,
 what was pasted, and the copies of edited files that rewinding uses. A
 session has no use for those of another project, and one that went wrong
-could read them all, so unless CLAUDE_DOCKER_SHARED_HISTORY=1 they are
+could read them all, so unless CLAUDE_AIRLOCK_SHARED_HISTORY=1 they are
 left out:
 
 - In projects, the directory of every other project is covered by an empty
@@ -21,7 +21,7 @@ left out:
   Sandboxed sessions of a project share them, the host's claude does not
   see them: it cannot rewind the files of a session run in here.
 
-With CLAUDE_DOCKER_SHARED_HISTORY=1 the three are the host's, mounted from
+With CLAUDE_AIRLOCK_SHARED_HISTORY=1 the three are the host's, mounted from
 its ~/.claude, and nothing of projects is covered.
 
 Directories mounted next to the project (--add-dir) do not bring their
@@ -141,8 +141,8 @@ def history_args(settings: Settings, host: Host) -> list[str]:
     if settings.shared_history:
         shared = prepare_shared(host)
         return [
-            # Shown by bin/claude-statusline, and said in docker/CLAUDE-sandbox.md
-            env_arg("CLAUDE_DOCKER_SHARED_HISTORY", 1),
+            # Shown by bin/claude-statusline, and said in docker/CLAUDE-airlock.md
+            env_arg("CLAUDE_AIRLOCK_SHARED_HISTORY", 1),
             *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
         ]
     others = other_projects(host)

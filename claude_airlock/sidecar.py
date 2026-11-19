@@ -216,7 +216,7 @@ class Sidecar:
             # Said and passed over: this runs as a session ends, and what
             # is left to do then (the check of tamper.py) matters more
             print(
-                f"claude-docker: the {self.RECORD} was not kept: {problem}",
+                f"claude-airlock: the {self.RECORD} was not kept: {problem}",
                 file=sys.stderr,
             )
         finally:

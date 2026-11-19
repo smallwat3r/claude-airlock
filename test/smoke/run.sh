@@ -22,9 +22,9 @@ set -euo pipefail
 
 SMOKE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SMOKE}/../.." && pwd)"
-LAUNCHER="${ROOT}/bin/claude-docker"
-SIDECARS=(claude-egress-proxy claude-docker-ps-proxy claude-docker-proxy)
-STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-sandbox"
+LAUNCHER="${ROOT}/bin/claude-airlock"
+SIDECARS=(claude-egress-proxy claude-airlock-ps-proxy claude-airlock-proxy)
+STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-airlock"
 FAILED=0
 # Set by prepare: the throwaway project, the name of its session container,
 # the launcher's stderr of the last session, and the files planted on the host
@@ -76,9 +76,11 @@ session() { # "script..." [VAR=value]...
     script+=$'\n'"$(cat "${SMOKE}/inside/${name}.sh")"
   done
   shift
-  output="$(cd "${PROJECT}" && env CLAUDE_DOCKER_NET_FILTER=0 CLAUDE_DOCKER_NET_LOG=0 \
-    CLAUDE_DOCKER_PROC_LOG=0 CLAUDE_DOCKER_SSH_AGENT=0 CLAUDE_DOCKER_SHARED_HISTORY=0 \
-    CLAUDE_DOCKER_SOCKET=0 CLAUDE_DOCKER_RW_CONFIG=0 CLAUDE_DOCKER_CACHE=1 \
+  output="$(cd "${PROJECT}" && env CLAUDE_AIRLOCK_NET_FILTER=0 \
+    CLAUDE_AIRLOCK_NET_LOG=0 CLAUDE_AIRLOCK_PROC_LOG=0 \
+    CLAUDE_AIRLOCK_SSH_AGENT=0 CLAUDE_AIRLOCK_SHARED_HISTORY=0 \
+    CLAUDE_AIRLOCK_DOCKER_SOCKET=0 CLAUDE_AIRLOCK_RW_CONFIG=0 \
+    CLAUDE_AIRLOCK_CACHE=1 \
     "$@" "${LAUNCHER}" --shell -c "${script}" 2>"${SESSION_ERR}" </dev/null)" || {
     fail "session exited with an error, see below"
     cat "${SESSION_ERR}" >&2
@@ -89,7 +91,7 @@ session() { # "script..." [VAR=value]...
 
 preflight() {
   echo "Preflight"
-  if [ -n "${CLAUDE_DOCKER_SANDBOX:-}" ]; then
+  if [ -n "${CLAUDE_AIRLOCK_SANDBOX:-}" ]; then
     echo "This runs on the host, not inside the sandbox." >&2
     exit 1
   fi
@@ -186,7 +188,7 @@ defaults() {
 
 egress_filter() {
   section "Session with the egress filter"
-  session egress-filter CLAUDE_DOCKER_NET_FILTER=1
+  session egress-filter CLAUDE_AIRLOCK_NET_FILTER=1
   check "--net-log lists the blocked domain" \
     bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
   check "the proxy log survives a proxy restart" \
@@ -202,7 +204,7 @@ egress_filter() {
 # The capture and the record of processes. Under a runtime where a watcher
 # sidecar cannot see into the session, such as gVisor, no watcher is started
 # and the launcher records memory and CPU use from outside instead (see
-# claude_sandbox/runtime.py).
+# claude_airlock/runtime.py).
 capture_and_processes() {
   local captured="${STATE}/captures/${CONTAINER}.capture-"
   local watched="${STATE}/processes/${CONTAINER}.procs-"
@@ -210,7 +212,7 @@ capture_and_processes() {
   section "Session with the network capture and the record of processes"
   if [ "$(python_check watched_inside)" = 0 ]; then watcher=no-watcher; fi
   rm -f "${captured}"* "${watched}"*
-  session "${watcher} capture" CLAUDE_DOCKER_NET_LOG=1 CLAUDE_DOCKER_PROC_LOG=1
+  session "${watcher} capture" CLAUDE_AIRLOCK_NET_LOG=1 CLAUDE_AIRLOCK_PROC_LOG=1
   # Without a capture, which the launcher reports, there is nothing to read
   if ! grep -q "network capture" "${SESSION_ERR}"; then
     check "the capture names what the session reached, by UDP too" \
@@ -229,14 +231,14 @@ capture_and_processes() {
     check "the watcher sidecar is gone" \
       bash -c "! docker inspect '${CONTAINER}.procs'"
   fi
-  session filtered-capture CLAUDE_DOCKER_NET_FILTER=1 CLAUDE_DOCKER_NET_LOG=1
+  session filtered-capture CLAUDE_AIRLOCK_NET_FILTER=1 CLAUDE_AIRLOCK_NET_LOG=1
   check "the filtered session was captured too" \
     bash -c "ls '${captured}'* | wc -l | grep -q 2"
 }
 
 socket_proxy() {
   section "Session with the socket proxy"
-  session socket-proxy CLAUDE_DOCKER_SOCKET=1
+  session socket-proxy CLAUDE_AIRLOCK_DOCKER_SOCKET=1
   # The session leaves this file when the docker feature is in the image
   if [ -f "${PROJECT}/.smoke-docker-used" ]; then
     check "the calls through the socket proxy were noted, the denied one too" \
@@ -247,7 +249,7 @@ socket_proxy() {
 ssh_agent() {
   [ -S "${SSH_AUTH_SOCK:-}" ] || return 0
   section "Session with the SSH agent"
-  session ssh-agent CLAUDE_DOCKER_SSH_AGENT=1
+  session ssh-agent CLAUDE_AIRLOCK_SSH_AGENT=1
   # On macOS the session uses the agent of Docker's machine, which the
   # launcher cannot note
   if [ "$(uname)" != Darwin ]; then
@@ -260,8 +262,8 @@ summary() {
   echo
   if [ "${FAILED}" = 0 ]; then
     echo "All checks passed. Not covered here, try once by hand: an interactive"
-    echo "claude-docker session from your editor, and Ctrl-C during a piped run"
-    echo "(claude-docker -p ... < file)."
+    echo "claude-airlock session from your editor, and Ctrl-C during a piped run"
+    echo "(claude-airlock -p ... < file)."
   else
     echo "Some checks failed."
   fi

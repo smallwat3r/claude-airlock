@@ -1,4 +1,4 @@
-"""The container runtime of a session (CLAUDE_DOCKER_RUNTIME), and how a
+"""The container runtime of a session (CLAUDE_AIRLOCK_RUNTIME), and how a
 session differs under it.
 
 Docker reports which runtimes the daemon has, as registered in
@@ -149,7 +149,7 @@ class Gvisor(Runtime):
     # They are estimates, rounded up from counts on one machine with
     # gVisor's systrap platform: 36 for an idle session, 250 with 100
     # sleeping processes, 653 with 300. Idle threads within one process
-    # cost almost nothing: 300 of them added 3. CLAUDE_DOCKER_PIDS is the
+    # cost almost nothing: 300 of them added 3. CLAUDE_AIRLOCK_PIDS is the
     # setting to raise when the estimate is too low for a workload.
     OWN_SLOTS: ClassVar[int] = 64
     SLOTS_PER_PROCESS: ClassVar[int] = 2
@@ -223,7 +223,7 @@ def known_runtime(registered: Registered) -> Runtime:
 
 def session_runtime(settings: Settings) -> Runtime:
     """The runtime a session with these settings runs under: the one set
-    in CLAUDE_DOCKER_RUNTIME, otherwise the daemon's default. When the
+    in CLAUDE_AIRLOCK_RUNTIME, otherwise the daemon's default. When the
     daemon does not list it, or does not answer, the runtime is handled
     like Docker's own and Docker reports any error."""
     default, _, listed = docker_output("info", _RUNTIMES).partition("\n")
@@ -241,7 +241,7 @@ def say_runtime_notes(runtime: Runtime, settings: Settings) -> None:
     notes = runtime.notes(settings)
     if notes:
         print(
-            f"claude-docker: under {runtime.shown}:",
+            f"claude-airlock: under {runtime.shown}:",
             *(f"  {note}" for note in notes),
             sep="\n",
             file=sys.stderr,

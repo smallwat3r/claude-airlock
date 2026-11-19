@@ -18,7 +18,7 @@ from unittest import mock
 
 from harness import LauncherTest, follow, network, prompts_at, settings
 
-from claude_sandbox import door_events, doors
+from claude_airlock import door_events, doors
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (
@@ -239,7 +239,7 @@ class AgentDoorTest(LauncherTest):
     def test_the_door_is_the_users_alone_and_gone_with_the_session(self):
         flags = self.launch(
             session="true",
-            CLAUDE_DOCKER_SSH_AGENT="1",
+            CLAUDE_AIRLOCK_SSH_AGENT="1",
             SSH_AUTH_SOCK=os.path.join(self.directory, "agent.sock"),
         ).flags
         (mount,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
@@ -264,7 +264,7 @@ class AgentDoorTest(LauncherTest):
 
     @unittest.skipIf(sys.platform == "darwin", "the agent is the machine's there")
     def test_without_an_agent_nothing_is_forwarded(self):
-        flags = self.launch(CLAUDE_DOCKER_SSH_AGENT="1").flags
+        flags = self.launch(CLAUDE_AIRLOCK_SSH_AGENT="1").flags
         self.assertFalse([flag for flag in flags if "ssh-agent" in flag])
 
     def test_only_the_latest_uses_stay_in_the_record(self):
@@ -360,7 +360,7 @@ class SocketWatchTest(LauncherTest):
         }
         with mock.patch.object(network, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
             with mock.patch.dict(os.environ, environment):
-                asked = settings.Settings(socket=settings.SocketAccess.LIMITED)
+                asked = settings.Settings(docker_socket=settings.SocketAccess.LIMITED)
                 with doors.socket_proxy_watched(
                     asked, host, "claude-proj", "claude-proj"
                 ):
@@ -378,7 +378,7 @@ class SocketWatchTest(LauncherTest):
         )
         (followed,) = (call for call in self.calls() if call[0] == "logs")
         self.assertEqual(
-            (followed[1], followed[-1]), ("--follow", "claude-docker-ps-proxy")
+            (followed[1], followed[-1]), ("--follow", "claude-airlock-ps-proxy")
         )
 
     def test_without_the_socket_nothing_is_watched(self):

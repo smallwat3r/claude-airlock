@@ -16,9 +16,9 @@ jobs:
         with:
           persist-credentials: false
       - run: shellcheck bin/claude-statusline test/smoke/run.sh test/smoke/inside/*.sh
-      - run: pipx run ruff check bin/claude-docker claude_sandbox test docker/update-pins.py docker/features/excalidraw/excalidraw-export
-      - run: pipx run ruff format --check bin/claude-docker claude_sandbox test docker/update-pins.py docker/features/excalidraw/excalidraw-export
-      - run: pipx run mypy claude_sandbox bin/claude-docker
+      - run: pipx run ruff check bin/claude-airlock claude_airlock test docker/update-pins.py docker/features/excalidraw/excalidraw-export
+      - run: pipx run ruff format --check bin/claude-airlock claude_airlock test docker/update-pins.py docker/features/excalidraw/excalidraw-export
+      - run: pipx run mypy claude_airlock bin/claude-airlock
 
   test:
     runs-on: ${{ matrix.os }}
@@ -42,7 +42,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python test/launcher_test.py
       # Every feature must assemble into the generated Dockerfile
-      - run: python bin/claude-docker --dockerfile | grep -q '^ENTRYPOINT'
+      - run: python bin/claude-airlock --dockerfile | grep -q '^ENTRYPOINT'
 
   build:
     runs-on: ubuntu-latest
@@ -51,4 +51,4 @@ jobs:
         with:
           persist-credentials: false
       # Base and tail plus one small feature, the full set takes too long
-      - run: CLAUDE_DOCKER_FEATURES=go bin/claude-docker --rebuild
+      - run: CLAUDE_AIRLOCK_FEATURES=go bin/claude-airlock --rebuild

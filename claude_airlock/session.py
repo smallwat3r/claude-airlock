@@ -77,7 +77,7 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
 
 
 def telemetry_args(settings: Settings) -> list[str]:
-    """Unless CLAUDE_DOCKER_TELEMETRY=1, Claude Code is told to keep its
+    """Unless CLAUDE_AIRLOCK_TELEMETRY=1, Claude Code is told to keep its
     usage events and crash reports to itself. They go to third parties
     (Datadog for one) outside of any tool call, with what they hold not
     the user's to see. Nothing a session does depends on them. DO_NOT_TRACK
@@ -93,7 +93,7 @@ def telemetry_args(settings: Settings) -> list[str]:
 
 
 def connector_args(settings: Settings) -> list[str]:
-    """Unless CLAUDE_DOCKER_CONNECTORS=1, Claude Code is told not to load
+    """Unless CLAUDE_AIRLOCK_CONNECTORS=1, Claude Code is told not to load
     the connectors of the claude.ai account (Gmail, Google Drive and the
     like). They are a way out of the sandbox with the user's own access,
     which no other setting closes, and each brings its tools and its
@@ -105,7 +105,7 @@ def connector_args(settings: Settings) -> list[str]:
 
 
 def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
-    """Unless CLAUDE_DOCKER_ASK=1, claude is told not to ask before it
+    """Unless CLAUDE_AIRLOCK_ASK=1, claude is told not to ask before it
     uses a tool: the container is what keeps a session from the host, and
     a question for every command is no safeguard on top of it that anyone
     reads for long. Not when its arguments say how to go about permissions
@@ -146,18 +146,18 @@ def base_args(
         *connector_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
-        env_arg("CLAUDE_DOCKER_SANDBOX", name),
-        env_arg("CLAUDE_DOCKER_NET_FILTER", int(settings.net_filter)),
+        env_arg("CLAUDE_AIRLOCK_SANDBOX", name),
+        env_arg("CLAUDE_AIRLOCK_NET_FILTER", int(settings.net_filter)),
         # The session is told its settings, so that Claude can name the one
-        # behind something it could not do (see docker/CLAUDE-sandbox.md).
+        # behind something it could not do (see docker/CLAUDE-airlock.md).
         # The other switches are only set when they are on, by the code
         # that acts on them.
-        env_arg("CLAUDE_DOCKER_NET_LOG", int(settings.net_log)),
-        env_arg("CLAUDE_DOCKER_PROC_LOG", int(settings.proc_log)),
-        env_arg("CLAUDE_DOCKER_CACHE", int(settings.cache)),
-        env_arg("CLAUDE_DOCKER_MEMORY", settings.memory),
-        env_arg("CLAUDE_DOCKER_PIDS", settings.pids),
-        *([env_arg("CLAUDE_DOCKER_CPUS", settings.cpus)] if settings.cpus else []),
+        env_arg("CLAUDE_AIRLOCK_NET_LOG", int(settings.net_log)),
+        env_arg("CLAUDE_AIRLOCK_PROC_LOG", int(settings.proc_log)),
+        env_arg("CLAUDE_AIRLOCK_CACHE", int(settings.cache)),
+        env_arg("CLAUDE_AIRLOCK_MEMORY", settings.memory),
+        env_arg("CLAUDE_AIRLOCK_PIDS", settings.pids),
+        *([env_arg("CLAUDE_AIRLOCK_CPUS", settings.cpus)] if settings.cpus else []),
         # No gpg binary (or key) in the image, so a host gitconfig with
         # commit.gpgsign=true would make every commit fail. Sign the
         # sandbox's commits at review time, before pushing.

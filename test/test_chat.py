@@ -23,9 +23,9 @@ from pathlib import Path
 
 from harness import LAUNCHER, LauncherTest
 
-from claude_sandbox import claude_args, started
-from claude_sandbox.changes import change_events
-from claude_sandbox.chat import (
+from claude_airlock import claude_args, started
+from claude_airlock.changes import change_events
+from claude_airlock.chat import (
     asking,
     commands,
     console,
@@ -36,13 +36,13 @@ from claude_sandbox.chat import (
     talk,
     turn,
 )
-from claude_sandbox.chat import reply as replying
-from claude_sandbox.events import Event, Who
-from claude_sandbox.follow import Follower, Round
-from claude_sandbox.layout import Layout
-from claude_sandbox.mounts import ExtraDir
-from claude_sandbox.runtime import DOCKERS_OWN
-from claude_sandbox.settings import Host, Settings, SocketAccess
+from claude_airlock.chat import reply as replying
+from claude_airlock.events import Event, Who
+from claude_airlock.follow import Follower, Round
+from claude_airlock.layout import Layout
+from claude_airlock.mounts import ExtraDir
+from claude_airlock.runtime import DOCKERS_OWN
+from claude_airlock.settings import Host, Settings, SocketAccess
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
 # A test at a terminal that waits for what never comes fails after this
@@ -179,8 +179,8 @@ class ChatTest(LauncherTest):
         return {
             **self.fake_docker_env(),
             "HOME": str(self.home),
-            "CLAUDE_DOCKER_NET_LOG": "0",
-            "CLAUDE_DOCKER_PROC_LOG": "0",
+            "CLAUDE_AIRLOCK_NET_LOG": "0",
+            "CLAUDE_AIRLOCK_PROC_LOG": "0",
             "FAKE_SESSION": f"{sys.executable} {script}",
             "FAKE_ID": session,
             "FAKE_TRANSCRIPT": str(transcripts / f"{SESSION}.jsonl"),
@@ -301,7 +301,7 @@ class ChatTest(LauncherTest):
             )
             return self.session_call()
 
-        on = {"CLAUDE_DOCKER_LINE_MODE": "1"}
+        on = {"CLAUDE_AIRLOCK_LINE_MODE": "1"}
         self.assertIn("--input-format=stream-json", launched("--model", "opus", **on))
         self.assertIn("--input-format=stream-json", launched(**on))
         # Not what has no conversation: claude is run as it is
@@ -313,7 +313,7 @@ class ChatTest(LauncherTest):
         # On unless switched off, and --line-mode is one session with it
         # either way
         self.assertIn("--input-format=stream-json", launched())
-        off = {"CLAUDE_DOCKER_LINE_MODE": "0"}
+        off = {"CLAUDE_AIRLOCK_LINE_MODE": "0"}
         self.assertNotIn("--input-format=stream-json", launched(**off))
         self.assertIn("--input-format=stream-json", launched("--line-mode", **off))
 
@@ -437,7 +437,7 @@ class ChatTest(LauncherTest):
         self.assertRegex(said, r"# turn [^\n]*\n" + re.escape(head) + "> typ")
         self.assertRegex(said, r"user     prompt      typed\n")
         again = (
-            f"to go on with this session: claude-docker --line-mode --resume {SESSION}"
+            f"to go on with this session: claude-airlock --line-mode --resume {SESSION}"
         )
         self.assertIn(again, said)
 
@@ -1754,7 +1754,7 @@ class StatusTest(LauncherTest):
         settings = Settings(
             net_filter=True,
             ssh_agent=True,
-            socket=SocketAccess.FULL,
+            docker_socket=SocketAccess.FULL,
             shared_history=True,
         )
         dirs = [

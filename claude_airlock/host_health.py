@@ -242,7 +242,7 @@ def health_recorded(host: Host, session: str, runtime: str) -> Iterator[None]:
             record.keep(host, time.time())
         if not records and time.time() - started >= SOON_OVER:
             print(
-                "claude-docker: the memory and CPU use of this session was"
+                "claude-airlock: the memory and CPU use of this session was"
                 " not recorded, because the cgroup of its container was not"
                 " found on this host",
                 file=sys.stderr,

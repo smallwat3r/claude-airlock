@@ -15,7 +15,7 @@ What a session is given and what it is kept from.
   while a session runs, so a session starts logged in.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so one
   session cannot poison another project's dependencies.
-  `CLAUDE_DOCKER_CACHE=0` goes back to a tmpfs of at most 2g.
+  `CLAUDE_AIRLOCK_CACHE=0` goes back to a tmpfs of at most 2g.
 - The git config, read-only. Of `~/.config/git` that is `config`, `ignore`,
   `attributes` and `templates`, and the files the config includes: the rest
   stays on the host, as git's `store` helper keeps passwords in clear
@@ -27,16 +27,16 @@ What a session is given and what it is kept from.
 - **Claude's configuration.** `settings.json`, `hooks`, `CLAUDE.md`,
   `commands`, `skills`, `agents` and `rules` of `~/.claude` run commands
   on the host or are followed by every later session, so they are
-  read-only. `CLAUDE_DOCKER_RW_CONFIG=1` makes them writable.
-- **What you name.** `CLAUDE_DOCKER_PROTECT` makes a path read-only inside
+  read-only. `CLAUDE_AIRLOCK_RW_CONFIG=1` makes them writable.
+- **What you name.** `CLAUDE_AIRLOCK_PROTECT` makes a path read-only inside
   whatever mounts it.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty. Templates such as `.env.example` stay readable,
-  `CLAUDE_DOCKER_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
+  `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
 - **The history of other projects.** Their transcripts are covered by
   empty directories, and the prompt history, the paste cache and the file
   history are kept per project. So `claude` on the host cannot rewind the
-  files of a session run in the sandbox. `CLAUDE_DOCKER_SHARED_HISTORY=1`
+  files of a session run in the sandbox. `CLAUDE_AIRLOCK_SHARED_HISTORY=1`
   shares it all again.
 - **The shell snapshots of other sessions.** `~/.claude/shell-snapshots`
   and `session-env` are each session's own.
@@ -45,7 +45,7 @@ What a session is given and what it is kept from.
 
 - Runs as your user, with a read-only root filesystem, all capabilities
   dropped, `no-new-privileges`, and PID and memory limits. A CPU limit with
-  `CLAUDE_DOCKER_CPUS`.
+  `CLAUDE_AIRLOCK_CPUS`.
 - No program of the image is setuid or setgid, and a process that crashes
   leaves no core dump.
 - What a session installs in `~/.cache` (`uv tool install`, `go install`)
@@ -62,7 +62,7 @@ What a session is given and what it is kept from.
 space, so a session cannot exploit a flaw in the host's kernel. It is
 available on Linux only. To use it, install `runsc`, register it in
 `/etc/docker/daemon.json` with the two arguments below, restart the daemon,
-and name the runtime in `CLAUDE_DOCKER_RUNTIME`:
+and name the runtime in `CLAUDE_AIRLOCK_RUNTIME`:
 
 ```json
 {
@@ -76,7 +76,7 @@ and name the runtime in `CLAUDE_DOCKER_RUNTIME`:
 ```
 
 ```
-CLAUDE_DOCKER_RUNTIME=runsc-hostnet claude-docker
+CLAUDE_AIRLOCK_RUNTIME=runsc-hostnet claude-airlock
 ```
 
 The launcher asks Docker which runtime a session will use and recognises
@@ -109,20 +109,20 @@ prints what differs from Docker's own runtime:
   host's kernel sees a single program, gVisor itself.
 - **The process limit is an estimate.** The host counts gVisor's own
   threads: a few dozen, plus about two for each process of the session. The
-  launcher therefore gives Docker twice `CLAUDE_DOCKER_PIDS` plus 64. A
+  launcher therefore gives Docker twice `CLAUDE_AIRLOCK_PIDS` plus 64. A
   session that reaches that limit is also ended as a whole, so raise
-  `CLAUDE_DOCKER_PIDS` if that happens to a session that was not running
+  `CLAUDE_AIRLOCK_PIDS` if that happens to a session that was not running
   away.
 
 ## How Claude Code is started
 
 - **Without asking.** Claude Code is started with
   `--dangerously-skip-permissions`: the container is what keeps a session
-  from the host. `CLAUDE_DOCKER_ASK=1` has it ask as it does outside the
+  from the host. `CLAUDE_AIRLOCK_ASK=1` has it ask as it does outside the
   sandbox, and a `--permission-mode` of your own is left alone.
 - **Without telemetry.** `DISABLE_TELEMETRY=1` and
   `DISABLE_ERROR_REPORTING=1` are set, so it sends no usage events and no
-  crash reports. `CLAUDE_DOCKER_TELEMETRY=1` sends both. `DO_NOT_TRACK=1`
+  crash reports. `CLAUDE_AIRLOCK_TELEMETRY=1` sends both. `DO_NOT_TRACK=1`
   is set with them, for the tools a session runs that go by it, and the
   image turns off the usage reports of gh and of common frameworks (Next.js,
   Nuxt, Astro and the like) whatever the setting.
@@ -130,7 +130,7 @@ prints what differs from Docker's own runtime:
   is set, so the connectors of your account (Gmail, Google Drive and the
   like) are not loaded: they reach your data from inside the sandbox, and
   their tools and instructions take room in every request.
-  `CLAUDE_DOCKER_CONNECTORS=1` loads them.
+  `CLAUDE_AIRLOCK_CONNECTORS=1` loads them.
 
 ## The check when a session ends
 
@@ -142,7 +142,7 @@ rather than locked: the launcher warns when a session changed one.
   hooks, `.claude/settings.json`, `settings.local.json` and `.mcp.json`
   with the scripts they name, `CLAUDE.md`, and the `hooks`, `commands`,
   `skills`, `agents` and `rules` of `.claude`.
-- In `~/.claude`: the plugins, and what `CLAUDE_DOCKER_RW_CONFIG=1` made
+- In `~/.claude`: the plugins, and what `CLAUDE_AIRLOCK_RW_CONFIG=1` made
   writable.
 
 Said apart, as something to read before you build, test or commit there:
@@ -170,13 +170,13 @@ only when what it holds is no longer what it was. Not looked into:
 whole project again.
 
 A session that ends without its launcher, a killed terminal say, is
-checked by the next `claude-docker` launch instead.
+checked by the next `claude-airlock` launch instead.
 
 ## The opt-in doors
 
 Each is off until you switch it on, and each use is noted for `--trace`.
 
-**The SSH agent**, with `CLAUDE_DOCKER_SSH_AGENT=1`:
+**The SSH agent**, with `CLAUDE_AIRLOCK_SSH_AGENT=1`:
 
 - Opt-in because the agent lets the container authenticate as you to every
   host your keys reach. Loading keys with `ssh-add -c` makes each use ask
@@ -187,8 +187,8 @@ Each is off until you switch it on, and each use is noted for `--trace`.
   it at most, and one that asks nothing for two minutes is closed.
 - On macOS its use is not noted.
 
-**The Docker socket**, with `CLAUDE_DOCKER_SOCKET` (and the `docker` feature
-for the CLI), through
+**The Docker socket**, with `CLAUDE_AIRLOCK_DOCKER_SOCKET` (and the `docker`
+feature for the CLI), through
 [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy):
 
 | Value | Allowed | Hidden |
@@ -199,13 +199,13 @@ for the CLI), through
 Writes are blocked in both modes, a write to the root daemon would let the
 container escape. Command lines and logs can still carry secrets.
 
-**The egress filter**, with `CLAUDE_DOCKER_NET_FILTER=1`:
+**The egress filter**, with `CLAUDE_AIRLOCK_NET_FILTER=1`:
 
 - The session joins an internal network with no route out. Egress goes
   through a squid sidecar that only allows the domains in
   `docker/allowed-domains.txt`, and external DNS is blackholed. What the
   host listens on is out of reach too (Docker 28 and later).
-- `claude-docker --net-log` lists the domains it refused, most frequent
+- `claude-airlock --net-log` lists the domains it refused, most frequent
   first, the quickest way to find what a project needs.
 - An edited allowlist is picked up by the next filtered session, or at once
-  with `claude-docker --net-reload`.
+  with `claude-airlock --net-reload`.

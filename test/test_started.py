@@ -11,10 +11,10 @@ import unittest
 from harness import LauncherTest, prompts_at, settings
 from test_runtime import INFO, gvisor
 
-from claude_sandbox import runtime, started
-from claude_sandbox.events import Who
-from claude_sandbox.mounts import ExtraDir
-from claude_sandbox.noted import NewlyNoted, noted_events
+from claude_airlock import runtime, started
+from claude_airlock.events import Who
+from claude_airlock.mounts import ExtraDir
+from claude_airlock.noted import NewlyNoted, noted_events
 
 
 def note(when: float, session: str, did: str = started.STARTED) -> dict:
@@ -36,7 +36,7 @@ class StartTest(unittest.TestCase):
         start = started.Start.of(
             chosen,
             gvisor("--network=host"),
-            "claude-sandbox:1a2b",
+            "claude-airlock:1a2b",
             dirs,
             ssh_agent=False,
         )
@@ -65,7 +65,7 @@ class StartTest(unittest.TestCase):
         said = {
             **note(5.0, "claude-proj"),
             "runtime": "gVisor (runsc)",
-            "image": "claude-sandbox:1a2b",
+            "image": "claude-airlock:1a2b",
             "memory": "8g",
             "pids": "256",
             "cpus": "",
@@ -81,7 +81,7 @@ class StartTest(unittest.TestCase):
         self.assertEqual(
             event.details,
             [
-                "claude-proj under gVisor (runsc), image claude-sandbox:1a2b",
+                "claude-proj under gVisor (runsc), image claude-airlock:1a2b",
                 "limits: memory 8g, processes 256, all CPUs",
                 "network: filtered to the allowed domains",
                 "recorded: connections",
@@ -138,9 +138,9 @@ class LaunchTest(LauncherTest):
 
     def test_a_session_is_noted_as_it_starts_and_when_it_is_over(self):
         result = self.launch(
-            CLAUDE_DOCKER_RUNTIME="runsc",
-            CLAUDE_DOCKER_CPUS="2",
-            CLAUDE_DOCKER_MEMORY="4g",
+            CLAUDE_AIRLOCK_RUNTIME="runsc",
+            CLAUDE_AIRLOCK_CPUS="2",
+            CLAUDE_AIRLOCK_MEMORY="4g",
             FAKE_INFO=INFO,
             session="exit 3",
         )
@@ -158,7 +158,7 @@ class LaunchTest(LauncherTest):
         self.assertNotIn("of this session", result.stderr)
 
     def test_a_trace_shows_how_the_session_was_started(self):
-        self.launch(CLAUDE_DOCKER_NET_FILTER="1", FAKE_INFO=INFO)
+        self.launch(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_INFO=INFO)
         record = self.state / "session-starts.jsonl"
         start, _ = record.read_text().splitlines()
         # As a session that still runs, or whose launcher was killed

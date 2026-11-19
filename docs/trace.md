@@ -1,6 +1,6 @@
 # Reviewing a session
 
-`claude-docker --trace` shows what the latest session of the current project
+`claude-airlock --trace` shows what the latest session of the current project
 did: what it ran, where and why, what it wrote and what it reached on the
 network, in the order it happened.
 
@@ -23,7 +23,7 @@ network, in the order it happened.
 #   tcp/postgres 10.0.0.7:5432 x1
 #
 # time                 who      what        details
-2026-01-02 10:02:11  sandbox  started     claude-api under runc, image claude-code-sandbox:1a2b3c4d5e6f
+2026-01-02 10:02:11  sandbox  started     claude-api under runc, image claude-airlock:1a2b3c4d5e6f
 2026-01-02 10:02:11  sandbox  started     limits: memory 16g, processes 512, all CPUs
 2026-01-02 10:02:11  sandbox  started     network: open
 2026-01-02 10:02:11  sandbox  started     recorded: connections, processes
@@ -168,8 +168,8 @@ session, which can neither forge nor edit them:
 
 | Record | Kept when | Holds |
 | --- | --- | --- |
-| The egress proxy's log | `CLAUDE_DOCKER_NET_FILTER=1` | What the session asked the proxy for: method, host, allowed or `DENIED`, the bytes each way and duration |
-| The capture | Unless `CLAUDE_DOCKER_NET_LOG=0` | Every TCP connection whatever the protocol, what was sent by anything but TCP, and every name looked up |
+| The egress proxy's log | `CLAUDE_AIRLOCK_NET_FILTER=1` | What the session asked the proxy for: method, host, allowed or `DENIED`, the bytes each way and duration |
+| The capture | Unless `CLAUDE_AIRLOCK_NET_LOG=0` | Every TCP connection whatever the protocol, what was sent by anything but TCP, and every name looked up |
 
 The capture is taken by a sidecar that shares the session's network
 namespace. It records where a connection went and how it ended, not what
@@ -226,7 +226,7 @@ compares the two. The header says what came of it:
 ## What ran
 
 The transcript says what a tool call was, not what the command it ran went
-on to do. Unless `CLAUDE_DOCKER_PROC_LOG=0`, a second sidecar notes each
+on to do. Unless `CLAUDE_AIRLOCK_PROC_LOG=0`, a second sidecar notes each
 process it sees in the session and which one holds each connection:
 
 ```
@@ -269,7 +269,7 @@ session itself, along with the time it waited for memory, CPU or disk.
 - `waited for` is the share of the time something in the session stood
   still for want of memory, CPU or disk, as the kernel counts it. High
   use alone is often harmless, this says whether it hurt.
-- `held back` is the time the session was slowed at `CLAUDE_DOCKER_CPUS`.
+- `held back` is the time the session was slowed at `CLAUDE_AIRLOCK_CPUS`.
 - When the kernel ends a process for want of memory it does not say
   which. `gone since` names the large ones that were there a second
   before and are not any more: the likely ones, not proof.
@@ -277,7 +277,7 @@ session itself, along with the time it waited for memory, CPU or disk.
   on average and at most, and what else came near its limit.
 - `--only health` shows these lines alone, `--json` has every figure,
   each tmpfs and the three largest processes.
-- Memory is written as `CLAUDE_DOCKER_MEMORY` is, in units of 1024
+- Memory is written as `CLAUDE_AIRLOCK_MEMORY` is, in units of 1024
   (`3.1g`, `512m`), so a figure can be held against the limit as it was
   set. What went over the network is in units of 1000 (`14 MB`), as
   network tools count.
@@ -290,7 +290,7 @@ notes how it starts each session, and when it is over. A trace has it in
 its header (`sandbox`) and as its first lines:
 
 ```
-sandbox  started  claude-api under gVisor (runsc-hostnet), image claude-code-sandbox:1a2b3c4d5e6f
+sandbox  started  claude-api under gVisor (runsc-hostnet), image claude-airlock:1a2b3c4d5e6f
 sandbox  started  limits: memory 8g, processes 512, cpus 4
 sandbox  started  network: filtered to the allowed domains
 sandbox  started  recorded: connections, memory and CPU use
@@ -301,8 +301,8 @@ sandbox  started  mounted: /home/me/code/lib (ro)
 | Line | Says |
 | --- | --- |
 | The first | The container, the runtime it runs under (`gVisor (name)` under [gVisor](sandbox.md#gvisor), else the name of the runtime, `runc` as a rule) and its image |
-| `limits` | `CLAUDE_DOCKER_MEMORY`, `CLAUDE_DOCKER_PIDS` and `CLAUDE_DOCKER_CPUS` as they were set |
-| `network` | Whether `CLAUDE_DOCKER_NET_FILTER` was on |
+| `limits` | `CLAUDE_AIRLOCK_MEMORY`, `CLAUDE_AIRLOCK_PIDS` and `CLAUDE_AIRLOCK_CPUS` as they were set |
+| `network` | Whether `CLAUDE_AIRLOCK_NET_FILTER` was on |
 | `recorded` | What the launcher kept of the session from outside it: its connections, its processes, or under gVisor its memory and CPU use alone |
 | `open` | What was open that is closed by default: the SSH agent, the Docker socket, a writable `~/.claude` config, the history of other projects, the connectors, telemetry. Not there when nothing was |
 | `mounted` | The directories mounted next to the project. Not there without any |
@@ -316,7 +316,7 @@ sandbox  started  mounted: /home/me/code/lib (ro)
 
 ## The SSH agent and the Docker socket
 
-A session started with `CLAUDE_DOCKER_SSH_AGENT=1` or `CLAUDE_DOCKER_SOCKET`
+A session started with `CLAUDE_AIRLOCK_SSH_AGENT=1` or `CLAUDE_AIRLOCK_DOCKER_SOCKET`
 has each use of them noted by the launcher:
 
 ```
@@ -330,14 +330,14 @@ The launcher says what is worth a look, and is silent when there is
 nothing:
 
 ```
-claude-docker: of this session, claude-docker --trace has the rest:
+claude-airlock: of this session, claude-airlock --trace has the rest:
   reached for the first time from this project:
     tcp/https transfer.example (203.0.113.9):443
   sent 14 MB to tcp/https gist.github.com (140.82.121.4):443
   refused by the egress filter:
     example.org:443 x3
-  ran into its memory limit of 16g, what it ran was ended for it: CLAUDE_DOCKER_MEMORY sets the limit
-  ran into its limit of processes 3 times, what it tried to start then did not: CLAUDE_DOCKER_PIDS sets the limit
+  ran into its memory limit of 16g, what it ran was ended for it: CLAUDE_AIRLOCK_MEMORY sets the limit
+  ran into its limit of processes 3 times, what it tried to start then did not: CLAUDE_AIRLOCK_PIDS sets the limit
   lookups that stand out:
     4a6f...3d.x.example.com: an unusually long name
   waited for connections, open to the other sessions on its network:
@@ -356,7 +356,7 @@ host, a tunnel is logged when it closes.
 
 ## What is kept
 
-The records are under `~/.local/state/claude-sandbox`, but for the proxy's
+The records are under `~/.local/state/claude-airlock`, but for the proxy's
 log:
 
 | What | Holds | How much |
@@ -378,7 +378,7 @@ remember (see
 
 ## Following a session
 
-`claude-docker --trace --follow`, run on the host in a second terminal,
+`claude-airlock --trace --follow`, run on the host in a second terminal,
 shows the same lines while the sessions of the project run, until you
 interrupt it. It needs nothing from the session and changes nothing about
 it, so it can be started and stopped at any time.
@@ -401,5 +401,5 @@ it, so it can be started and stopped at any time.
 - `--verbose`, `--json`, `--only` and `--failed` work as above:
 
 ```
-claude-docker --trace --follow --json | jq -c 'select(.denied or .failed)'
+claude-airlock --trace --follow --json | jq -c 'select(.denied or .failed)'
 ```

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCHER = ROOT / "bin" / "claude-docker"
+LAUNCHER = ROOT / "bin" / "claude-airlock"
 
 # Records its arguments, fails the "does it exist" queries so everything gets
 # created (but says the containers named in FAKE_RUNNING are up, and of every
@@ -85,7 +85,7 @@ if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
 sys.path.insert(0, str(ROOT))
 MODULES = ("capture", "follow", "image", "launcher", "network", "pcap", "records")
 capture, follow, image, launcher, network, pcap, records, settings, transcript = (
-    importlib.import_module(f"claude_sandbox.{name}")
+    importlib.import_module(f"claude_airlock.{name}")
     for name in (*MODULES, "settings", "transcript")
 )
 
@@ -153,7 +153,7 @@ class LauncherTest(unittest.TestCase):
         self.home = self.work / "home"
         self.project = self.home / "proj"
         # Where the launcher keeps its own records
-        self.state = self.home / ".local" / "state" / "claude-sandbox"
+        self.state = self.home / ".local" / "state" / "claude-airlock"
         # The ~/.claude of the sandboxed sessions
         self.base = self.state / "home"
         # Where Claude Code keeps the transcripts of the project
@@ -208,9 +208,9 @@ class LauncherTest(unittest.TestCase):
         environment = {
             **self.fake_docker_env(),
             "HOME": str(self.home),
-            "CLAUDE_DOCKER_NET_LOG": "0",
-            "CLAUDE_DOCKER_PROC_LOG": "0",
-            "CLAUDE_DOCKER_LINE_MODE": "0",
+            "CLAUDE_AIRLOCK_NET_LOG": "0",
+            "CLAUDE_AIRLOCK_PROC_LOG": "0",
+            "CLAUDE_AIRLOCK_LINE_MODE": "0",
             **env,
         }
         if session:
@@ -234,7 +234,7 @@ class LauncherTest(unittest.TestCase):
         return file
 
     def write_config(self, *lines: str) -> None:
-        directory = self.home / ".config" / "claude-sandbox"
+        directory = self.home / ".config" / "claude-airlock"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "config").write_text("\n".join(lines) + "\n")
 

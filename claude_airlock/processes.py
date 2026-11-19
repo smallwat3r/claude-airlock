@@ -1,5 +1,5 @@
 """Recording what runs in a session and which process made each of its
-connections (CLAUDE_DOCKER_PROC_LOG, on unless set to 0), and reading that
+connections (CLAUDE_AIRLOCK_PROC_LOG, on unless set to 0), and reading that
 record for --trace.
 
 The transcript says which tool calls were issued, not what a command went
@@ -46,7 +46,7 @@ from .settings import Host, Settings
 from .sidecar import Sidecar
 
 PROCESSES_SUFFIX = ".procs"
-PROCESSES_LABEL = "claude-sandbox.processes"
+PROCESSES_LABEL = "claude-airlock.processes"
 RECORD_FILE = "/processes.jsonl"
 WATCHER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "procwatch.py")
 # The records are a few hundred kB each as a rule, the oldest go once
@@ -166,8 +166,8 @@ def say_not_recorded(watcher: Watcher) -> None:
     if time.time() - watcher.start < SOON_OVER:
         return
     print(
-        "claude-docker: the processes of this session were not recorded,"
-        " CLAUDE_DOCKER_PROC_LOG=0 runs a session without the attempt:\n"
+        "claude-airlock: the processes of this session were not recorded,"
+        " CLAUDE_AIRLOCK_PROC_LOG=0 runs a session without the attempt:\n"
         f"{watcher.last_said(5)}",
         file=sys.stderr,
     )

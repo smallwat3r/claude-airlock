@@ -165,7 +165,7 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
         if record and record.process_limit:
             lines.append(
                 f"ran into its limit of processes {record.process_limit} times,"
-                " what it tried to start then did not: CLAUDE_DOCKER_PIDS sets"
+                " what it tried to start then did not: CLAUDE_AIRLOCK_PIDS sets"
                 " the limit"
             )
         capture = session_capture(host, session)
@@ -289,7 +289,7 @@ def report_session(
     lines = [*(heard or []), *lines]
     if lines:
         print(
-            "claude-docker: of this session, claude-docker --trace has the rest:",
+            "claude-airlock: of this session, claude-airlock --trace has the rest:",
             *(f"  {line}" for line in lines),
             sep="\n",
             file=sys.stderr,

@@ -1,4 +1,4 @@
-"""What a session is configured from: the CLAUDE_DOCKER_* settings, the
+"""What a session is configured from: the CLAUDE_AIRLOCK_* settings, the
 user's config file, and where things are on the host."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 # The checkout's bin and docker directories, found from where this package
-# really is, so bin/claude-docker can be symlinked from anywhere
+# really is, so bin/claude-airlock can be symlinked from anywhere
 _REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 BIN_DIR = os.path.join(_REPO_DIR, "bin")
 DOCKERFILE_DIR = os.path.join(_REPO_DIR, "docker")
@@ -31,7 +31,14 @@ EGRESS_PORT = 3128
 CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
-SETTING_PREFIX = "CLAUDE_DOCKER_"
+SETTING_PREFIX = "CLAUDE_AIRLOCK_"
+# What the project was called before, claude-sandbox with a claude-docker
+# command: its settings, its directories and its command are still taken,
+# each with a word to the user about the name that replaced it
+LEGACY_SETTING_PREFIX = "CLAUDE_DOCKER_"
+LEGACY_NAME = "claude-sandbox"
+LEGACY_COMMAND = "claude-docker"
+NAME = "claude-airlock"
 
 
 class Fatal(Exception):
@@ -40,7 +47,7 @@ class Fatal(Exception):
 
 class SocketAccess(enum.Enum):
     """What of the host's Docker daemon a session reaches, each by what
-    CLAUDE_DOCKER_SOCKET says for it, see socket_proxy_options of
+    CLAUDE_AIRLOCK_DOCKER_SOCKET says for it, see socket_proxy_options of
     network.py."""
 
     OFF = "0"
@@ -52,7 +59,7 @@ class SocketAccess(enum.Enum):
 
 @dataclass(frozen=True)
 class Settings:
-    """The value of every CLAUDE_DOCKER_* setting, a field for each of
+    """The value of every CLAUDE_AIRLOCK_* setting, a field for each of
     SETTINGS. The defaults here are the launcher's defaults, the one place
     to change them."""
 
@@ -65,7 +72,7 @@ class Settings:
     # Whether a session loads the connectors of the claude.ai account
     connectors: bool = False
     ssh_agent: bool = False
-    socket: SocketAccess = SocketAccess.OFF
+    docker_socket: SocketAccess = SocketAccess.OFF
     rw_config: bool = False
     shared_history: bool = False
     shadow: tuple[str, ...] = ()
@@ -97,10 +104,13 @@ class Host:
     project_dir: str
     config_home: str  # XDG_CONFIG_HOME, ~/.config by default
     state_home: str  # XDG_STATE_HOME, ~/.local/state by default
+    # The user's directory under config_home, the one of before the
+    # rename for a user who still has theirs there, see legacy.py
+    config_name: str = NAME
 
     @property
     def user_conf(self) -> str:
-        return os.path.join(self.config_home, "claude-sandbox")
+        return os.path.join(self.config_home, self.config_name)
 
     @property
     def claude_dir(self) -> str:
@@ -116,7 +126,12 @@ class Host:
         # The launcher's own records. Never mounted into a session, which
         # could otherwise edit what is kept about it, but for
         # sandbox_claude_dir and history_dir.
-        return os.path.join(self.state_home, "claude-sandbox")
+        return os.path.join(self.state_home, NAME)
+
+    @property
+    def legacy_state_dir(self) -> str:
+        # Where the records were before the rename, see legacy.py
+        return os.path.join(self.state_home, LEGACY_NAME)
 
     @property
     def sandbox_claude_dir(self) -> str:
@@ -244,7 +259,7 @@ class Kind(enum.Enum):
 
 @dataclass(frozen=True)
 class Setting:
-    """One CLAUDE_DOCKER_* setting: its name without the prefix, how it is
+    """One CLAUDE_AIRLOCK_* setting: its name without the prefix, how it is
     read and what --help says of it. Its value is the field of Settings
     of the same name in lower case, its default is the one there."""
 
@@ -257,10 +272,16 @@ class Setting:
     # What to mount next to a project is a per-project choice, not a
     # default for every session: not taken from the config file
     config_file: bool = True
+    # Its name before the rename, when that was not this one
+    was: str = ""
 
     @property
     def variable(self) -> str:
         return SETTING_PREFIX + self.name
+
+    @property
+    def legacy_variable(self) -> str:
+        return LEGACY_SETTING_PREFIX + (self.was or self.name)
 
     @property
     def field(self) -> str:
@@ -269,7 +290,7 @@ class Setting:
 
 # Every setting, the one list of them: load_settings reads these, the
 # config file takes these and --help names these. The README has a
-# row for each and docker/CLAUDE-sandbox.md tells a session of those
+# row for each and docker/CLAUDE-airlock.md tells a session of those
 # it can run into, test/test_settings.py holds both to this list.
 SETTINGS = (
     Setting("FEATURES", Kind.NAME, "features to build in, space or comma separated"),
@@ -284,11 +305,12 @@ SETTINGS = (
     ),
     Setting("SSH_AGENT", Kind.SWITCH, "1 forwards the SSH agent"),
     Setting(
-        "SOCKET",
+        "DOCKER_SOCKET",
         Kind.CHOICE,
         "1 allows docker ps and logs, full adds inspect",
         choices=tuple(access.value for access in SocketAccess),
         of=SocketAccess,
+        was="SOCKET",
     ),
     Setting(
         "RW_CONFIG", Kind.SWITCH, "1 leaves the protected ~/.claude config writable"
@@ -335,6 +357,24 @@ CONFIG_FILE_SETTINGS = frozenset(
 )
 
 
+def renamed(values: Mapping[str, str], told: list[str]) -> dict[str, str]:
+    """Those values with each setting under the name it has now. One still
+    under its name of before the rename is taken as the one of now, unless
+    that one is there too, and told gets a line about it."""
+    current = dict(values)
+    for setting in SETTINGS:
+        old, new = setting.legacy_variable, setting.variable
+        if old not in current:
+            continue
+        value = current.pop(old)
+        if new in values:
+            told.append(f"{old} is not read, {new} is set too")
+        else:
+            current[new] = value
+            told.append(f"{old} is now {new}, the old name is read for now")
+    return current
+
+
 def settings_help() -> str:
     """The part of --help about the settings: each with what it does and
     the default of a limit, then how to set one for every session."""
@@ -358,19 +398,26 @@ def settings_help() -> str:
     lines += [
         "",
         "To override a default for every session, put NAME=value lines in",
-        "~/.config/claude-sandbox/config, the environment still wins. Of",
+        "~/.config/claude-airlock/config, the environment still wins. Of",
         f"{merged} the lists of both count.",
     ]
     return "\n".join(lines)
 
 
-def read_config_file(path: str) -> dict[str, str]:
-    """Defaults for the CLAUDE_DOCKER_* settings from the user's config file:
-    one NAME=value per line, # comments, the value taken literally (no
-    quotes, no ~ or variable expansion). A line that is not a known setting
-    aborts: a typo must not silently leave a restriction off. Deliberately
-    not read from the project, the session can write there and could switch
-    its own sandboxing off for the next run."""
+def read_config_file(path: str, told: list[str]) -> dict[str, str]:
+    """Defaults for the CLAUDE_AIRLOCK_* settings from the user's config
+    file: one NAME=value per line, # comments, the value taken literally
+    (no quotes, no ~ or variable expansion). A line that is not a known
+    setting aborts: a typo must not silently leave a restriction off. A
+    setting under its name of before the rename is known, see renamed.
+    Deliberately not read from the project, the session can write there
+    and could switch its own sandboxing off for the next run."""
+    known_names = {
+        name
+        for setting in SETTINGS
+        if setting.config_file
+        for name in (setting.variable, setting.legacy_variable)
+    }
     values: dict[str, str] = {}
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -380,17 +427,15 @@ def read_config_file(path: str) -> dict[str, str]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         name, separator, value = line.partition("=")
-        known = (
-            name.startswith(SETTING_PREFIX)
-            and name[len(SETTING_PREFIX) :] in CONFIG_FILE_SETTINGS
-        )
-        if not separator or not known:
+        if not separator or name not in known_names:
             raise Fatal(f"{path}: not a known setting: {line}")
         values[name] = value
-    return values
+    return renamed(values, told)
 
 
-def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
+def load_settings(
+    env: Mapping[str, str], config_file: str, told: list[str] | None = None
+) -> Settings:
     """Settings from the environment, then the config file, then the
     defaults, each read as its kind says (see Kind). A list or a name in
     the environment wins also when set but empty, which says none (no
@@ -399,8 +444,11 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     empty variable must not switch off a restriction the file switched on.
     What is hidden and what is protected are the lists of both, for the
     same reason: what one hides or protects, the other does not take
-    back."""
-    file_values = read_config_file(config_file)
+    back. told gets a line for each setting found under its name of
+    before the rename, in the file first."""
+    told = [] if told is None else told
+    file_values = read_config_file(config_file, told)
+    env = renamed(env, told)
     defaults = Settings()
 
     def items(said: str) -> tuple[str, ...]:

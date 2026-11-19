@@ -188,7 +188,7 @@ def net_log() -> int:
     if requests is None:
         raise Fatal(
             "the egress filter has no log yet "
-            "(start a CLAUDE_DOCKER_NET_FILTER=1 session first)"
+            "(start a CLAUDE_AIRLOCK_NET_FILTER=1 session first)"
         )
     denied = Counter(request.url for request in requests if request.denied)
     for url, count in sorted(denied.items(), key=lambda item: (-item[1], item[0])):

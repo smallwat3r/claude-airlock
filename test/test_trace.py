@@ -21,10 +21,10 @@ from harness import (
     transcript,
 )
 
-from claude_sandbox import egress_log, files, settings, trace
-from claude_sandbox.events import Event, Who
-from claude_sandbox.layout import Layout, event_json, folded
-from claude_sandbox.transcript import call_details
+from claude_airlock import egress_log, files, settings, trace
+from claude_airlock.events import Event, Who
+from claude_airlock.layout import Layout, event_json, folded
+from claude_airlock.transcript import call_details
 
 
 class TraceTest(LauncherTest):
@@ -511,7 +511,7 @@ class TraceTest(LauncherTest):
         self.assertIn("usage:", result.stderr)
 
     def test_a_directory_that_is_gone_does_not_stop_the_trace(self):
-        result = self.launch("--trace", CLAUDE_DOCKER_EXTRA_DIRS="/no/such/dir")
+        result = self.launch("--trace", CLAUDE_AIRLOCK_EXTRA_DIRS="/no/such/dir")
         self.assertEqual(result.status, 0, result.stderr)
 
     def test_a_date_out_of_range_does_not_stop_the_trace(self):
@@ -678,7 +678,7 @@ class NetworkTraceTest(LauncherTest):
 
     def setUp(self):
         super().setUp()
-        self.filtered = self.launch(CLAUDE_DOCKER_NET_FILTER="1", FAKE_IP="172.20.0.5")
+        self.filtered = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_IP="172.20.0.5")
         now = time.time()
         self.write_transcript("0a", prompts_at(now, now + 10))
         mine, other = "172.20.0.5", "172.20.0.9"
@@ -812,7 +812,7 @@ class NetworkTraceTest(LauncherTest):
         ended = self.launch(
             # Logged while it runs, whenever it got to start
             session="sleep 2.5",
-            CLAUDE_DOCKER_NET_FILTER="1",
+            CLAUDE_AIRLOCK_NET_FILTER="1",
             FAKE_IP=mine,
             FAKE_ACCESS_LOG=str(self.access_log),
         )

@@ -2,8 +2,8 @@
 """Refresh every pinned version, sha256 and image digest of the sandbox.
 
 Covers the Dockerfile parts (base, tail, features, plus your own features in
-~/.config/claude-sandbox/features) and the sidecar images in
-claude_sandbox/network.py.
+~/.config/claude-airlock/features) and the sidecar images in
+claude_airlock/network.py.
 A pin that appears in none of the files is skipped, so removing a feature
 needs no change here.
 
@@ -300,8 +300,8 @@ def default_paths() -> list[Path]:
         here / "base.Dockerfile",
         here / "tail.Dockerfile",
         *sorted((here / "features").glob("*.Dockerfile")),
-        *sorted((config / "claude-sandbox" / "features").glob("*.Dockerfile")),
-        here.parent / "claude_sandbox" / "network.py",
+        *sorted((config / "claude-airlock" / "features").glob("*.Dockerfile")),
+        here.parent / "claude_airlock" / "network.py",
     ]
 
 
@@ -312,7 +312,7 @@ def main() -> None:
             pin(pins)
     changed = pins.write()
     print(f"\nDone, {len(changed)} file(s) changed. Review with git diff, then")
-    print("start claude-docker, the image rebuilds itself when its parts change.")
+    print("start claude-airlock, the image rebuilds itself when its parts change.")
 
 
 if __name__ == "__main__":

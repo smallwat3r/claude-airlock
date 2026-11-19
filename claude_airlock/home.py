@@ -165,7 +165,7 @@ def session_state() -> list[Tmpfs]:
     its additions with that session's next command, in another project's
     sandbox. So a session is given a tmpfs in place of each: its own are
     made there and gone with it, and it neither sees nor reaches those of
-    another session. Whatever CLAUDE_DOCKER_RW_CONFIG says, that is about
+    another session. Whatever CLAUDE_AIRLOCK_RW_CONFIG says, that is about
     the config and this is not config. The session's user's alone: a tmpfs
     is root's unless told otherwise."""
     user = (os.getuid(), os.getgid())
@@ -184,7 +184,7 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     host too. The ones that are missing were made empty by prepare_home,
     so that none can be created either, in the base, where the sandboxed
     sessions would follow it. The cost: none of these can be changed from
-    inside the sandbox. CLAUDE_DOCKER_RW_CONFIG=1 opts out, they are then
+    inside the sandbox. CLAUDE_AIRLOCK_RW_CONFIG=1 opts out, they are then
     the host's and writable."""
     mode = "z" if settings.rw_config else "ro,z"
     args = [
@@ -195,7 +195,7 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     ]
     if settings.rw_config:
         # Shown by bin/claude-statusline
-        args.append(env_arg("CLAUDE_DOCKER_RW_CONFIG", 1))
+        args.append(env_arg("CLAUDE_AIRLOCK_RW_CONFIG", 1))
     return args
 
 

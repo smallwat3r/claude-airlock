@@ -9,8 +9,8 @@ import sys
 
 from records import only_file, require
 
-from claude_sandbox.pcap import read_capture
-from claude_sandbox.processes import read_record
+from claude_airlock.pcap import read_capture
+from claude_airlock.processes import read_record
 
 record = read_record(only_file(sys.argv[1]))
 require(not record.unreadable, "the watcher could not see who holds a socket")

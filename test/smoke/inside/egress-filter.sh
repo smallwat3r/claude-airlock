@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# A session with the egress filter (CLAUDE_DOCKER_NET_FILTER=1).
+# A session with the egress filter (CLAUDE_AIRLOCK_NET_FILTER=1).
 
 check "an allowed domain is reachable" curl -fsS -m 15 -o /dev/null https://api.github.com
 # The proxy itself must refuse it. A proxy that is down would also make the

@@ -3,7 +3,7 @@
 
 The launcher is run as a command against a throwaway home and project, with a
 fake docker first on PATH that records every call and can play a session
-(see harness.py). A few checks call the claude_sandbox package directly
+(see harness.py). A few checks call the claude_airlock package directly
 instead. The checks are in the test_*.py files next to this one, each of
 which also runs on its own.
 

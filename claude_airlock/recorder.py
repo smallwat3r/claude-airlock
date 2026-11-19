@@ -227,7 +227,7 @@ def transcripts_copied(host: Host) -> Iterator[None]:
             # What was written and taken back meanwhile is not in the
             # copy, and a session can be what made the copying fail
             print(
-                "claude-docker: the transcripts could not be copied at"
+                "claude-airlock: the transcripts could not be copied at"
                 f" {copier.failed} looks, what the session took out of them"
                 f" meanwhile is not known: {copier.problem}",
                 file=sys.stderr,

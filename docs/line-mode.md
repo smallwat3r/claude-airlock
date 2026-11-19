@@ -4,7 +4,7 @@ Line mode is Claude Code with a simpler UI. You type at a prompt, and the
 session writes what it does above it, one line at a time, the network
 included.
 
-It is the default. Nothing else changes: `claude-docker` takes the same
+It is the default. Nothing else changes: `claude-airlock` takes the same
 arguments, and it is the same session in the same sandbox, recorded and
 checked the same way.
 
@@ -83,19 +83,19 @@ they made.
 
 ## Switching it off
 
-`CLAUDE_DOCKER_LINE_MODE=0 claude-docker` is one session with Claude Code's
+`CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock` is one session with Claude Code's
 native UI. With that setting in the config file every session has it,
-and `claude-docker --line-mode` is then one session in line mode.
+and `claude-airlock --line-mode` is then one session in line mode.
 
 What has no conversation runs as it always did: `-p`, a command of
-claude's (`claude-docker mcp list`), `--version` and `--shell`.
+claude's (`claude-airlock mcp list`), `--version` and `--shell`.
 
 ## How it works
 
 Claude Code runs in its print mode and speaks JSON Lines over its standard
 input and output, the protocol of the Agent SDK. What the session did
 comes from the same records as `--trace --follow`, so the two never
-disagree. The code is the `claude_sandbox/chat` package.
+disagree. The code is the `claude_airlock/chat` package.
 
 A new version of Claude Code may move or rename what it says. Line mode
 checks each message against what it reads of it, and says once when

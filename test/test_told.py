@@ -10,9 +10,9 @@ import unittest
 
 from harness import LauncherTest
 
-from claude_sandbox import transcript
-from claude_sandbox.events import Event, Who
-from claude_sandbox.layout import Layout, alerting, event_json, went_wrong
+from claude_airlock import transcript
+from claude_airlock.events import Event, Who
+from claude_airlock.layout import Layout, alerting, event_json, went_wrong
 
 PROJECT = "/p"
 

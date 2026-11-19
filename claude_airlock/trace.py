@@ -68,7 +68,7 @@ from .transcript import (
 )
 
 USAGE = (
-    "usage: claude-docker --trace [list | SESSION] [--follow] [--verbose | --json]"
+    "usage: claude-airlock --trace [list | SESSION] [--follow] [--verbose | --json]"
     " [--only KIND,...] [--failed]"
 )
 # Of the call a connection is said to be made during
@@ -482,8 +482,8 @@ def network(
 ) -> tuple[list[str], list[Event]]:
     """What the session did on the network and what ran in it, from what
     the launcher kept: the egress proxy's log for a filtered session, a
-    capture for one run without CLAUDE_DOCKER_NET_LOG=0, and the record
-    of its processes for one run without CLAUDE_DOCKER_PROC_LOG=0, all
+    capture for one run without CLAUDE_AIRLOCK_NET_LOG=0, and the record
+    of its processes for one run without CLAUDE_AIRLOCK_PROC_LOG=0, all
     of those between start and end."""
     sessions = recorded_sessions(host, start, end)
     filtered = [session for session in sessions if session.ip]
@@ -505,7 +505,7 @@ def network(
         if found
         else [
             labelled(
-                "network", "not recorded (CLAUDE_DOCKER_NET_LOG=0, or not sandboxed)"
+                "network", "not recorded (CLAUDE_AIRLOCK_NET_LOG=0, or not sandboxed)"
             )
         ]
     )
@@ -836,7 +836,7 @@ def picked_session(files: list[Path], name: str) -> Path:
     found = sessions_named(files, name)
     if len(found) != 1:
         problem = "matches several sessions" if found else "matches no session"
-        raise Fatal(f"{name} {problem}, see claude-docker --trace list")
+        raise Fatal(f"{name} {problem}, see claude-airlock --trace list")
     return found[0]
 
 

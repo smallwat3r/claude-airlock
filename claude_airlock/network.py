@@ -53,7 +53,7 @@ SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38c
 EGRESS_PROXY = "claude-egress-proxy"
 # A hash of what a proxy sidecar was started from, so one started from
 # something else (an edited rule, another image) is noticed and replaced
-SIDECAR_CONFIG_LABEL = "claude-sandbox.config"
+SIDECAR_CONFIG_LABEL = "claude-airlock.config"
 # The proxy's log is kept in a volume, so it outlives the proxy's container,
 # as the current file and the one before it (logfile_rotate in squid.conf).
 # The current one is rotated out once it is over the limit, which bounds the
@@ -70,13 +70,13 @@ EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # Each of the two is one network per socket mode, so that a session only
 # shares a network with the socket proxy it was given: on a network, every
 # container reaches every other by name.
-FILTER_NET = "claude-docker-net"
-OPEN_NET = "claude-docker-open-net"
+FILTER_NET = "claude-airlock-net"
+OPEN_NET = "claude-airlock-open-net"
 SOCKET_NET_SUFFIXES = {SocketAccess.LIMITED: "-ps", SocketAccess.FULL: "-full"}
 FILTER_NETS = (FILTER_NET, *(FILTER_NET + s for s in SOCKET_NET_SUFFIXES.values()))
 SOCKET_PROXIES = {
-    SocketAccess.LIMITED: "claude-docker-ps-proxy",
-    SocketAccess.FULL: "claude-docker-proxy",
+    SocketAccess.LIMITED: "claude-airlock-ps-proxy",
+    SocketAccess.FULL: "claude-airlock-proxy",
 }
 DOCKER_SOCK = "/var/run/docker.sock"
 # The networks each proxy can be on, by its name: where a session that uses
@@ -108,14 +108,14 @@ def network_name(settings: Settings) -> str:
     name = FILTER_NET if settings.net_filter else OPEN_NET
     if not has_socket_proxy(settings):
         return name
-    return name + SOCKET_NET_SUFFIXES[settings.socket]
+    return name + SOCKET_NET_SUFFIXES[settings.docker_socket]
 
 
 def socket_proxy_name(settings: Settings) -> str:
     """One sidecar per socket mode, so sessions in different modes never
     share. The limited one has its own name on purpose: a full-access sidecar
     left running must not be picked up as the limited one."""
-    full = settings.socket is SocketAccess.FULL
+    full = settings.docker_socket is SocketAccess.FULL
     return SOCKET_PROXIES[SocketAccess.FULL if full else SocketAccess.LIMITED]
 
 
@@ -181,7 +181,7 @@ def isolate_network(name: str, state: NetworkState) -> NetworkState:
         return state
     if state.sessions:
         print(
-            f"claude-docker: the docker network {name} lets a session reach what"
+            f"claude-airlock: the docker network {name} lets a session reach what"
             " the host listens on. It is made anew, without that, by the first"
             " session started once none is on it.",
             file=sys.stderr,
@@ -296,7 +296,7 @@ def wait_for_egress_proxy(timeout: float = 15.0) -> None:
             return
         time.sleep(0.2)
     print(
-        "claude-docker: the egress proxy is slow to start,"
+        "claude-airlock: the egress proxy is slow to start,"
         " the session's first requests may fail",
         file=sys.stderr,
     )
@@ -510,7 +510,7 @@ def is_socket(path: str) -> bool:
 def has_socket_proxy(settings: Settings) -> bool:
     """Whether the session gets a socket proxy: asked for, and there is
     a Docker socket on the host."""
-    return settings.socket in SOCKET_PROXIES and is_socket(DOCKER_SOCK)
+    return settings.docker_socket in SOCKET_PROXIES and is_socket(DOCKER_SOCK)
 
 
 def socket_proxy_options(settings: Settings) -> list[str]:
@@ -518,13 +518,14 @@ def socket_proxy_options(settings: Settings) -> list[str]:
     session that has one, see has_socket_proxy. A write call to the host daemon (which runs as root) would let
     the session spawn a sibling that mounts the host filesystem, escaping
     the sandbox entirely, so writes are blocked in both modes:
-      CLAUDE_DOCKER_SOCKET=1     docker ps and docker logs only, through our
-                                 own HAProxy rules (docker-socket-proxy.cfg)
-      CLAUDE_DOCKER_SOCKET=full  every read under /containers, which adds
-                                 inspect, stats and top. inspect shows the
-                                 environment of every container on the host,
-                                 secrets included."""
-    if settings.socket is SocketAccess.LIMITED:
+      CLAUDE_AIRLOCK_DOCKER_SOCKET=1
+          docker ps and docker logs only, through our own HAProxy rules
+          (docker-socket-proxy.cfg)
+      CLAUDE_AIRLOCK_DOCKER_SOCKET=full
+          every read under /containers, which adds inspect, stats and top.
+          inspect shows the environment of every container on the host,
+          secrets included."""
+    if settings.docker_socket is SocketAccess.LIMITED:
         # The image renders this template into its HAProxy config. No allow
         # switches are passed, so if a future image ignored the template, its
         # stock rules would deny containers rather than open them up.
@@ -574,5 +575,5 @@ def socket_proxy_args(settings: Settings) -> list[str]:
     return [
         env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),
         # Shown by bin/claude-statusline
-        env_arg("CLAUDE_DOCKER_SOCKET", settings.socket.value),
+        env_arg("CLAUDE_AIRLOCK_DOCKER_SOCKET", settings.docker_socket.value),
     ]

@@ -14,7 +14,7 @@ with a directory of the same name holding files the fragment copies in:
 | `ble` | tshark and scapy, for offline analysis of BLE captures |
 | `cad` | OpenSCAD, admesh |
 | `cpp` | cmake, clangd |
-| `docker` | Docker CLI, for `CLAUDE_DOCKER_SOCKET` |
+| `docker` | Docker CLI, for `CLAUDE_AIRLOCK_DOCKER_SOCKET` |
 | `docs` | pandoc, poppler-utils, qpdf, gnuplot |
 | `excalidraw` | `excalidraw-export`, renders an [Excalidraw](https://excalidraw.com) scene to PNG or SVG offline, and takes the scene back out of one. Brings in `playwright` for its headless Chromium |
 | `font` | fontforge, fonttools, ttfautohint, woff2, fontconfig and the Ocrab font |
@@ -35,15 +35,15 @@ With no selection every feature is built, which is large. Select a subset
 either way, the environment variable wins:
 
 ```
-export CLAUDE_DOCKER_FEATURES="go typst"       # empty string for none
+export CLAUDE_AIRLOCK_FEATURES="go typst"       # empty string for none
 
-mkdir -p ~/.config/claude-sandbox
-printf 'go\ntypst\n' > ~/.config/claude-sandbox/features.txt
+mkdir -p ~/.config/claude-airlock
+printf 'go\ntypst\n' > ~/.config/claude-airlock/features.txt
 ```
 
 ## A feature of your own
 
-Drop a fragment into `~/.config/claude-sandbox/features/NAME.Dockerfile`.
+Drop a fragment into `~/.config/claude-airlock/features/NAME.Dockerfile`.
 It runs as root after the base, so `apt-get install` and friends work, and
 a same-named file there overrides a bundled feature:
 
@@ -80,7 +80,7 @@ without a plugin being enabled on the host. The `python`, `go`, `cpp` and
 - The image tag is a hash of the generated Dockerfile. Changing the
   selection or editing a part rebuilds on the next start, and each feature
   set keeps its own image.
-- Old images pile up, several GB each. `claude-docker --prune` removes
+- Old images pile up, several GB each. `claude-airlock --prune` removes
   them all but the one your settings ask for now.
 - Images, downloads and Python packages are pinned by digest, checksum or
   version. Claude Code's auto-updater is off, so upgrading means
