@@ -27,6 +27,7 @@ from .entries import (
     local_time,
     tool_calls,
 )
+from .planted import Planted, flagged, planted
 from .shown import size
 
 # Of the output of a call, how many lines of its start and of its end are
@@ -38,6 +39,14 @@ VERBOSE_OUTPUT = (10, 10)
 # ends it, quoted or not. Not <<<, which is a here-string.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)(\w+)\2")
 FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# The tools whose result is not something read from elsewhere, and is not
+# looked at for text written to instruct the session (see planted.py):
+# what the session or the user wrote, and what a subagent said. What that
+# read is looked at in its own transcript, and Claude Code adds words of
+# its own to its result that read as a sign.
+NOT_READ = frozenset(
+    {*FILE_TOOLS, "TodoWrite", "AskUserQuestion", "ExitPlanMode", "Agent", "Task"}
+)
 # What tells the plugin a call is of, each value of the event with what
 # its line starts with
 PLUGIN_SAID = {"plugin": "plugin", "plugin_server": "plugin server"}
@@ -324,6 +333,8 @@ class Outcome:
     output_size: int | None = None
     # The files a command changed
     changed: tuple[ChangedFile, ...] = ()
+    # The signs that its output was written to instruct the session
+    planted: tuple[Planted, ...] = ()
 
     @property
     def refused(self) -> bool:
@@ -352,16 +363,27 @@ class Outcome:
         if self.changed:
             fields["changed"] = [file.fields() for file in self.changed]
             fields["outside_project"] = self.outside_project
-        return fields
+        return {**fields, **flagged(self.planted)}
 
 
-def outcome(call: dict, entry: dict, block: dict, project_dir: str) -> Outcome:
+def result_planted(tool: str, output: str) -> tuple[Planted, ...]:
+    """The signs in what a tool call gave the session to read, none for a
+    tool whose result is no such thing, see NOT_READ."""
+    return () if tool in NOT_READ else planted(output)
+
+
+def outcome(
+    call: dict, entry: dict, block: dict, project_dir: str, tool: str
+) -> Outcome:
     """How a tool call ended, from the entry it is in, the entry of its
-    result and the result itself: whether it failed, how long it took, its
-    output, who decided that it may run when that was not the mode of the
-    session, and what Claude Code noted of a command besides its output:
-    that it was interrupted, what its exit code means, where its output
-    was kept, and the files it changed."""
+    result, the result itself and the name of the tool: whether it
+    failed, how long it took, its output, who decided that it may run
+    when that was not the mode of the session, and what Claude Code noted
+    of a command besides its output: that it was interrupted, what its
+    exit code means, where its output was kept, and the files it changed.
+    And the signs that the output was written to instruct the session,
+    see planted.py."""
+    output = block_text(block.get("content"))
     started, finished = local_time(call), local_time(entry)
     said = entry.get("toolUseResult")
     noted = said if isinstance(said, dict) else {}
@@ -371,7 +393,7 @@ def outcome(call: dict, entry: dict, block: dict, project_dir: str) -> Outcome:
     held = counted(noted.get("persistedOutputSize")) if output_kept else None
     return Outcome(
         failed=bool(block.get("is_error")),
-        output=block_text(block.get("content")),
+        output=output,
         seconds=(
             round((finished - started).total_seconds(), 3)
             if started and finished
@@ -383,6 +405,7 @@ def outcome(call: dict, entry: dict, block: dict, project_dir: str) -> Outcome:
         output_kept=output_kept,
         output_size=held,
         changed=tuple(files_changed(entry, project_dir)),
+        planted=result_planted(tool, output),
     )
 
 
@@ -417,7 +440,8 @@ def changed_details(
 def result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, bool]]:
     """The lines for how a tool call ended and how much it put out, each
     with whether it tells of what went wrong: how a call ended that
-    failed or was refused, and a file changed outside the project. None
+    failed or was refused, a file changed outside the project, and each
+    sign that what it put out was written to instruct the session. None
     for a call that no result was recorded of. Of the output itself the
     start and the end, when the call failed or with --verbose: never all
     of it, a command can put out thousands of lines."""
@@ -446,6 +470,7 @@ def result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, bool
     lines = [
         ("result: " + ", ".join(notes), badly),
         *(("out: " + line, badly) for line in shown),
+        *((sign.shown, True) for sign in ended.planted),
     ]
     if ended.output_kept:
         # Too long to give the model whole: it was given the start, and

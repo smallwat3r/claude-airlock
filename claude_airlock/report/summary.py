@@ -1,6 +1,7 @@
 """What a transcript says of its session as a whole, for the header of a
 trace: what ran it, when and at what cost, how many calls it made and how
-many failed, the instructions it read, the files it wrote and the pages
+many failed, how much of what it read shows signs of being written to
+instruct it, the instructions it read, the files it wrote and the pages
 it fetched.
 
 Like the rest of a transcript, all of it is the session's own word, see
@@ -13,9 +14,10 @@ from urllib.parse import urlsplit
 
 from ..events import flat, labelled
 from .brief import PREVIEW_WIDTH, amount
-from .calls import outside_flag, refused, written_paths
+from .calls import outside_flag, refused, result_planted, written_paths
 from .entries import (
     INPUT_TOKENS,
+    block_text,
     call_input,
     entry_times,
     measured,
@@ -25,7 +27,29 @@ from .entries import (
     tool_calls,
     tool_results,
 )
-from .told import instructions_read
+from .planted import INJECTION, read_said
+from .told import attachment, instruction_files, instructions_read
+
+
+def planted_reads(entries: list[dict]) -> int:
+    """How many of the results of its calls and of the files it read as
+    instructions show signs of being written to instruct the session,
+    see planted.py. A file of instructions is read again as the session
+    goes, and counts once."""
+    tools = {
+        str(block.get("id")): block.get("name") for _, block in tool_calls(entries)
+    }
+    results = sum(
+        bool(result_planted(str(tools.get(call, "")), block_text(block.get("content"))))
+        for call, (_, block) in tool_results(entries).items()
+    )
+    files = {
+        file.path
+        for entry in entries
+        for file in instruction_files(attachment(entry))
+        if file.planted
+    }
+    return results + len(files)
 
 
 def overview(entries: list[dict]) -> list[tuple[str, str]]:
@@ -85,6 +109,9 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     not_run = sum(refused(entry) for entry, _ in results)
     if not_run:
         rows.append(("refused", f"{not_run} calls were not allowed to run"))
+    signs = planted_reads(entries)
+    if signs:
+        rows.append((INJECTION, f"{read_said(signs)}, see --failed"))
     return rows
 
 

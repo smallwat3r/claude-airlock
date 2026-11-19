@@ -19,6 +19,7 @@ from typing import Any
 
 from ..events import Event, Kind, labelled
 from ..recording.pcap import Went
+from .planted import INJECTION
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -96,13 +97,15 @@ def wrong_throughout(fields: dict) -> bool:
 
 def went_wrong(event: Event) -> bool:
     """Whether an event tells of something gone wrong: a call that failed
-    or was not allowed to run, a write outside the project, and what
-    wrong_throughout names."""
+    or was not allowed to run, a write outside the project, something
+    read that shows signs of being written to instruct the session (see
+    planted.py), and what wrong_throughout names."""
     fields = event.fields
     return bool(
         fields.get("failed")
         or fields.get("refused")
         or fields.get("outside_project")
+        or fields.get(INJECTION)
         or wrong_throughout(fields)
     )
 

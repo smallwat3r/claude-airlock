@@ -26,6 +26,10 @@ What you get:
   it. Its tool calls come from its own transcript, which the launcher
   copies as it is written and flags when a line is later changed or
   removed. `--trace` shows it all.
+- **A flag on prompt injection.** What a session reads, a page, a file,
+  the output of a command, is looked at for signs that it was written to
+  instruct the model, and flagged where the session does it. The session
+  is told to treat it as data and to tell you.
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook or a Makefile say.
 - **Line mode.** Claude Code with a simpler UI that shows more than the
@@ -210,6 +214,10 @@ read-write project safe to trust blindly afterwards. A session is not asked
 before it uses a tool unless `CLAUDE_AIRLOCK_ASK=1`, so all of this it can
 do on its own, also when something it read told it to:
 
+- What it reads is looked at for signs of that, and flagged (see
+  [What it read](docs/trace.md#what-it-read)). The flag knows a few ways
+  of writing and stops nothing: text in other words goes unflagged, and
+  the session had read it either way.
 - Anything in the project can be changed, including files that run code on
   the host later. The launcher warns about git's and Claude's own, and
   about the build files, hook managers and nested `CLAUDE.md` it knows by
@@ -257,8 +265,8 @@ You get a prompt and, above it, what the session does in the lines of
   resource use and the doors are recorded from outside the sandbox, the
   session cannot leave them out.
 - **What went wrong stands out.** A refused connection, a denied
-  request, a failed command and a write outside the project are in bold
-  red and in capitals.
+  request, a failed command, a write outside the project and a possible
+  prompt injection in what was read are in bold red and in capitals.
 - **The cost is in sight.** Each step says the tokens it wrote and read,
   each turn its time and price, and the sandbox says every so often how
   much memory and CPU it uses.

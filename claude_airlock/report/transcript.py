@@ -375,7 +375,7 @@ class Walk:
         issued = self._open.pop(call, None)
         if issued is None:
             return []
-        ended = outcome(issued.started, entry, block, self._project_dir)
+        ended = outcome(issued.started, entry, block, self._project_dir, issued.name)
         if issued.event:
             self._ended(issued.event, ended)
             return []

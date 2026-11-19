@@ -35,8 +35,10 @@ from ..settings import EGRESS_PORT, Host
 from .calls import outside, written_paths
 from .entries import modified, short_id
 from .noted import noted_events
+from .planted import FLAG, read_said
 from .recorded import ReadTranscript, Recorded
 from .shown import reached, size
+from .summary import planted_reads
 
 # To one destination in one session, from this many bytes on it is said
 LARGE_UPLOAD = 10_000_000
@@ -210,7 +212,9 @@ def denied_lines(recorded: Recorded) -> list[str]:
 
 def transcript_lines(host: Host, start: float) -> list[str]:
     """What the transcripts written to since a time say: the files
-    written outside the project, and what was taken out of them."""
+    written outside the project, how much of what was read shows signs of
+    being written to instruct the session, and what was taken out of
+    them."""
     lines: list[str] = []
     written: list[str] = []
     # Those of the subagents too, what one wrote is in its own
@@ -229,6 +233,10 @@ def transcript_lines(host: Host, start: float) -> list[str]:
         session = subagent_session(path)
         whose = "a subagent of " if session else ""
         named = f"the transcript of {whose}{short_id(session or path)}"
+        signs = planted_reads(read.entries)
+        if signs:
+            said = f"{FLAG} in {named}: {read_said(signs)}"
+            lines.append(f"{said}, see --trace --failed")
         if compared.gone or compared.rewritten:
             lines.append(
                 f"{named} was changed:"

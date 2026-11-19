@@ -20,12 +20,18 @@ from dataclasses import dataclass
 from ..events import Event, Kind, Who, clean, flat
 from .brief import PREVIEW_WIDTH, amount, between, shortened
 from .entries import MOST_LISTED, claude_of, counted, kept, listed, seconds
+from .planted import Planted, flagged, planted
 
 # What a line of a language server's report is about, in the order of the
 # LSP's severities as Claude Code names them
 SEVERITIES = ("Error", "Warning", "Info", "Hint")
 # The mode in which a line typed while claude works is a prompt
 PROMPT_MODE = "prompt"
+# Where the instructions the user gave every session are from, as Claude
+# Code names it: those are the host's own and read-only in the sandbox.
+# Any other file of instructions came with the project or was written in
+# a session.
+OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
 
 Reader = Callable[[dict, float, Who], list[Event]]
 
@@ -47,6 +53,9 @@ class Instructions:
     kind: str
     # How long it is, in characters
     size: int
+    # The signs that it was written to turn the session against the
+    # user, of a file that is not the user's own, see planted.py
+    planted: tuple[Planted, ...] = ()
 
     @property
     def shown(self) -> str:
@@ -54,20 +63,27 @@ class Instructions:
 
     @property
     def fields(self) -> dict:
-        return {"path": self.path, "type": self.kind, "chars": self.size}
+        about = {"path": self.path, "type": self.kind, "chars": self.size}
+        return {**about, **flagged(self.planted)}
+
+
+def instructions_planted(kind: str, content: object) -> tuple[Planted, ...]:
+    """The signs in a file read as instructions (see planted.py), none
+    for one of the user's own."""
+    return () if kind in OWN_INSTRUCTIONS else planted(content)
 
 
 def instruction_files(given: dict) -> tuple[Instructions, ...]:
     """The files an entry says were read as instructions."""
-    return tuple(
-        Instructions(
-            kept(file["path"]),
-            kept(file.get("type")) or "?",
-            len(file["content"]) if isinstance(file.get("content"), str) else 0,
-        )
-        for file in listed(given.get("files"))
-        if isinstance(file, dict) and isinstance(file.get("path"), str)
-    )
+    files = []
+    for file in listed(given.get("files")):
+        if not isinstance(file, dict) or not isinstance(file.get("path"), str):
+            continue
+        kind, content = kept(file.get("type")) or "?", file.get("content")
+        size = len(content) if isinstance(content, str) else 0
+        signs = instructions_planted(kind, content)
+        files.append(Instructions(kept(file["path"]), kind, size, signs))
+    return tuple(files)
 
 
 def attachment(entry: dict) -> dict:
@@ -192,9 +208,17 @@ class Asides:
         if not files or files == self._instructions:
             return []
         self._instructions = files
-        lines = [f"instructions: {file.shown}" for file in files]
-        fields = {"kind": "instructions", "files": [file.fields for file in files]}
-        return [Event(when, who, Kind.CONTEXT, lines, fields)]
+        fields = {
+            "kind": "instructions",
+            "files": [file.fields for file in files],
+            **flagged(sign for file in files for sign in file.planted),
+        }
+        event = Event(when, who, Kind.CONTEXT, [], fields)
+        for file in files:
+            event.say(f"instructions: {file.shown}")
+            for sign in file.planted:
+                event.say(sign.shown, alert=True)
+        return [event]
 
     def _server_instructions(self, given: dict, when: float, who: Who) -> list[Event]:
         added, removed = (

@@ -31,8 +31,10 @@ and CPU the sandbox uses](img/line-mode.png)
   each use of the SSH agent and of the Docker socket when you opened
   one: each is a line, whatever the session says of it. Here the second
   install downloads 9 MB from a host that its output never names.
-- **What went wrong stands out.** `REFUSED`, `DENIED`, `FAILED` and a
-  write `OUTSIDE PROJECT` are in bold red, among lines that are not.
+- **What went wrong stands out.** `REFUSED`, `DENIED`, `FAILED`, a
+  write `OUTSIDE PROJECT` and a `POSSIBLE INJECTION` in what the session
+  read (see [What it read](trace.md#what-it-read)) are in bold red, among
+  lines that are not.
 - **The cost is in sight.** Each step says the tokens it wrote and read
   and whether it missed the cache, each turn how long it took and what
   it cost, and the status above the prompt how full the context and the
