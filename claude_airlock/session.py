@@ -13,8 +13,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from .action import Action
 from .claude_args import is_a_command, says_permissions
 from .docker import (
+    DROP_CAPABILITIES,
+    NO_NEW_PRIVILEGES,
     Tmpfs,
     docker,
     docker_ok,
@@ -24,7 +27,7 @@ from .docker import (
     project_slug,
 )
 from .ending import Ending
-from .files import expand_home, json_object, private_dir, try_lock_file
+from .files import expand_home, private_dir, settings_object, try_lock_file
 from .home import home_args, session_state, statusline_of
 from .image import Image
 from .runtime import DOCKERS_OWN, Runtime
@@ -175,8 +178,8 @@ def base_args(
         # keep it self-contained.
         mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
         *statusline_args(host),
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
+        DROP_CAPABILITIES,
+        NO_NEW_PRIVILEGES,
         "--read-only",
         # No core of a process that crashed: it holds what the process had
         # in memory, and goes to a file in the project or to the host's own
@@ -201,9 +204,9 @@ def base_args(
 def configured_statusline(host: Host) -> str | None:
     """The program ~/.claude/settings.json runs as its statusline, if any."""
     try:
-        text = Path(host.claude_dir, "settings.json").read_text(encoding="utf-8")
-        words = shlex.split(statusline_of(json_object(text) or {}))
-    except (OSError, ValueError):
+        settings = settings_object(Path(host.claude_dir, "settings.json"))
+        words = shlex.split(statusline_of(settings))
+    except ValueError:
         return None
     program = expand_home(words[0] if words else "", host.home)
     return os.path.normpath(program) if os.path.isabs(program) else None
@@ -279,15 +282,15 @@ def scratch_args(settings: Settings, host: Host) -> list[str]:
     return args
 
 
-def session_args(action: str, env: Mapping[str, str]) -> list[str]:
+def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
     """What depends on how this one session was started."""
     args = []
-    if action == "shell":
+    if action is Action.SHELL:
         args.append("--entrypoint=bash")
     # A TTY only when there is one, so piped and scripted runs (claude -p)
     # work instead of failing with "the input device is not a TTY". Never
     # for a chat, which speaks to claude over pipes (see chat/).
-    if action != "line-mode" and sys.stdin.isatty() and sys.stdout.isatty():
+    if action is not Action.LINE_MODE and sys.stdin.isatty() and sys.stdout.isatty():
         args.append("--tty")
     # Passed through when set. GH_TOKEN is how gh authenticates in here, its
     # config directory is a tmpfs.

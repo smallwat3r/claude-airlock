@@ -18,53 +18,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .brief import PREVIEW_WIDTH, amount, between, shortened
-from .changes import CHANGED
-from .events import Event, Who, clean, flat
+from .entries import MOST_LISTED, claude_of, counted, kept, listed, seconds
+from .events import Event, Kind, Who, clean, flat
 
-# Of one list a transcript gives (files, names, messages), how much is
-# read and shown
-MOST_LISTED = 50
-# Of a path or a name that is kept to tell a change by
-KEPT_WIDTH = 4096
-# More than a session could count: a number above it is not a count
-MOST_COUNTED = 10**15
 # What a line of a language server's report is about, in the order of the
 # LSP's severities as Claude Code names them
 SEVERITIES = ("Error", "Warning", "Info", "Hint")
 # The mode in which a line typed while claude works is a prompt
 PROMPT_MODE = "prompt"
-# The events a chat is told of by claude itself as they happen, which it
-# says in its own words (see chat/notices.py), and the one it notes
-# itself (see changes.py)
-SAID_LIVE = frozenset({"api", "compact", "task", CHANGED})
 
 Reader = Callable[[dict, float, Who], list[Event]]
-
-
-def counted(value: object) -> int | None:
-    """A count a transcript gives, none for what is not one."""
-    if type(value) is not int or not 0 <= value <= MOST_COUNTED:
-        return None
-    return value
-
-
-def seconds(value: object) -> float | None:
-    """Milliseconds a transcript gives as seconds, none for what is not
-    a length of time."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    # Not a number and the infinities are not within it either
-    return value / 1000 if 0 <= value <= MOST_COUNTED else None
-
-
-def kept(value: object) -> str:
-    """A text as it is kept to tell a change by, empty for what is none."""
-    return value[:KEPT_WIDTH] if isinstance(value, str) else ""
-
-
-def listed(value: object) -> list:
-    """The start of a list a transcript gives, empty for what is none."""
-    return value[:MOST_LISTED] if isinstance(value, list) else []
 
 
 def names(value: object) -> list[str]:
@@ -211,8 +174,7 @@ class Asides:
         reader = readers.get(kind) if isinstance(kind, str) else None
         if reader is None:
             return []
-        who = Who.AGENT if entry.get("isSidechain") else Who.CLAUDE
-        return reader(given, when, who)
+        return reader(given, when, claude_of(entry))
 
     def prompted(self, entry: dict, when: float) -> list[Event]:
         """A prompt says the permission mode it was given in: an event
@@ -232,7 +194,7 @@ class Asides:
         self._instructions = files
         lines = [f"instructions: {file.shown}" for file in files]
         fields = {"kind": "instructions", "files": [file.fields for file in files]}
-        return [Event(when, who, "context", lines, fields)]
+        return [Event(when, who, Kind.CONTEXT, lines, fields)]
 
     def _server_instructions(self, given: dict, when: float, who: Who) -> list[Event]:
         added, removed = (
@@ -245,7 +207,7 @@ class Asides:
         if removed:
             lines.append("MCP server instructions gone: " + ", ".join(removed))
         fields = {"kind": "mcp_instructions", "added": added, "removed": removed}
-        return [Event(when, who, "context", lines, fields)] if lines else []
+        return [Event(when, who, Kind.CONTEXT, lines, fields)] if lines else []
 
     def _skills_listed(self, given: dict, when: float, who: Who) -> list[Event]:
         skills = names(given.get("names"))
@@ -258,7 +220,7 @@ class Asides:
         if self._verbose and skills:
             line += ": " + ", ".join(skills)
         fields = {"kind": "skills", "count": number, "names": skills}
-        return [Event(when, who, "context", [line], fields)]
+        return [Event(when, who, Kind.CONTEXT, [line], fields)]
 
     def _told(self, given: dict, when: float, who: Who) -> list[Event]:
         """What Claude Code told the model in the place of a prompt: that
@@ -270,12 +232,14 @@ class Asides:
         if mode != "task-notification":
             first = (text.strip().splitlines() or [""])[0]
             line = f"told ({mode}): {shortened(first)}".rstrip(": ")
-            return [Event(when, who, "context", [line], {"kind": mode, "text": said})]
+            return [
+                Event(when, who, Kind.CONTEXT, [line], {"kind": mode, "text": said})
+            ]
         status = flat((between(text, "<status>", "</status>") or "ended").strip())
         summary = flat((between(text, "<summary>", "</summary>") or "").strip())
         line = shortened(f"{status}: {summary}".rstrip(": "))
         fields = {"status": status, "summary": summary, "text": said}
-        return [Event(when, who, "task", [line], fields)]
+        return [Event(when, who, Kind.TASK, [line], fields)]
 
     def _file_changed(self, given: dict, when: float, who: Who) -> list[Event]:
         path = given.get("filename")
@@ -283,7 +247,7 @@ class Asides:
             return []
         line = f"changed since claude read it: {flat(path)}"
         fields = {"kind": "edited_file", "path": path, "snippet": given.get("snippet")}
-        return [Event(when, who, "context", [line], fields)]
+        return [Event(when, who, Kind.CONTEXT, [line], fields)]
 
     def _diagnostics(self, given: dict, when: float, who: Who) -> list[Event]:
         files = [file for file in listed(given.get("files")) if isinstance(file, dict)]
@@ -291,7 +255,7 @@ class Asides:
             return []
         lines = [line for file in files for line in diagnostic_lines(file)]
         fields = {"kind": "diagnostics", "files": files}
-        return [Event(when, who, "context", lines, fields)]
+        return [Event(when, who, Kind.CONTEXT, lines, fields)]
 
     def _thinking_dropped(self, given: dict, _when: float, _who: Who) -> list[Event]:
         dropped = given.get("newlyDropped")
@@ -327,7 +291,7 @@ class Asides:
         if attempt:
             line += f" (retry {attempt}" + (f" of {most})" if most else ")")
             fields.update(retry=attempt, retries=most)
-        return [Event(when, who, "api", [line], fields)]
+        return [Event(when, who, Kind.API, [line], fields)]
 
     def _compacted(self, entry: dict, when: float, who: Who) -> list[Event]:
         """The conversation was summed up to make room: what the model
@@ -340,7 +304,7 @@ class Asides:
         if before:
             line += f", {amount(before)} tokens before"
         fields = {"trigger": trigger or None, "pre_tokens": before}
-        return [Event(when, who, "compact", [line], fields)]
+        return [Event(when, who, Kind.COMPACT, [line], fields)]
 
     def _mode_set(self, entry: dict, when: float, _who: Who) -> list[Event]:
         """The permission mode of the session, an event when it is another
@@ -352,7 +316,7 @@ class Asides:
         if not was or was == mode:
             return []
         line = f"permissions: {shortened(flat(mode))}  was: {shortened(flat(was))}"
-        return [Event(when, Who.CLAUDE, "mode", [line], {"mode": mode, "was": was})]
+        return [Event(when, Who.CLAUDE, Kind.MODE, [line], {"mode": mode, "was": was})]
 
     def _requested(self, entry: dict, when: float, who: Who) -> list[Event]:
         """A request to the API says which model it asks and how hard it
@@ -379,7 +343,7 @@ class Asides:
             "was_effort": was[1] or None,
             "source": source,
         }
-        return [Event(when, who, "model", [line], fields)]
+        return [Event(when, who, Kind.MODEL, [line], fields)]
 
 
 def model_shown(model: str, effort: str) -> str:

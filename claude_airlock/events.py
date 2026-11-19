@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # C0 and C1 controls except tab and newline, and the bidi overrides: a
 # transcript could otherwise drive the terminal or reorder what is shown.
@@ -33,12 +33,53 @@ class Who(enum.Enum):
     SANDBOX = "sandbox"
 
 
+class Kind:
+    """What an event is when it is not the call of a tool, as the what
+    column says it and --only names it. The call of a tool is the name of
+    the tool, which is not a closed set."""
+
+    PROMPT = "prompt"
+    REPLY = "reply"
+    # What a command of Claude Code's said
+    COMMAND = "command"
+    # What a step of the model used
+    STEP = "step"
+    # What the session was told and became, see told.py
+    CONTEXT = "context"
+    TASK = "task"
+    API = "api"
+    COMPACT = "compact"
+    MODE = "mode"
+    MODEL = "model"
+    # A line of the transcript that cannot be read
+    TRANSCRIPT = "transcript"
+    # What the launcher recorded of the network and of the processes
+    NET = "net"
+    DNS = "dns"
+    EXEC = "exec"
+    LISTEN = "listen"
+    HEALTH = "health"
+    # What the launchers noted, see noted.py
+    STARTED = "started"
+    CHANGED = "changed"
+
+
+class Stage:
+    """Which part of something an event is, among its values, when it is
+    followed as it happens: a tool call and its result, a connection as
+    it opens and what became of it."""
+
+    CALL = "call"
+    RESULT = "result"
+    OPEN = "open"
+    OUTCOME = "outcome"
+
+
 @dataclass
 class Event:
     """Something that happened: when (seconds since the epoch), who did
-    it, what kind of thing (prompt, reply, net, dns, or the name of the
-    tool for a call, which is not a closed set) and the lines that
-    describe it."""
+    it, what kind of thing (see Kind, or the name of the tool for a call)
+    and the lines that describe it."""
 
     when: float
     who: Who
@@ -49,6 +90,28 @@ class Event:
     # Of a tool call that is followed as it runs, and of its result: the
     # number the two are matched by, in the order the calls were issued
     number: int | None = None
+    # Said ahead of its first line: the container it is of, how it came
+    tag: str = ""
+    # Said after its first line, each found out after the event was made:
+    # the process that made a connection, the call it was made during
+    notes: list[str] = field(default_factory=list)
+    # Which of the details tell of what went wrong, by their place
+    alerts: set[int] = field(default_factory=set)
+
+    @property
+    def lines(self) -> list[str]:
+        """The details as they are shown, the first with the tag ahead
+        of it and the notes after."""
+        first = " ".join(filter(None, (self.tag, *self.details[:1])))
+        first = "  ".join(filter(None, (first, *self.notes)))
+        return [first, *self.details[1:]] if self.details or first else []
+
+    def say(self, line: str, alert: bool = False) -> None:
+        """Add a line to the details, one that tells of what went wrong
+        marked as that."""
+        if alert:
+            self.alerts.add(len(self.details))
+        self.details.append(line)
 
 
 def clean(value: object) -> str:

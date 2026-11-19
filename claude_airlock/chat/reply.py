@@ -22,9 +22,9 @@ import textwrap
 import time
 from collections.abc import Callable
 
-from ..events import Event, Who, clean
+from ..entries import content_blocks
+from ..events import Event, Kind, Who, clean
 from ..layout import BOLD, GREEN, painted
-from ..transcript import content_blocks
 from .console import Page
 
 CODE = GREEN
@@ -254,7 +254,7 @@ class ReplyStream:
                 self._owed -= 1
             elif text.strip():
                 self._before()
-                said = Event(time.time(), Who.CLAUDE, "reply", [], {"text": text})
+                said = Event(time.time(), Who.CLAUDE, Kind.REPLY, [], {"text": text})
                 self._page.put(said_whole(self._page, said))
 
     def finish(self) -> None:
@@ -266,7 +266,7 @@ class ReplyStream:
             self._page.put([""])
         elif self._lines:
             self._before()
-            said = Event(self._started, Who.CLAUDE, "reply", self._lines, {})
+            said = Event(self._started, Who.CLAUDE, Kind.REPLY, self._lines, {})
             self._page.put(self._page.layout.event(said))
         self._owed += not self._met
         self._writer = None
@@ -289,6 +289,6 @@ class ReplyStream:
         if not self._headed:
             self._before()
             self._headed = True
-            head = Event(self._started, Who.CLAUDE, "reply", [""], {})
+            head = Event(self._started, Who.CLAUDE, Kind.REPLY, [""], {})
             lines = self._page.layout.event(head) + lines
         self._page.put(lines)

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .docker import docker, docker_bytes, docker_ok
+from .errors import Fatal
 from .network import (
     EGRESS_ACCESS_LOG,
     EGRESS_LOG_DIR,
@@ -24,8 +25,7 @@ from .network import (
     EGRESS_PROXY,
     SQUID_IMAGE,
 )
-from .records import NetSession
-from .settings import Fatal
+from .records import TracedSession
 
 # The fields of a line that says how much the session sent, the last of them
 SENT_FIELDS = 11
@@ -93,7 +93,7 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
 
 
 def made_by(
-    request: ProxyRequest, session: NetSession, start: float, end: float
+    request: ProxyRequest, session: TracedSession, start: float, end: float
 ) -> bool:
     """Whether a session made a request between start and end: it came
     from the session's address and was open at some point of that time.
@@ -106,8 +106,8 @@ def made_by(
 
 
 def requests_made(
-    logged: list[ProxyRequest], sessions: list[NetSession], start: float, end: float
-) -> Iterator[tuple[ProxyRequest, NetSession]]:
+    logged: list[ProxyRequest], sessions: list[TracedSession], start: float, end: float
+) -> Iterator[tuple[ProxyRequest, TracedSession]]:
     """Each request of the log that one of the sessions made between
     start and end, see made_by, with the session that made it."""
     for request in logged:

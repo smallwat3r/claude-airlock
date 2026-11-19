@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .docker import docker, docker_ok, docker_output
-from .settings import DOCKERFILE_DIR, Fatal, Host, Settings
+from .errors import Fatal
+from .settings import DOCKERFILE_DIR, Host, Settings
 
 IMAGE_NAME = "claude-airlock"
 # The lines of a part that the launcher reads. One of the first kind is a

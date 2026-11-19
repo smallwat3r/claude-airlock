@@ -23,7 +23,7 @@ from pathlib import Path
 
 from harness import LAUNCHER, LauncherTest
 
-from claude_airlock import claude_args, started
+from claude_airlock import claude_args, entries, started
 from claude_airlock.changes import change_events
 from claude_airlock.chat import (
     asking,
@@ -32,11 +32,15 @@ from claude_airlock.chat import (
     drift,
     notices,
     pipe,
+    shell,
     status,
     talk,
     turn,
 )
+from claude_airlock.chat import followed as following
 from claude_airlock.chat import reply as replying
+from claude_airlock.chat import said as saying
+from claude_airlock.chat import screen as screens
 from claude_airlock.events import Event, Who
 from claude_airlock.follow import Follower, Round
 from claude_airlock.layout import Layout
@@ -154,6 +158,12 @@ def page(layout: Layout | None = None) -> console.Page:
     """Somewhere to write to, as a file is written to unless laid out
     otherwise."""
     return console.Page(console.Console("/nowhere"), layout or Layout())
+
+
+def a_chat(host: Host, claude: object = None) -> talk.Chat:
+    """A chat that is not run, with what stands for claude once it is."""
+    sandbox = status.Sandbox("claude-test")
+    return talk.Chat(host, sandbox, Layout(), lambda _on_end: claude)
 
 
 @contextlib.contextmanager
@@ -597,23 +607,24 @@ class ChatTest(LauncherTest):
         self.assertFalse(follower._ours("claude-test-2"))
 
     def test_a_cleared_session_is_followed_in_its_new_transcript(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        chat = a_chat(self.host())
         other = SESSION.replace("3fa9", "4fa9")
         with written():
             for session in (SESSION, other, "../elsewhere"):
                 chat._heard(
-                    None, {"type": "system", "subtype": "init", "session_id": session}
+                    {"type": "system", "subtype": "init", "session_id": session}
                 )
         # What is not an id changes nothing
-        self.assertEqual([path.stem for path in chat._follower._tails], [other])
+        tails = chat._followed._follower._tails
+        self.assertEqual([path.stem for path in tails], [other])
 
     def said_by(self, *messages: dict) -> list[str]:
         """What a chat writes of what claude says, the lines about what
         changed in it."""
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        chat = a_chat(self.host())
         with written() as lines:
             for message in messages:
-                chat._heard(None, message)
+                chat._heard(message)
         return [line for line in lines if "CHANGED" in line]
 
     def test_a_chat_says_nothing_of_what_claude_says_as_it_reads_it(self):
@@ -739,9 +750,9 @@ class ChatTest(LauncherTest):
 
     def test_a_chat_notes_what_changed_for_a_trace_of_the_session(self):
         host = self.host()
-        chat = talk.Chat(host, status.Sandbox("claude-test"), Layout())
+        chat = a_chat(host)
         # A moment ago, as it is when claude first says something
-        chat._started -= 1
+        began = time.time() - 1
         mine = Follower(host, verbose=False, container="claude-test")
         others = Follower(host, verbose=False, container="claude-other")
 
@@ -754,7 +765,7 @@ class ChatTest(LauncherTest):
         time.sleep(0.002)
         with written():
             for _ in range(2):
-                chat._heard(None, {"type": "new_thing", "text": "secret"})
+                chat._heard({"type": "new_thing", "text": "secret"})
         rows, events = change_events(host, 0, float("inf"))
         self.assertEqual(
             rows,
@@ -773,17 +784,17 @@ class ChatTest(LauncherTest):
         self.assertEqual(change_events(host, 0, float("inf"), "claude-other")[1], [])
         self.assertEqual(len(change_events(host, 0, float("inf"), "claude-test")[1]), 1)
         # The chat said it itself, it is not written again as it follows
-        self.assertTrue(chat._told_over_the_pipe(event))
+        self.assertTrue(following.told_over_the_pipe(event, began))
         # Nor is what was noted before a session is followed, a trace's
         time.sleep(0.002)
         self.assertEqual(followed(Follower(host, verbose=False)), [])
         with written():
-            chat._heard(None, {"type": "another_thing"})
+            chat._heard({"type": "another_thing"})
         self.assertEqual([event.what for event in followed(mine)], ["changed"] * 2)
         self.assertEqual(followed(mine) + followed(others), [])
 
     def test_a_file_asked_about_is_outside_the_project_as_the_session_knows_it(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        chat = a_chat(self.host())
         asked: list[str] = []
 
         def ask(prompt: str) -> str | None:
@@ -806,37 +817,29 @@ class ChatTest(LauncherTest):
         )
 
     def test_a_reply_of_before_the_chat_is_history_one_since_is_told_by_the_pipe(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
-        now = Event(time.time() + 1, Who.CLAUDE, "reply", ["x"], {})
-        self.assertTrue(chat._told_over_the_pipe(now))
-        self.assertFalse(
-            chat._told_over_the_pipe(Event(1.0, Who.CLAUDE, "reply", ["x"], {}))
-        )
+        began = time.time()
+        told = following.told_over_the_pipe
+        now = Event(began + 1, Who.CLAUDE, "reply", ["x"], {})
+        self.assertTrue(told(now, began))
+        self.assertFalse(told(Event(1.0, Who.CLAUDE, "reply", ["x"], {}), began))
         # What a command said and what a subagent replied are the transcript's
         for who, what in ((Who.CLAUDE, "command"), (Who.AGENT, "reply")):
-            self.assertFalse(
-                chat._told_over_the_pipe(Event(now.when, who, what, [], {}))
-            )
+            self.assertFalse(told(Event(now.when, who, what, [], {}), began))
 
     def test_what_claude_says_of_the_session_live_is_not_said_again(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
-        soon = time.time() + 1
+        began = time.time()
+        told = following.told_over_the_pipe
+        soon = began + 1
         # A retry, a compaction and a task that ended come over the pipe
         for what in ("api", "compact", "task"):
-            self.assertTrue(
-                chat._told_over_the_pipe(Event(soon, Who.CLAUDE, what, ["x"], {}))
-            )
-            self.assertFalse(
-                chat._told_over_the_pipe(Event(1.0, Who.CLAUDE, what, ["x"], {}))
-            )
+            self.assertTrue(told(Event(soon, Who.CLAUDE, what, ["x"], {}), began))
+            self.assertFalse(told(Event(1.0, Who.CLAUDE, what, ["x"], {}), began))
         # What only the transcript has is shown from it
         for what in ("context", "mode", "model", "prompt"):
-            self.assertFalse(
-                chat._told_over_the_pipe(Event(soon, Who.CLAUDE, what, ["x"], {}))
-            )
+            self.assertFalse(told(Event(soon, Who.CLAUDE, what, ["x"], {}), began))
 
     def test_ctrl_c_is_for_the_turn_that_runs_else_for_the_line(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        chat = a_chat(self.host())
         chat._reading = True
         with self.assertRaises(KeyboardInterrupt):
             chat._on_interrupt(2, None)
@@ -845,53 +848,69 @@ class ChatTest(LauncherTest):
         self.assertTrue(chat._interrupt)
 
     def test_a_line_is_not_waited_for_once_claude_has_ended(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        chat = a_chat(self.host())
         chat._session_ended()
         with written(), self.assertRaises(KeyboardInterrupt):
             chat._read("> ")
         self.assertFalse(chat._reading)
 
     def test_a_turn_that_is_quiet_says_that_it_still_runs(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
+        shown, turns = page(), turn.Turns()
+        heart = turn.Heartbeat(shown, turns, lambda: False)
         with written() as lines:
             # Not between two turns
-            chat._page.wrote -= talk.QUIET
-            chat._still_working()
+            shown.wrote -= turn.QUIET
+            heart.beat()
             self.assertEqual(lines, [])
-            chat._turns.begin()
+            turns.begin()
             # Not while claude has just taken a step
-            chat._still_working()
+            heart.beat()
             self.assertEqual(lines, [])
-            chat._turns.current.since -= talk.QUIET
-            chat._still_working()
+            turns.current.since -= turn.QUIET
+            heart.beat()
             # Said once, the next one waits twice as long
-            chat._page.wrote -= talk.QUIET
-            chat._still_working()
-            chat._page.wrote -= talk.QUIET
-            chat._still_working()
-            self.assertEqual(chat._quiet, 4 * talk.QUIET)
+            shown.wrote -= turn.QUIET
+            heart.beat()
+            shown.wrote -= turn.QUIET
+            heart.beat()
+            self.assertEqual(heart.wait, 4 * turn.QUIET)
             # What else is written only puts it off
-            chat._page.say(["chat        something"])
-            chat._still_working()
-            self.assertEqual(chat._quiet, 4 * talk.QUIET)
+            shown.say(["chat        something"])
+            heart.beat()
+            self.assertEqual(heart.wait, 4 * turn.QUIET)
             # A step of claude starts the wait over
-            chat._turns.current.stepped()
-            chat._still_working()
-            self.assertEqual(chat._quiet, talk.QUIET)
+            turns.current.stepped()
+            heart.beat()
+            self.assertEqual(heart.wait, turn.QUIET)
         self.assertEqual(sum("# working " in line for line in lines), 2)
 
-    def test_at_a_terminal_a_quiet_turn_is_said_to_run_in_one_line(self):
-        chat = talk.Chat(self.host(), status.Sandbox("claude-test"), Layout())
-        chat._console._redrawn = True
+    def test_a_turn_that_waits_for_the_user_is_not_said_to_run(self):
+        shown, turns = page(), turn.Turns()
+        asking_now = [True]
+        heart = turn.Heartbeat(shown, turns, lambda: asking_now[0])
         with written() as lines:
-            chat._turns.begin()
-            chat._turns.current.since -= 2 * talk.QUIET + 1
-            chat._still_working()
-            working = chat._console._working
+            turns.begin()
+            turns.current.since -= turn.QUIET
+            shown.wrote -= turn.QUIET
+            heart.beat()
+            self.assertEqual(lines, [])
+            asking_now[0] = False
+            heart.beat()
+        self.assertEqual(sum("# working " in line for line in lines), 1)
+
+    def test_at_a_terminal_a_quiet_turn_is_said_to_run_in_one_line(self):
+        terminal, turns = console.Console("/nowhere"), turn.Turns()
+        terminal._redrawn = True
+        heart = turn.Heartbeat(console.Page(terminal, Layout()), turns, lambda: False)
+        with written() as lines:
+            turns.begin()
+            turns.current.since -= 2 * turn.QUIET + 1
+            heart.beat()
+            working = terminal._working
             self.assertRegex(working, r"^# working +10s, waiting for claude$")
-            chat._turns.current.stepped()
-            chat._still_working()
-            self.assertEqual(chat._console._working, "")
+            turns.current.stepped()
+            heart.beat()
+            self.assertEqual(terminal._working, "")
         self.assertEqual(lines, [])
 
 
@@ -899,13 +918,13 @@ class PipeTest(unittest.TestCase):
     def test_a_session_id_that_is_none_is_not_made_a_path_of(self):
         host = Host("/home/me", "/home/me/proj", "", "")
         for said in ("../../../etc/passwd", "x" * 36, None, 7, SESSION + "/.."):
-            self.assertIsNone(pipe.transcript_of(host, said))
-        found = pipe.transcript_of(host, SESSION)
+            self.assertIsNone(saying.transcript_of(host, said))
+        found = saying.transcript_of(host, SESSION)
         self.assertEqual(found.name, f"{SESSION}.jsonl")
         self.assertIn(Path("/home/me/.claude/projects"), found.parents)
 
     def test_what_claude_says_of_the_session_is_taken_when_it_is_what_it_should(self):
-        session = pipe.Session()
+        session = saying.Session()
         self.assertFalse(session.heard({"subtype": "status", "permissionMode": "plan"}))
         self.assertEqual(session.mode, "plan")
         init = {
@@ -934,7 +953,7 @@ class PipeTest(unittest.TestCase):
         self.assertEqual(session.servers, [])
 
     def test_the_model_of_the_session_is_the_one_that_last_replied(self):
-        session = pipe.Session()
+        session = saying.Session()
         session.heard({"subtype": "init", "model": "claude-fable-5-2"})
         # /model names the model it chose, the next reply is by it
         said = {
@@ -981,8 +1000,8 @@ class PipeTest(unittest.TestCase):
 
     def test_a_count_is_a_number_within_reason(self):
         for odd in (True, "1", -1, float("inf"), float("nan"), 10**400, None):
-            self.assertIsNone(pipe.amount(odd))
-        self.assertEqual(pipe.amount(3), 3.0)
+            self.assertIsNone(entries.measured(odd))
+        self.assertEqual(entries.measured(3), 3.0)
 
     def test_the_arguments_of_a_resumed_session_name_it_alone(self):
         args = [
@@ -1000,27 +1019,63 @@ class PipeTest(unittest.TestCase):
             ["--model", "opus", "--verbose", f"--resume={SESSION}"],
         )
 
+    def agent(self) -> pipe.Agent:
+        """Claude played by what says again what it is told, in the place
+        of the docker command that runs it. Ended with the test."""
+        ran: list[subprocess.Popen] = []
+
+        def run(*_args: str, **options) -> subprocess.Popen:
+            ran.append(subprocess.Popen(["cat"], **options))
+            return ran[-1]
+
+        agent = pipe.Agent([], lambda: None, run)
+
+        def end() -> None:
+            agent.close()
+            agent.status()
+            # Once nothing reads them any more
+            agent.ended.wait(PATIENCE)
+            for process in ran:
+                for piped in (process.stdout, process.stderr):
+                    if piped:
+                        piped.close()
+
+        self.addCleanup(end)
+        return agent
+
     def test_what_claude_is_told_is_a_line_each(self):
-        class Piped(pipe.Agent):
-            def __init__(self):
-                self.sent = []
-                self._requests = iter(range(1, 9))
-
-            def send(self, message):
-                self.sent.append(message)
-
-        agent = Piped()
+        agent = self.agent()
         agent.prompt("hello")
         asked = agent.request("set_permission_mode", mode="plan")
         agent.respond("r1", {"behavior": "allow"})
         agent.refuse("r2", "no")
+        sent = [agent.messages.get(timeout=PATIENCE) for _ in range(4)]
+        agent.close()
+        self.assertEqual(agent.status(), 0)
         self.assertEqual(asked, "chat-1")
-        self.assertEqual(agent.sent[0]["message"]["content"][0]["text"], "hello")
+        self.assertEqual(sent[0]["message"]["content"][0]["text"], "hello")
         self.assertEqual(
-            agent.sent[1]["request"], {"subtype": "set_permission_mode", "mode": "plan"}
+            sent[1]["request"], {"subtype": "set_permission_mode", "mode": "plan"}
         )
-        self.assertEqual(agent.sent[2]["response"]["response"], {"behavior": "allow"})
-        self.assertEqual(agent.sent[3]["response"]["subtype"], "error")
+        self.assertEqual(sent[2]["response"]["response"], {"behavior": "allow"})
+        self.assertEqual(sent[3]["response"]["subtype"], "error")
+
+    def test_what_claude_answers_is_told_to_what_asked_for_it(self):
+        agent = self.agent()
+        answers: list[dict] = []
+        asked = agent.request("set_permission_mode", answers.append, mode="plan")
+        # Nothing waits for the answer to an interrupt
+        stopped = agent.request("interrupt")
+        self.assertTrue(agent.pending)
+        for odd in ("no", {"request_id": stopped}, {"request_id": [asked]}):
+            agent.answered({"response": odd})
+        self.assertEqual(answers, [])
+        answer = {"request_id": asked, "subtype": "success"}
+        agent.answered({"response": answer})
+        self.assertFalse(agent.pending)
+        # Told once
+        agent.answered({"response": answer})
+        self.assertEqual(answers, [answer])
 
 
 def message(kind: str, *blocks: dict, **more) -> dict:
@@ -1295,7 +1350,7 @@ class AskingTest(unittest.TestCase):
         self.assertEqual(asking.chosen(" green ", options), "green")
         # Digits that are no number to int
         self.assertEqual(asking.chosen("\u00b2", options), "\u00b2")
-        self.assertFalse(asking.is_number("\u0662"))
+        self.assertFalse(saying.is_number("\u0662"))
 
     def test_a_question_is_answered_once_and_not_by_a_line_typed_before_it(self):
         asker = asking.Asker(
@@ -1513,25 +1568,30 @@ def lines_now(lines: list[str]) -> str:
 
 
 class CommandsTest(LauncherTest):
-    def commands(self, handover: commands.Handover | None = None) -> commands.Commands:
+    def commands(
+        self, handover: commands.Handover | None = None, status=lambda: None
+    ) -> commands.Commands:
         host = Host(str(self.home), str(self.project), "", "")
-        self.session, self.turns = pipe.Session(), turn.Turns()
+        shown = page()
+        self.session, self.turns = saying.Session(), turn.Turns()
+        self.shell = shell.Shell(shown, "claude-test")
+        # What claude was asked for, each with what is told its answer
+        self.requests: list[tuple] = []
+        resume = commands.Resume(shown, host, self.turns, lambda _: "1", handover)
         return commands.Commands(
-            page(),
-            host,
-            "claude-test",
+            shown,
             self.session,
-            self.turns,
-            lambda _: "1",
-            handover,
+            lambda *asked, **more: self.requests.append((*asked, more)),
+            self.shell.run,
+            resume.resume,
+            status,
         )
 
     def test_status_and_statusline_say_what_the_statusline_writes(self):
-        ours = self.commands()
         asked: list[str] = []
-        ours._status = lambda: asked.append("status")
+        ours = self.commands(status=lambda: asked.append("status"))
         for line in ("/status", "/statusline"):
-            self.assertIs(ours.do(None, line), commands.Did.DONE)
+            self.assertIs(ours.do(line), commands.Did.DONE)
         self.assertEqual(asked, ["status", "status"])
 
     def test_what_a_command_of_the_users_writes_is_cleaned(self):
@@ -1541,19 +1601,19 @@ class CommandsTest(LauncherTest):
         seen: list[bool] = []
 
         def run(*_args: str, **options):
-            seen.append(ours.shelling)
+            seen.append(self.shell.running)
             return subprocess.Popen(ran, **options)
 
         with (
-            unittest.mock.patch.object(commands, "docker_popen", run),
+            unittest.mock.patch.object(shell, "docker_popen", run),
             written() as lines,
         ):
-            self.assertIs(ours.do(None, "!make test"), commands.Did.DONE)
+            self.assertIs(ours.do("!make test"), commands.Did.DONE)
         self.assertEqual(lines[1:3], ["one[2J", "two"])
         self.assertIn("ended with 3", lines[3])
         # Ctrl-C is for the command while it runs, and only then
         self.assertEqual(seen, [True])
-        self.assertFalse(ours.shelling)
+        self.assertFalse(self.shell.running)
 
     def test_ctrl_c_ends_what_a_command_of_the_users_runs_in_the_container(self):
         ours = self.commands()
@@ -1579,14 +1639,14 @@ class CommandsTest(LauncherTest):
             killed.append(args[-1])
             return subprocess.run(["bash", "-c", args[-1]], check=False).returncode == 0
 
-        threading.Timer(1.0, ours.interrupt).start()
+        threading.Timer(1.0, self.shell.interrupt).start()
         started = time.monotonic()
         with (
-            unittest.mock.patch.object(commands, "docker_popen", run),
-            unittest.mock.patch.object(commands, "docker_ok", in_container),
+            unittest.mock.patch.object(shell, "docker_popen", run),
+            unittest.mock.patch.object(shell, "docker_ok", in_container),
             written() as lines,
         ):
-            self.assertIs(ours.do(None, "!echo up; sleep 60"), commands.Did.DONE)
+            self.assertIs(ours.do("!echo up; sleep 60"), commands.Did.DONE)
         self.assertLess(time.monotonic() - started, 30)
         # Its group is not shown, what it wrote is
         self.assertEqual(lines[1], "up")
@@ -1607,18 +1667,18 @@ class CommandsTest(LauncherTest):
 
     def test_ctrl_c_is_for_a_command_of_the_users_while_it_runs(self):
         host = Host(str(self.home), str(self.project), "", "")
-        chat = talk.Chat(host, status.Sandbox("claude-test"), Layout())
+        chat = a_chat(host)
         chat._turns.begin()
-        chat._commands.shelling = True
+        chat._shell.running = True
         chat._on_interrupt(signal.SIGINT, None)
         self.assertFalse(chat._interrupt)
-        chat._commands.shelling = False
+        chat._shell.running = False
         chat._on_interrupt(signal.SIGINT, None)
         self.assertTrue(chat._interrupt)
 
     def test_claude_is_listened_to_while_a_question_waits(self):
         host = Host(str(self.home), str(self.project), "", "")
-        chat = talk.Chat(host, status.Sandbox("claude-test"), Layout())
+        chat = a_chat(host)
         said: list[tuple] = []
 
         class Claude:
@@ -1630,42 +1690,75 @@ class CommandsTest(LauncherTest):
 
         ask = {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}}
         asking = {"type": "control_request", "request_id": "r1", "request": ask}
-        decider = threading.Thread(target=chat._decide, args=(Claude(),), daemon=True)
         with written():
-            decider.start()
+            chat._asked.start(Claude())
             # Whoever listens is not kept by the question
-            chat._heard(Claude(), asking)
-            chat._heard(Claude(), {**asking, "request_id": "r2"})
+            chat._heard(asking)
+            chat._heard({**asking, "request_id": "r2"})
             deadline = time.monotonic() + PATIENCE
             while not chat._asker.asking and time.monotonic() < deadline:
                 time.sleep(0.01)
-            self.assertEqual((said, chat._answering), ([], 2))
+            self.assertEqual((said, chat._asked.pending), ([], 2))
             # One question at a time, each answered by a line
             self.assertTrue(chat._asker.take("y"))
             while len(said) < 1 or not chat._asker.asking:
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(0.01)
             self.assertTrue(chat._asker.take("n"))
-            chat._asked.put(None)
-            decider.join(PATIENCE)
+            self.assertTrue(chat._asked.answered_within(PATIENCE))
+            chat._asked.close()
         self.assertEqual(said, [("r1", "allow"), ("r2", "deny")])
-        self.assertEqual(chat._answering, 0)
+        self.assertEqual(chat._asked.pending, 0)
 
     def test_a_line_that_is_not_the_chats_is_for_claude(self):
         ours = self.commands()
         with written() as lines:
-            self.assertIs(ours.do(None, "fix the build"), commands.Did.NOTHING)
-            self.assertIs(ours.do(None, "/model sonnet"), commands.Did.NOTHING)
+            self.assertIs(ours.do("fix the build"), commands.Did.NOTHING)
+            self.assertIs(ours.do("/model sonnet"), commands.Did.NOTHING)
             # Not /mcp, before claude has listed its servers either
-            self.assertIs(ours.do(None, "/mcp"), commands.Did.DONE)
+            self.assertIs(ours.do("/mcp"), commands.Did.DONE)
             self.assertIn("not known before the first turn", lines_now(lines))
             self.session.servers = [("docs", "connected")]
-            self.assertIs(ours.do(None, "/mcp"), commands.Did.DONE)
-            self.assertIs(ours.do(None, "/help"), commands.Did.DONE)
-            self.assertIs(ours.do(None, "/quit"), commands.Did.LEFT)
+            self.assertIs(ours.do("/mcp"), commands.Did.DONE)
+            self.assertIs(ours.do("/help"), commands.Did.DONE)
+            self.assertIs(ours.do("/quit"), commands.Did.LEFT)
         self.assertIn("#   docs  connected", lines)
         self.assertIn(
             "#   !COMMAND       run a command in the sandbox, claude is not told", lines
+        )
+
+    def test_the_mode_is_asked_of_claude_and_said_when_it_answers(self):
+        ours = self.commands()
+        with written() as lines:
+            self.assertIs(ours.do("/mode"), commands.Did.DONE)
+            self.assertEqual(self.requests, [])
+            self.assertIs(ours.do("/mode plan"), commands.Did.DONE)
+            ((asked, answered, more),) = self.requests
+            self.assertEqual((asked, more), ("set_permission_mode", {"mode": "plan"}))
+            answered({"subtype": "error", "error": "no such\x1b[2J mode"})
+            self.assertEqual(self.session.mode, "")
+            answered({"subtype": "success", "response": {"mode": "plan"}})
+        self.assertEqual(self.session.mode, "plan")
+        self.assertEqual(
+            lines,
+            [
+                "# chat        /mode NAME changes it, plan for one",
+                "# chat        mode not changed: no such[2J mode",
+                "# chat        mode plan",
+            ],
+        )
+
+    def test_what_completes_and_what_help_says_are_the_same_commands(self):
+        said = "\n".join(commands.HELP)
+        for local in commands.LOCALS:
+            for name in local.names:
+                self.assertIs(commands.BY_NAME[name], local)
+            if local.typed:
+                self.assertIn(f"  {local.typed}", said)
+        self.assertEqual(
+            sorted(commands.LOCAL),
+            ["/exit", "/help", "/mcp", "/mode", "/quit", "/resume", "/status"]
+            + ["/statusline"],
         )
 
     def test_a_session_to_resume_is_left_for_the_launcher(self):
@@ -1673,20 +1766,20 @@ class CommandsTest(LauncherTest):
         handover = commands.Handover()
         ours = self.commands(handover)
         with written() as lines:
-            self.assertIs(ours.do(None, "/resume nope"), commands.Did.DONE)
+            self.assertIs(ours.do("/resume nope"), commands.Did.DONE)
             self.assertEqual(handover.session, "")
             self.turns.begin()
-            ours.do(None, f"/resume {SESSION[:6]}")
+            ours.do(f"/resume {SESSION[:6]}")
             self.assertIn(
                 "# chat        not while a turn runs",
                 lines or ["# chat        not while a turn runs"],
             )
             self.turns.end()
-            self.assertIs(ours.do(None, f"/resume {SESSION[:6]}"), commands.Did.LEFT)
+            self.assertIs(ours.do(f"/resume {SESSION[:6]}"), commands.Did.LEFT)
         self.assertEqual(handover.session, SESSION)
         # Nothing to leave it with: said, and not left
         with written() as lines:
-            self.assertIs(self.commands().do(None, "/resume"), commands.Did.DONE)
+            self.assertIs(self.commands().do("/resume"), commands.Did.DONE)
         self.assertEqual(lines, ["# chat        nothing here to resume a session with"])
 
 
@@ -1705,12 +1798,12 @@ class StatusTest(LauncherTest):
     def test_the_status_says_what_is_known_and_nothing_else(self):
         sandbox = status.Sandbox("claude-test")
         parts = status.status_parts(
-            pipe.Session(), turn.Usage(), status.Limits(), sandbox
+            saying.Session(), turn.Usage(), status.Limits(), sandbox
         )
         self.assertEqual(
             status.status_line(parts, colour=False), "[claude-test] net:open"
         )
-        session = pipe.Session(model="claude-opus-5-5")
+        session = saying.Session(model="claude-opus-5-5")
         usage = turn.Usage()
         limits = status.Limits()
         limits.heard({"rateLimitType": "five_hour", "utilization": 0.42, "resetsAt": 9})
@@ -1734,11 +1827,11 @@ class StatusTest(LauncherTest):
     def test_the_mode_is_said_when_it_changed_and_of_plan_always(self):
         sandbox = status.Sandbox("claude-test")
 
-        def shown(session: pipe.Session) -> str:
+        def shown(session: saying.Session) -> str:
             parts = status.status_parts(session, turn.Usage(), status.Limits(), sandbox)
             return status.status_line(parts, colour=False)
 
-        session = pipe.Session()
+        session = saying.Session()
         session.heard({"subtype": "init", "permissionMode": "bypassPermissions"})
         self.assertNotIn("mode:", shown(session))
         session.heard({"subtype": "status", "permissionMode": "acceptEdits\x1b[2J"})
@@ -1746,7 +1839,7 @@ class StatusTest(LauncherTest):
         session.heard({"subtype": "status", "permissionMode": "bypassPermissions"})
         self.assertNotIn("mode:", shown(session))
         # The one a prompt is not acted on in, started with or not
-        planning = pipe.Session()
+        planning = saying.Session()
         planning.heard({"subtype": "init", "permissionMode": "plan"})
         self.assertIn("mode:plan", shown(planning))
 
@@ -1785,13 +1878,13 @@ class StatusTest(LauncherTest):
 
     def test_it_heads_the_prompt_and_is_said_when_asked_for(self):
         shown = page()
-        line = status.StatusLine(shown, status.Sandbox("claude-test"))
-        session, usage = pipe.Session(), turn.Usage()
+        session, usage = saying.Session(), turn.Usage()
+        line = status.StatusLine(shown, status.Sandbox("claude-test"), session, usage)
         with written() as lines:
-            self.assertEqual(line.refresh(session, usage), "[claude-test] net:open")
+            self.assertEqual(line.refresh(), "[claude-test] net:open")
             self.assertEqual(shown._console._head, ["[claude-test] net:open"])
             session.replied({"message": {"model": "claude-opus-5-5"}})
-            line.show(session, usage)
+            line.show()
             self.assertEqual(shown._console._head, ["Opus 5.5 [claude-test] net:open"])
         self.assertEqual(lines, ["# status      Opus 5.5 [claude-test] net:open"])
 
@@ -1812,7 +1905,7 @@ class StatusTest(LauncherTest):
             }
         )
         parts = status.status_parts(
-            pipe.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
+            saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
         )
         reset = f"{datetime.fromtimestamp(9):%H:%M}"
         self.assertEqual(
@@ -1897,12 +1990,12 @@ class StatusTest(LauncherTest):
             {"rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": 9e11}
         )
         parts = status.status_parts(
-            pipe.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
+            saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
         )
         self.assertIn("5h:40% used", status.status_line(parts, colour=False))
 
     def test_the_model_chosen_with_model_is_shown_before_it_replies(self):
-        session = pipe.Session(model="claude-fable-5-2", chosen="Opus 5.5")
+        session = saying.Session(model="claude-fable-5-2", chosen="Opus 5.5")
         parts = status.status_parts(
             session, turn.Usage(), status.Limits(), status.Sandbox("claude-test")
         )
@@ -1982,73 +2075,58 @@ class ConsoleTest(LauncherTest):
         self.assertEqual(screen._above(), "")
 
     def test_the_head_is_erased_with_the_line_being_typed(self):
-        with unittest.mock.patch.object(console.shutil, "get_terminal_size") as size:
-            size.return_value = os.terminal_size((10, 24))
-            # Its colours take no column
-            self.assertEqual(
-                console.Console._erased("\x1b[2mmodel\x1b[0m\n> ", "abc"),
-                "\x1b[1A\r\x1b[J",
-            )
-            # A line of it as wide as the terminal takes one row, a wider two
-            self.assertEqual(
-                console.Console._erased("x" * 10 + "\n> ", ""), "\x1b[1A\r\x1b[J"
-            )
-            self.assertEqual(
-                console.Console._erased("x" * 11 + "\n> ", ""), "\x1b[2A\r\x1b[J"
-            )
+        # Its colours take no column
+        self.assertEqual(
+            screens.erased("\x1b[2mmodel\x1b[0m\n> ", "abc", 10), "\x1b[1A\r\x1b[J"
+        )
+        # A line of it as wide as the terminal takes one row, a wider two
+        self.assertEqual(screens.erased("x" * 10 + "\n> ", "", 10), "\x1b[1A\r\x1b[J")
+        self.assertEqual(screens.erased("x" * 11 + "\n> ", "", 10), "\x1b[2A\r\x1b[J")
 
     def test_the_line_being_typed_is_erased_by_the_rows_it_takes(self):
-        with unittest.mock.patch.object(console.shutil, "get_terminal_size") as size:
-            size.return_value = os.terminal_size((10, 24))
-            self.assertEqual(console.Console._erased("> ", "abc"), "\r\x1b[J")
-            self.assertEqual(console.Console._erased("> ", "x" * 25), "\x1b[2A\r\x1b[J")
-            # A wide character takes two columns, what is put on one none
-            self.assertEqual(
-                console.Console._erased("> ", "\u4e2d" * 5), "\x1b[1A\r\x1b[J"
-            )
-            self.assertEqual(console.Console._erased("> ", "e\u0301" * 7), "\r\x1b[J")
-            # What was pasted with its line breaks, each line its own rows
-            self.assertEqual(
-                console.Console._erased("> ", "one\n" + "x" * 12), "\x1b[2A\r\x1b[J"
-            )
+        self.assertEqual(screens.erased("> ", "abc", 10), "\r\x1b[J")
+        self.assertEqual(screens.erased("> ", "x" * 25, 10), "\x1b[2A\r\x1b[J")
+        # A wide character takes two columns, what is put on one none
+        self.assertEqual(screens.erased("> ", "\u4e2d" * 5, 10), "\x1b[1A\r\x1b[J")
+        self.assertEqual(screens.erased("> ", "e\u0301" * 7, 10), "\r\x1b[J")
+        # What was pasted with its line breaks, each line its own rows
+        self.assertEqual(
+            screens.erased("> ", "one\n" + "x" * 12, 10), "\x1b[2A\r\x1b[J"
+        )
+        # A terminal that says it has no column is taken to have one
+        self.assertEqual(screens.erased("> ", "", 0), "\x1b[2A\r\x1b[J")
 
     def test_a_line_is_written_again_with_the_cursor_where_it_was(self):
-        screen = console.Console(str(self.project))
+        out = io.StringIO()
+        screen = console.Console(str(self.project), out=out, columns=lambda: 10)
         screen._redrawn, screen._reading, screen._shown = True, "> ", "> "
         typed = "x" * 12
-        out = io.StringIO()
         with (
-            unittest.mock.patch.object(console.shutil, "get_terminal_size") as size,
             unittest.mock.patch.object(console.readline, "get_line_buffer") as buffer,
             unittest.mock.patch.object(console, "_point", lambda: 3),
-            contextlib.redirect_stdout(out),
         ):
-            size.return_value = os.terminal_size((10, 24))
             buffer.return_value = typed
             # The cursor is on the first of its two rows: nothing above
             # it is erased, and it is put back after the third character
             screen.write(["one"])
         self.assertEqual(out.getvalue(), "\r\x1b[Jone\n> " + typed + "\x1b[1A\r\x1b[5C")
-        with unittest.mock.patch.object(console.shutil, "get_terminal_size") as size:
-            size.return_value = os.terminal_size((10, 24))
-            back = console.Console._cursor_back
-            # At its end it is where it was written to, on the next row
-            # when that was to the edge
-            self.assertEqual(back("> ", "abc", "abc"), "")
-            self.assertEqual(back("head\n> ", "x" * 8, "x" * 8), " \r")
-            self.assertEqual(back("> ", "one\ntwo", "on"), "\x1b[1A\r\x1b[4C")
+        back = screens.cursor_back
+        # At its end it is where it was written to, on the next row
+        # when that was to the edge
+        self.assertEqual(back("> ", "abc", "abc", 10), "")
+        self.assertEqual(back("head\n> ", "x" * 8, "x" * 8, 10), " \r")
+        self.assertEqual(back("> ", "one\ntwo", "on", 10), "\x1b[1A\r\x1b[4C")
 
     def test_an_entered_line_is_written_again_in_its_style(self):
-        screen = console.Console(str(self.project), sent="1;7")
-        screen._redrawn, screen._reading = True, "> "
         out = io.StringIO()
-        with unittest.mock.patch.object(console.shutil, "get_terminal_size") as size:
-            size.return_value = os.terminal_size((10, 24))
-            with contextlib.redirect_stdout(out):
-                screen._entered("hi")
-                # A line as wide as the terminal took a row more
-                screen._entered("x" * 8)
-                screen._entered("  ")
+        screen = console.Console(
+            str(self.project), sent="1;7", out=out, columns=lambda: 10
+        )
+        screen._redrawn, screen._reading = True, "> "
+        screen._entered("hi")
+        # A line as wide as the terminal took a row more
+        screen._entered("x" * 8)
+        screen._entered("  ")
         self.assertEqual(
             out.getvalue(),
             "\x1b[1A\r\x1b[J\x1b[1;7m> hi\x1b[0m\n"
@@ -2056,15 +2134,12 @@ class ConsoleTest(LauncherTest):
         )
 
     def test_an_entered_line_leaves_no_working_line_above_it(self):
-        screen = console.Console(str(self.project))
+        out = io.StringIO()
+        screen = console.Console(str(self.project), out=out, columns=lambda: 40)
         screen._redrawn, screen._reading, screen._headed = True, "> ", True
         screen._head, screen._working = ["model x"], "# working 5s"
         screen._shown = screen._above() + "> "
-        out = io.StringIO()
-        with unittest.mock.patch.object(console.shutil, "get_terminal_size") as size:
-            size.return_value = os.terminal_size((40, 24))
-            with contextlib.redirect_stdout(out):
-                screen._entered("hi")
+        screen._entered("hi")
         self.assertEqual(out.getvalue(), "\x1b[1A\x1b[2A\r\x1b[Jmodel x\n> hi\n")
 
     def test_an_entered_line_is_left_as_typed_without_a_style(self):

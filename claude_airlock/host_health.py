@@ -26,7 +26,6 @@ session ends."""
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import threading
@@ -42,8 +41,8 @@ from .files import json_object, private_dir
 from .health import Ended, Sample
 from .launcher import Launcher, session_alive
 from .processes import KEPT_RECORDS, SOON_OVER, Watcher, health_said
-from .procwatch import LIMITS_EVERY, MOST_BYTES, CgroupHealth, Note
-from .records import NetSession, record_net_session
+from .procwatch import LIMITS_EVERY, MOST_BYTES, CgroupHealth, Note, stamped
+from .records import TracedSession, record_traced_session
 from .settings import Host
 from .sidecar import keep_latest
 
@@ -133,7 +132,7 @@ class HealthRecord:
     def note(self, **said: object) -> None:
         """Add a line to the record, in the format the watcher of
         procwatch.py uses. Lines past the size limit are dropped."""
-        line = json.dumps({"t": round(time.time(), 3), **said}) + "\n"
+        line = stamped(**said)
         if self._written + len(line) > MOST_BYTES:
             return
         with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
@@ -151,9 +150,9 @@ class HealthRecord:
         except OSError:
             return
         with suppress(OSError):
-            record_net_session(
+            record_traced_session(
                 host,
-                NetSession(
+                TracedSession(
                     self.session, self.project, self.start, processes=kept.name, end=end
                 ),
             )

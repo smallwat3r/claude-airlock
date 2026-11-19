@@ -19,24 +19,24 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import subprocess
 import sys
 import time
 from collections import Counter
 
-from .capture import cut_short, session_capture
-from .egress_log import logged_requests, requests_made
+from .calls import outside, written_paths
+from .capture import cut_short
+from .entries import modified, short_id
+from .errors import Fatal
 from .events import flat
-from .files import UNREADABLE, json_object, open_locked, private_dir
+from .files import json_object, open_locked, private_dir
 from .noted import noted_events
 from .pcap import Capture
-from .processes import session_record
 from .projects import project_root, session_transcripts, subagent_session
-from .recorder import compare, copied_at, removed_transcripts
-from .records import NetSession, recorded_sessions
-from .settings import EGRESS_PORT, Fatal, Host
+from .recorded import ReadTranscript, Recorded
+from .recorder import copied_at, removed_transcripts
+from .records import recorded_sessions
+from .settings import EGRESS_PORT, Host
 from .shown import reached, size
-from .transcript import modified, outside, read_entries, written_paths
 
 # To one destination in one session, from this many bytes on it is said
 LARGE_UPLOAD = 10_000_000
@@ -49,8 +49,8 @@ MODEL_API = (
     ipaddress.ip_network("2607:6bc0::/48"),
 )
 MODEL_DOMAIN = "anthropic.com"
-# Of one kind of thing, how many are listed
-MOST_LISTED = 8
+# Of one kind of thing, how many are said
+MOST_SAID = 8
 # The destinations kept per project, the ones reached longest ago go first
 KEPT_DESTINATIONS = 2000
 
@@ -131,26 +131,26 @@ def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
     return [] if first else new
 
 
-def listed(heading: str, items: list[str]) -> list[str]:
+def headed(heading: str, items: list[str]) -> list[str]:
     """A heading and the first few of what it is about, none without any."""
     if not items:
         return []
-    more = len(items) - MOST_LISTED
+    more = len(items) - MOST_SAID
     return [
         heading,
-        *(f"  {item}" for item in items[:MOST_LISTED]),
+        *(f"  {item}" for item in items[:MOST_SAID]),
         *([f"  and {more} more"] if more > 0 else []),
     ]
 
 
-def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
+def network_lines(host: Host, recorded: Recorded) -> list[str]:
     """What the captures and the process records of a session's
     containers give."""
     lines: list[str] = []
     found: dict[str, str] = {}
-    filtered = any(session.ip for session in sessions)
-    for session in sessions:
-        record = session_record(host, session)
+    filtered = bool(recorded.filtered)
+    for kept in recorded.traced:
+        record, capture = kept.processes, kept.capture
         if record and record.full:
             lines.append("the record of its processes stopped at its size limit")
         if record:
@@ -158,7 +158,7 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
             waited = dict.fromkeys(
                 flat(listener.at) for listener in record.listeners if listener.open
             )
-            lines += listed(
+            lines += headed(
                 "waited for connections, open to the other sessions on its network:",
                 list(waited),
             )
@@ -168,30 +168,26 @@ def network_lines(host: Host, sessions: list[NetSession]) -> list[str]:
                 " what it tried to start then did not: CLAUDE_AIRLOCK_PIDS sets"
                 " the limit"
             )
-        capture = session_capture(host, session)
         if capture is None:
             continue
         found.update(destinations(capture))
         lines += uploads(capture, filtered)
-        lines += listed(
+        lines += headed(
             "lookups that stand out:",
             [flat(f"{lookup.name}: {why}") for why, lookup in capture.flagged],
         )
         if cut_short(capture):
             lines.append("its capture stopped at its packet limit")
-    captured = any(session.capture for session in sessions)
-    new = newly_reached(host, found) if captured else []
-    return [*listed("reached for the first time from this project:", new), *lines]
+    new = newly_reached(host, found) if recorded.captured else []
+    return [*headed("reached for the first time from this project:", new), *lines]
 
 
-def denied_lines(sessions: list[NetSession], start: float, end: float) -> list[str]:
+def denied_lines(recorded: Recorded) -> list[str]:
     """What the egress filter's log says of the session: where it sent
     a lot, and what it was refused."""
-    filtered = [session for session in sessions if session.ip]
-    logged = logged_requests(stderr=subprocess.DEVNULL) if filtered else None
-    if not logged:
+    if not recorded.requests:
         return []
-    made = [request for request, _ in requests_made(logged, filtered, start, end)]
+    made = [request for request, _ in recorded.requests]
     denied = Counter(flat(request.url) for request in made if request.denied)
     # How much went where through the filter, which a capture cannot tell
     # of a session whose every connection is to the proxy
@@ -205,7 +201,7 @@ def denied_lines(sessions: list[NetSession], start: float, end: float) -> list[s
             for where, count in sent.most_common()
             if count >= LARGE_UPLOAD
         ),
-        *listed(
+        *headed(
             "refused by the egress filter:",
             [f"{url} x{count}" for url, count in denied.most_common()],
         ),
@@ -222,33 +218,34 @@ def transcript_lines(host: Host, start: float) -> list[str]:
         if modified(path) < start:
             continue
         project_dir = project_root(path, host)
-        entries = read_entries(path)
+        read = ReadTranscript.read(host, path)
         written.extend(
-            flat(file) for file in written_paths(entries) if outside(file, project_dir)
+            flat(file)
+            for file in written_paths(read.entries)
+            if outside(file, project_dir)
         )
-        compared = compare(host, path)
+        compared = read.compared
         # A subagent's is named by its session
         session = subagent_session(path)
         whose = "a subagent of " if session else ""
-        named = f"the transcript of {whose}{flat((session or path).stem)[:8]}"
+        named = f"the transcript of {whose}{short_id(session or path)}"
         if compared.gone or compared.rewritten:
             lines.append(
                 f"{named} was changed:"
                 f" {len(compared.gone)} lines the launcher copied are gone or altered"
             )
-        unreadable = sum(entry.get("type") == UNREADABLE for entry in entries)
-        if unreadable:
-            lines.append(f"{named} has {unreadable} lines that cannot be read")
+        if read.unreadable:
+            lines.append(f"{named} has {read.unreadable} lines that cannot be read")
         if compared.cut_short:
             lines.append(f"{named} was not all copied, it is past the launcher's limit")
     for path in removed_transcripts(host):
         if copied_at(host, path) >= start:
             lines.append(
-                f"the transcript of {flat(path.stem)[:8]} was removed, --trace"
+                f"the transcript of {short_id(path)} was removed, --trace"
                 " shows the launcher's copy of it"
             )
     return [
-        *listed("written outside the project:", list(dict.fromkeys(written))),
+        *headed("written outside the project:", list(dict.fromkeys(written))),
         *lines,
     ]
 
@@ -262,10 +259,11 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
         for found in recorded_sessions(host, start, end)
         if found.name == session and found.start >= start - 1
     ]
+    recorded = Recorded(host, sessions, start, end)
     noted_rows, _ = noted_events(host, start, end, session)
     return [
-        *network_lines(host, sessions),
-        *denied_lines(sessions, start, end),
+        *network_lines(host, recorded),
+        *denied_lines(recorded),
         *transcript_lines(host, start),
         *(f"{about} {said}" for about, said in noted_rows),
     ]

@@ -26,6 +26,7 @@ the session's own word, the capture and the proxy's log are the launcher's."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import time
@@ -34,37 +35,26 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
-from .capture import CaptureSidecar, captured_since, cut_short, running_captures
+from .capture import CaptureSidecar, captured_since, cut_short
 from .docker import running_containers
 from .egress_log import logged_since
+from .entries import read_entries, session_files, title
+from .errors import Fatal
 from .events import Event, clean, flat, labelled
-from .files import line_entry, open_plain
+from .files import LINE_LIMIT, line_entry, open_plain
 from .health import Ended, Sample
 from .host_health import running_health, said_in
 from .layout import Layout, event_json
+from .net_events import capture_events, name_container, proxy_event
 from .noted import NewlyNoted
 from .pcap import Capture, PcapReader, take_frames
-from .processes import Watcher, running_watchers, said_since
+from .processes import Watcher, said_since
 from .projects import project_root, subagent_files, transcript_files
 from .records import recorded_sessions
-from .settings import Fatal, Host
-from .trace import (
-    EVERYTHING,
-    USAGE,
-    Filter,
-    Timeline,
-    capture_events,
-    name_container,
-    picked_session,
-    proxy_event,
-    trace_options,
-)
-from .transcript import (
-    Walk,
-    read_entries,
-    session_files,
-    title,
-)
+from .settings import Host
+from .stream import EVERYTHING, Filter, Timeline, ordered
+from .trace_args import USAGE, picked_session, trace_options
+from .transcript import Walk, WalkOptions
 
 # Seconds between two looks at what is followed
 INTERVAL = 1.0
@@ -77,31 +67,23 @@ HISTORY = 10
 # it says so every 30 seconds, and at once when a limit is near
 HEALTH_EVERY = 10.0
 READ_SIZE = 1 << 20
-# A transcript is the session's to write: a line longer than this is
-# dropped, not held in memory
-LINE_LIMIT = 32 * READ_SIZE
 
 
 class TranscriptTail:
-    """A transcript read as it grows, from a place in it onward."""
+    """A transcript read as it grows, from a place in it onward. It is
+    the session's to write: a line longer than LINE_LIMIT is dropped, not
+    held in memory."""
 
     def __init__(
-        self,
-        path: Path,
-        project_dir: str,
-        verbose: bool,
-        offset: int = 0,
-        name_results: bool = False,
-        steps: bool = False,
+        self, path: Path, project_dir: str, options: WalkOptions, offset: int = 0
     ):
         self.path = path
         self._offset = offset
         # The start of a line whose end is not written yet
         self._partial = b""
+        # Whether what is read is the rest of a line that was too long
         self._dropping = False
-        self._walk = Walk(
-            project_dir, verbose, live=True, name_results=name_results, steps=steps
-        )
+        self._walk = Walk(project_dir, options)
         self._title: str | None = None
 
     @property
@@ -137,11 +119,12 @@ class TranscriptTail:
                 if not data:
                     return
                 self._offset += len(data)
+                if self._dropping:
+                    # The rest of the line that was too long, to its end:
+                    # said once, and none of it kept
+                    _, ended, data = data.partition(b"\n")
+                    self._dropping = not ended
                 *lines, self._partial = (self._partial + data).split(b"\n")
-                if self._dropping and lines:
-                    # The end of the line that was too long
-                    del lines[0]
-                    self._dropping = False
                 yield from lines
                 if len(self._partial) > LINE_LIMIT:
                     self._partial, self._dropping = b"", True
@@ -264,8 +247,11 @@ class Follower:
     ):
         self._host = host
         self._verbose = verbose
-        # Whether each step of the model is told without --verbose too
-        self._steps = steps
+        # How the transcripts are walked. With events left out a result
+        # may come without its call, so it names it.
+        self._walked = WalkOptions(
+            verbose, live=True, name_results=bool(chosen), steps=steps
+        )
         self._only = only
         self._chosen = chosen
         # The one session whose network and doors are followed, by the
@@ -320,11 +306,9 @@ class Follower:
             found.events += [(session, event) for event in tail.poll()]
         self._poll_network(found)
         self._poll_notes(found)
-        # Stable, so what a transcript has at the same time keeps its order
-        found.events.sort(key=lambda shown: shown[1].when)
-        for _, event in found.events:
-            self._timeline.take(event)
-        found.events = [shown for shown in found.events if self._chosen.wants(shown[1])]
+        found.events = ordered(
+            found.events, lambda shown: shown[1], self._timeline, self._chosen
+        )
         if self._rounds == 0:
             self._keep_latest(found)
         self._rounds += 1
@@ -332,15 +316,7 @@ class Follower:
 
     def _tail(self, path: Path, offset: int = 0) -> None:
         project_dir = project_root(path, self._host)
-        # With events left out a result may come without its call
-        self._tails[path] = TranscriptTail(
-            path,
-            project_dir,
-            self._verbose,
-            offset,
-            name_results=bool(self._chosen),
-            steps=self._steps,
-        )
+        self._tails[path] = TranscriptTail(path, project_dir, self._walked, offset)
         self._sizes.pop(path, None)
 
     def _look_for_transcripts(self, found: Round) -> None:
@@ -390,10 +366,8 @@ class Follower:
                 tail = TranscriptTail(
                     path,
                     project_root(session, self._host),
-                    self._verbose,
+                    dataclasses.replace(self._walked, name_results=True),
                     size if self._rounds == 0 else 0,
-                    name_results=True,
-                    steps=self._steps,
                 )
                 self._subagents[path] = (session, tail)
 
@@ -406,7 +380,7 @@ class Follower:
         try:
             running = [
                 (sidecar, started)
-                for sidecar, started in running_captures(self._host.project_dir)
+                for sidecar, started in CaptureSidecar.running(self._host.project_dir)
                 if self._ours(CaptureSidecar.session_of(sidecar))
             ]
             self._addresses = self._filtered_addresses()
@@ -450,7 +424,7 @@ class Follower:
         watcher's name or the record's path, with the start time. Each
         value is the session's name and the function that reads it."""
         sources: dict[tuple[str, float], tuple[str, SaidSince]] = {}
-        for watcher, started in running_watchers(self._host.project_dir):
+        for watcher, started in Watcher.running(self._host.project_dir):
             session = Watcher.session_of(watcher)
             sources[(watcher, started)] = (session, partial(said_since, watcher))
         for record, session, started in running_health(self._host):

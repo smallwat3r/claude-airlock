@@ -7,6 +7,7 @@ door_events.py) and what a chat found changed in what Claude Code says
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from .changes import change_event, change_events, change_record
 from .door_events import door_events, use_event
@@ -16,26 +17,40 @@ from .notes import NewNotes, Notes
 from .settings import Host
 from .started import start_event, start_events, start_record
 
-# Each record with how a note of it is shown, none for one that is not
-RECORDS: tuple[tuple[Callable[[Host], Notes], Callable[[dict], Event | None]], ...] = (
-    (start_record, start_event),
-    (door_record, use_event),
-    (change_record, change_event),
+# Summary rows, each what it is about and what is said of it, and events
+Noted = tuple[list[tuple[str, str]], list[Event]]
+
+
+@dataclass(frozen=True)
+class NoteKind:
+    """One kind of thing the launchers note of the sessions."""
+
+    # Where the notes are kept
+    record: Callable[[Host], Notes]
+    # How a note of it is shown, none for one that is not
+    event: Callable[[dict], Event | None]
+    # What gives the summary rows and the events between two times, of
+    # one session when it is named
+    between: Callable[[Host, float, float, str | None], Noted]
+
+
+KINDS = (
+    NoteKind(start_record, start_event, start_events),
+    NoteKind(door_record, use_event, door_events),
+    NoteKind(change_record, change_event, change_events),
 )
-# What gives the summary rows and the events of each between two times
-BETWEEN = (start_events, door_events, change_events)
 
 
 def noted_events(
     host: Host, start: float, end: float, session: str | None = None
-) -> tuple[list[tuple[str, str]], list[Event]]:
+) -> Noted:
     """What was noted of this project's sessions between two times, as
     summary rows and as events. Of one session when it is named, by its
     container."""
     rows: list[tuple[str, str]] = []
     events: list[Event] = []
-    for between in BETWEEN:
-        some_rows, some_events = between(host, start, end, session)
+    for kind in KINDS:
+        some_rows, some_events = kind.between(host, start, end, session)
         rows += some_rows
         events += some_events
     return rows, events
@@ -47,8 +62,8 @@ class NewlyNoted:
 
     def __init__(self, host: Host, session: str | None = None):
         self._new = [
-            (NewNotes(record(host), host.project_dir, session), shown)
-            for record, shown in RECORDS
+            (NewNotes(kind.record(host), host.project_dir, session), kind.event)
+            for kind in KINDS
         ]
 
     def poll(self) -> list[Event]:

@@ -7,17 +7,22 @@ from __future__ import annotations
 import dataclasses
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from .. import brief
+from ..entries import INPUT_TOKENS, content_blocks, measured
 from ..events import flat, labelled
-from ..transcript import content_blocks
+from .console import Page
 from .drift import Drift
-from .pipe import amount, own
+from .said import own
 
-# Of what a turn used, what was read: new, written to the cache and read
-# from it
-READ = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+# Seconds claude takes no step before a line says that the turn still
+# runs, and the most between two such lines: the wait is doubled after
+# each. At a terminal the line is one, said again in its place every
+# QUIET seconds.
+QUIET = 5.0
+QUIET_MOST = 60.0
 
 
 @dataclass
@@ -64,6 +69,18 @@ class Turn:
                 if isinstance(call, str):
                     self.waiting.pop(call, None)
 
+    def piece(self, event: dict) -> None:
+        """Take in a piece of what claude itself is making: a block of it
+        that starts or ends is a step, and says whether claude thinks."""
+        kind = event.get("type")
+        block = event.get("content_block")
+        if kind == "content_block_start" and isinstance(block, dict):
+            self.thinking = block.get("type") == "thinking"
+            self.stepped()
+        elif kind == "content_block_stop":
+            self.thinking = False
+            self.stepped()
+
 
 class Turns:
     """The turn that runs, or the one that ran last, and whether one runs.
@@ -91,13 +108,15 @@ class Turns:
 
 
 def tokens(count: float) -> str:
-    return f"{count / 1000:.1f}k" if count >= 1000 else f"{count:.0f}"
+    """A number of tokens claude gave, as a trace shows one."""
+    return brief.amount(round(count))
 
 
 def read_by(usage: object) -> list[float]:
-    """The counts of what was read, of the usage claude gives."""
+    """The counts of what was read, of the usage claude gives: new,
+    written to the cache and read from it."""
     given = usage if isinstance(usage, dict) else {}
-    return [n for n in map(amount, map(given.get, READ)) if n is not None]
+    return [n for n in map(measured, map(given.get, INPUT_TOKENS)) if n is not None]
 
 
 def used(result: dict, spent: float) -> list[str]:
@@ -107,14 +126,14 @@ def used(result: dict, spent: float) -> list[str]:
     given = result.get("usage")
     usage = given if isinstance(given, dict) else {}
     read = read_by(usage)
-    written = amount(usage.get("output_tokens"))
+    written = measured(usage.get("output_tokens"))
     if not sum(read) and not written:
         # A command of Claude Code's, the model was not asked
         return []
     parts = [f"{tokens(sum(read))} in"] if read else []
     if written is not None:
         parts.append(f"{tokens(written)} out")
-    total = amount(result.get("total_cost_usd"))
+    total = measured(result.get("total_cost_usd"))
     if total is not None and total >= spent:
         parts.append(f"${total - spent:.4f}")
     return parts
@@ -168,7 +187,7 @@ class Usage:
         is and the model when it is not the one named last. Nothing for
         a turn the model was not asked in."""
         parts = used(result, self._spent)
-        total = amount(result.get("total_cost_usd"))
+        total = measured(result.get("total_cost_usd"))
         self._spent = self._spent if total is None else total
         window = window_of(result, model)
         self._window = window or self._window
@@ -194,7 +213,7 @@ def window_of(result: dict, model: str) -> float:
     given = result.get("modelUsage")
     models = given if isinstance(given, dict) else {}
     windows = {
-        name: amount(about.get("contextWindow"))
+        name: measured(about.get("contextWindow"))
         for name, about in models.items()
         if isinstance(about, dict)
     }
@@ -209,6 +228,42 @@ def working_line(turn: Turn, step: float = 1.0) -> str:
     tools = ", ".join(sorted(set(turn.waiting.values())))
     claude = "claude, thinking" if turn.thinking else "claude"
     return labelled("working", f"{took:.0f}s, waiting for {tools or claude}")
+
+
+class Heartbeat:
+    """Says that the turn still runs when claude took no step for a
+    while, so that a long call or a long thought does not pass for a chat
+    that is stuck. At a terminal in one line above the prompt. Anywhere
+    else in lines, less and less often for a file not to fill with them,
+    and not while other lines are written."""
+
+    def __init__(self, page: Page, turns: Turns, asking: Callable[[], bool]):
+        self._page = page
+        self._turns = turns
+        # Whether the user is asked something: the turn waits for them
+        self._asking = asking
+        # How long a turn may write nothing before a line says it runs,
+        # and the step of claude's that wait is counted from
+        self.wait = QUIET
+        self._since = 0.0
+
+    def beat(self) -> None:
+        """Say that the turn still runs, when it is time to."""
+        turn = self._turns.current
+        running = self._turns.running and not self._asking()
+        idle = time.monotonic() - turn.since >= QUIET
+        if self._page.redrawn:
+            self._page.working(working_line(turn, QUIET) if running and idle else "")
+            return
+        if turn.since != self._since:
+            # Claude took a step, the wait starts over
+            self.wait, self._since = QUIET, turn.since
+        if not running or not idle:
+            return
+        if time.monotonic() - self._page.wrote < self.wait:
+            return
+        self._page.say([working_line(turn)])
+        self.wait = min(self.wait * 2, QUIET_MOST)
 
 
 def ended_badly(result: dict) -> bool:

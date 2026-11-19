@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .errors import Fatal
+
 # The checkout's bin and docker directories, found from where this package
 # really is, so bin/claude-airlock can be symlinked from anywhere
 _REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -33,10 +35,6 @@ CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
 NAME = "claude-airlock"
-
-
-class Fatal(Exception):
-    """A problem to report to the user as one line, without a traceback."""
 
 
 class SocketAccess(enum.Enum):
@@ -165,7 +163,7 @@ class Host:
 
     @property
     def agent_sockets_dir(self) -> str:
-        # Where the sessions' way to the SSH agent listens, see doors.py
+        # Where the sessions' way to the SSH agent listens, see ssh_agent.py
         return os.path.join(self.state_dir, "agents")
 
     @property

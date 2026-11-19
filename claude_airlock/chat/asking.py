@@ -8,19 +8,26 @@ as a prompt, and is not taken for the answer.
 
 What is allowed is what was read. The call is shown whole before it is
 asked about, its input is given back as it was shown, and a rule to allow
-such calls from now on is said in full before it can be taken."""
+such calls from now on is said in full before it can be taken.
+
+Claude may ask again before it has an answer, a subagent of its does while
+another waits: what it asked is put one question at a time, by a thread of
+its own (see Asked), and whoever listens to claude goes on listening."""
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from collections.abc import Callable
+from typing import Protocol
 
+from ..calls import call_details
 from ..events import clean, flat, labelled
 from ..layout import CYAN, GREEN, RED, WHAT_WIDTH, painted, prefixed
-from ..transcript import call_details
 from .console import Console, Page
 from .reply import reply_lines
+from .said import is_number
 
 # What the question whether a tool may be used is answered with
 YES = ("y", "yes")
@@ -62,12 +69,6 @@ class Question:
         if not self.answered.is_set():
             self.said = said
             self.answered.set()
-
-
-def is_number(typed: str) -> bool:
-    """Whether what was typed is a number as int reads one: isdigit also
-    takes digits of other scripts and a superscript, which int refuses."""
-    return typed.isascii() and typed.isdigit()
 
 
 def chosen(typed: str, options: list[dict]) -> str:
@@ -188,7 +189,7 @@ class Asker:
             # Not answered by a line, which would have let go of it
             self._question = None
             self._console.ask(None)
-        self._page.wrote = time.monotonic()
+        self._page.touched()
         return question.said
 
     def decide(self, request: dict) -> dict:
@@ -266,3 +267,74 @@ class Asker:
                 return REFUSED
             answers[text] = chosen(typed, options)
         return {"behavior": "allow", "updatedInput": {**tool_input, "answers": answers}}
+
+
+class Answered(Protocol):
+    """Who is given the answer to what it asked under an id: claude, see
+    Agent."""
+
+    def respond(self, asked: object, decision: dict) -> None: ...
+
+    def refuse(self, asked: object, why: str) -> None: ...
+
+
+class Asked:
+    """What claude asked and has no answer to yet, put to the user one
+    question after the other on a thread of its own, and each answer
+    given to claude."""
+
+    def __init__(self, asker: Asker, page: Page):
+        self._asker = asker
+        self._page = page
+        # Each the id claude asked under and the request, then None when
+        # nothing more is asked
+        self._waiting: queue.Queue[tuple[object, dict] | None] = queue.Queue()
+        # How many of them have no answer yet, the one being put too
+        self._count = 0
+        self._counting = threading.Lock()
+
+    def start(self, claude: Answered) -> None:
+        """Have what is asked from now on put, and claude given each
+        answer, until nothing more is asked, see close."""
+        threading.Thread(target=self._decide, args=(claude,), daemon=True).start()
+
+    def put(self, asked: object, request: dict) -> None:
+        """Keep what claude asked under an id until its turn comes. Whoever
+        listens to claude is not held up by it."""
+        with self._counting:
+            self._count += 1
+        self._waiting.put((asked, request))
+
+    def close(self) -> None:
+        """Nothing more is asked: claude has ended."""
+        self._waiting.put(None)
+
+    @property
+    def pending(self) -> int:
+        """How many of what claude asked have no answer yet."""
+        return self._count
+
+    def answered_within(self, seconds: float) -> bool:
+        """Whether all that claude asked has its answer, once that long
+        was waited for it at most."""
+        patience = time.monotonic() + seconds
+        while self._count and time.monotonic() < patience:
+            time.sleep(0.05)
+        return not self._count
+
+    def _decide(self, claude: Answered) -> None:
+        """Put each question and give claude its answer. One that cannot
+        be put is refused: claude waits for an answer to each."""
+        while True:
+            waiting = self._waiting.get()
+            if waiting is None:
+                return
+            asked, request = waiting
+            try:
+                claude.respond(asked, self._asker.decide(request))
+            except Exception as error:  # noqa: BLE001
+                self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
+                claude.refuse(asked, "the question could not be put")
+            finally:
+                with self._counting:
+                    self._count -= 1

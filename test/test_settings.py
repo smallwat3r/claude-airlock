@@ -12,6 +12,8 @@ from pathlib import Path
 
 from harness import ROOT, LauncherTest, settings
 
+from claude_airlock import errors
+
 NAMED = re.compile(r"CLAUDE_AIRLOCK_[A-Z_]+")
 # What a session is told that is not a setting: its container's name, and
 # the directories mounted next to its project
@@ -42,7 +44,7 @@ class SettingsListTest(LauncherTest):
                 {"CLAUDE_AIRLOCK_DOCKER_SOCKET": said}, missing
             )
             self.assertIs(read.docker_socket, access)
-        with self.assertRaises(settings.Fatal):
+        with self.assertRaises(errors.Fatal):
             settings.load_settings({"CLAUDE_AIRLOCK_DOCKER_SOCKET": "all"}, missing)
 
     def test_the_config_file_takes_all_but_the_per_project_ones(self):

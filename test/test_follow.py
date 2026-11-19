@@ -20,6 +20,8 @@ from unittest import mock
 from harness import LAUNCHER, LauncherTest, follow, pcap
 from test_capture import answer, pcap_file, sample_capture, tcp
 
+from claude_airlock.transcript import WalkOptions
+
 # Marks the last thing a test wrote: what came before it has been shown
 # once this is
 DONE = "that is all"
@@ -481,7 +483,7 @@ class TranscriptTailTest(unittest.TestCase):
         return [event.details[0] for event in tail.poll()]
 
     def test_a_line_is_read_once_it_is_whole(self):
-        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         whole = json.dumps(prompt("hello")) + "\n"
         self.file.write_text(whole[:20])
         self.assertEqual(self.said(tail), [])
@@ -499,7 +501,7 @@ class TranscriptTailTest(unittest.TestCase):
         self.assertEqual(self.said(tail), [])
 
     def test_a_line_too_long_to_hold_is_dropped_and_said_to_be(self):
-        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         with mock.patch.object(follow, "LINE_LIMIT", 100):
             add(self.file, prompt("x" * 500))
             # Still without its end, which the next look finds
@@ -512,8 +514,27 @@ class TranscriptTailTest(unittest.TestCase):
             add(self.file, prompt("after"))
             self.assertEqual(self.said(tail), ["after"])
 
+    def test_a_line_many_times_too_long_is_said_once(self):
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        too_long = "UNREADABLE line of the transcript: (a line too long to read)"
+        with (
+            mock.patch.object(follow, "LINE_LIMIT", 100),
+            mock.patch.object(follow, "READ_SIZE", 64),
+        ):
+            # Read in pieces, and found again without its end every time
+            with open(self.file, "a") as transcript:
+                transcript.write(json.dumps(prompt("x" * 2000))[:1000])
+            self.assertEqual(self.said(tail), [too_long])
+            with open(self.file, "a") as transcript:
+                transcript.write("y" * 1000)
+            self.assertEqual(self.said(tail), [])
+            with open(self.file, "a") as transcript:
+                transcript.write("its end\n")
+            add(self.file, prompt("after"))
+            self.assertEqual(self.said(tail), ["after"])
+
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
-        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         add(self.file, prompt("one"), prompt("two"))
         self.assertEqual(self.said(tail), ["one", "two"])
         self.file.write_text(json.dumps(prompt("anew")) + "\n")
@@ -526,7 +547,7 @@ class TranscriptTailTest(unittest.TestCase):
         secret.write_text(json.dumps(prompt("a secret")) + "\n")
         self.file.unlink()
         self.file.symlink_to(secret)
-        tail = follow.TranscriptTail(self.file, "/proj", verbose=False)
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         self.assertEqual(self.said(tail), [])
         self.file.unlink()
         os.mkfifo(self.file)

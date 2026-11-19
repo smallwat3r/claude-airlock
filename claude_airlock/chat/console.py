@@ -45,18 +45,18 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
-import re
 import select
 import shutil
 import sys
 import termios
 import threading
 import time
-import unicodedata
 from collections.abc import Callable
+from typing import TextIO
 
 from ..events import Event, labelled
 from ..layout import Layout, painted
+from .screen import SGR, cursor_back, erased
 
 try:
     import readline
@@ -101,23 +101,6 @@ PASTE_GAP = 0.3
 PASTE_LIMIT = 1 << 20
 # A terminal narrower than this is written to as if it were so wide
 NARROWEST = 20
-# The escapes of colour, the only ones a head keeps
-SGR = re.compile(r"\x1b\[[0-9;]{0,32}m")
-
-
-def columns_of(text: str) -> int:
-    """How many columns of a terminal a text takes: two for the wide
-    characters of East Asia, none for what is put on the one before."""
-    return sum(
-        (
-            0
-            if unicodedata.combining(c)
-            else 2
-            if unicodedata.east_asian_width(c) in "WF"
-            else 1
-        )
-        for c in text
-    )
 
 
 def completions(word: str, first: bool, commands: list[str], root: str) -> list[str]:
@@ -148,10 +131,22 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
 
 
 class Console:
-    """Where a chat reads its lines and writes its own."""
+    """Where a chat reads its lines and writes its own: to out, the
+    standard output unless given, as wide as columns says, the terminal
+    unless given."""
 
-    def __init__(self, root: str, history: str | None = None, sent: str = ""):
+    def __init__(
+        self,
+        root: str,
+        history: str | None = None,
+        sent: str = "",
+        out: TextIO | None = None,
+        columns: Callable[[], int] | None = None,
+    ):
         self._lock = threading.Lock()
+        self._given_out = out
+        # How many columns what is written to has
+        self.columns = columns or (lambda: shutil.get_terminal_size().columns)
         # The style of a line once it is entered, none for as it was typed
         self._sent = sent
         # The prompt of the line being read, none while none is
@@ -180,7 +175,7 @@ class Console:
         self._redrawn = bool(
             readline
             and self.interactive
-            and sys.stdout.isatty()
+            and self._out.isatty()
             and os.environ.get("TERM", "dumb") != "dumb"
         )
         self._root = root
@@ -190,6 +185,16 @@ class Console:
         self._offered: list[str] = []
         if self._redrawn:
             self._set_up()
+
+    @property
+    def _out(self) -> TextIO:
+        """Where lines are written: the standard output as it is when
+        written to, unless another was given."""
+        return self._given_out or sys.stdout
+
+    def _say(self, text: str) -> None:
+        self._out.write(text)
+        self._out.flush()
 
     def _set_up(self) -> None:
         readline.set_completer(self._complete)
@@ -260,8 +265,7 @@ class Console:
         if not self.interactive:
             # Nobody typed it: said here, for what is written to read as
             # a conversation and to start on a line of its own
-            sys.stdout.write(self._styled(line) + "\n")
-            sys.stdout.flush()
+            self._say(self._styled(line) + "\n")
         if self._redrawn and line.strip() and not keep():
             with contextlib.suppress(ValueError):
                 readline.remove_history_item(readline.get_current_history_length() - 1)
@@ -286,8 +290,7 @@ class Console:
                     self._shown = above + shown
                 elif not self._held or self._asked is not None:
                     self._shown = above
-                    sys.stdout.write(above + shown)
-                    sys.stdout.flush()
+                    self._say(above + shown)
                     self._on_screen = True
         # Readline counts the columns of the last line of a prompt alone,
         # the head's escapes of colour are all above it
@@ -313,12 +316,12 @@ class Console:
                 unfinished = self._hooked and (self._redrawn or not text.endswith("\n"))
                 if self._redrawn:
                     # The line entered alone, written again with the rest
-                    sys.stdout.write("\x1b[1A" + self._erased(self._shown, line))
+                    out = "\x1b[1A" + self._erased(self._shown, line)
                     self._forget(line)
                     if not unfinished:
-                        sys.stdout.write(self._shown + text)
+                        out += self._shown + text
                         readline.add_history(text.removesuffix("\n"))
-                    sys.stdout.flush()
+                    self._say(out)
                 if not unfinished:
                     return text.removesuffix("\n")
                 self._filled = text.rstrip("\n")
@@ -379,8 +382,7 @@ class Console:
             out += "\n".join(self._head) + "\n"
         rows = (prompt + line).split("\n")
         out += "\n".join(self._styled(row) if styled else row for row in rows)
-        sys.stdout.write(out + "\n")
-        sys.stdout.flush()
+        self._say(out + "\n")
 
     def _styled(self, text: str) -> str:
         """Text the user typed in the style of a line that was entered."""
@@ -456,8 +458,7 @@ class Console:
             if held or self._redrawn or self._reading is None or self._on_screen:
                 return
             self._shown = self._above()
-            sys.stdout.write(self._shown + self._reading)
-            sys.stdout.flush()
+            self._say(self._shown + self._reading)
             self._on_screen = True
 
     @property
@@ -485,10 +486,9 @@ class Console:
     def bell(self) -> None:
         """Ring, for a user who looks elsewhere while a turn runs: where
         someone sits, not into a file."""
-        if self.interactive and sys.stdout.isatty():
+        if self.interactive and self._out.isatty():
             with self._lock:
-                sys.stdout.write("\a")
-                sys.stdout.flush()
+                self._say("\a")
 
     def end_line(self) -> None:
         """Go to a new line, after a line that was left unfinished.
@@ -496,8 +496,7 @@ class Console:
         there is no line to leave."""
         with self._lock:
             if self._redrawn or self._on_screen or not self.interactive:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                self._say("\n")
             self._on_screen = False
 
     def _put(self, text: str, prompt: str | None) -> None:
@@ -514,7 +513,7 @@ class Console:
             # Erased from where the cursor is, and the cursor put back
             # there: readline goes on from where it left it
             out = self._erased(self._shown, before) + text + shown + typed
-            out += self._cursor_back(shown, typed, before)
+            out += cursor_back(shown, typed, before, self.columns())
             self._shown = shown
         else:
             # Nothing is erased: what is written starts on a line of its
@@ -532,8 +531,7 @@ class Console:
             self._on_screen = shows
         if was is not None:
             self._reading = prompt
-        sys.stdout.write(out)
-        sys.stdout.flush()
+        self._say(out)
 
     @staticmethod
     def _before_cursor(typed: str) -> str:
@@ -545,49 +543,10 @@ class Console:
         raw = typed.encode(encoding, "replace")
         return raw[: max(0, _point())].decode(encoding, "ignore")
 
-    @staticmethod
-    def _rows_above(text: str, columns: int) -> int:
-        """How many rows a prompt and what is typed after it take above
-        the row their end is on. What ends at the edge has its end on the
-        row after, as readline writes it."""
-        rows = text.split("\n")
-        return len(rows) - 1 + sum(columns_of(row) // columns for row in rows)
-
-    @classmethod
-    def _erased(cls, prompt: str, typed: str) -> str:
-        """The escapes that erase the line being typed with its prompt and
-        the head of that, from the cursor at the end of typed: all the
-        rows they take above it and all that is under it. A line longer
-        than the terminal is wide takes more than one row, and so does
-        what was pasted with its line breaks. Escapes of colour take no
-        column."""
-        columns = max(1, shutil.get_terminal_size().columns)
-        *heads, prompt = SGR.sub("", prompt).split("\n")
-        # A line of the head that ends at the edge takes no row more: its
-        # break goes to the next row
-        above = len(heads) + cls._rows_above(prompt + typed, columns)
-        above += sum(max(0, columns_of(row) - 1) // columns for row in heads)
-        up = f"\x1b[{above}A" if above else ""
-        return f"{up}\r\x1b[J"
-
-    @classmethod
-    def _cursor_back(cls, prompt: str, typed: str, before: str) -> str:
-        """The escapes that follow a prompt and what was typed, written
-        again: they leave the cursor where readline has it, after what is
-        before it. A terminal keeps the cursor on the row of what ends at
-        its edge until more is written, readline has it on the next: a
-        space takes it there."""
-        columns = max(1, shutil.get_terminal_size().columns)
-        prompt = SGR.sub("", prompt).rpartition("\n")[2]
-        whole, part = prompt + typed, prompt + before
-        last = columns_of(whole.rpartition("\n")[2])
-        out = " \r" if last and last % columns == 0 else ""
-        if before == typed:
-            return out
-        up = cls._rows_above(whole, columns) - cls._rows_above(part, columns)
-        across = columns_of(part.rpartition("\n")[2]) % columns
-        out += f"\x1b[{up}A" if up else ""
-        return out + "\r" + (f"\x1b[{across}C" if across else "")
+    def _erased(self, prompt: str, typed: str) -> str:
+        """The escapes that erase a prompt and what is typed after it, at
+        a terminal as wide as it is now, see erased of screen.py."""
+        return erased(prompt, typed, self.columns())
 
 
 class Page:
@@ -597,10 +556,9 @@ class Page:
     def __init__(self, console: Console, layout: Layout):
         self._console = console
         self.layout = layout
-        # When a line was last written and how many times one was, for a
-        # turn that then writes nothing to say that it still runs
+        # When a line was last written, for a turn that then writes
+        # nothing to say that it still runs
         self.wrote = time.monotonic()
-        self.times = 0
 
     @property
     def width(self) -> int | None:
@@ -608,13 +566,23 @@ class Page:
         one. None in a file, where a line is as long as it is."""
         if not self.layout.compact:
             return None
-        return max(NARROWEST, shutil.get_terminal_size().columns - 1)
+        return max(NARROWEST, self._console.columns() - 1)
 
     def put(self, lines: list[str]) -> None:
         if lines:
             self._console.write(lines)
-            self.wrote = time.monotonic()
-            self.times += 1
+            self.touched()
+
+    def touched(self) -> None:
+        """Something was written, or read, that is no line of the page:
+        what the user typed, a question that was put."""
+        self.wrote = time.monotonic()
+
+    @property
+    def redrawn(self) -> bool:
+        """Whether what is above the prompt is written again in its place
+        when it changes, see Console.redrawn."""
+        return self._console.redrawn
 
     def head(self, lines: list[str]) -> None:
         """Have these lines above the prompt, see Console.set_head."""

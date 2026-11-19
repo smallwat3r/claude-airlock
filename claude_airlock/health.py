@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .events import Event, Who, flat
+from .events import Event, Kind, Who, flat
 
 # The percent of a limit from which a session is said to be at it, as in
 # procwatch.py, and the percent of the time it waited for memory from
@@ -239,7 +239,7 @@ class Sample:
         wrong = self.wrong()
         if wrong:
             fields["flagged"] = wrong
-        return Event(self.when, Who.SANDBOX, "health", [self.detail()], fields)
+        return Event(self.when, Who.SANDBOX, Kind.HEALTH, [self.detail()], fields)
 
 
 @dataclass(frozen=True)
@@ -270,7 +270,7 @@ class Ended:
             "gone": [process.fields for process in self.gone],
             "flagged": "out of memory",
         }
-        return Event(self.when, Who.SANDBOX, "health", [detail], fields)
+        return Event(self.when, Who.SANDBOX, Kind.HEALTH, [detail], fields)
 
 
 def read_health(when: float, said: dict) -> Sample | Ended | None:

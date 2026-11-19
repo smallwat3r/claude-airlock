@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import time
 
+from ..entries import measured
 from ..events import flat, labelled
 from .console import Page
-from .pipe import amount
 from .turn import tokens
 
 # Of what a task or an error is said to be about
@@ -82,8 +82,8 @@ class Notices:
 
     def _compacted(self, given: object) -> None:
         about = given if isinstance(given, dict) else {}
-        before = amount(about.get("pre_tokens"))
-        after = amount(about.get("post_tokens"))
+        before = measured(about.get("pre_tokens"))
+        after = measured(about.get("post_tokens"))
         sizes = ""
         if before is not None and after is not None:
             sizes = f", {tokens(before)} tokens to {tokens(after)}"
@@ -118,7 +118,7 @@ class Notices:
         if isinstance(info, dict) and status and status != "allowed":
             kind = flat(info.get("rateLimitType", "")).replace("_", " ")
             line = labelled("chat", f"usage limit: {status} {kind}").rstrip()
-            reset = amount(info.get("resetsAt"))
+            reset = measured(info.get("resetsAt"))
             if reset:
                 at = time.strftime("%H:%M", time.localtime(reset))
                 line += f", resets at {at}"

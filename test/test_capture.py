@@ -555,11 +555,11 @@ class CaptureSessionTest(LauncherTest):
         Path(host.state_dir).mkdir(parents=True)
         Path(host.net_sessions_file).write_text("cut off by a killed launch")
         for number in range(records.KEPT_SESSIONS + 5):
-            session = records.NetSession(
+            session = records.TracedSession(
                 f"s{number}", "/p", float(number), ip="10.0.0.1"
             )
-            records.record_net_session(host, session)
-        kept = records.read_net_sessions(host)
+            records.record_traced_session(host, session)
+        kept = records.read_traced_sessions(host)
         self.assertEqual(len(kept), records.KEPT_SESSIONS)
         self.assertEqual((kept[0].name, kept[-1].start), ("s5", kept[-1].start))
         self.assertEqual(kept[-1].name, f"s{records.KEPT_SESSIONS + 4}")
@@ -572,8 +572,8 @@ class CaptureSessionTest(LauncherTest):
             '{"name": "a", "project": "/p", "start": 5}',
             '{"name": 1, "project": "/p", "start": 5, "ip": "10.0.0.1"}',
         ):
-            self.assertIsNone(records.NetSession.from_line(line), line[:40])
-        kept = records.NetSession.from_line(
+            self.assertIsNone(records.TracedSession.from_line(line), line[:40])
+        kept = records.TracedSession.from_line(
             '{"name": "a", "project": "/p", "start": 5, "end": 9,'
             ' "capture": "../../etc/passwd"}'
         )

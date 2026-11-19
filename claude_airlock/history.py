@@ -35,7 +35,7 @@ import re
 from pathlib import Path
 
 from .docker import env_arg, mount_arg, project_slug
-from .files import json_object, private_dir
+from .files import bounded_lines, json_object, private_dir, write_whole
 from .projects import project_roots, transcript_dirs
 from .settings import CONTAINER_CLAUDE, Host, Settings
 
@@ -92,14 +92,26 @@ def own_prompts(host: Host) -> list[str]:
     roots = set(project_roots(host))
     kept = []
     try:
-        with open(
-            Path(host.claude_dir, PROMPT_HISTORY), encoding="utf-8", errors="replace"
-        ) as history:
-            for line in history:
-                said = json_object(line)
+        # Shared, the host's history is a session's to write: no line of
+        # it is trusted to be short
+        with open(Path(host.claude_dir, PROMPT_HISTORY), "rb") as history:
+            for line in bounded_lines(history):
+                said = json_object(line) if line is not None else None
                 project = said.get("project") if said else None
-                if isinstance(project, str) and project in roots:
-                    kept.append(line if line.endswith("\n") else line + "\n")
+                if line is None or not isinstance(project, str):
+                    continue
+                if project in roots:
+                    kept.append(line.decode("utf-8", "replace").rstrip("\r\n") + "\n")
+    except OSError:
+        pass
+    return kept
+    try:
+        with history:
+            for line in bounded_lines(history):
+                said = json_object(line) if line is not None else None
+                project = said.get("project") if said else None
+                if line is not None and isinstance(project, str) and project in roots:
+                    kept.append(line.rstrip(b"\n").decode("utf-8", "replace") + "\n")
     except OSError:
         pass
     return kept
@@ -114,9 +126,8 @@ def prepare_store(host: Host) -> Path:
         (store / name).mkdir(mode=0o700, exist_ok=True)
     prompts = store / PROMPT_HISTORY
     if not prompts.exists():
-        descriptor = os.open(prompts, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as seeded:
-            seeded.writelines(own_prompts(host))
+        # Whole or not at all: a launcher that starts meanwhile mounts it
+        write_whole(str(prompts), "".join(own_prompts(host)), replace=False)
     return store
 
 

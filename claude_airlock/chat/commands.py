@@ -5,25 +5,23 @@ their own way.
 /mode changes the permission mode, which claude is asked for over the
 pipe. /resume goes on with an earlier session of the project, which is
 another launch (see Handover). /mcp lists the MCP servers claude said it
-has. !COMMAND runs a command in the sandbox."""
+has. !COMMAND runs a command in the sandbox (see shell.py).
+
+Each is one line of LOCALS: what completes at the prompt and what /help
+says are made of that."""
 
 from __future__ import annotations
 
-import contextlib
 import enum
-import re
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..docker import docker_ok, docker_popen, exec_args
-from ..events import clean, flat, labelled
+from ..entries import session_files, sessions_named
+from ..events import flat, labelled
 from ..settings import Host
 from ..trace import session_rows
-from ..transcript import session_files, sessions_named
-from .asking import is_number
 from .console import Page
-from .pipe import Agent, Session, is_session_id
+from .said import Session, is_number, is_session_id
 from .turn import Turns
 
 LEAVE = ("/exit", "/quit")
@@ -31,36 +29,13 @@ MODE = "/mode"
 # Claude Code's own two are not there in its print mode, these say the
 # status of the chat
 STATUS = ("/status", "/statusline")
-# What a line can start with that the chat does itself
-LOCAL = (MODE, "/help", "/mcp", "/resume", *STATUS, *LEAVE)
-HELP = [
-    labelled("chat", "what the chat does itself, any other line is for claude:"),
-    "  /mode [NAME]   the permission mode, or change it (default, acceptEdits, plan)",
-    "  /resume [ID]   leave this session for an earlier one of the project",
-    "  /mcp           the MCP servers of the session",
-    "  /status        the model, context, limits, cost and sandbox, or /statusline",
-    "  !COMMAND       run a command in the sandbox, claude is not told",
-    "  /exit, /quit   leave, as Ctrl-D does",
-    labelled("chat", "claude's own commands that answer in text work as typed:"),
-    "  /model [NAME], /context, /usage, /compact, /clear, and skills",
-    labelled(
-        "chat", "a line can be typed while a turn runs, claude takes it up when it can"
-    ),
-    "  a line that ends with a backslash takes the next one too, as Alt+Enter",
-    "  does, and Shift+Enter in a terminal set to tell it from Enter",
-    "  Tab completes commands and @files, Ctrl-C interrupts the turn that",
-    "  runs and a second one stops the session, at the prompt it drops the line",
-]
+# What a line starts with that is a command for the sandbox, not a word of
+# its own: the command follows it
+SHELL = "!"
+# How wide /help has what is typed, before what it does
+TYPED_WIDTH = 15
 # How many of the project's sessions /resume lists
 RESUME_LISTED = 15
-# Of a line a command of the user's writes, what is shown as one line
-SHELL_WIDTH = 4096
-# What a command of the user's is run through in the container: in a
-# process group of its own, whose id it says first. docker passes no
-# signal on to what it runs without a terminal, so Ctrl-C ends docker's
-# end of it alone, and the command is then ended by its group.
-SHELL_WRAPPER = 'echo "$$"; exec bash -c "$1"'
-_GROUP = re.compile(rb"[1-9][0-9]{0,9}\n")
 
 
 @dataclass
@@ -82,160 +57,27 @@ class Did(enum.Enum):
     LEFT = enum.auto()
 
 
-class Commands:
+class Resume:
+    """/resume: leaves this session for an earlier one of the project."""
+
     def __init__(
         self,
         page: Page,
         host: Host,
-        name: str,
-        session: Session,
         turns: Turns,
         read: Callable[[str], str | None],
         handover: Handover | None,
-        status: Callable[[], None] = lambda: None,
     ):
         self._page = page
         self._host = host
-        # Of the session's container
-        self._name = name
-        self._session = session
         self._turns = turns
         # Reads a line from the user, see Chat
         self._read = read
         self._handover = handover
-        # Says the status, see StatusLine
-        self._status = status
-        # The request to change the mode that has no answer yet
-        self.mode_request = ""
-        # Whether a command of the user's runs (!COMMAND): Ctrl-C is then
-        # for it and not for claude's turn, see interrupt
-        self.shelling = False
-        self._shell_process: subprocess.Popen | None = None
-        self._interrupted = False
 
-    def do(self, agent: Agent, text: str) -> Did:
-        """Do what a line asks of the chat itself."""
-        words = text.split()
-        if text.startswith("!"):
-            self._shell(text[1:].strip())
-        elif words[0] in LEAVE:
-            return Did.LEFT
-        elif words[0] == MODE:
-            self._mode(agent, words[1:])
-        elif words[0] in STATUS:
-            self._status()
-        elif words[0] == "/help":
-            self._page.say(HELP)
-        elif words[0] == "/mcp":
-            self._mcp()
-        elif words[0] == "/resume":
-            return Did.LEFT if self._resume(words[1:]) else Did.DONE
-        else:
-            return Did.NOTHING
-        return Did.DONE
-
-    def _mcp(self) -> None:
-        """/mcp: the MCP servers claude said the session has, which it
-        says at the start of a turn."""
-        servers = self._session.servers
-        if not servers:
-            known = "none" if self._session.id else "not known before the first turn"
-            self._page.note("chat", f"the MCP servers of the session: {known}")
-            return
-        self._page.say(
-            [labelled("chat", "the MCP servers of the session:")]
-            + [f"  {name}  {status}" for name, status in servers]
-        )
-
-    def _shell(self, command: str) -> None:
-        """!COMMAND: run a command in the session's container. Claude is
-        not told of it and the transcript does not have it, the record of
-        what ran does. What it writes is the session's word as anything
-        else from there: shown a line at a time, cleaned. Ctrl-C is for
-        the command while it runs, see shelling."""
-        if not command:
-            return
-        self._page.note("shell", f"$ {flat(command)}  (claude is not told)")
-        wrapped = ("setsid", "--wait", "bash", "-c", SHELL_WRAPPER, "bash", command)
-        group = b""
-        self._interrupted = False
-        self.shelling = True
-        try:
-            process = docker_popen(
-                *("exec", self._name, *wrapped),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            self._shell_process = process
-            with process:
-                out = process.stdout
-                first = True
-                while out and (line := out.readline(SHELL_WIDTH)):
-                    if first and _GROUP.fullmatch(line):
-                        group = line.strip()
-                    else:
-                        text = line.decode("utf-8", "replace").rstrip("\r\n")
-                        self._page.put([clean(text)])
-                    first = False
-        except OSError:
-            self._page.note("shell", "docker could not be run")
-            return
-        finally:
-            self._shell_process = None
-            self.shelling = False
-        if self._interrupted:
-            # What it left running in the container goes with it
-            ended = bool(group) and docker_ok(
-                *exec_args(self._name, f"kill -TERM -- -{group.decode()}")
-            )
-            left = "" if ended else ", what it ran may still be running"
-            self._page.note("shell", f"interrupted{left}")
-        elif process.returncode:
-            self._page.note("shell", f"ended with {process.returncode}")
-
-    def interrupt(self) -> None:
-        """Ctrl-C while a command of the user's runs: docker's end of it
-        is ended here, the command itself once that is over, see _shell.
-        Called from the handler of the signal, so it does no more."""
-        self._interrupted = True
-        process = self._shell_process
-        if process is not None:
-            with contextlib.suppress(OSError):
-                process.terminate()
-
-    def _mode(self, agent: Agent, names: list[str]) -> None:
-        """/mode: ask claude for the permission mode of that name, which
-        is its own to know, or say which one it is in. What claude answers
-        is said when it comes, see answered."""
-        if len(names) != 1:
-            now = f"mode {self._session.mode}, " if self._session.mode else ""
-            self._page.note("chat", f"{now}{MODE} NAME changes it, plan for one")
-            return
-        self.mode_request = agent.request("set_permission_mode", mode=names[0])
-
-    def answered(self, message: dict) -> None:
-        """Take in what claude answers to a request of the chat's: whether
-        the mode changed. An interrupt shows in how its turn ends."""
-        response = message.get("response")
-        if not isinstance(response, dict) or not self.mode_request:
-            return
-        if response.get("request_id") != self.mode_request:
-            return
-        self.mode_request = ""
-        if response.get("subtype") != "success":
-            reason = flat(response.get("error", "claude refused"))
-            self._page.note("chat", f"mode not changed: {reason}")
-            return
-        told = response.get("response")
-        mode = told.get("mode") if isinstance(told, dict) else None
-        self._session.mode = flat(mode or self._session.mode)
-        self._page.note("chat", f"mode {self._session.mode}")
-
-    def _resume(self, names: list[str]) -> bool:
-        """/resume: leave this session for an earlier one of the project,
-        the one whose id starts as said or one picked from the latest.
-        Whether one is to be resumed."""
+    def resume(self, names: list[str]) -> bool:
+        """Leave this session for the one whose id starts as said, or one
+        picked from the latest. Whether one is to be resumed."""
         if self._handover is None:
             self._page.note("chat", "nothing here to resume a session with")
             return False
@@ -276,3 +118,156 @@ class Commands:
         if not is_number(number) or not 1 <= int(number) <= len(rows):
             return ""
         return rows[int(number) - 1][0].stem
+
+
+class Commands:
+    """Does what a line asks of the chat itself, see LOCALS. What is not
+    its own to do it is given: request asks claude for something of its
+    own doing and has the answer told (see Agent.request), shell runs a
+    command in the sandbox, resume leaves for an earlier session and says
+    whether it does, status says the status."""
+
+    def __init__(
+        self,
+        page: Page,
+        session: Session,
+        request: Callable[..., object],
+        shell: Callable[[str], None],
+        resume: Callable[[list[str]], bool],
+        status: Callable[[], None] = lambda: None,
+    ):
+        self._page = page
+        self._session = session
+        self._request = request
+        self._shell = shell
+        self._resume = resume
+        self._status = status
+
+    def do(self, text: str) -> Did:
+        """Do what a line asks of the chat itself."""
+        if text.startswith(SHELL):
+            name, words = SHELL, [text[len(SHELL) :].strip()]
+        else:
+            name, *words = text.split()
+        local = BY_NAME.get(name)
+        return local.do(self, words) if local else Did.NOTHING
+
+    def _shelled(self, words: list[str]) -> Did:
+        """!COMMAND: all that follows the mark is the command."""
+        self._shell(words[0])
+        return Did.DONE
+
+    def _left(self, _words: list[str]) -> Did:
+        return Did.LEFT
+
+    def _said_status(self, _words: list[str]) -> Did:
+        self._status()
+        return Did.DONE
+
+    def _help(self, _words: list[str]) -> Did:
+        self._page.say(HELP)
+        return Did.DONE
+
+    def _resumed(self, names: list[str]) -> Did:
+        return Did.LEFT if self._resume(names) else Did.DONE
+
+    def _mcp(self, _words: list[str]) -> Did:
+        """/mcp: the MCP servers claude said the session has, which it
+        says at the start of a turn."""
+        servers = self._session.servers
+        if not servers:
+            known = "none" if self._session.id else "not known before the first turn"
+            self._page.note("chat", f"the MCP servers of the session: {known}")
+            return Did.DONE
+        self._page.say(
+            [labelled("chat", "the MCP servers of the session:")]
+            + [f"  {name}  {status}" for name, status in servers]
+        )
+        return Did.DONE
+
+    def _mode(self, names: list[str]) -> Did:
+        """/mode: ask claude for the permission mode of that name, which
+        is its own to know, or say which one it is in. What claude answers
+        is said when it comes, see _mode_answered."""
+        if len(names) != 1:
+            now = f"mode {self._session.mode}, " if self._session.mode else ""
+            self._page.note("chat", f"{now}{MODE} NAME changes it, plan for one")
+            return Did.DONE
+        self._request("set_permission_mode", self._mode_answered, mode=names[0])
+        return Did.DONE
+
+    def _mode_answered(self, response: dict) -> None:
+        """Take in what claude answers to a request for a mode: whether
+        it changed."""
+        if response.get("subtype") != "success":
+            reason = flat(response.get("error", "claude refused"))
+            self._page.note("chat", f"mode not changed: {reason}")
+            return
+        told = response.get("response")
+        mode = told.get("mode") if isinstance(told, dict) else None
+        self._session.mode = flat(mode or self._session.mode)
+        self._page.note("chat", f"mode {self._session.mode}")
+
+
+@dataclass(frozen=True)
+class Local:
+    """Something a chat does itself with a line: what the line starts
+    with for it, how /help says it is typed and what it does, nothing for
+    what /help leaves out, and what does it, given the words after."""
+
+    names: tuple[str, ...]
+    typed: str
+    about: str
+    do: Callable[[Commands, list[str]], Did]
+
+
+# In the order /help says them
+LOCALS = (
+    Local(
+        (MODE,),
+        f"{MODE} [NAME]",
+        "the permission mode, or change it (default, acceptEdits, plan)",
+        Commands._mode,
+    ),
+    Local(
+        ("/resume",),
+        "/resume [ID]",
+        "leave this session for an earlier one of the project",
+        Commands._resumed,
+    ),
+    Local(("/mcp",), "/mcp", "the MCP servers of the session", Commands._mcp),
+    Local(
+        STATUS,
+        "/status",
+        "the model, context, limits, cost and sandbox, or /statusline",
+        Commands._said_status,
+    ),
+    Local(
+        (SHELL,),
+        "!COMMAND",
+        "run a command in the sandbox, claude is not told",
+        Commands._shelled,
+    ),
+    Local(LEAVE, "/exit, /quit", "leave, as Ctrl-D does", Commands._left),
+    Local(("/help",), "", "", Commands._help),
+)
+BY_NAME = {name: local for local in LOCALS for name in local.names}
+# The words a line can start with that the chat does itself
+LOCAL = tuple(name for name in BY_NAME if name != SHELL)
+HELP = [
+    labelled("chat", "what the chat does itself, any other line is for claude:"),
+    *(
+        f"  {local.typed:<{TYPED_WIDTH}}{local.about}"
+        for local in LOCALS
+        if local.typed
+    ),
+    labelled("chat", "claude's own commands that answer in text work as typed:"),
+    "  /model [NAME], /context, /usage, /compact, /clear, and skills",
+    labelled(
+        "chat", "a line can be typed while a turn runs, claude takes it up when it can"
+    ),
+    "  a line that ends with a backslash takes the next one too, as Alt+Enter",
+    "  does, and Shift+Enter in a terminal set to tell it from Enter",
+    "  Tab completes commands and @files, Ctrl-C interrupts the turn that",
+    "  runs and a second one stops the session, at the prompt it drops the line",
+]

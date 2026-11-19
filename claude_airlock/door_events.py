@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 
-from .doors import BY_LAUNCHER, read_uses
+from .doors import BY_LAUNCHER, AgentUse, Door, read_uses
 from .events import Event, Who, clean
 from .settings import Host
 
@@ -16,14 +16,14 @@ def ssh_agent_event(when: float, said: dict) -> Event:
     another the launcher refused."""
     refused = bool(said.get("refused"))
     did = said.get("did")
-    if did == "sign":
+    if did == AgentUse.SIGN.value:
         comment = f" ({said['comment']})" if said.get("comment") else ""
         detail = (
             f"signed {said.get('what', 'something')} with {said.get('key')}{comment}"
         )
         if refused:
             detail = "asked for " + detail[len("signed ") :]
-    elif did == "list":
+    elif did == AgentUse.LIST.value:
         detail = f"listed the keys, {said.get('keys', 0)} of them"
     else:
         detail = str(said.get("what", "sent a request"))
@@ -36,7 +36,7 @@ def ssh_agent_event(when: float, said: dict) -> Event:
         by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
         detail += f"  REFUSED by the {by}"
         fields["error"] = f"refused by the {by}"
-    return Event(when, Who.SANDBOX, "ssh-agent", [clean(detail)], fields)
+    return Event(when, Who.SANDBOX, Door.SSH_AGENT.value, [clean(detail)], fields)
 
 
 def docker_event(when: float, said: dict) -> Event:
@@ -52,13 +52,13 @@ def docker_event(when: float, said: dict) -> Event:
     }
     if denied:
         detail += "  DENIED"
-    return Event(when, Who.SANDBOX, "docker", [clean(detail)], fields)
+    return Event(when, Who.SANDBOX, Door.DOCKER.value, [clean(detail)], fields)
 
 
 # How the use of each door is shown, by the door
 DOOR_EVENTS: dict[str, Callable[[float, dict], Event]] = {
-    "ssh-agent": ssh_agent_event,
-    "docker": docker_event,
+    Door.SSH_AGENT.value: ssh_agent_event,
+    Door.DOCKER.value: docker_event,
 }
 
 
@@ -81,16 +81,16 @@ def door_events(
     events = [event for event in map(use_event, uses) if event]
     by_door = Counter(event.what for event in events)
     rows = []
-    if by_door["ssh-agent"]:
+    agent, docker = by_door[Door.SSH_AGENT.value], by_door[Door.DOCKER.value]
+    if agent:
         signed = sum(
-            event.fields.get("did") == "sign" and "error" not in event.fields
+            event.fields.get("did") == AgentUse.SIGN.value
+            and "error" not in event.fields
             for event in events
         )
-        rows.append(
-            ("ssh agent", f"{by_door['ssh-agent']} requests, {signed} signatures")
-        )
-    if by_door["docker"]:
+        rows.append(("ssh agent", f"{agent} requests, {signed} signatures"))
+    if docker:
         denied = sum(bool(event.fields.get("denied")) for event in events)
         denials = f", {denied} DENIED" if denied else ""
-        rows.append(("docker", f"{by_door['docker']} calls{denials}"))
+        rows.append(("docker", f"{docker} calls{denials}"))
     return rows, events

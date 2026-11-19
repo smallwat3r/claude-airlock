@@ -5,14 +5,12 @@ so the chat notes it in a record of the launcher's, see notes.py."""
 
 from __future__ import annotations
 
-from .events import Event, Who, clean
+from .events import Event, Kind, Who, clean
 from .notes import Notes
 from .settings import Host
 
 # The notes kept, a chat adds a few at most (see MOST_SAID of drift.py)
 KEPT_CHANGES = 1000
-# What a change is shown as in a trace
-CHANGED = "changed"
 
 
 def change_record(host: Host) -> Notes:
@@ -31,7 +29,7 @@ def change_event(said: dict) -> Event:
     own, what it holds still comes from a session: it is cleaned like the
     rest."""
     what = clean(said.get("what", ""))
-    return Event(float(said["t"]), Who.CLAUDE, CHANGED, [what], {"what": what})
+    return Event(float(said["t"]), Who.CLAUDE, Kind.CHANGED, [what], {"what": what})
 
 
 def change_events(

@@ -26,10 +26,11 @@ from pathlib import Path
 from typing import ClassVar
 
 from .docker import container_running, docker, docker_bytes
+from .errors import Fatal
 from .network import namespace_args
 from .pcap import HTTP_METHODS, Capture, read_capture
-from .records import NetSession
-from .settings import Fatal, Host, Settings
+from .records import TracedSession
+from .settings import Host, Settings
 from .sidecar import Sidecar
 
 CAPTURE_SUFFIX = ".capture"
@@ -116,8 +117,10 @@ class CaptureSidecar(Sidecar):
     def directory(self, host: Host) -> str:
         return host.captures_dir
 
-    def noted(self, file: str, end: float) -> NetSession:
-        return NetSession(self.session, self.project, self.start, capture=file, end=end)
+    def noted(self, file: str, end: float) -> TracedSession:
+        return TracedSession(
+            self.session, self.project, self.start, capture=file, end=end
+        )
 
 
 def start_capture(
@@ -184,7 +187,7 @@ def cut_short(capture: Capture) -> bool:
     return capture.packets >= PACKET_LIMIT
 
 
-def session_capture(host: Host, session: NetSession) -> Capture | None:
+def session_capture(host: Host, session: TracedSession) -> Capture | None:
     """The capture of a session, none when it has none or it is no
     longer kept."""
     if not session.capture:
@@ -193,16 +196,6 @@ def session_capture(host: Host, session: NetSession) -> Capture | None:
         return read_capture(Path(host.captures_dir, session.capture))
     except OSError:
         return None
-
-
-def running_captures(project_dir: str) -> list[tuple[str, float]]:
-    """The sidecars of the sessions of a project that are running now, as
-    the name of each and when it started."""
-    return [
-        (sidecar.name, sidecar.start)
-        for sidecar in CaptureSidecar.listed()
-        if sidecar.project == project_dir
-    ]
 
 
 def captured_since(sidecar: str, offset: int) -> bytes | None:

@@ -10,8 +10,9 @@ import stat
 from dataclasses import dataclass
 
 from .docker import env_arg, mount_arg
+from .errors import Fatal
 from .files import expand_home
-from .settings import Fatal, Host, Settings
+from .settings import Host, Settings
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")

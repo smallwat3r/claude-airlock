@@ -1,5 +1,5 @@
 """Claude Code at the other end of a pipe: the process a chat talks to,
-what it is told, and what it says read with care.
+what it is told, and what it says as it comes.
 
 Claude Code runs in its print mode and speaks JSON Lines over its standard
 input and output, the protocol of the Agent SDK. A line each way is one
@@ -7,8 +7,8 @@ object: a prompt, a request (to interrupt, to change the mode) or the
 answer to one of its own going in, what it does and asks coming out.
 
 What comes out is the session's to write, as its transcript is. It is
-bounded as it is read, and what is taken from it is checked for being
-what it should be: a number, a name, the id of a session."""
+bounded as it is read here, and what is taken from it is checked for being
+what it should be in said.py."""
 
 from __future__ import annotations
 
@@ -16,21 +16,15 @@ import contextlib
 import itertools
 import json
 import queue
-import re
 import subprocess
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
 
 from ..docker import NOT_FOUND, docker_popen
-from ..events import clean, flat
+from ..errors import Fatal
+from ..events import clean
 from ..files import json_object
-from ..projects import transcript_dirs
-from ..settings import Fatal, Host
-from ..transcript import content_blocks
-from .drift import Drift
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
 # about permissions asked over the same pipe, and a reply told as it is made
@@ -48,25 +42,25 @@ LINE_LIMIT = 64 << 20
 BACKLOG = 1000
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
-# More than a session could use: a count or a cost above it is not one
-MOST = 1e12
-# Of a list claude gives (its commands, its MCP servers), what is kept
-MOST_LISTED = 1000
-_COMMAND = re.compile(r"[\w:.-]{1,100}")
-_SESSION_ID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
-# What /model says of the model it chose, by the name Claude Code shows
-_CHOSEN = re.compile(r"(?:Set model to|Kept model as) `([^`\n]{1,100})`")
+# What is told the answer claude gives to a request of the chat's
+Answer = Callable[[dict], None]
 
 
 class Agent:
     """Claude Code in its container, spoken to over the pipes of the
-    docker command that runs it."""
+    docker command that runs it. With run, what starts that command in
+    docker's place, given what docker_popen is."""
 
-    def __init__(self, docker_args: list[str], on_end: Callable[[], None]):
+    def __init__(
+        self,
+        docker_args: list[str],
+        on_end: Callable[[], None],
+        run: Callable[..., subprocess.Popen] = docker_popen,
+    ):
         try:
             # A session of its own: Ctrl-C at the terminal is for the chat
             # to pass on as an interrupt, not for docker to end claude with
-            self._process = docker_popen(
+            self._process = run(
                 *docker_args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -79,6 +73,10 @@ class Agent:
         self._on_end = on_end
         self._speaking = threading.Lock()
         self._requests = itertools.count(1)
+        # What waits for the answer to a request of the chat's, by the id
+        # it was asked under
+        self._answers: dict[str, Answer] = {}
+        self._asking = threading.Lock()
         # What claude said, each an object, or the text of a line that is
         # none, then None when it has ended
         self.messages: queue.Queue[dict | str | None] = queue.Queue(BACKLOG)
@@ -149,13 +147,38 @@ class Agent:
         message = {"role": "user", "content": content}
         self.send({"type": "user", "message": message})
 
-    def request(self, subtype: str, **more: object) -> str:
+    def request(
+        self, subtype: str, on_answer: Answer | None = None, **more: object
+    ) -> str:
         """Ask claude for something of its own doing. The id its answer
-        will name."""
+        will name, which on_answer is given when it comes, see answered."""
         asked = f"chat-{next(self._requests)}"
         request = {"subtype": subtype, **more}
+        if on_answer:
+            # Before it is asked: the answer may come at once
+            with self._asking:
+                self._answers[asked] = on_answer
         self.send({"type": "control_request", "request_id": asked, "request": request})
         return asked
+
+    def answered(self, message: dict) -> None:
+        """Take in what claude answers to a request of the chat's, for
+        what waits for it. Nothing waits for the answer to an interrupt,
+        which shows in how its turn ends."""
+        response = message.get("response")
+        asked = response.get("request_id") if isinstance(response, dict) else None
+        if not isinstance(response, dict) or not isinstance(asked, str):
+            return
+        with self._asking:
+            take = self._answers.pop(asked, None)
+        if take:
+            take(response)
+
+    @property
+    def pending(self) -> bool:
+        """Whether a request of the chat's waits for its answer."""
+        with self._asking:
+            return bool(self._answers)
 
     def respond(self, asked: object, decision: dict) -> None:
         """Answer what claude asked under an id."""
@@ -190,121 +213,3 @@ class Agent:
         except subprocess.TimeoutExpired:
             return False
         return True
-
-
-def amount(value: object) -> float | None:
-    """A count or a cost claude gave, none for what is not one."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    # Not a number and the infinities are not within it either
-    return float(value) if 0 <= value <= MOST else None
-
-
-def is_session_id(value: object) -> bool:
-    """Whether a value is the id of a session, and so safe as the name of
-    its transcript."""
-    return isinstance(value, str) and bool(_SESSION_ID.fullmatch(value))
-
-
-def transcript_of(host: Host, session: object) -> Path | None:
-    """The transcript of the session that has an id, there or not yet.
-    None for what is not an id: it comes from the session."""
-    if not is_session_id(session):
-        return None
-    places = [directory / f"{session}.jsonl" for directory in transcript_dirs(host)]
-    for path in places:
-        if path.is_file() and not path.is_symlink():
-            return path
-    # Where a sandboxed session writes it, see project_roots
-    return places[-1]
-
-
-def command_names(given: object) -> list[str]:
-    """The commands claude says it has, as they are typed: only what is
-    a name."""
-    names = given if isinstance(given, list) else []
-    return [
-        "/" + name.lstrip("/")
-        for name in names[:MOST_LISTED]
-        if isinstance(name, str) and _COMMAND.fullmatch(name.lstrip("/"))
-    ]
-
-
-def servers_of(given: object) -> list[tuple[str, str]]:
-    """The MCP servers claude lists, each with how it is."""
-    servers = given if isinstance(given, list) else []
-    return [
-        (flat(server.get("name", "?")), flat(server.get("status", "?")))
-        for server in servers[:MOST_LISTED]
-        if isinstance(server, dict)
-    ]
-
-
-def own(message: dict) -> bool:
-    """Whether a message is of claude itself, not of a subagent of its."""
-    return not message.get("parent_tool_use_id")
-
-
-@dataclass
-class Session:
-    """What claude says of the session at the start of each turn, as far
-    as a chat goes by it."""
-
-    # Its id once it is seen to be one, which /clear changes
-    id: str = ""
-    mode: str = ""
-    # The mode it was first said to be in, the one it was started with
-    first_mode: str = ""
-    model: str = ""
-    # The name of the model /model chose, until claude names it by its id
-    chosen: str = ""
-    # Of Claude Code
-    version: str = ""
-    servers: list[tuple[str, str]] = field(default_factory=list)
-    commands: list[str] = field(default_factory=list)
-    # Told what claude does not say of the session any more, see heard
-    drift: Drift = field(default_factory=Drift, repr=False, compare=False)
-
-    def heard(self, message: dict) -> bool:
-        """Take in something claude says of the session. Whether it is
-        the start of a turn, which says all of it: what is not there then
-        is missed."""
-        starts = message.get("subtype") == "init"
-        read = self.drift.field
-        # Said in between too, when it changes
-        mode = (
-            read(message, "permissionMode", str)
-            if starts
-            else message.get("permissionMode")
-        )
-        self.mode = flat(mode or self.mode)
-        self.first_mode = self.first_mode or self.mode
-        if not starts:
-            return False
-        session = read(message, "session_id", str)
-        self.id = session if session and is_session_id(session) else ""
-        self.model = flat(read(message, "model", str) or self.model)
-        self.chosen = ""
-        self.version = flat(read(message, "claude_code_version", str) or self.version)
-        self.commands = command_names(read(message, "slash_commands", list))
-        self.servers = servers_of(read(message, "mcp_servers", list))
-        return True
-
-    def replied(self, message: dict) -> None:
-        """Take in a reply of claude's own: the model that wrote it is the
-        session's. The start of a turn says the one it started with. What
-        /model says names the one it chose, by its name alone, which stands
-        for it until the next turn or reply names its id. Not the stand-in
-        Claude Code names for what it wrote itself (<synthetic>)."""
-        command = message.get("local_command_run")
-        if isinstance(command, dict) and command.get("command") == "model":
-            for block in content_blocks(message):
-                said = _CHOSEN.search(str(block.get("text", "")))
-                if said:
-                    self.chosen = flat(said[1])
-            return
-        reply = message.get("message")
-        model = reply.get("model") if isinstance(reply, dict) else None
-        if isinstance(model, str) and model and not model.startswith("<"):
-            self.model = flat(model)
-            self.chosen = ""

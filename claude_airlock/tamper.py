@@ -10,12 +10,14 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .files import expand_home, private_dir, settings_object, write_whole
 from .launcher import Launcher, session_alive
 from .plugins import INSTALLED
-from .settings import CONFIG_FILES, CONFIG_TREES
+from .projects import memory_dirs
+from .settings import CONFIG_FILES, CONFIG_TREES, Host
 
 # What Claude follows or starts in a project, on the host as in a session:
 # its settings, the servers it is told to run and its instructions. Relative
@@ -422,27 +424,39 @@ def below_the_top(
     return watched
 
 
+def differing(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """The paths two fingerprints do not agree on, in their order: those
+    of a file that changed, came or went."""
+    return sorted(
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    )
+
+
+def first_named(paths: list[str]) -> list[str]:
+    """The lines that name the first MOST_NAMED paths of a report, and
+    say how many more there are."""
+    more = len(paths) - MOST_NAMED
+    lines = [f"  {path}" for path in paths[:MOST_NAMED]]
+    return lines + ([f"  and {more} more"] if more > 0 else [])
+
+
 def report_build_changes(
     before: dict[str, str], after: dict[str, str], unchecked: str = ""
 ) -> None:
     """Name the files of build_fingerprint that differ, the first
     MOST_NAMED of them. unchecked as for report_tampering."""
-    changed = sorted(
-        path
-        for path in before.keys() | after.keys()
-        if before.get(path) != after.get(path)
-    )
+    changed = differing(before, after)
     if not changed:
         return
-    more = len(changed) - MOST_NAMED
     whose = f"the session {unchecked} started" if unchecked else "this session started"
     print(
         f"claude-airlock: since {whose}, these files that your tools run on the"
         " host (make, a package manager, a test runner, a hook manager, an"
         " editor), or that git and Claude follow below the top of the"
         " project, have changed:",
-        *(f"  {path}" for path in changed[:MOST_NAMED]),
-        *([f"  and {more} more"] if more > 0 else []),
+        *first_named(changed),
         "Read them before you build, test or commit there outside the sandbox.",
         sep="\n",
         file=sys.stderr,
@@ -478,13 +492,11 @@ def report_memory(changed: list[str], unchecked: str = "") -> None:
     session read can have it leave instructions for the next ones."""
     if not changed:
         return
-    more = len(changed) - MOST_NAMED
     whose = f"the session {unchecked}" if unchecked else "this session"
     print(
         f"claude-airlock: {whose} changed what Claude remembers of this project,"
         " which every later session here is told:",
-        *(f"  {path}" for path in changed[:MOST_NAMED]),
-        *([f"  and {more} more"] if more > 0 else []),
+        *first_named(changed),
         "Read them, a later session follows what they say.",
         sep="\n",
         file=sys.stderr,
@@ -502,18 +514,12 @@ def report_tampering(
     the memory directories apart (see report_memory). unchecked is the
     name of an earlier session that ended without this check, when the
     report is the late one for it."""
-    differing = sorted(
-        path
-        for path in before.keys() | after.keys()
-        if before.get(path) != after.get(path)
-    )
+    differ = differing(before, after)
     roots = tuple(directory + os.sep for directory in memory)
-    remembered = [
-        path for path in differing if path in memory or path.startswith(roots)
-    ]
+    remembered = [path for path in differ if path in memory or path.startswith(roots)]
     report_memory(remembered, unchecked)
     changed = named_changes(
-        [path for path in differing if path not in remembered], claude_dir
+        [path for path in differ if path not in remembered], claude_dir
     )
     if not changed:
         return
@@ -537,54 +543,117 @@ def report_tampering(
     )
 
 
-def save_pending_check(
-    file: Path,
-    watched: list[str],
-    claude_dir: str,
-    before: dict[str, str],
-    build: dict[str, str] | None = None,
-    memory: Sequence[str] = (),
-) -> None:
-    """Keep a session's starting fingerprint on disk until its check has
-    run. A launcher that dies with its terminal (a killed Emacs buffer, a
-    closed window, a crash) never gets to compare, the next launch finds
-    this file and does it instead (see report_unchecked_sessions). Written
-    whole: a launcher that starts meanwhile reads the checks that are
-    there, and drops one it cannot read."""
-    private_dir(str(file.parent))
-    pending = {
-        **Launcher.current().as_fields(),
-        "watched": watched,
-        "claude_dir": claude_dir,
-        "before": before,
-        # What build_fingerprint gave
-        "build": build or {},
-        "memory": list(memory),
-    }
-    write_whole(str(file), json.dumps(pending))
+def texts(value: object) -> list[str]:
+    """A list of a pending check as the texts it holds. Raises TypeError
+    for what is no list."""
+    if not isinstance(value, list):
+        raise TypeError("not a list")
+    return [str(text) for text in value]
+
+
+def fingerprint_of(value: object) -> dict[str, str]:
+    """A fingerprint of a pending check. Raises TypeError for what is
+    none."""
+    if not isinstance(value, dict):
+        raise TypeError("not a fingerprint")
+    return {str(path): str(stamp) for path, stamp in value.items()}
+
+
+@dataclass(frozen=True)
+class HostCheck:
+    """What a session is checked against once it is over: the directories
+    it could write, and how the files watched in them were as it started
+    (see host_exec_fingerprint and build_fingerprint)."""
+
+    watched: list[str]
+    claude_dir: str
+    memory: list[str]
+    before: dict[str, str]
+    # None in a check saved by a version that did not take it
+    build: dict[str, str] | None
+
+    @classmethod
+    def take(cls, watched: list[str], claude_dir: str, memory: list[str]) -> HostCheck:
+        """The check of a session about to start."""
+        before = host_exec_fingerprint(watched, claude_dir, memory)
+        return cls(watched, claude_dir, memory, before, build_fingerprint(watched))
+
+    def as_fields(self) -> dict[str, object]:
+        return {
+            "watched": self.watched,
+            "claude_dir": self.claude_dir,
+            "before": self.before,
+            "build": self.build or {},
+            "memory": self.memory,
+        }
+
+    @classmethod
+    def from_fields(cls, pending: dict) -> HostCheck:
+        """A check as it was saved. Raises KeyError or TypeError for
+        what is none. The fields after the first two are not in a check
+        saved by an earlier version."""
+        return cls(
+            texts(pending["watched"]),
+            str(pending.get("claude_dir", "")),
+            texts(pending.get("memory", [])),
+            fingerprint_of(pending["before"]),
+            fingerprint_of(pending["build"]) if "build" in pending else None,
+        )
+
+    def report(self, unchecked: str = "") -> None:
+        """Compare with how the files are now and say what changed.
+        unchecked is the name of an earlier session that ended without
+        this check, when the report is the late one for it."""
+        after = host_exec_fingerprint(self.watched, self.claude_dir, self.memory)
+        report_tampering(self.before, after, unchecked, self.claude_dir, self.memory)
+        if self.build is not None:
+            report_build_changes(self.build, build_fingerprint(self.watched), unchecked)
+
+
+class PendingCheck:
+    """The check of a session, kept on disk until it has run. A launcher
+    that dies with its terminal (a killed Emacs buffer, a closed window,
+    a crash) never gets to compare, the next launch finds the file and
+    does it instead (see report_unchecked_sessions). The file is named
+    after the container."""
+
+    def __init__(self, file: Path, check: HostCheck) -> None:
+        self._file = file
+        self._check = check
+
+    @classmethod
+    def begin(cls, host: Host, session: str, watched: list[str]) -> PendingCheck:
+        """Take the check of a session about to start and keep it, once
+        the checks earlier sessions left have run. Written whole: a
+        launcher that starts meanwhile reads the checks that are there,
+        and drops one it cannot read."""
+        file = Path(host.pending_checks_dir, session + ".json")
+        report_unchecked_sessions(file.parent)
+        check = HostCheck.take(watched, host.claude_dir, memory_dirs(host))
+        private_dir(str(file.parent))
+        pending = {**Launcher.current().as_fields(), **check.as_fields()}
+        write_whole(str(file), json.dumps(pending))
+        return cls(file, check)
+
+    def drop(self) -> None:
+        """For a session that did not start: there is nothing of it to
+        check."""
+        self._file.unlink(missing_ok=True)
+
+    def run(self) -> None:
+        """Run the check of the session, now over."""
+        self._check.report()
+        self._file.unlink(missing_ok=True)
 
 
 def report_unchecked_sessions(directory: Path) -> None:
     """Run the check for every session that ended without it, one still
-    going is left alone. The file is named after the container."""
+    going is left alone."""
     for file in sorted(directory.glob("*.json")):
         try:
             pending = json.loads(file.read_text(encoding="utf-8"))
-            launcher, watched, claude_dir, before = (
-                Launcher.from_fields(pending),
-                [str(watched_dir) for watched_dir in pending["watched"]],
-                # Not in a check saved by an earlier version
-                str(pending.get("claude_dir", "")),
-                {str(k): str(v) for k, v in pending["before"].items()},
-            )
-            # Not in a check saved by an earlier version
-            build = (
-                {str(k): str(v) for k, v in pending["build"].items()}
-                if "build" in pending
-                else None
-            )
-            # Not in a check saved by an earlier version
-            memory = [str(directory) for directory in pending.get("memory", [])]
+            launcher = Launcher.from_fields(pending)
+            check = HostCheck.from_fields(pending)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Said out loud, a check must not vanish without a word
             print(
@@ -595,8 +664,5 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         if session_alive(launcher, file.stem):
             continue
-        after = host_exec_fingerprint(watched, claude_dir, memory)
-        report_tampering(before, after, file.stem, claude_dir, memory)
-        if build is not None:
-            report_build_changes(build, build_fingerprint(watched), file.stem)
+        check.report(file.stem)
         file.unlink(missing_ok=True)

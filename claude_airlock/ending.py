@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from .docker import docker_ok
-from .settings import Fatal
+from .errors import Fatal
 
 # What tells the launcher to end: a kill, and a terminal that is gone (a
 # closed window, a killed Emacs buffer)

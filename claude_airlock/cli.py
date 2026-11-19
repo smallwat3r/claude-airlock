@@ -12,22 +12,23 @@ import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
+from typing import NamedTuple
 
+from .action import Action
 from .capture import CaptureSidecar, session_captured
 from .chat import CHAT_ARGS, Handover, Sandbox, chat
 from .claude_args import has_a_conversation, resumed_args
 from .digest import report_session
 from .docker import docker_ok
-from .doors import refuse_unreachable_agent, socket_proxy_watched, ssh_agent_door
 from .egress_log import net_log
 from .ending import Ending, ending_passed_on, interrupts_held
+from .errors import Fatal
 from .follow import follow
 from .history import history_args
 from .home import prepare_home, protect_config_args
 from .host_health import collect_left_behind, health_recorded
 from .image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
-from .limits import LimitsHit, limits_watched
+from .limits import limits_watched
 from .login import login_shared
 from .mounts import (
     ExtraDir,
@@ -50,7 +51,6 @@ from .network import (
 )
 from .plugins import enabled_plugins
 from .processes import Watcher, processes_recorded
-from .projects import memory_dirs
 from .recorder import transcripts_copied
 from .runtime import Runtime, say_runtime_notes, session_runtime
 from .session import (
@@ -61,53 +61,40 @@ from .session import (
     run_session,
     session_args,
 )
-from .settings import (
-    NAME,
-    Fatal,
-    Host,
-    Settings,
-    detect_host,
-    load_settings,
-    settings_help,
-)
+from .settings import NAME, Host, Settings, detect_host, load_settings, settings_help
+from .socket_watch import socket_proxy_watched
+from .ssh_agent import refuse_unreachable_agent, ssh_agent_door
 from .started import Start, note_end, note_start
-from .tamper import (
-    build_fingerprint,
-    host_exec_fingerprint,
-    report_build_changes,
-    report_tampering,
-    report_unchecked_sessions,
-    save_pending_check,
-)
+from .tamper import PendingCheck
 from .trace import trace
 
 
-def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]:
-    """Take the launcher's own options out of argv. Returns the action
-    (run, help, shell, line-mode, rebuild, prune, dockerfile, net-log, net-reload
-    or trace), the arguments left for claude, and the directories asked for
-    with --add-dir and --add-dir-ro, each with whether it is read-only."""
-    action = "run"
+class ParsedArgs(NamedTuple):
+    """The command line taken apart: what to do, the arguments left for
+    claude, and the directories asked for with --add-dir and --add-dir-ro,
+    each with whether it is read-only."""
+
+    action: Action
+    claude_args: list[str]
+    added: list[tuple[str, bool]]
+
+
+# The launcher's own options that say what to do
+ACTIONS = {action.option: action for action in Action if action is not Action.RUN}
+
+
+def parse_args(argv: list[str]) -> ParsedArgs:
+    """Take the launcher's own options out of argv."""
+    action = Action.RUN
     claude_args: list[str] = []
     added: list[tuple[str, bool]] = []
-    actions = (
-        "--help",
-        "--rebuild",
-        "--prune",
-        "--dockerfile",
-        "--shell",
-        "--line-mode",
-        "--net-log",
-        "--net-reload",
-        "--trace",
-    )
     args = iter(argv)
     for arg in args:
         option, has_value, value = arg.partition("=")
         if arg == "-h":
-            action = "help"
-        elif arg in actions:
-            action = arg[2:]
+            action = Action.HELP
+        elif arg in ACTIONS:
+            action = ACTIONS[arg]
         elif option in ("--add-dir", "--add-dir-ro"):
             if not has_value:
                 following = next(args, None)
@@ -117,12 +104,12 @@ def parse_args(argv: list[str]) -> tuple[str, list[str], list[tuple[str, bool]]]
             added.append((value, option == "--add-dir-ro"))
         else:
             claude_args.append(arg)
-    return action, claude_args, added
+    return ParsedArgs(action, claude_args, added)
 
 
 def main(argv: list[str], usage: str = "") -> int:
     action, claude_args, added = parse_args(argv)
-    if action == "help":
+    if action is Action.HELP:
         # Ahead of the settings: a config file that is refused is one of
         # the things the text is asked about
         print(usage.strip() + "\n\n" + settings_help())
@@ -132,26 +119,26 @@ def main(argv: list[str], usage: str = "") -> int:
     settings = load_settings(env, os.path.join(host.user_conf, "config"))
 
     # What needs neither the image nor the directories of a session
-    if action == "net-log":
+    if action is Action.NET_LOG:
         return net_log()
-    if action == "trace":
+    if action is Action.TRACE:
         following = "--follow" in claude_args
         return (follow if following else trace)(host, claude_args)
-    if action == "net-reload":
+    if action is Action.NET_RELOAD:
         with sidecars_locked(host):
             start_egress_proxy()
         return 0
 
-    if action == "run" and settings.line_mode and has_a_conversation(claude_args):
+    if action is Action.RUN and settings.line_mode and has_a_conversation(claude_args):
         # Line mode, Claude Code without its native UI, see chat/
-        action = "line-mode"
+        action = Action.LINE_MODE
     image = prepare_image(settings, host)
-    if action == "dockerfile":
+    if action is Action.DOCKERFILE:
         print(image.dockerfile)
         return 0
-    if action == "rebuild":
+    if action is Action.REBUILD:
         return build_image(image, host, "--no-cache")
-    if action == "prune":
+    if action is Action.PRUNE:
         return prune_images(image.tag)
 
     dirs = configured_extra_dirs(settings, host)
@@ -159,7 +146,7 @@ def main(argv: list[str], usage: str = "") -> int:
         add_extra_dir(dirs, raw, host, read_only)
     dirs, protected = protected_dirs(dirs, settings, host)
     plan = Plan(settings, host, image, action, dirs, protected, claude_args)
-    return chats(plan) if action == "line-mode" else session(plan)
+    return chats(plan) if plan.is_chat else session(plan)
 
 
 @dataclass(frozen=True)
@@ -173,12 +160,21 @@ class Plan:
     settings: Settings
     host: Host
     image: Image
-    action: str
+    action: Action
     dirs: list[ExtraDir]
     protected: list[str]
     claude_args: list[str]
     # Where a chat leaves what is to be done after it, see chats
     handover: Handover | None = None
+
+    @property
+    def runs_claude(self) -> bool:
+        """Not for the shell action, which runs bash."""
+        return self.action is not Action.SHELL
+
+    @property
+    def is_chat(self) -> bool:
+        return self.action is Action.LINE_MODE
 
 
 def chats(plan: Plan) -> int:
@@ -232,19 +228,21 @@ def session_watched(
     return processes_recorded(settings, host, name, owner, plan.image.tag)
 
 
-def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> int:
-    """The session of a plan in the container of a name, with its network
-    there, under the given runtime. It is ended when the launcher is told
-    to end, see ending_passed_on."""
-    settings, host, image = plan.settings, plan.host, plan.image
-    action, dirs, protected = plan.action, plan.dirs, plan.protected
-    claude_args = plan.claude_args
-    env = os.environ
-    # With a capture, the session's network namespace is its sidecar's
-    capture = CaptureSidecar.name_for(name) if settings.net_log else ""
-    run_args = [
+def session_run_args(
+    plan: Plan, name: str, runtime: Runtime, capture: str
+) -> list[str]:
+    """The options of docker run for the session of a plan, but for what
+    is only known once its recorders run. capture names the sidecar whose
+    network namespace the session is in, if any."""
+    settings, host, dirs, protected = (
+        plan.settings,
+        plan.host,
+        plan.dirs,
+        plan.protected,
+    )
+    return [
         *base_args(settings, host, name, runtime),
-        *session_args(action, env),
+        *session_args(plan.action, os.environ),
         *protect_config_args(settings, host),
         *history_args(settings, host),
         *extra_dir_args(dirs),
@@ -255,90 +253,115 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
         *git_config_args(host),
         *shadow_args(settings, host, dirs),
     ]
+
+
+def command_args(plan: Plan) -> list[str]:
+    """What the session's program is given: the user's arguments, for
+    claude after the launcher's own."""
+    if not plan.runs_claude:
+        # Bash takes none of claude's
+        return plan.claude_args
     # --add-dir is variadic: written as two arguments it takes what follows
     # for more directories, a prompt that comes first among the user's
-    # arguments included. With = it takes the one. A --shell session runs
-    # bash, which takes no --add-dir.
-    if action != "shell":
-        add_dirs = [f"--add-dir={extra.path}" for extra in dirs]
-        # The language servers of the image, as a plugin for this session
-        plugin = ["--plugin-dir", PLUGIN_DIR] if image.has_language_servers else []
-        # A chat has claude speak JSON Lines, ahead of the user's arguments
-        spoken = list(CHAT_ARGS) if action == "line-mode" else []
-        unasked = permission_args(settings, claude_args)
-        claude_args = plugin + add_dirs + spoken + unasked + claude_args
+    # arguments included. With = it takes the one.
+    add_dirs = [f"--add-dir={extra.path}" for extra in plan.dirs]
+    # The language servers of the image, as a plugin for this session
+    servers = plan.image.has_language_servers
+    plugin = ["--plugin-dir", PLUGIN_DIR] if servers else []
+    # A chat has claude speak JSON Lines, ahead of the user's arguments
+    spoken = list(CHAT_ARGS) if plan.is_chat else []
+    unasked = permission_args(plan.settings, plan.claude_args)
+    return plugin + add_dirs + spoken + unasked + plan.claude_args
 
-    watched = [host.project_dir] + [extra.path for extra in dirs]
-    pending = Path(host.pending_checks_dir, name + ".json")
-    report_unchecked_sessions(pending.parent)
-    memory = memory_dirs(host)
-    before = host_exec_fingerprint(watched, host.claude_dir, memory)
-    build = build_fingerprint(watched)
-    save_pending_check(pending, watched, host.claude_dir, before, build, memory)
-    # What sessions that ended without their launcher left behind
+
+def collect_all_left_behind(host: Host) -> None:
+    """What sessions that ended without their launcher left behind."""
     CaptureSidecar.collect_left_behind(host)
     Watcher.collect_left_behind(host)
     collect_left_behind(host)
-    # The container whose network namespace the session is in
-    owner = capture or name
+
+
+def recorded_session(
+    plan: Plan,
+    name: str,
+    ending: Ending,
+    runtime: Runtime,
+    run_args: list[str],
+    owner: str,
+) -> tuple[int, list[str]]:
+    """Run the session of a plan with its recorders around it, and its
+    doors open. owner is the container whose network namespace the
+    session is in. Returns its exit status, and what is to be said of
+    the limits it ran into."""
+    settings, host, image = plan.settings, plan.host, plan.image
+    with contextlib.ExitStack() as running:
+        # The capture first, a filtered session's address is its
+        # sidecar's
+        for recording in (
+            session_captured(settings, host, name, image.tag),
+            session_address_recorded(settings, host, name, owner),
+            socket_proxy_watched(settings, host, name, owner),
+            session_watched(plan, name, owner, runtime),
+            transcripts_copied(host),
+            login_shared(host),
+        ):
+            running.enter_context(recording)
+        hit = running.enter_context(limits_watched(settings, name))
+        agent = ssh_agent_door(settings, host, name, os.environ)
+        agent_args = running.enter_context(agent)
+        # How the sandbox is started, noted for a trace and what
+        # follows the sessions, and for a chat to say first
+        start = Start.of(
+            settings,
+            runtime,
+            image.tag,
+            plan.dirs,
+            # The agent's door is open when the host has an agent
+            ssh_agent=bool(agent_args),
+            plugins=enabled_plugins(host.claude_dir, host.project_dir),
+            # A --shell session runs bash, which is given no plugin
+            servers=image.language_servers if plan.runs_claude else (),
+        )
+        said = note_start(host, name, start)
+        through = None
+        if plan.is_chat:
+            sandbox = Sandbox.started(name, start, host.home)
+            through = partial(chat, host, sandbox, handover=plan.handover, start=said)
+        run_args = run_args + agent_args
+        try:
+            status = run_session(run_args, image, command_args(plan), ending, through)
+        finally:
+            note_end(host, name)
+    # Whole once the recorders are done
+    return status, hit.lines()
+
+
+def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> int:
+    """The session of a plan in the container of a name, with its network
+    there, under the given runtime. It is ended when the launcher is told
+    to end, see ending_passed_on."""
+    settings, host = plan.settings, plan.host
+    # With a capture, the session's network namespace is its sidecar's
+    capture = CaptureSidecar.name_for(name) if settings.net_log else ""
+    run_args = session_run_args(plan, name, runtime, capture)
+    watched = [host.project_dir] + [extra.path for extra in plan.dirs]
+    check = PendingCheck.begin(host, name, watched)
+    collect_all_left_behind(host)
     started = time.time()
-    hit = LimitsHit()
     # From here to the end of the checks, see interrupts_held
     with interrupts_held():
         try:
-            with contextlib.ExitStack() as running:
-                # The capture first, a filtered session's address is its
-                # sidecar's
-                for recording in (
-                    session_captured(settings, host, name, image.tag),
-                    session_address_recorded(settings, host, name, owner),
-                    socket_proxy_watched(settings, host, name, owner),
-                    session_watched(plan, name, owner, runtime),
-                    transcripts_copied(host),
-                    login_shared(host),
-                ):
-                    running.enter_context(recording)
-                hit = running.enter_context(limits_watched(settings, name))
-                agent = ssh_agent_door(settings, host, name, env)
-                agent_args = running.enter_context(agent)
-                run_args += agent_args
-                # The agent's door is open when the host has an agent
-                forwarded = bool(agent_args)
-                # How the sandbox is started, noted for a trace and what
-                # follows the sessions, and for a chat to say first
-                start = Start.of(
-                    settings,
-                    runtime,
-                    image.tag,
-                    dirs,
-                    ssh_agent=forwarded,
-                    plugins=enabled_plugins(host.claude_dir, host.project_dir),
-                    # A --shell session runs bash, which is given no plugin
-                    servers=() if action == "shell" else image.language_servers,
-                )
-                said = note_start(host, name, start)
-                through = None
-                if action == "line-mode":
-                    sandbox = Sandbox.started(name, start, host.home)
-                    through = partial(
-                        chat, host, sandbox, handover=plan.handover, start=said
-                    )
-                try:
-                    status = run_session(run_args, image, claude_args, ending, through)
-                finally:
-                    note_end(host, name)
+            status, limits = recorded_session(
+                plan, name, ending, runtime, run_args, capture or name
+            )
         except Fatal:
-            # The session did not start, there is nothing of it to check
-            pending.unlink(missing_ok=True)
+            check.drop()
             raise
         try:
-            report_session(host, name, started, hit.lines())
+            report_session(host, name, started, limits)
         finally:
             # Whatever became of the digest: this check matters more
-            after = host_exec_fingerprint(watched, host.claude_dir, memory)
-            report_tampering(before, after, claude_dir=host.claude_dir, memory=memory)
-            report_build_changes(build, build_fingerprint(watched))
-            pending.unlink(missing_ok=True)
+            check.run()
     return status
 
 

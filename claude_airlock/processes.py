@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,8 +40,9 @@ from typing import ClassVar
 from .background import in_background, wait_for
 from .docker import container_running, docker, docker_output, mount_arg
 from .health import Ended, Sample, read_health
+from .pcap import is_loopback
 from .procwatch import Note
-from .records import NetSession
+from .records import TracedSession
 from .settings import Host, Settings
 from .sidecar import Sidecar
 
@@ -80,8 +81,8 @@ class Watcher(Sidecar):
     def directory(self, host: Host) -> str:
         return host.process_records_dir
 
-    def noted(self, file: str, end: float) -> NetSession:
-        return NetSession(
+    def noted(self, file: str, end: float) -> TracedSession:
+        return TracedSession(
             self.session, self.project, self.start, processes=file, end=end
         )
 
@@ -113,16 +114,6 @@ def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watch
         stderr=subprocess.DEVNULL,
     )
     return watcher
-
-
-def running_watchers(project_dir: str) -> list[tuple[str, float]]:
-    """The watchers of the sessions of a project that are running now, as
-    the name of each and when it started."""
-    return [
-        (watcher.name, watcher.start)
-        for watcher in Watcher.listed()
-        if watcher.project == project_dir
-    ]
 
 
 def said_since(watcher: str, since: float) -> list[Sample | Ended]:
@@ -245,7 +236,7 @@ class Listener:
         """Whether it can be reached from outside the session: not one
         that waits on the session's own loopback alone. A session shares
         its network with the other sessions that run."""
-        return not (self.address.startswith("127.") or self.address == "::1")
+        return not is_loopback(self.address)
 
     @property
     def at(self) -> str:
@@ -291,38 +282,63 @@ class ProcessRecord:
         try:
             said = json.loads(line)
             when = float(said["t"])
-            if "note" in said:
-                self.full |= said["note"] == Note.FULL
-                self.unreadable |= said["note"] == Note.UNREADABLE
-                if said["note"] == Note.STARTED:
-                    self.outside = str(said.get("outside", ""))
-            elif "limit" in said:
-                if said["limit"] == "pids":
-                    self.process_limit = max(self.process_limit, int(said["hits"]))
-            elif "health" in said or "oom" in said:
-                health = read_health(when, said)
-                if isinstance(health, Sample):
-                    self.samples.append(health)
-                elif health:
-                    self.ended.append(health)
-            elif "listen" in said:
-                pids = tuple(int(pid) for pid in said["pids"])
-                self.listeners.append(
-                    Listener(when, int(said["listen"]), str(said["on"]), pids)
-                )
-            elif "port" in said:
-                key = (int(said["port"]), str(said["to"]), int(said["to_port"]))
-                pids = tuple(int(pid) for pid in said["pids"])
-                self.holders.setdefault(key, []).append((when, pids))
-            else:
-                argv = tuple(str(argument) for argument in said["argv"])
-                found = Process(
-                    when, int(said["pid"]), int(said["ppid"]), str(said["exe"]), argv
-                )
-                self.processes.append(found)
-                self._by_pid.setdefault(found.pid, []).append(found)
+            for key, taken in self._KINDS:
+                if key in said:
+                    taken(self, when, said)
+                    return
+            self._process(when, said)
         except (ValueError, KeyError, TypeError, RecursionError):
             return
+
+    def _note(self, _when: float, said: dict) -> None:
+        self.full |= said["note"] == Note.FULL
+        self.unreadable |= said["note"] == Note.UNREADABLE
+        if said["note"] == Note.STARTED:
+            self.outside = str(said.get("outside", ""))
+
+    def _limit(self, _when: float, said: dict) -> None:
+        if said["limit"] == "pids":
+            self.process_limit = max(self.process_limit, int(said["hits"]))
+
+    def _health(self, when: float, said: dict) -> None:
+        health = read_health(when, said)
+        if isinstance(health, Sample):
+            self.samples.append(health)
+        elif health:
+            self.ended.append(health)
+
+    def _listener(self, when: float, said: dict) -> None:
+        pids = tuple(int(pid) for pid in said["pids"])
+        self.listeners.append(
+            Listener(when, int(said["listen"]), str(said["on"]), pids)
+        )
+
+    def _connection(self, when: float, said: dict) -> None:
+        key = (int(said["port"]), str(said["to"]), int(said["to_port"]))
+        pids = tuple(int(pid) for pid in said["pids"])
+        self.holders.setdefault(key, []).append((when, pids))
+
+    def _process(self, when: float, said: dict) -> None:
+        argv = tuple(str(argument) for argument in said["argv"])
+        found = Process(
+            when, int(said["pid"]), int(said["ppid"]), str(said["exe"]), argv
+        )
+        self.processes.append(found)
+        self._by_pid.setdefault(found.pid, []).append(found)
+
+    # What a line of the record tells of, by the key only such a line
+    # has, in the order they are looked for. A line with none of them is
+    # a process. See procwatch.py for the lines.
+    _KINDS: ClassVar[
+        tuple[tuple[str, Callable[[ProcessRecord, float, dict], None]], ...]
+    ] = (
+        ("note", _note),
+        ("limit", _limit),
+        ("health", _health),
+        ("oom", _health),
+        ("listen", _listener),
+        ("port", _connection),
+    )
 
     def process(self, pid: int, when: float) -> Process | None:
         """What a process id was at a time: the last it was noted as up
@@ -385,7 +401,7 @@ def shown_lineage(lineage: list[Process]) -> str:
     return f"[{first.pid}] {command}{parents}"
 
 
-def session_record(host: Host, session: NetSession) -> ProcessRecord | None:
+def session_record(host: Host, session: TracedSession) -> ProcessRecord | None:
     """The record of a session's processes, none when it has none or it
     is no longer kept."""
     if not session.processes:

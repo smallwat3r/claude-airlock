@@ -3,7 +3,7 @@
 in the same sandbox, run with the same arguments. A prompt is read a line at a
 time, and what the session does with it is written under it in the lines
 of a trace, with what the launcher records of the network, the SSH agent
-and the Docker socket.
+and the Docker socket (followed.py).
 
 Claude Code's screen redraws itself and so needs a terminal that keeps up
 with it. Here lines are added at the end and never changed, in a terminal
@@ -25,10 +25,11 @@ transcript would have it a moment late. Both are the session's own word,
 cleaned before they are shown, and the id claude gives for its session is
 not made a path of before it is seen to be one.
 
-The conversation itself, the two threads it takes and how it ends, is in
+The conversation itself, the threads it takes and how it ends, is in
 talk.py. What a chat does itself with a line (/mode, /resume, !COMMAND)
-is in commands.py, what it says of claude's doings besides answering in
-notices.py."""
+is in commands.py and shell.py, what it says of claude's doings besides
+answering in notices.py. What claude says over the pipe is checked for
+being what it should be in said.py."""
 
 from .commands import Handover
 from .pipe import CHAT_ARGS

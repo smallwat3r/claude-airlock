@@ -1,8 +1,8 @@
-"""The launcher's record of the sessions whose network use can be traced:
-a line per session in its state directory, with the address a filtered one
-had on the internal network (see network.py), the file of its capture
-(see capture.py) or the file of its processes (see processes.py). Written
-as a session runs and ends, read by --trace.
+"""The launcher's record of the sessions that left something to trace
+besides their transcript: a line per session in its state directory, with
+the address a filtered one had on the internal network (see network.py),
+the file of its capture (see capture.py) or the file of its processes
+(see processes.py). Written as a session runs and ends, read by --trace.
 
 The file is the launcher's own, never mounted into a session. It is still
 read with care, a line that does not hold up is passed over: it is written
@@ -41,11 +41,11 @@ def _moment(value: object) -> float | None:
 
 
 @dataclass(frozen=True)
-class NetSession:
-    """A session with a network record: its container's name, its project
-    and when it started, with its address for a filtered one, and for a
-    captured one the file of its capture and when it ended. A line of its
-    own has the file of its processes."""
+class TracedSession:
+    """A session and one thing recorded of it: its container's name, its
+    project and when it started, with its address for a filtered one, for
+    a captured one the file of its capture and when it ended, or, on a
+    line of its own, the file of its processes."""
 
     name: str
     project: str
@@ -75,10 +75,10 @@ class NetSession:
         return json.dumps(kept)
 
     @classmethod
-    def from_line(cls, line: str) -> NetSession | None:
+    def from_line(cls, line: str) -> TracedSession | None:
         """The session of a line of the record, none for a line that is
-        not one: it has to say what ran, when, and where its network use
-        is to be found."""
+        not one: it has to say what ran, when, and where what was
+        recorded of it is to be found."""
         said = json_object(line)
         if said is None:
             return None
@@ -103,26 +103,26 @@ class NetSession:
         return cls(name, project, start, ip, capture, processes, end)
 
 
-def record_net_session(host: Host, session: NetSession) -> None:
+def record_traced_session(host: Host, session: TracedSession) -> None:
     """Add a session to the record, the oldest go past KEPT_SESSIONS."""
     append_kept(host.net_sessions_file, session.as_line(), KEPT_SESSIONS)
 
 
-def read_net_sessions(host: Host) -> list[NetSession]:
+def read_traced_sessions(host: Host) -> list[TracedSession]:
     """Every session of the record, none when nothing was recorded yet."""
     try:
         with open(host.net_sessions_file, encoding="utf-8", errors="replace") as record:
-            sessions = [NetSession.from_line(line) for line in record]
+            sessions = [TracedSession.from_line(line) for line in record]
     except FileNotFoundError:
         return []
     return [session for session in sessions if session]
 
 
-def recorded_sessions(host: Host, start: float, end: float) -> list[NetSession]:
-    """The sessions of this project with a network record that ran at some
-    point between start and end. A filtered one, known by its address, ran
+def recorded_sessions(host: Host, start: float, end: float) -> list[TracedSession]:
+    """The sessions of this project in the record that ran at some point
+    between start and end. A filtered one, known by its address, ran
     until a later session was given the same address."""
-    sessions = read_net_sessions(host)
+    sessions = read_traced_sessions(host)
     starts: dict[str, list[float]] = {}
     for session in sessions:
         if session.ip:

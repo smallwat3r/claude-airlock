@@ -288,6 +288,11 @@ def session_tmpfs(mounts: str) -> list[str]:
     return found[:MOST_TMPFS]
 
 
+def stamped(**said: object) -> str:
+    """A line of a record: what is said, and when."""
+    return json.dumps({"t": round(time.time(), 3), **said}) + "\n"
+
+
 def percent(used: float, of: float | None) -> int | None:
     return int(100 * used / of) if of else None
 
@@ -602,14 +607,14 @@ class Watch:
         no more of them than to the record."""
         if self._written >= MOST_BYTES or (self._full and not reserved):
             return
-        line = json.dumps({"t": round(time.time(), 3), **said}) + "\n"
+        line = stamped(**said)
         if reserved and self._written + len(line) > MOST_BYTES:
             self._written = MOST_BYTES
             return
         if not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
             self._full = True
             aloud = False
-            line = json.dumps({"t": round(time.time(), 3), "note": Note.FULL}) + "\n"
+            line = stamped(note=Note.FULL)
         self._written += len(line)
         self._out.write(line)
         self._out.flush()
@@ -624,7 +629,7 @@ class Watch:
     def say(self, **said: object) -> None:
         """Write a line to the record and to the watcher's output, see
         note. The line does not use the reserved part of the record."""
-        self.note(False, True, **said)
+        self.note(reserved=False, aloud=True, **said)
 
     def look(self) -> None:
         now = time.monotonic()

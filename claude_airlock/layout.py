@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .events import Event, labelled
-from .transcript import FILE_TOOLS, OUTSIDE_FLAG
+from .events import Event, Kind, labelled
+from .pcap import Went
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -50,25 +50,29 @@ ALERT = together(BOLD, RED)
 # its user saw anyway, and the lines about the trace itself are dimmed,
 # the other tools are left as they are.
 STYLES = {
-    "prompt": DIM,
-    "reply": DIM,
-    "command": DIM,
+    Kind.PROMPT: DIM,
+    Kind.REPLY: DIM,
+    Kind.COMMAND: DIM,
     # What the session was told and became, which no one did
-    "context": DIM,
-    "compact": DIM,
-    "model": DIM,
-    "task": DIM,
+    Kind.CONTEXT: DIM,
+    Kind.COMPACT: DIM,
+    Kind.MODEL: DIM,
+    Kind.TASK: DIM,
     # How the session is doing comes every so often, and is no act of it
-    "health": DIM,
+    Kind.HEALTH: DIM,
     # Nor is how its sandbox was started
-    "started": DIM,
+    Kind.STARTED: DIM,
+    Kind.NET: CYAN,
+    Kind.DNS: CYAN,
+    # The tools, each by its name in small letters: the one that runs
+    # commands, the network asked for through a tool, and those that
+    # write files
     "bash": YELLOW,
-    "net": CYAN,
-    "dns": CYAN,
-    # The network too, asked for through a tool
     "webfetch": BLUE,
     "websearch": BLUE,
-    **dict.fromkeys(map(str.lower, FILE_TOOLS), MAGENTA),
+    "edit": MAGENTA,
+    "write": MAGENTA,
+    "notebookedit": MAGENTA,
 }
 
 
@@ -80,7 +84,7 @@ def wrong_throughout(fields: dict) -> bool:
     transcript, and a line of it that cannot be read."""
     return bool(
         fields.get("denied")
-        or fields.get("outcome") in ("refused", "no answer")
+        or fields.get("outcome") in Went.WRONG
         or fields.get("error")
         or fields.get("flagged")
         or fields.get("removed")
@@ -101,26 +105,12 @@ def went_wrong(event: Event) -> bool:
     )
 
 
-def alerting(event: Event, line: str) -> bool:
-    """Whether a line of an event is one that tells of what went wrong,
-    see went_wrong: how a call ended that failed or was refused, the file
-    of a write outside the project, and every line of what is wrong
-    throughout."""
-    fields = event.fields
-    ended_badly = fields.get("failed") or fields.get("refused")
-    return bool(
-        (ended_badly and line.startswith(("result: ", "out: ")))
-        or (fields.get("outside_project") and written_outside(line))
-        or wrong_throughout(fields)
-    )
-
-
-def written_outside(line: str) -> bool:
-    """Whether a line of an event that wrote outside the project is the
-    one that names such a file: the file of the call, or one of those a
-    command changed."""
-    by_command = line.startswith("changed: ") and line.endswith(OUTSIDE_FLAG)
-    return line.startswith("file: ") or by_command
+def alerting(event: Event, index: int) -> bool:
+    """Whether a detail of an event, by its place, is one that tells of
+    what went wrong, see went_wrong: one that what made the event marked
+    (how a call ended that failed or was refused, the file of a write
+    outside the project), and every one of what is wrong throughout."""
+    return index in event.alerts or wrong_throughout(event.fields)
 
 
 def shown_what(what: str) -> str:
@@ -141,9 +131,9 @@ def folded(events: Iterable[Event]) -> list[Event]:
         last, count = runs[-1] if runs else (None, 0)
         if (
             last
-            and event.what in ("net", "dns")
-            and (event.who, event.what, event.details)
-            == (last.who, last.what, last.details)
+            and event.what in (Kind.NET, Kind.DNS)
+            and (event.who, event.what, event.lines)
+            == (last.who, last.what, last.lines)
             and went_wrong(event) == went_wrong(last)
         ):
             runs[-1] = (last, count + 1)
@@ -152,9 +142,7 @@ def folded(events: Iterable[Event]) -> list[Event]:
     return [
         event
         if count == 1
-        else dataclasses.replace(
-            event, details=[f"{event.details[0]}  x{count}", *event.details[1:]]
-        )
+        else dataclasses.replace(event, notes=[*event.notes, f"x{count}"])
         for event, count in runs
     ]
 
@@ -247,8 +235,14 @@ class Layout:
         about = f"{event.who.value:<7}  {shown_what(event.what):<{WHAT_WIDTH}}  "
         style = self.styles.get(event.what, "")
         head = self.heads.get(event.what, "")
-        for index, line in enumerate(prefixed("", event.details)):
-            first = index == 0
+        # Each line with the detail it is of, a detail can hold several
+        shown = [
+            (index, line)
+            for index, detail in enumerate(event.lines)
+            for line in prefixed("", [detail])
+        ]
+        for at, (index, line) in enumerate(shown):
+            first = at == 0
             text = f"[{event.number}] {line}" if first and event.number else line
             if self.compact and not first:
                 # Under the first line, which said when, who and what
@@ -257,7 +251,7 @@ class Layout:
             if not self.colour:
                 lines.append(f"{clock}  {rest}".rstrip())
                 continue
-            if alerting(event, line):
+            if alerting(event, index):
                 rest = painted(ALERT, rest)
             else:
                 rest = self._painted(style, head if about.strip() else "", rest, about)

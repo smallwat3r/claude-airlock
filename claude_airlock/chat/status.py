@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ..entries import LATEST, measured
 from ..events import flat, labelled
 from ..layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
 from ..started import (
@@ -24,10 +25,9 @@ from ..started import (
     SSH_AGENT,
     Start,
 )
-from ..transcript import LATEST
 from .console import Page
 from .drift import Drift
-from .pipe import Session, amount
+from .said import Session
 from .turn import Usage
 
 # The windows of the limits of the account that are shown, as claude
@@ -105,10 +105,10 @@ class Limits:
             return False
         window: dict = {}
         # A fraction of the limit, as the API says it
-        used = amount(said.get("utilization"))
+        used = measured(said.get("utilization"))
         if used is not None and used <= 1:
             window["used_percentage"] = round(used * 100, 1)
-        resets = amount(said.get("resetsAt"))
+        resets = measured(said.get("resetsAt"))
         # A time that can be shown as one, see LATEST of transcript.py
         if resets and resets <= LATEST:
             window["resets_at"] = int(resets)
@@ -211,23 +211,33 @@ def status_line(parts: list[Part], colour: bool) -> str:
 
 
 class StatusLine:
-    """The status of a chat, see the module."""
+    """The status of a chat, see the module: of a session and of what
+    it used, as they are when it is made."""
 
-    def __init__(self, page: Page, sandbox: Sandbox, drift: Drift | None = None):
+    def __init__(
+        self,
+        page: Page,
+        sandbox: Sandbox,
+        session: Session,
+        usage: Usage,
+        drift: Drift | None = None,
+    ):
         self._page = page
         self._sandbox = sandbox
+        self._session = session
+        self._usage = usage
         self.limits = Limits(drift=drift or Drift())
 
-    def refresh(self, session: Session, usage: Usage) -> str:
+    def refresh(self) -> str:
         """Make the status and keep it above the prompt. Returns it."""
-        parts = status_parts(session, usage, self.limits, self._sandbox)
+        parts = status_parts(self._session, self._usage, self.limits, self._sandbox)
         line = status_line(parts, self._page.layout.colour)
         self._page.head([line])
         return line
 
-    def show(self, session: Session, usage: Usage) -> None:
+    def show(self) -> None:
         """Say the status, as /status asks."""
-        line = self.refresh(session, usage)
+        line = self.refresh()
         head = labelled("status", "")
         if self._page.layout.colour:
             self._page.put([painted(DIM, "# " + head) + line])

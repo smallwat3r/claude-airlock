@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .background import in_background, wait_for
 from .docker import (
+    NO_NEW_PRIVILEGES,
     container_label,
     container_running,
     docker_must,
@@ -34,16 +35,10 @@ from .docker import (
     mount_arg,
     running_containers,
 )
+from .errors import Fatal
 from .files import lock_file, private_dir, try_lock_file
-from .records import NetSession, record_net_session
-from .settings import (
-    DOCKERFILE_DIR,
-    EGRESS_PORT,
-    Fatal,
-    Host,
-    Settings,
-    SocketAccess,
-)
+from .records import TracedSession, record_traced_session
+from .settings import DOCKERFILE_DIR, EGRESS_PORT, Host, Settings, SocketAccess
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
 # they are pinned by digest (the tag is informative only), refreshed by
@@ -72,24 +67,37 @@ EGRESS_LOG_LIMIT = 10 * 1024 * 1024
 # container reaches every other by name.
 FILTER_NET = "claude-airlock-net"
 OPEN_NET = "claude-airlock-open-net"
-SOCKET_NET_SUFFIXES = {SocketAccess.LIMITED: "-ps", SocketAccess.FULL: "-full"}
-FILTER_NETS = (FILTER_NET, *(FILTER_NET + s for s in SOCKET_NET_SUFFIXES.values()))
+
+
+@dataclass(frozen=True)
+class SocketProxy:
+    """The socket proxy of a mode: the name of its container, and what
+    the names of the networks of its sessions end in."""
+
+    name: str
+    net_suffix: str
+
+    @property
+    def networks(self) -> tuple[str, str]:
+        """The networks it can be on, the open one and the filtered."""
+        return (OPEN_NET + self.net_suffix, FILTER_NET + self.net_suffix)
+
+
 SOCKET_PROXIES = {
-    SocketAccess.LIMITED: "claude-airlock-ps-proxy",
-    SocketAccess.FULL: "claude-airlock-proxy",
+    SocketAccess.LIMITED: SocketProxy("claude-airlock-ps-proxy", "-ps"),
+    SocketAccess.FULL: SocketProxy("claude-airlock-proxy", "-full"),
 }
+SOCKET_PROXY_NAMES = frozenset(proxy.name for proxy in SOCKET_PROXIES.values())
+FILTER_NETS = (FILTER_NET, *(proxy.networks[1] for proxy in SOCKET_PROXIES.values()))
 DOCKER_SOCK = "/var/run/docker.sock"
 # The networks each proxy can be on, by its name: where a session that uses
 # it would be found
 PROXY_NETWORKS = {
     EGRESS_PROXY: FILTER_NETS,
-    **{
-        proxy: (OPEN_NET + suffix, FILTER_NET + suffix)
-        for proxy, suffix in (
-            (SOCKET_PROXIES[mode], SOCKET_NET_SUFFIXES[mode]) for mode in SOCKET_PROXIES
-        )
-    },
+    **{proxy.name: proxy.networks for proxy in SOCKET_PROXIES.values()},
 }
+# How many processes a shared proxy can have, a bound on one gone wrong
+PROXY_PIDS = 512
 # An internal network has no route out, but docker still gives its bridge
 # an address on it, the gateway, which is the host: whatever the host
 # listens on everywhere is reached through it, around the filter. In this
@@ -108,7 +116,7 @@ def network_name(settings: Settings) -> str:
     name = FILTER_NET if settings.net_filter else OPEN_NET
     if not has_socket_proxy(settings):
         return name
-    return name + SOCKET_NET_SUFFIXES[settings.docker_socket]
+    return name + SOCKET_PROXIES[settings.docker_socket].net_suffix
 
 
 def socket_proxy_name(settings: Settings) -> str:
@@ -116,7 +124,7 @@ def socket_proxy_name(settings: Settings) -> str:
     share. The limited one has its own name on purpose: a full-access sidecar
     left running must not be picked up as the limited one."""
     full = settings.docker_socket is SocketAccess.FULL
-    return SOCKET_PROXIES[SocketAccess.FULL if full else SocketAccess.LIMITED]
+    return SOCKET_PROXIES[SocketAccess.FULL if full else SocketAccess.LIMITED].name
 
 
 @dataclass(frozen=True)
@@ -219,18 +227,18 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
     return set(state.containers)
 
 
-def sidecar_current(name: str, config: str) -> bool:
+def proxy_current(name: str, config: str) -> bool:
     """Running, and started from the config of that hash."""
     if not container_running(name):
         return False
     return container_label(name, SIDECAR_CONFIG_LABEL) == config
 
 
-def start_sidecar(
+def start_shared_proxy(
     name: str, network: str, config: str, options: list[str], image: str
 ) -> None:
-    """(Re)create a sidecar on a network, labelled with the hash of what
-    it is started from."""
+    """(Re)create a proxy that sessions share on a network, labelled with
+    the hash of what it is started from."""
     docker_ok("rm", "--force", name)
     docker_must(
         "run",
@@ -241,6 +249,11 @@ def start_sidecar(
         # is removed with the last of them, see session_network.
         "--restart=on-failure",
         f"--label={SIDECAR_CONFIG_LABEL}={config}",
+        # Nothing it runs gains what it was not started with, and one
+        # gone wrong does not fill the host with processes. Its
+        # capabilities are left as its image expects them.
+        NO_NEW_PRIVILEGES,
+        f"--pids-limit={PROXY_PIDS}",
         *options,
         image,
     )
@@ -276,7 +289,9 @@ def start_egress_proxy() -> None:
         ),
         f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
     ]
-    start_sidecar(EGRESS_PROXY, FILTER_NET, egress_config_hash(), options, SQUID_IMAGE)
+    start_shared_proxy(
+        EGRESS_PROXY, FILTER_NET, egress_config_hash(), options, SQUID_IMAGE
+    )
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
     # The internal networks of the sessions with a socket proxy, those that
     # are there: sessions may be running on them
@@ -306,7 +321,7 @@ def egress_proxy_current() -> bool:
     """Running, and started from the config as it is on disk now. A stale
     proxy is replaced on the next filtered start, which briefly drops the
     connections of other filtered sessions."""
-    return sidecar_current(EGRESS_PROXY, egress_config_hash())
+    return proxy_current(EGRESS_PROXY, egress_config_hash())
 
 
 def rotate_access_log() -> None:
@@ -331,8 +346,8 @@ def record_address(
 ) -> None:
     address = wait_for(lambda: session_address(owner), stop)
     if address:
-        record_net_session(
-            host, NetSession(name, host.project_dir, started, ip=address)
+        record_traced_session(
+            host, TracedSession(name, host.project_dir, started, ip=address)
         )
 
 
@@ -378,7 +393,7 @@ def prepare_network(settings: Settings) -> None:
     # is from before each mode had its network, and would be a way to the
     # Docker socket the session was not given.
     mine = socket_proxy_name(settings) if has_socket_proxy(settings) else ""
-    for stray in on_it.intersection(SOCKET_PROXIES.values()) - {mine}:
+    for stray in on_it.intersection(SOCKET_PROXY_NAMES) - {mine}:
         docker_ok("network", "disconnect", "--force", network, stray)
     if not settings.net_filter:
         return
@@ -560,8 +575,8 @@ def start_socket_proxy(settings: Settings) -> None:
     network = network_name(settings)
     rules = Path(DOCKERFILE_DIR, "docker-socket-proxy.cfg").read_bytes()
     config = config_hash(PROXY_IMAGE.encode(), rules, *map(str.encode, options))
-    if not sidecar_current(name, config):
-        start_sidecar(name, network, config, options, PROXY_IMAGE)
+    if not proxy_current(name, config):
+        start_shared_proxy(name, network, config, options, PROXY_IMAGE)
     # A proxy started by a session of the other network mode (filtered or
     # open) sits on that one's network, attach it to ours too
     docker_ok("network", "connect", network, name)

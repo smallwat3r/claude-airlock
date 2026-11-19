@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
-from .events import Event, Who, flat
+from .events import Event, Kind, Who, flat
 from .mounts import ExtraDir
 from .network import has_socket_proxy
 from .notes import Notes
@@ -26,7 +27,7 @@ from .settings import Host, Settings, SocketAccess
 
 # The notes kept, two per session
 KEPT_STARTS = 2000
-# What a note says a session did, and what a start is shown as in a trace
+# What a note says a session did
 STARTED = "started"
 ENDED = "ended"
 # What can be open to a session that is closed by default, as a start
@@ -47,9 +48,6 @@ SAID_WHEN_ANY = (
     ("plugins", "plugins"),
     ("language servers", "servers"),
 )
-# The values of a note that are text, and those that are lists of texts
-TEXTS = ("runtime", "image", "memory", "pids", "cpus")
-LISTS = ("recorded", "open", "dirs", "plugins", "servers")
 
 
 @dataclass(frozen=True)
@@ -129,6 +127,38 @@ class Start:
             servers=tuple(servers),
         )
 
+    @classmethod
+    def from_note(cls, said: dict) -> Start:
+        """The start a note of the record tells of. The record is the
+        launcher's own, it is still read with care and cleaned like the
+        rest: a name or a path in it was not chosen by the launcher. Each
+        value is read as what it is declared to be here, so a value added
+        to a start is read too."""
+        read = {name.name: _READ[str(name.type)] for name in dataclasses.fields(cls)}
+        return cls(**{name: reader(said, name) for name, reader in read.items()})
+
+    def fields(self) -> dict[str, object]:
+        """The start as the values of its event."""
+        said = dataclasses.asdict(self)
+        return {
+            name: list(value) if isinstance(value, tuple) else value
+            for name, value in said.items()
+        }
+
+    def under(self, container: str) -> str:
+        """The container of the start and the runtime it runs under."""
+        return f"{container} under {self.runtime or 'an unknown runtime'}"
+
+    @property
+    def limits(self) -> str:
+        """The limits of the start, as they were set."""
+        cpus = f"cpus {self.cpus}" if self.cpus else "all CPUs"
+        return f"memory {self.memory}, processes {self.pids}, {cpus}"
+
+    @property
+    def network(self) -> str:
+        return "filtered" if self.net_filter else "open"
+
 
 def start_record(host: Host) -> Notes:
     """The record of how the sessions were started, and when each was
@@ -158,65 +188,61 @@ def _text(said: dict, key: str) -> str:
     return flat(value) if isinstance(value, str) else ""
 
 
-def _texts(said: dict, key: str) -> list[str]:
+def _texts(said: dict, key: str) -> tuple[str, ...]:
     """A list of a note as texts, each on one line."""
     values = said.get(key)
     # A list as read from the record, a tuple as the launcher noted it
     if not isinstance(values, (list, tuple)):
-        return []
-    return [flat(value) for value in values if isinstance(value, str)]
+        return ()
+    return tuple(flat(value) for value in values if isinstance(value, str))
+
+
+def _switch(said: dict, key: str) -> bool:
+    """A value of a note that is on or off, off for one that is neither."""
+    return said.get(key) is True
+
+
+# How each value of a start is read from a note, by what Start declares
+# it to be
+_READ: dict[str, Callable[[dict, str], Any]] = {
+    "str": _text,
+    "bool": _switch,
+    "tuple[str, ...]": _texts,
+}
 
 
 def start_event(said: dict) -> Event | None:
     """A note of the record as an event, none for one that is not the
-    start of a session. The record is the launcher's own, it is still read
-    with care and cleaned like the rest: a name or a path in it was not
-    chosen by the launcher."""
+    start of a session."""
     return _shown(said) if said.get("did") == STARTED else None
 
 
 def _shown(said: dict) -> Event:
     """The note of a start as an event."""
-    lists = {key: _texts(said, key) for key in LISTS}
-    fields: dict[str, object] = {
-        "container": _text(said, "session"),
-        **{key: _text(said, key) for key in TEXTS},
-        "net_filter": said.get("net_filter") is True,
-        **lists,
-    }
-    image = f", image {fields['image']}" if fields["image"] else ""
-    filtered = "filtered to the allowed domains" if fields["net_filter"] else "open"
+    start = Start.from_note(said)
+    container = _text(said, "session")
+    filtered = "filtered to the allowed domains" if start.net_filter else "open"
     details = [
-        f"{_where(fields)}{image}",
-        f"limits: {_limits(fields)}",
+        start.under(container) + (f", image {start.image}" if start.image else ""),
+        f"limits: {start.limits}",
         f"network: {filtered}",
-        "recorded: " + (", ".join(lists["recorded"]) or "nothing"),
+        "recorded: " + (", ".join(start.recorded) or "nothing"),
         # Said when there is any
         *(
-            f"{label}: " + ", ".join(lists[key])
+            f"{label}: " + ", ".join(getattr(start, key))
             for label, key in SAID_WHEN_ANY
-            if lists[key]
+            if getattr(start, key)
         ),
     ]
-    return Event(float(said["t"]), Who.SANDBOX, STARTED, details, fields)
-
-
-def _where(fields: dict) -> str:
-    """The container of a start and the runtime it runs under."""
-    return f"{fields['container']} under {fields['runtime'] or 'an unknown runtime'}"
-
-
-def _limits(fields: dict) -> str:
-    """The limits of a start, as they were set."""
-    cpus = f"cpus {fields['cpus']}" if fields["cpus"] else "all CPUs"
-    return f"memory {fields['memory']}, processes {fields['pids']}, {cpus}"
+    fields = {"container": container, **start.fields()}
+    return Event(float(said["t"]), Who.SANDBOX, Kind.STARTED, details, fields)
 
 
 def start_summary(event: Event) -> str:
     """A start in one line, for the header of a trace."""
-    fields = event.fields
-    network = "filtered" if fields["net_filter"] else "open"
-    return f"{_where(fields)}, {_limits(fields)}, network {network}"
+    start = Start.from_note(event.fields)
+    where = start.under(event.fields["container"])
+    return f"{where}, {start.limits}, network {start.network}"
 
 
 def running_between(notes: list[dict], start: float) -> list[dict]:

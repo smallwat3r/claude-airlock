@@ -110,13 +110,8 @@ def make_missing(
         path = os.path.join(directory, name)
         if os.path.lexists(path):
             continue
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # Another launcher was first
-            continue
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            file.write("{}\n" if name.endswith(".json") else "")
+        # Left as it is when another launcher was first
+        write_whole(path, "{}\n" if name.endswith(".json") else "", replace=False)
 
 
 def prepare_home(host: Host) -> None:

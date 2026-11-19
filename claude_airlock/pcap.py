@@ -186,6 +186,21 @@ class Packet:
     length: int = 0
 
 
+class Went:
+    """What became of a connection, as its outcome is named."""
+
+    REFUSED = "refused"
+    CLOSED = "closed"
+    # Answered, and not seen to end
+    OPEN = "open"
+    # Asked for again, and never answered
+    NO_ANSWER = "no answer"
+    # The capture does not tell
+    UNKNOWN = ""
+    # Those of a connection that was not made
+    WRONG = (REFUSED, NO_ANSWER)
+
+
 @dataclass
 class Connection:
     """A TCP connection the session opened, and how it went as far as the
@@ -215,19 +230,19 @@ class Connection:
 
     @property
     def outcome(self) -> str:
-        """refused, closed, open, no answer, or empty when the capture
-        does not tell."""
+        """What became of it, see Went: UNKNOWN when the capture does
+        not tell."""
         if self.refused:
-            return "refused"
+            return Went.REFUSED
         if self.ended is not None:
-            return "closed"
+            return Went.CLOSED
         if self.answered:
-            return "open"
-        return "no answer" if self.retried else ""
+            return Went.OPEN
+        return Went.NO_ANSWER if self.retried else Went.UNKNOWN
 
     @property
     def failed(self) -> bool:
-        return self.outcome in ("refused", "no answer")
+        return self.outcome in Went.WRONG
 
     @property
     def seconds(self) -> float | None:
@@ -428,7 +443,7 @@ class Capture:
             known.attempted = packet.when
             if not known.answered and not known.retried:
                 known.retried = True
-                self.endings.append((packet.when, "no answer", known))
+                self.endings.append((packet.when, Went.NO_ANSWER, known))
             return
         connection = Connection(
             packet.when,
@@ -451,7 +466,7 @@ class Capture:
         closing = TcpFlag.FIN in packet.tcp_flags
         if not connection.answered and not closing and not packet.sent:
             connection.refused = True
-            self.endings.append((packet.when, "refused", connection))
+            self.endings.append((packet.when, Went.REFUSED, connection))
             return
         if connection.answer_sequence is not None:
             # Where the sender of the packet started from, then the other
@@ -467,7 +482,7 @@ class Capture:
             connection.sent, connection.received = (
                 (said, got) if packet.sent else (got, said)
             )
-        self.endings.append((packet.when, "closed", connection))
+        self.endings.append((packet.when, Went.CLOSED, connection))
 
     def _add_server_name(self, packet: Packet) -> None:
         name = tls_server_name(packet.payload)

@@ -22,9 +22,11 @@ from harness import (
 )
 
 from claude_airlock import egress_log, files, settings, trace
+from claude_airlock.calls import call_details, call_label
+from claude_airlock.entries import read_entries
 from claude_airlock.events import Event, Who
 from claude_airlock.layout import Layout, event_json, folded
-from claude_airlock.transcript import call_details
+from claude_airlock.transcript import WalkOptions
 
 
 class TraceTest(LauncherTest):
@@ -393,7 +395,7 @@ class TraceTest(LauncherTest):
         ]
         shown = folded(events)
         self.assertEqual(
-            [(event.when, event.details[0]) for event in shown],
+            [(event.when, event.lines[0]) for event in shown],
             [
                 (1.0, "tcp/https a.test:443  x3"),
                 (4.0, "tcp/https b.test:443"),
@@ -444,8 +446,8 @@ class TraceTest(LauncherTest):
             1.0, Who.CLAUDE, "webfetch", ["url: https://a.test"], {"tool": "WebFetch"}
         )
         ran = Event(1.0, Who.CLAUDE, "bash", ["$ make: all"], {"tool": "Bash"}, 7)
-        self.assertEqual(transcript.call_label(fetch), "webfetch https://a.test")
-        self.assertEqual(transcript.call_label(ran), "[7] $ make: all")
+        self.assertEqual(call_label(fetch), "webfetch https://a.test")
+        self.assertEqual(call_label(ran), "[7] $ make: all")
 
     def test_sessions_are_listed_by_when_they_last_did_something(self):
         # Started first and written last, as a session that goes on is
@@ -512,10 +514,10 @@ class TraceTest(LauncherTest):
         secret.write_text(json.dumps({"type": "ai-title", "aiTitle": "TOP SECRET"}))
         swapped = self.transcripts / "ffff.jsonl"
         swapped.symlink_to(secret)
-        self.assertEqual(transcript.read_entries(swapped), [])
+        self.assertEqual(read_entries(swapped), [])
         swapped.unlink()
         os.mkfifo(swapped)
-        self.assertEqual(transcript.read_entries(swapped), [])
+        self.assertEqual(read_entries(swapped), [])
 
     def test_a_reader_that_leaves_early_ends_the_trace_quietly(self):
         file = self.transcripts / f"{self.SESSION}.jsonl"
@@ -603,8 +605,8 @@ class TraceTest(LauncherTest):
     def test_the_network_of_a_session_is_looked_for_over_all_of_its_time(self):
         asked: list[tuple[float, float]] = []
 
-        def network(_host, start, end, _verbose):
-            asked.append((start, end))
+        def network(recorded, _verbose):
+            asked.append((recorded.start, recorded.end))
             return [], []
 
         # An entry that says it is from long ago, written last
@@ -909,7 +911,7 @@ class CommandTest(unittest.TestCase):
         )
 
     def test_followed_a_command_says_its_first_line_and_has_the_rest(self):
-        walk = transcript.Walk("/p", False, live=True)
+        walk = transcript.Walk("/p", WalkOptions(live=True))
         said = [event for entry in self.ENTRIES for event in walk.take(entry)][1]
         self.assertEqual(said.details, ["Set model to Sonnet[2J"])
         self.assertIn("for this session", said.fields["text"])

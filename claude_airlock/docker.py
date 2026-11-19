@@ -9,9 +9,14 @@ import subprocess
 from dataclasses import dataclass
 from typing import IO, Any
 
-from .settings import Fatal
+from .errors import Fatal
 
 NOT_FOUND = "docker was not found on PATH"
+# What every container the launcher starts is confined by: no capability
+# but those it is given back by name, and nothing it runs gains what it
+# was not started with
+DROP_CAPABILITIES = "--cap-drop=ALL"
+NO_NEW_PRIVILEGES = "--security-opt=no-new-privileges"
 
 
 def docker(

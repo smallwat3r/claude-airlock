@@ -15,10 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, TypeVar
 
-from .docker import docker, docker_ok, docker_output
+from .docker import (
+    DROP_CAPABILITIES,
+    NO_NEW_PRIVILEGES,
+    docker,
+    docker_ok,
+    docker_output,
+)
 from .files import json_object, private_dir
 from .launcher import Launcher, session_alive
-from .records import NetSession, record_net_session
+from .records import TracedSession, record_traced_session
 from .settings import Host
 
 SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
@@ -95,9 +101,9 @@ class Sidecar:
             f"--name={self.name}",
             self.label_arg,
             "--user=0:0",
-            "--cap-drop=ALL",
+            DROP_CAPABILITIES,
             *(f"--cap-add={capability}" for capability in self.CAPABILITIES),
-            "--security-opt=no-new-privileges",
+            NO_NEW_PRIVILEGES,
             f"--memory={self.MEMORY}",
             f"--pids-limit={SIDECAR_PIDS}",
         ]
@@ -148,6 +154,16 @@ class Sidecar:
         return found
 
     @classmethod
+    def running(cls, project_dir: str) -> list[tuple[str, float]]:
+        """Those of the sessions of a project that are running now, as
+        the name of each and when it started."""
+        return [
+            (sidecar.name, sidecar.start)
+            for sidecar in cls.listed()
+            if sidecar.project == project_dir
+        ]
+
+    @classmethod
     def left_behind(  # noqa: PYI019
         cls: type[SidecarKind],
     ) -> list[SidecarKind]:
@@ -171,7 +187,7 @@ class Sidecar:
         """Where the launcher keeps what sidecars of this kind recorded."""
         raise NotImplementedError
 
-    def noted(self, file: str, end: float) -> NetSession:
+    def noted(self, file: str, end: float) -> TracedSession:
         """The line of the record that says where what this sidecar
         recorded is kept, and which project and time it covers."""
         raise NotImplementedError
@@ -206,7 +222,7 @@ class Sidecar:
             directory = self.directory(host)
             copied = self.copy_out(directory)
             if copied and self.recorded(copied):
-                record_net_session(host, self.noted(copied.name, time.time()))
+                record_traced_session(host, self.noted(copied.name, time.time()))
             else:
                 if copied:
                     copied.unlink(missing_ok=True)

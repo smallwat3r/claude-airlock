@@ -18,7 +18,7 @@ from unittest import mock
 
 from harness import LauncherTest, follow, network, prompts_at, settings
 
-from claude_airlock import door_events, doors
+from claude_airlock import door_events, doors, socket_watch, ssh_agent
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (
@@ -79,7 +79,7 @@ class FakeAgent:
             except OSError:
                 return
             with client:
-                while (request := doors.read_message(client)) is not None:
+                while (request := ssh_agent.read_message(client)) is not None:
                     self.asked.append(request[:1])
                     if request[:1] == b"\x0b":
                         answer = b"\x0c" + struct.pack("!I", 1)
@@ -113,7 +113,7 @@ class AgentDoorTest(LauncherTest):
         short = settings.Host(
             self.host.home, self.host.project_dir, self.host.config_home, self.directory
         )
-        door = self.door = doors.AgentDoor(short, "claude-proj", agent.path)
+        door = self.door = ssh_agent.AgentDoor(short, "claude-proj", agent.path)
         self.addCleanup(door.close)
         self.host = short
         answers = []
@@ -121,7 +121,7 @@ class AgentDoorTest(LauncherTest):
             client.connect(door.path)
             for request in requests:
                 client.sendall(string(request))
-                answers.append(doors.read_message(client))
+                answers.append(ssh_agent.read_message(client))
         return answers
 
     def uses(self) -> list[dict]:
@@ -134,7 +134,7 @@ class AgentDoorTest(LauncherTest):
         before = len(os.listdir("/proc/self/fd"))
         held = []
         self.addCleanup(lambda: [each.close() for each in held])
-        for _ in range(doors.AGENT_CONNECTIONS * 4):
+        for _ in range(ssh_agent.AGENT_CONNECTIONS * 4):
             client = socket.socket(socket.AF_UNIX)
             held.append(client)
             # As fast as the door takes them in
@@ -147,7 +147,7 @@ class AgentDoorTest(LauncherTest):
             client.settimeout(5)
         time.sleep(0.5)
         # Ours, and for each that was let in the door's two
-        most = len(held) + 2 * doors.AGENT_CONNECTIONS
+        most = len(held) + 2 * ssh_agent.AGENT_CONNECTIONS
         self.assertLessEqual(len(os.listdir("/proc/self/fd")) - before, most + 2)
         # Those past the bound were closed at once, and the door still serves
         self.assertEqual(held[-1].recv(1), b"")
@@ -157,12 +157,12 @@ class AgentDoorTest(LauncherTest):
         with socket.socket(socket.AF_UNIX) as client:
             client.connect(path)
             client.sendall(string(b"\x0b"))
-            self.assertEqual(doors.read_message(client)[:1], b"\x0c")
+            self.assertEqual(ssh_agent.read_message(client)[:1], b"\x0c")
 
     def test_a_connection_that_asks_nothing_is_let_go(self):
         self.through_the_door(b"\x0b")
         path = self.door.path
-        idle = mock.patch.object(doors, "AGENT_IDLE", 0.2)
+        idle = mock.patch.object(ssh_agent, "AGENT_IDLE", 0.2)
         with idle, socket.socket(socket.AF_UNIX) as client:
             client.settimeout(5)
             client.connect(path)
@@ -174,7 +174,7 @@ class AgentDoorTest(LauncherTest):
         listed, signed = self.uses()
         self.assertEqual((listed["did"], listed["keys"]), ("list", 1))
         self.assertEqual(signed["did"], "sign")
-        self.assertEqual(signed["key"], doors.fingerprint(KEY))
+        self.assertEqual(signed["key"], ssh_agent.fingerprint(KEY))
         self.assertTrue(signed["key"].startswith("SHA256:"))
         self.assertEqual(signed["comment"], "me@laptop")
         self.assertEqual(signed["what"], "a login as git")
@@ -251,16 +251,16 @@ class AgentDoorTest(LauncherTest):
         # Whatever the host has: the path is the machine's, not the host's
         for env in ({}, {"SSH_AUTH_SOCK": "/private/tmp/agent.sock"}):
             self.assertEqual(
-                doors.agent_socket(env, "darwin"),
+                ssh_agent.agent_socket(env, "darwin"),
                 ("/run/host-services/ssh-auth.sock", False),
             )
 
     def test_elsewhere_the_agent_is_the_hosts_behind_the_launcher(self):
         self.assertEqual(
-            doors.agent_socket({"SSH_AUTH_SOCK": "/tmp/agent.sock"}, "linux"),
+            ssh_agent.agent_socket({"SSH_AUTH_SOCK": "/tmp/agent.sock"}, "linux"),
             ("/tmp/agent.sock", True),
         )
-        self.assertIsNone(doors.agent_socket({}, "linux"))
+        self.assertIsNone(ssh_agent.agent_socket({}, "linux"))
 
     @unittest.skipIf(sys.platform == "darwin", "the agent is the machine's there")
     def test_without_an_agent_nothing_is_forwarded(self):
@@ -270,13 +270,15 @@ class AgentDoorTest(LauncherTest):
     def test_only_the_latest_uses_stay_in_the_record(self):
         with mock.patch.object(doors, "KEPT_USES", 3):
             for number in range(5):
-                doors.note_use(self.host, "/p", "s", "docker", path=str(number))
+                doors.note_use(
+                    self.host, "/p", "s", doors.Door.DOCKER, path=str(number)
+                )
         lines = Path(self.host.doors_file).read_text().splitlines()
         self.assertEqual([json.loads(line)["path"] for line in lines], ["2", "3", "4"])
 
     def test_the_uses_of_one_session_can_be_told_from_another(self):
         for session in ("claude-proj", "claude-proj-2"):
-            doors.note_use(self.host, self.host.project_dir, session, "docker")
+            doors.note_use(self.host, self.host.project_dir, session, doors.Door.DOCKER)
         mine = doors.read_uses(self.host, 0, time.time() + 1, "claude-proj-2")
         self.assertEqual([use["session"] for use in mine], ["claude-proj-2"])
         self.assertEqual(len(doors.read_uses(self.host, 0, time.time() + 1)), 2)
@@ -287,9 +289,9 @@ class AgentDoorTest(LauncherTest):
         paths = ["/_ping", "/containers/json", "/version"]
 
         def note(path: str) -> None:
-            with mock.patch.object(doors.time, "time", return_value=moment):
+            with mock.patch.object(time, "time", return_value=moment):
                 doors.note_use(
-                    self.host, self.host.project_dir, "s", "docker", path=path
+                    self.host, self.host.project_dir, "s", doors.Door.DOCKER, path=path
                 )
 
         def followed() -> list[str]:
@@ -318,7 +320,7 @@ class SocketWatchTest(LauncherTest):
         self.proxy_log.write_text(PROXY_LOG)
 
     def test_a_line_of_the_proxys_log_is_read(self):
-        calls = [doors.parse_proxy_call(line) for line in PROXY_LOG.splitlines()]
+        calls = [socket_watch.parse_proxy_call(line) for line in PROXY_LOG.splitlines()]
         self.assertEqual(
             calls[:2],
             [
@@ -336,11 +338,13 @@ class SocketWatchTest(LauncherTest):
             '"GET /v1.56/volumes HTTP/1.1"'
         )
         self.assertEqual(
-            doors.parse_proxy_call(line),
+            socket_watch.parse_proxy_call(line),
             ("172.21.0.5", "GET", "/v1.56/volumes", 403),
         )
         self.assertEqual(
-            doors.parse_proxy_call(line.replace("::ffff:172.21.0.5", "fd00::5"))[0],
+            socket_watch.parse_proxy_call(line.replace("::ffff:172.21.0.5", "fd00::5"))[
+                0
+            ],
             "fd00::5",
         )
 
@@ -361,7 +365,7 @@ class SocketWatchTest(LauncherTest):
         with mock.patch.object(network, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
             with mock.patch.dict(os.environ, environment):
                 asked = settings.Settings(docker_socket=settings.SocketAccess.LIMITED)
-                with doors.socket_proxy_watched(
+                with socket_watch.socket_proxy_watched(
                     asked, host, "claude-proj", "claude-proj"
                 ):
                     time.sleep(0.5)
@@ -381,6 +385,27 @@ class SocketWatchTest(LauncherTest):
             (followed[1], followed[-1]), ("--follow", "claude-airlock-ps-proxy")
         )
 
+    def test_an_address_found_after_the_watch_closed_follows_no_log(self):
+        """The proxy outlives the session: a log followed once nobody
+        ends it would keep the launcher from ending."""
+        closing = threading.Event()
+
+        def slow_address(_owner):
+            # Asked once, and answered after the watch stopped waiting
+            closing.wait(5)
+            time.sleep(1.3)
+            return "172.20.0.5"
+
+        host = settings.Host(str(self.home), str(self.project), "", "")
+        with (
+            mock.patch.object(socket_watch, "session_address", slow_address),
+            mock.patch.object(socket_watch, "docker_popen") as followed,
+        ):
+            watch = socket_watch.SocketWatch(host, "claude-proj", "claude-proj", "p")
+            closing.set()
+            watch.close()
+        followed.assert_not_called()
+
     def test_without_the_socket_nothing_is_watched(self):
         self.launch()
         self.assertFalse([call for call in self.calls() if call[0] == "logs"])
@@ -395,20 +420,26 @@ class SocketWatchTest(LauncherTest):
         )
         project = str(self.project)
         doors.note_use(
-            host, project, "claude-proj", "docker", method="POST", path="/x", status=403
+            host,
+            project,
+            "claude-proj",
+            doors.Door.DOCKER,
+            method="POST",
+            path="/x",
+            status=403,
         )
         doors.note_use(
             host,
             project,
             "claude-proj",
-            "ssh-agent",
+            doors.Door.SSH_AGENT,
             did="sign",
             key="SHA256:abc",
             comment="me@laptop\x1b[31m",
             what="a login as git",
         )
         doors.note_use(
-            host, "/elsewhere", "claude-x", "docker", method="GET", path="/y"
+            host, "/elsewhere", "claude-x", doors.Door.DOCKER, method="GET", path="/y"
         )
         self.write_transcript("0a", prompts_at(now - 5, now + 5))
         stdout = self.launch("--trace").stdout
