@@ -9,8 +9,9 @@ later. When the session ends, what it changed is checked. Works from any
 shell, and from editors that can launch a custom `claude` program.
 
 ![The launcher on the host starts the session container, a capture sidecar
-and a process sidecar that share one network namespace, the egress proxy,
-the Docker socket proxy, the SSH agent and the gVisor runtime are
+and a process sidecar that share one network namespace, and reads their
+records and the transcript while the session runs, the egress proxy, the
+Docker socket proxy, the SSH agent and the gVisor runtime are
 opt-in](docs/img/architecture.excalidraw.png)
 
 What you get:
