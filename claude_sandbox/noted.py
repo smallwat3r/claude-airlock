@@ -1,7 +1,8 @@
 """What the launchers noted of the sessions as they ran, as --trace, what
-follows the sessions and the lines said when one ends show it: the uses
-of the doors (see door_events.py) and what a chat found changed in what
-Claude Code says (see changes.py). One more such record is added here."""
+follows the sessions and the lines said when one ends show it: how the
+sandbox of each was started (see started.py), the uses of the doors (see
+door_events.py) and what a chat found changed in what Claude Code says
+(see changes.py). One more such record is added here."""
 
 from __future__ import annotations
 
@@ -13,14 +14,16 @@ from .doors import door_record
 from .events import Event
 from .notes import NewNotes, Notes
 from .settings import Host
+from .started import start_event, start_events, start_record
 
 # Each record with how a note of it is shown, none for one that is not
 RECORDS: tuple[tuple[Callable[[Host], Notes], Callable[[dict], Event | None]], ...] = (
+    (start_record, start_event),
     (door_record, use_event),
     (change_record, change_event),
 )
 # What gives the summary rows and the events of each between two times
-BETWEEN = (door_events, change_events)
+BETWEEN = (start_events, door_events, change_events)
 
 
 def noted_events(

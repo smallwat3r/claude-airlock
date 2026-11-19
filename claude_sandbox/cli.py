@@ -68,6 +68,7 @@ from .settings import (
     load_settings,
     settings_help,
 )
+from .started import Start, note_end, note_start
 from .tamper import (
     build_fingerprint,
     host_exec_fingerprint,
@@ -299,14 +300,24 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
                 agent = ssh_agent_door(settings, host, name, env)
                 agent_args = running.enter_context(agent)
                 run_args += agent_args
+                # The agent's door is open when the host has an agent
+                forwarded = bool(agent_args)
+                # How the sandbox is started, noted for a trace and what
+                # follows the sessions, and for a chat to say first
+                start = Start.of(
+                    settings, runtime, image.tag, dirs, ssh_agent=forwarded
+                )
+                said = note_start(host, name, start)
                 through = None
                 if action == "line-mode":
-                    # The agent's door is open when the host has an agent
-                    sandbox = Sandbox.started(
-                        name, settings, dirs, host.home, ssh_agent=bool(agent_args)
+                    sandbox = Sandbox.started(name, start, host.home)
+                    through = partial(
+                        chat, host, sandbox, handover=plan.handover, start=said
                     )
-                    through = partial(chat, host, sandbox, handover=plan.handover)
-                status = run_session(run_args, image, claude_args, ending, through)
+                try:
+                    status = run_session(run_args, image, claude_args, ending, through)
+                finally:
+                    note_end(host, name)
         except Fatal:
             # The session did not start, there is nothing of it to check
             pending.unlink(missing_ok=True)

@@ -286,9 +286,10 @@ class Follower:
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
-        # What the launchers note of the sessions, shown from now: the
-        # uses of the SSH agent and the Docker socket, and what a chat
-        # found changed in what Claude Code says
+        # What the launchers note of the sessions, shown from now: how
+        # the sandbox of one was started, the uses of the SSH agent and
+        # the Docker socket, and what a chat found changed in what Claude
+        # Code says
         self._noted = NewlyNoted(host, container)
 
     def title(self, path: Path) -> str:
@@ -509,7 +510,8 @@ class Follower:
 
     def _poll_notes(self, found: Round) -> None:
         """What the launchers of the project's sessions noted since the
-        last time: the uses of the doors, and the changes chats found."""
+        last time: the starts, the uses of the doors, and the changes
+        chats found."""
         found.events += [(None, event) for event in self._noted.poll()]
 
     @staticmethod

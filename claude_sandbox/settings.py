@@ -158,6 +158,11 @@ class Host:
         return os.path.join(self.state_dir, "claude-code-changes.jsonl")
 
     @property
+    def starts_file(self) -> str:
+        # How each session's sandbox was started, see started.py
+        return os.path.join(self.state_dir, "session-starts.jsonl")
+
+    @property
     def agent_sockets_dir(self) -> str:
         # Where the sessions' way to the SSH agent listens, see doors.py
         return os.path.join(self.state_dir, "agents")

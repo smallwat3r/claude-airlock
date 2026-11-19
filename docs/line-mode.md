@@ -28,6 +28,10 @@ model used and how the sandbox is doing](line-mode.png)
 
 ## What it shows
 
+- First, how the sandbox was started: the runtime it runs under
+  (gVisor or not), its image, its limits of memory, processes and CPUs,
+  whether its network is filtered, what is recorded of it, and what is
+  open to it or mounted beyond the defaults.
 - Each tool call, with the reason claude gives for it, and its result:
   the files a command changed, and who allowed the call when that was
   not the permission mode.

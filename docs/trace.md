@@ -16,12 +16,17 @@ network, in the order it happened.
 #   /home/me/code/api/CLAUDE.md (Project)
 # files written
 #   /home/me/code/api/Makefile x2
+# sandbox     claude-api under runc, memory 16g, processes 512, all CPUs, network open
 # network
 #   captured in claude-api from 10:02:11 to 10:31:40
 #   tcp/https registry.npmjs.org (104.16.3.35):443 x4
 #   tcp/postgres 10.0.0.7:5432 x1
 #
 # time                 who      what        details
+2026-01-02 10:02:11  sandbox  started     claude-api under runc, image claude-code-sandbox:1a2b3c4d5e6f
+2026-01-02 10:02:11  sandbox  started     limits: memory 16g, processes 512, all CPUs
+2026-01-02 10:02:11  sandbox  started     network: open
+2026-01-02 10:02:11  sandbox  started     recorded: connections, processes
 2026-01-02 10:02:30  user     prompt      fix the build
 2026-01-02 10:02:41  claude   bash        $ npm ci
 2026-01-02 10:02:41  claude   bash        why: Install the dependencies
@@ -55,7 +60,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -278,6 +283,37 @@ session itself, along with the time it waited for memory, CPU or disk.
   network tools count.
 - It takes cgroup v2. On a host with version 1 the lines are not there.
 
+## How the sandbox was started
+
+The settings of today are not those a session ran with, so the launcher
+notes how it starts each session, and when it is over. A trace has it in
+its header (`sandbox`) and as its first lines:
+
+```
+sandbox  started  claude-api under gVisor (runsc-hostnet), image claude-code-sandbox:1a2b3c4d5e6f
+sandbox  started  limits: memory 8g, processes 512, cpus 4
+sandbox  started  network: filtered to the allowed domains
+sandbox  started  recorded: connections, memory and CPU use
+sandbox  started  open: ssh-agent, docker:ps
+sandbox  started  mounted: /home/me/code/lib (ro)
+```
+
+| Line | Says |
+| --- | --- |
+| The first | The container, the runtime it runs under (`gVisor (name)` under [gVisor](sandbox.md#gvisor), else the name of the runtime, `runc` as a rule) and its image |
+| `limits` | `CLAUDE_DOCKER_MEMORY`, `CLAUDE_DOCKER_PIDS` and `CLAUDE_DOCKER_CPUS` as they were set |
+| `network` | Whether `CLAUDE_DOCKER_NET_FILTER` was on |
+| `recorded` | What the launcher kept of the session from outside it: its connections, its processes, or under gVisor its memory and CPU use alone |
+| `open` | What was open that is closed by default: the SSH agent, the Docker socket, a writable `~/.claude` config, the history of other projects, the connectors, telemetry. Not there when nothing was |
+| `mounted` | The directories mounted next to the project. Not there without any |
+
+- It is of the session, not of the settings: the SSH agent is only named
+  when the host had one to forward.
+- A session that goes on in a new container (`--resume`) has a start for
+  each, and so has each of several sessions that ran at the same time.
+- `--trace --follow` shows a start when a session starts, line mode
+  before the first prompt.
+
 ## The SSH agent and the Docker socket
 
 A session started with `CLAUDE_DOCKER_SSH_AGENT=1` or `CLAUDE_DOCKER_SOCKET`
@@ -331,6 +367,7 @@ log:
 | `transcripts` | The launcher's copy of each transcript | For 30 days |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
+| `session-starts.jsonl` | How each session was started, and when it was over | The latest 2000 lines |
 | `claude-code-changes.jsonl` | A line per change line mode found in what Claude Code says | The latest 1000 |
 | `destinations.json` | What each project is known to reach | 2000 destinations per project |
 

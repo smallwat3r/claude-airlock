@@ -16,9 +16,14 @@ from datetime import datetime
 
 from ..events import flat, labelled
 from ..layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
-from ..mounts import ExtraDir
-from ..network import has_socket_proxy
-from ..settings import Settings, SocketAccess
+from ..started import (
+    ALL_HISTORY,
+    DOCKER_FULL,
+    DOCKER_PS,
+    RW_CONFIG,
+    SSH_AGENT,
+    Start,
+)
 from ..transcript import LATEST
 from .console import Page
 from .drift import Drift
@@ -39,6 +44,16 @@ _MODEL = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?")
 
 # A part of the status: its style, and its text
 Part = tuple[str, str]
+# What of that which is open to a session the status shows, each with its
+# colour: yellow what widens what a session reaches, red what shows every
+# container on the host with its secrets
+OPEN_STYLES = {
+    SSH_AGENT: YELLOW,
+    DOCKER_PS: YELLOW,
+    DOCKER_FULL: RED,
+    RW_CONFIG: YELLOW,
+    ALL_HISTORY: YELLOW,
+}
 
 
 def display_name(model: str) -> str:
@@ -104,61 +119,34 @@ class Limits:
 @dataclass(frozen=True)
 class Sandbox:
     """What the session was started with, as the status shows it: its
-    container, whether its network is filtered, the doors open to it and
-    what more than the project is mounted. Of the session, not of the
-    settings: the Docker socket is only a door when the host has one."""
+    container, whether its network is filtered, what is open to it and
+    what more than the project is mounted. Taken from how the launcher
+    started it (see started.py), which is of the session and not of the
+    settings."""
 
     name: str
     net_filter: bool = False
-    ssh_agent: bool = False
-    socket: SocketAccess = SocketAccess.OFF
-    rw_config: bool = False
-    shared_history: bool = False
+    # What is open to it that is closed by default, as a start names it
+    open: tuple[str, ...] = ()
     # Each as it is shown, (ro) after one that is read-only
     dirs: tuple[str, ...] = ()
 
     @classmethod
-    def started(
-        cls,
-        name: str,
-        settings: Settings,
-        dirs: list[ExtraDir],
-        home: str,
-        *,
-        ssh_agent: bool,
-    ) -> Sandbox:
-        """The sandbox of a session of that name, started with those, the
-        SSH agent forwarded or not."""
-        shown = tuple(
-            home_relative(extra.path, home) + (" (ro)" if extra.read_only else "")
-            for extra in dirs
-        )
-        return cls(
-            name,
-            net_filter=settings.net_filter,
-            ssh_agent=ssh_agent,
-            socket=settings.socket if has_socket_proxy(settings) else SocketAccess.OFF,
-            rw_config=settings.rw_config,
-            shared_history=settings.shared_history,
-            dirs=shown,
-        )
+    def started(cls, name: str, start: Start, home: str) -> Sandbox:
+        """The sandbox of a session of that name, started so."""
+        dirs = tuple(home_relative(mounted, home) for mounted in start.dirs)
+        return cls(name, start.net_filter, start.open, dirs)
 
     def parts(self) -> list[Part]:
-        """The sandbox as parts of the status: yellow what widens what a
-        session reaches, red what shows every container on the host with
-        its secrets."""
+        """The sandbox as parts of the status, with of what is open to
+        it what OPEN_STYLES names."""
         parts = [(NAME_STYLE, f"[{flat(self.name)}]")]
         parts.append((DIM, "net:filtered") if self.net_filter else (YELLOW, "net:open"))
-        if self.ssh_agent:
-            parts.append((YELLOW, "ssh-agent"))
-        if self.socket is SocketAccess.LIMITED:
-            parts.append((YELLOW, "docker:ps"))
-        elif self.socket is SocketAccess.FULL:
-            parts.append((RED, "docker:full"))
-        if self.rw_config:
-            parts.append((YELLOW, "config:rw"))
-        if self.shared_history:
-            parts.append((YELLOW, "history:all"))
+        parts += [
+            (OPEN_STYLES[opened], opened)
+            for opened in self.open
+            if opened in OPEN_STYLES
+        ]
         if self.dirs:
             parts.append((DIM, "dirs: " + " ".join(flat(d) for d in self.dirs)))
         return parts

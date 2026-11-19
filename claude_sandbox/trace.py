@@ -52,6 +52,7 @@ from .recorder import (
 from .records import NetSession, recorded_sessions
 from .settings import Fatal, Host
 from .shown import over, reached, size, verdict
+from .started import STARTED, start_summary
 from .transcript import (
     call_label,
     entry_times,
@@ -683,8 +684,9 @@ def session_events(
     unreadable = sum(e.get("type") == UNREADABLE for e in [*entries, *theirs])
     net_lines: list[str] = []
     net_events: list[Event] = []
-    # What the launchers noted of the sessions: the uses of the doors,
-    # and what a chat found changed in what Claude Code says
+    # What the launchers noted of the sessions: how the sandbox of each
+    # was started, the uses of the doors, and what a chat found changed
+    # in what Claude Code says
     noted_rows: list[tuple[str, str]] = []
     noted: list[Event] = []
     if times:
@@ -707,6 +709,11 @@ def session_events(
             else []
         ),
         *summary(entries_known + theirs, project_dir),
+        *(
+            labelled("sandbox", start_summary(event))
+            for event in noted
+            if event.what == STARTED
+        ),
         *net_lines,
         *(labelled(about, said) for about, said in noted_rows),
         *chosen.header(),

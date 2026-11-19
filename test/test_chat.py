@@ -23,7 +23,7 @@ from pathlib import Path
 
 from harness import LAUNCHER, LauncherTest
 
-from claude_sandbox import claude_args
+from claude_sandbox import claude_args, started
 from claude_sandbox.changes import change_events
 from claude_sandbox.chat import (
     asking,
@@ -41,6 +41,7 @@ from claude_sandbox.events import Event, Who
 from claude_sandbox.follow import Follower, Round
 from claude_sandbox.layout import Layout
 from claude_sandbox.mounts import ExtraDir
+from claude_sandbox.runtime import DOCKERS_OWN
 from claude_sandbox.settings import Host, Settings, SocketAccess
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
@@ -260,6 +261,18 @@ class ChatTest(LauncherTest):
 
     def host(self) -> Host:
         return Host(str(self.home), str(self.project), "", str(self.home / "state"))
+
+    def test_a_chat_says_first_how_its_sandbox_was_started(self):
+        done = self.chat("hello\n")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        said = done.stdout
+        self.assertRegex(
+            said, r"sandbox  started     claude-proj under .*, image \S+\n"
+        )
+        self.assertIn("sandbox  started     limits: memory 16g, processes 512", said)
+        self.assertLess(said.index("limits: memory"), said.index("prompt      hello"))
+        # Once, it is not followed as what the session does is
+        self.assertEqual(said.count("limits: memory"), 1)
 
     def test_claude_is_run_in_print_mode_without_a_tty(self):
         done = self.chat("", "--model", "opus")
@@ -1748,10 +1761,9 @@ class StatusTest(LauncherTest):
             ExtraDir(str(self.home / "shared")),
             ExtraDir("/srv/data", read_only=True),
         ]
-        with unittest.mock.patch.object(status, "has_socket_proxy", return_value=True):
-            sandbox = status.Sandbox.started(
-                "claude-x", settings, dirs, str(self.home), ssh_agent=True
-            )
+        with unittest.mock.patch.object(started, "has_socket_proxy", return_value=True):
+            start = started.Start.of(settings, DOCKERS_OWN, "", dirs, ssh_agent=True)
+        sandbox = status.Sandbox.started("claude-x", start, str(self.home))
         self.assertEqual(
             [text for _, text in sandbox.parts()],
             [
@@ -1764,11 +1776,12 @@ class StatusTest(LauncherTest):
             ],
         )
         # Asked for, but the host has no Docker socket: no door
-        with unittest.mock.patch.object(status, "has_socket_proxy", return_value=False):
-            sandbox = status.Sandbox.started(
-                "claude-x", settings, [], str(self.home), ssh_agent=False
-            )
-        self.assertEqual((sandbox.socket, sandbox.ssh_agent), (SocketAccess.OFF, False))
+        with unittest.mock.patch.object(
+            started, "has_socket_proxy", return_value=False
+        ):
+            start = started.Start.of(settings, DOCKERS_OWN, "", [], ssh_agent=False)
+        sandbox = status.Sandbox.started("claude-x", start, str(self.home))
+        self.assertEqual(sandbox.open, ("history:all",))
 
     def test_it_heads_the_prompt_and_is_said_when_asked_for(self):
         shown = page()

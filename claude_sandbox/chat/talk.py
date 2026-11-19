@@ -113,8 +113,11 @@ class Chat:
         layout: Layout,
         console: Console | None = None,
         handover: Handover | None = None,
+        start: Event | None = None,
     ):
         self._host = host
+        # How the sandbox was started as the launcher noted it, said first
+        self._start = start
         # Of the session's container, to stop it by
         self._name = sandbox.name
         self._console = console or Console(host.project_dir)
@@ -195,6 +198,8 @@ class Chat:
             title = labelled("chat", flat(self._host.project_dir))
             columns = self._page.layout.columns
             self._page.say([f"{title}, /help says what there is", columns])
+            if self._start:
+                self._page.put(self._page.events([self._start]))
             listener = threading.Thread(target=self._listen, args=(agent,), daemon=True)
             listener.start()
             threading.Thread(target=self._decide, args=(agent,), daemon=True).start()
@@ -689,10 +694,12 @@ def chat(
     sandbox: Sandbox,
     docker_args: list[str],
     handover: Handover | None = None,
+    start: Event | None = None,
 ) -> int:
     """Talk to the session a docker command runs, given its arguments, in
     the sandbox it was started with. Returns how docker ended. What the
-    user asked to be done after it is left in handover."""
+    user asked to be done after it is left in handover. With start, how
+    the sandbox was started is said first, as a trace shows it."""
     # What is said is dimmed in a trace, where it was read before. Not here.
     styles = {**STYLES, "reply": "", "command": ""}
     layout = dataclasses.replace(
@@ -706,4 +713,4 @@ def chat(
     history = os.path.join(kept, project_slug(host.project_dir))
     sent = SENT_STYLE if layout.colour else ""
     console = Console(host.project_dir, history, sent)
-    return Chat(host, sandbox, layout, console, handover).run(docker_args)
+    return Chat(host, sandbox, layout, console, handover, start).run(docker_args)
