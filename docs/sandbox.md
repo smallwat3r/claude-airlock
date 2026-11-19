@@ -53,8 +53,66 @@ What a session is given and what it is kept from.
   there cannot stand in for one of the image.
 - Writable space is the mounts, the cache volume and a few size-capped
   tmpfs (`/tmp`, `~/.npm`, `~/.config`).
-- Containers still share the host kernel. `CLAUDE_DOCKER_RUNTIME=runsc`
-  runs the session under gVisor if you have it.
+- Containers still share the host kernel, unless the session runs under
+  [gVisor](#gvisor).
+
+## gVisor
+
+[gVisor](https://gvisor.dev) runs a session on its own kernel, in user
+space, so a session cannot exploit a flaw in the host's kernel. It is
+available on Linux only. To use it, install `runsc`, register it in
+`/etc/docker/daemon.json` with the two arguments below, restart the daemon,
+and name the runtime in `CLAUDE_DOCKER_RUNTIME`:
+
+```json
+{
+  "runtimes": {
+    "runsc-hostnet": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": ["--network=host", "--host-uds=open"]
+    }
+  }
+}
+```
+
+```
+CLAUDE_DOCKER_RUNTIME=runsc-hostnet claude-docker
+```
+
+The launcher asks Docker which runtime a session will use and recognises
+gVisor by its program, `runsc`, whatever name it is registered under. This
+also works when gVisor is the daemon's default runtime. At each launch it
+prints what differs from Docker's own runtime:
+
+- **`--network=host` is required.** By default gVisor uses its own network
+  stack, which cannot reach Docker's resolver. No name resolves, so access
+  by name, the egress filter and the socket proxy all fail. With
+  `--network=host` gVisor uses the host's network stack instead. The
+  session still has its own network namespace. The cost is that the
+  network stack of the host's kernel is exposed to the session again. The
+  rest of the kernel is not.
+- **`--host-uds=open` is required for the SSH agent**, because the agent is
+  reached through a socket of the host. Without it, a session that asks
+  for the agent is refused.
+- **Processes are not recorded**, nor which process made each connection.
+  A sidecar that joins the session sees gVisor's kernel process, not the
+  session's processes, and the launcher does not run a watcher inside the
+  session. The capture, the egress filter and the records of the SSH agent
+  and Docker socket work as they do under Docker's own runtime.
+- **Memory and CPU use are still recorded.** The launcher reads them from
+  the cgroup of the container, along with the time the session waited for
+  memory, CPU or disk. The process count, the use of each tmpfs and the
+  largest process are not available. This requires the daemon to run on
+  the same host and to use cgroup version 2.
+- **A session that reaches its memory limit is ended as a whole.** Under
+  Docker's own runtime the kernel ends one process. Under gVisor the
+  host's kernel sees a single program, gVisor itself.
+- **The process limit is an estimate.** The host counts gVisor's own
+  threads: a few dozen, plus about two for each process of the session. The
+  launcher therefore gives Docker twice `CLAUDE_DOCKER_PIDS` plus 64. A
+  session that reaches that limit is also ended as a whole, so raise
+  `CLAUDE_DOCKER_PIDS` if that happens to a session that was not running
+  away.
 
 ## How Claude Code is started
 

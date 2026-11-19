@@ -27,6 +27,7 @@ from .ending import Ending
 from .files import expand_home, json_object, private_dir, try_lock_file
 from .home import home_args, session_state, statusline_of
 from .image import Image
+from .runtime import DOCKERS_OWN, Runtime
 from .settings import (
     BIN_DIR,
     CONTAINER_CLAUDE,
@@ -116,9 +117,11 @@ def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
     return ["--dangerously-skip-permissions"]
 
 
-def base_args(settings: Settings, host: Host, name: str) -> list[str]:
+def base_args(
+    settings: Settings, host: Host, name: str, runtime: Runtime = DOCKERS_OWN
+) -> list[str]:
     """What every session gets: identity, the core mounts, the hardening and
-    the resource limits."""
+    the resource limits, adjusted for its runtime."""
     return [
         "--rm",
         "--interactive",
@@ -180,15 +183,17 @@ def base_args(settings: Settings, host: Host, name: str) -> list[str]:
         # collector, whichever the host's kernel is set for
         "--ulimit=core=0",
         *scratch_args(settings, host),
-        f"--pids-limit={settings.pids}",
+        # Some runtimes use part of this limit themselves, see runtime.py
+        f"--pids-limit={runtime.process_limit(settings.pids)}",
         # Same value for swap, otherwise docker allows as much swap again on top
         f"--memory={settings.memory}",
         f"--memory-swap={settings.memory}",
         # Not ended at this limit as at that of memory, held back: what a
         # session runs gets no more of the machine's CPUs than so many
         *([f"--cpus={settings.cpus}"] if settings.cpus else []),
-        # A stronger runtime when asked for, e.g. runsc (gVisor), which keeps
-        # the container off the host kernel. It must be installed in the daemon.
+        # A stronger runtime when asked for, such as gVisor, which keeps
+        # the container off the host kernel. It must be registered in the
+        # daemon. See runtime.py for what differs under it.
         *([f"--runtime={settings.runtime}"] if settings.runtime else []),
     ]
 

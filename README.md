@@ -158,7 +158,7 @@ The container and its image:
 | `CLAUDE_DOCKER_MEMORY=32g` | `16g` | Memory limit. Below about 10g, `/tmp` and the other tmpfs shrink to fit in half of it |
 | `CLAUDE_DOCKER_PIDS=1024` | `512` | Process limit |
 | `CLAUDE_DOCKER_CPUS=4` | every CPU | CPU limit, a fraction like `1.5` works too. A session at its limit runs slower, nothing is ended |
-| `CLAUDE_DOCKER_RUNTIME=runsc` | Docker's own | Container runtime, gVisor say, which must be installed in Docker |
+| `CLAUDE_DOCKER_RUNTIME=runsc-hostnet` | Docker's own | Container runtime, as registered in Docker. For gVisor see [docs/sandbox.md](docs/sandbox.md#gvisor) |
 
 The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the two
 records in [docs/trace.md](docs/trace.md).

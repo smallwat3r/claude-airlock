@@ -42,7 +42,8 @@ from .files import private_dir
 from .network import has_socket_proxy, session_address, socket_proxy_name
 from .notes import Notes
 from .reader import Cursor, NotThis
-from .settings import Host, Settings
+from .runtime import Runtime
+from .settings import Fatal, Host, Settings
 
 # The lines kept, the oldest go once there are more
 KEPT_USES = 5000
@@ -352,6 +353,20 @@ def agent_socket(
     return None
 
 
+def refuse_unreachable_agent(
+    settings: Settings, env: Mapping[str, str], runtime: Runtime
+) -> None:
+    """Refuse a session that asks for the SSH agent under a runtime that
+    cannot connect to sockets of the host. Without this, ssh in the
+    session would only report that it has no agent."""
+    if runtime.no_host_sockets and settings.ssh_agent and agent_socket(env):
+        raise Fatal(
+            f"the SSH agent cannot be reached under {runtime.shown}:"
+            f" {runtime.no_host_sockets}, see docs/sandbox.md."
+            " CLAUDE_DOCKER_SSH_AGENT=0 runs without the agent."
+        )
+
+
 @contextmanager
 def ssh_agent_door(
     settings: Settings, host: Host, session: str, env: Mapping[str, str]
@@ -405,8 +420,8 @@ def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
         address = ipaddress.ip_address(found["address"])
     except ValueError:
         return None
-    # The proxy listens on both families at once, and then logs an IPv4
-    # caller as ::ffff:172.20.0.5. session_address has it as 172.20.0.5.
+    # The proxy listens on IPv4 and IPv6 with one socket, so it logs an
+    # IPv4 caller as ::ffff:172.20.0.5. session_address gives 172.20.0.5.
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
     return (

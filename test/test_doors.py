@@ -329,7 +329,7 @@ class SocketWatchTest(LauncherTest):
         self.assertIsNone(calls[3])
 
     def test_an_ipv4_caller_logged_as_ipv6_is_read_as_ipv4(self):
-        # What the proxy logs when it listens on both families at once
+        # What the proxy logs when one socket listens on IPv4 and IPv6
         line = (
             "::ffff:172.21.0.5:51848 [18/Nov/2026:23:29:05.413] dockerfrontend "
             "dockerfrontend/<NOSRV> 0/-1/-1/-1/0 403 0 - - PR-- 1/1/0/0/0 0/0 "
