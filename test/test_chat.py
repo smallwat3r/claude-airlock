@@ -262,10 +262,15 @@ class ChatTest(LauncherTest):
                 if time.monotonic() > deadline:
                     return -1
                 if select.select([terminal], [], [], 0.2)[0]:
+                    # A terminal the chat has left fails the read on
+                    # Linux and reads as empty on macOS
                     try:
-                        seen += os.read(terminal, 65536)
+                        chunk = os.read(terminal, 65536)
                     except OSError:
                         return -1
+                    if not chunk:
+                        return -1
+                    seen += chunk
             return seen.index(wanted.encode(), start) + len(wanted)
 
         try:
