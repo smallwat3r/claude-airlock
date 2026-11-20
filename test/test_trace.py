@@ -826,12 +826,12 @@ class NetworkTraceTest(LauncherTest):
         )
 
     def test_a_filtered_session_that_sent_a_lot_is_said_to_when_it_ends(self):
-        now = time.time()
         mine = "172.20.0.7"
         sent = "CONNECT {} - HIER_DIRECT/203.0.113.9 - {}"
-        self.access_log.write_text(
+        requests = self.work / "requests"
+        requests.write_text(
             "".join(
-                f"{now + 2:.3f} 100 {mine} TCP_TUNNEL/200 900 {line}\n"
+                f"100 {mine} TCP_TUNNEL/200 900 {line}\n"
                 for line in (
                     sent.format("up.test:443", 9_000_000),
                     sent.format("up.test:443", 8_000_000),
@@ -840,9 +840,19 @@ class NetworkTraceTest(LauncherTest):
                 )
             )
         )
+        # Logged by the session itself, at the time it runs: however long
+        # the launcher took to start it, on a machine that is busy
+        logs = (
+            "import sys, time\n"
+            "lines = open(sys.argv[1]).read().splitlines()\n"
+            "open(sys.argv[2], 'w').writelines(\n"
+            "    f'{time.time():.3f} {line}\\n' for line in lines)\n"
+            "time.sleep(0.5)\n"
+        )
+        script = self.work / "logs.py"
+        script.write_text(logs)
         ended = self.launch(
-            # Logged while it runs, whenever it got to start
-            session="sleep 2.5",
+            session=f"{sys.executable} {script} {requests} {self.access_log}",
             CLAUDE_AIRLOCK_NET_FILTER="1",
             FAKE_IP=mine,
             FAKE_ACCESS_LOG=str(self.access_log),
