@@ -22,6 +22,8 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
+    # The tests end a file that hangs themselves, this is for what they miss
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

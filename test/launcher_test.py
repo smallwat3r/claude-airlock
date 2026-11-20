@@ -10,12 +10,14 @@ which also runs on its own.
 The files are run at the same time, each by a Python of its own: a check
 shares nothing with the checks of another file, and most of what one takes
 is waiting for the launcher it started. A line is said per file, with what
-it put out when it failed. What follows the options below is passed on to
-each file as it is.
+it put out when it failed. A file that takes too long is ended and says
+where it was, so that a check that hangs fails the run instead of holding
+it. What follows the options below is passed on to each file as it is.
 
   test/launcher_test.py           all of them
   test/launcher_test.py -k trace  those with trace in their name
   test/launcher_test.py --jobs 1  one file at a time
+  test/launcher_test.py --patience 60  a file is stuck after a minute
   test/test_capture.py            one file
 """
 
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -35,6 +38,10 @@ HERE = Path(__file__).resolve().parent
 # What unittest ends with since Python 3.12 when no test was picked, which
 # -k does to most files
 NO_TESTS = 5
+# The status of a file that was ended for taking too long, as timeout says it
+STUCK = 124
+# How long a file that is ended has to say where it was
+LAST_WORDS = 10.0
 RAN = re.compile(r"^Ran (\d+) tests? in", re.MULTILINE)
 
 
@@ -65,19 +72,45 @@ class Outcome:
         )
 
 
-def run_file(file: Path, passed_on: list[str]) -> Outcome:
-    """The checks of one file, by a Python of its own."""
+def run_file(file: Path, passed_on: list[str], patience: float) -> Outcome:
+    """The checks of one file, by a Python of its own. One that takes
+    longer than the patience is ended, having said where each of its
+    threads was."""
     start = time.monotonic()
-    done = subprocess.run(
+    process = subprocess.Popen(
         [sys.executable, str(file), *passed_on],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
-        check=False,
+        # SIGABRT then has Python write what every thread was at
+        env={**os.environ, "PYTHONFAULTHANDLER": "1"},
     )
-    return Outcome(file, done.returncode, done.stdout, time.monotonic() - start)
+    try:
+        output, _ = process.communicate(timeout=patience)
+        status = process.returncode
+    except subprocess.TimeoutExpired:
+        process.send_signal(signal.SIGABRT)
+        output = last_words(process)
+        output += f"\nSTUCK: ended after {patience:.0f}s, see where above\n"
+        status = STUCK
+    return Outcome(file, status, output, time.monotonic() - start)
+
+
+def last_words(process: subprocess.Popen[str]) -> str:
+    """What a file that was told to end wrote. Not waited for longer than
+    a moment: what it started may hold its output open after it."""
+    try:
+        output, _ = process.communicate(timeout=LAST_WORDS)
+    except subprocess.TimeoutExpired as late:
+        process.kill()
+        said = late.output or ""
+        output = said if isinstance(said, str) else said.decode(errors="replace")
+        if process.stdout:
+            process.stdout.close()
+        process.wait()
+    return output
 
 
 def main(argv: list[str]) -> int:
@@ -91,12 +124,20 @@ def main(argv: list[str]) -> int:
         default=os.cpu_count() or 1,
         help="how many files run at the same time, as many as CPUs by default",
     )
+    parser.add_argument(
+        "--patience",
+        type=float,
+        default=300.0,
+        help="seconds a file may take before it is ended as stuck, 300 by default",
+    )
     options, passed_on = parser.parse_known_args(argv)
     files = sorted(HERE.glob("test_*.py"))
     start = time.monotonic()
     outcomes = []
     with ThreadPoolExecutor(max_workers=max(1, options.jobs)) as pool:
-        for outcome in pool.map(lambda file: run_file(file, passed_on), files):
+        for outcome in pool.map(
+            lambda file: run_file(file, passed_on, options.patience), files
+        ):
             outcomes.append(outcome)
             if outcome.tests or outcome.failed:
                 print(outcome.line, flush=True)
