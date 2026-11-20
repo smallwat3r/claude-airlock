@@ -33,7 +33,9 @@ What a session is given and what it is kept from.
   on the host or are followed by every later session, so they are
   read-only. `CLAUDE_AIRLOCK_RW_CONFIG=1` makes them writable.
 - **What you name.** `CLAUDE_AIRLOCK_PROTECT` makes a path read-only inside
-  whatever mounts it.
+  whatever mounts it. The directories between the two cannot be renamed
+  or removed in a session, their content can: a path that was moved
+  aside could be made again with other content, for the host to read.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty. Templates such as `.env.example` stay readable,
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).

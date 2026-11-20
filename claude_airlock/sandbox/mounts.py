@@ -130,10 +130,41 @@ def protected_dirs(
     return dirs, inside
 
 
-def protect_args(inside: list[str]) -> list[str]:
+def held_in_place(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[str]:
+    """The directories between each protected path and what it is mounted
+    in, when that is writable. A session cannot write to a read-only
+    mount, but it can rename a directory above one and make the path
+    again with its own content, which is what the host would then read.
+    A directory that is a mount cannot be renamed or removed: each of
+    these is mounted on itself, writable as before. None for a path in
+    what is read-only anyway, a mounted directory or another protected
+    path: there is nothing to rename there, and a writable mount would
+    open it."""
+    writable = [host.project_dir, *(d.path for d in dirs if not d.read_only)]
+    read_only = [*(d.path for d in dirs if d.read_only), *inside]
+    held: dict[str, None] = {}
+    for path in inside:
+        above = [
+            root
+            for root in (*writable, *read_only)
+            if root != path and path.startswith(root + os.sep)
+        ]
+        root = max(above, key=len, default=None)
+        if root is None or root in read_only:
+            continue
+        directory = os.path.dirname(path)
+        while directory != root:
+            held[directory] = None
+            directory = os.path.dirname(directory)
+    return sorted(held)
+
+
+def protect_args(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[str]:
     """The read-only mounts of protected_dirs, on top of what they are
-    in."""
-    return [mount_arg(path, path, "ro,z") for path in inside]
+    in, and the mounts that keep them where they are, see
+    held_in_place."""
+    held = [mount_arg(path, path, "z") for path in held_in_place(inside, host, dirs)]
+    return held + [mount_arg(path, path, "ro,z") for path in inside]
 
 
 def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:

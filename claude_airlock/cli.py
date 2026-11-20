@@ -261,7 +261,7 @@ def session_run_args(
         *protect_config_args(settings, host),
         *history_args(settings, host),
         *extra_dir_args(dirs),
-        *protect_args(protected),
+        *protect_args(protected, host, dirs),
         *protect_env_args(protected),
         *network_args(settings, capture),
         *socket_proxy_args(settings),

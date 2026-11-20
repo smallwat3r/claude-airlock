@@ -57,6 +57,28 @@ class ExtraDirsTest(LauncherTest):
             f"--env=CLAUDE_AIRLOCK_PROTECT={kit}:{self.project / 'docs'}", flags
         )
 
+    def test_the_directories_above_a_protected_path_are_held_in_place(self):
+        deep = self.project / "a" / "b" / "kit"
+        deep.mkdir(parents=True)
+        nested = self.ref / "x" / "y"
+        nested.mkdir(parents=True)
+        inner = self.project / "a" / "b" / "kit" / "inner" / "most"
+        inner.mkdir(parents=True)
+        flags = self.launch(
+            "--add-dir-ro",
+            str(self.ref),
+            CLAUDE_AIRLOCK_PROTECT=f"a/b/kit:{nested}:{inner}",
+        ).flags
+        # Mounted on themselves, writable: a mount cannot be renamed
+        for above in (self.project / "a", self.project / "a" / "b"):
+            self.assertIn(f"--volume={above}:{above}:z", flags)
+        self.assertIn(f"--volume={deep}:{deep}:ro,z", flags)
+        # Nothing writable inside what is read-only, mounted or protected
+        for read_only in (self.ref / "x", deep / "inner"):
+            self.assertNotIn(f"--volume={read_only}:{read_only}:z", flags)
+        # Nor on the project itself
+        self.assertEqual(flags.count(f"--volume={self.project}:{self.project}:z"), 1)
+
     def test_a_protected_path_that_could_be_made_inside_is_refused(self):
         result = self.launch(CLAUDE_AIRLOCK_PROTECT="docs")
         self.assert_refused(result, "cannot protect docs: it does not exist")
