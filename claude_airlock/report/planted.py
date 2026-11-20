@@ -159,14 +159,17 @@ def _line_end(text: str, at: int, most: int) -> int:
 
 def _around(text: str, found: re.Match[str]) -> str:
     """What was found with the lines around it, each on a line of its
-    own and none of them blank. A line that is not whole says so."""
+    own and none of them blank. A line that is not whole says so, and so
+    does what was found when it is longer than an excerpt: the space
+    within it can be as long as what was read."""
     start = _line_start(text, found.start())
-    end = _line_end(text, found.end(), max(found.end(), start + EXCERPT_WIDTH))
+    most = start + EXCERPT_WIDTH
+    end = _line_end(text, min(found.end(), most), most)
     lines = [
         line.rstrip() for line in clean(text[start:end]).splitlines() if line.strip()
     ]
     # What was found shows, whatever is around it
-    lines = lines or [flat(found.group())]
+    lines = lines or [flat(found.group()[:EXCERPT_WIDTH])]
     if start and text[start - 1] != "\n":
         lines[0] = CUT + lines[0]
     if end < len(text) and text[end] != "\n":
@@ -245,7 +248,7 @@ SIGNS: tuple[Sign, ...] = (
             rf"</?{_CLAUDE_CODE_TAGS}(?:\s[^<>]{{0,200}})?>",
             # A call of a tool as the model writes one
             r"<invoke\s+name\s*=",
-            rf"</?{_SPEAKER}[-_]{_SPOKEN}(?:[-_]\w{{1,40}}){{0,3}}"
+            rf"</?{_SPEAKER}[-_]{_SPOKEN}(?:[-_][^\W_]{{1,40}}){{0,3}}"
             r"(?:\s[^<>]{0,200})?/?>",
             # What Claude Code heads a notice of its own with
             r"\[system\s+notification\b",

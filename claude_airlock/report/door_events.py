@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 
-from ..events import Event, Who, clean
+from ..events import Event, Who, flat
 from ..recording.doors import BY_LAUNCHER, AgentUse, Door, read_uses
 from ..settings import Host
 
@@ -36,7 +36,7 @@ def ssh_agent_event(when: float, said: dict) -> Event:
         by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
         detail += f"  REFUSED by the {by}"
         fields["error"] = f"refused by the {by}"
-    return Event(when, Who.SANDBOX, Door.SSH_AGENT.value, [clean(detail)], fields)
+    return Event(when, Who.SANDBOX, Door.SSH_AGENT.value, [flat(detail)], fields)
 
 
 def docker_event(when: float, said: dict) -> Event:
@@ -52,7 +52,7 @@ def docker_event(when: float, said: dict) -> Event:
     }
     if denied:
         detail += "  DENIED"
-    return Event(when, Who.SANDBOX, Door.DOCKER.value, [clean(detail)], fields)
+    return Event(when, Who.SANDBOX, Door.DOCKER.value, [flat(detail)], fields)
 
 
 # How the use of each door is shown, by the door

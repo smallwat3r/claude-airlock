@@ -519,9 +519,10 @@ class Output:
         together: list[Event] = []
         for path, event in found.events:
             if path and path != self._session:
-                self._session = path
+                # Those of the session before, while it is still the one
                 lines += self._shown(together)
                 together = []
+                self._session = path
                 about = labelled(
                     "session", f"{flat(path.stem)}  {self._follower.title(path)}"
                 )

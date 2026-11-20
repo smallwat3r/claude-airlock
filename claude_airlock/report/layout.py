@@ -90,7 +90,8 @@ def wrong_throughout(fields: dict) -> bool:
         or fields.get("outcome") in Went.WRONG
         or fields.get("error")
         or fields.get("flagged")
-        or fields.get("removed")
+        # Not the names an event of another kind keeps under that name
+        or fields.get("removed") is True
         or fields.get("unreadable_line")
     )
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 import functools
 import socket
 
-from ..events import clean
+from ..events import flat
 from ..recording.pcap import Capture
 
 PORT_USES = {
@@ -62,4 +62,6 @@ def reached(capture: Capture, address: str, port: int, transport: str = "tcp") -
         where = f"{known} ({address}):{port}" if known else f"{literal}:{port}"
     else:
         where = f"{known} ({address})" if known else address
-    return clean(f"{over(transport, port)} {where}")
+    # On one line: a name is the session's to choose, a line break in one
+    # would start a line of its own
+    return flat(f"{over(transport, port)} {where}")

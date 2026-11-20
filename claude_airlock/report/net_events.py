@@ -180,7 +180,7 @@ def sent_by(flow: Flow) -> str:
 def flag_event(why: str, lookup: Lookup) -> Event:
     """A lookup that stands out, see pcap.py for what makes one."""
     fields = {"name": lookup.name, "type": lookup.kind, "flagged": why}
-    detail = clean(f"lookup {lookup.name} {lookup.kind} FLAGGED: {why}")
+    detail = flat(f"lookup {lookup.name} {lookup.kind} FLAGGED: {why}")
     return Event(lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields)
 
 
@@ -193,7 +193,7 @@ def request_event(request: Request) -> Event:
         "address": request.address,
         "port": request.port,
     }
-    detail = clean(f"http {request.method} {request.url}")
+    detail = flat(f"http {request.method} {request.url}")
     return Event(request.when, Who.SANDBOX, Kind.NET, [detail], fields)
 
 
@@ -207,7 +207,7 @@ def lookup_event(lookup: Lookup) -> Event:
         "addresses": list(lookup.addresses),
         "error": lookup.error,
     }
-    detail = clean(f"lookup {lookup.name} {lookup.kind} {said}")
+    detail = flat(f"lookup {lookup.name} {lookup.kind} {said}")
     return Event(lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields)
 
 
@@ -295,7 +295,7 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
             "argv": list(made_it.argv),
             "parents": [parent.name for parent in lineage[1:]],
         }
-        event.notes.append(f"by: {clean(shown_lineage(lineage))}")
+        event.notes.append(f"by: {flat(shown_lineage(lineage))}")
 
 
 def process_events(record: ProcessRecord) -> list[Event]:

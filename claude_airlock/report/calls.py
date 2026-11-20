@@ -202,8 +202,16 @@ def call_details(
     return [
         line
         for key, value in tool_input.items()
-        for line in clip(f"{clean(key)}: {clean(value)}".splitlines(), verbose)
+        for line in clip(argument_lines(flat(key), clean(value)), verbose)
     ]
+
+
+def argument_lines(key: str, value: str) -> list[str]:
+    """An argument of a call as its lines, each under its name: a line
+    of a value is the model's to write, and one that stood alone could
+    read as a line of the report (a result, a file outside the project)."""
+    first, *more = value.splitlines() or [""]
+    return [f"{key}: {first}", *(f"{key}:   {line}" for line in more)]
 
 
 @dataclass(frozen=True)

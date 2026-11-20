@@ -157,7 +157,7 @@ class Asides:
     def __init__(self, verbose: bool):
         self._verbose = verbose
         self._instructions: tuple[Instructions, ...] = ()
-        self._skills: tuple[str, ...] = ()
+        self._skills: tuple[int, tuple[str, ...]] = (0, ())
         self._mode = ""
         # The model and the effort last asked for, by what asked
         self._models: dict[str, tuple[str, str]] = {}
@@ -239,9 +239,10 @@ class Asides:
     def _skills_listed(self, given: dict, when: float, who: Who) -> list[Event]:
         skills = names(given.get("names"))
         number = counted(given.get("skillCount")) or len(skills)
-        if not number or tuple(skills) == self._skills:
+        listed = (number, tuple(skills))
+        if not number or listed == self._skills:
             return []
-        self._skills = tuple(skills)
+        self._skills = listed
         more = "" if given.get("isInitial", True) else " more"
         line = f"skills: {number}{more} listed"
         if self._verbose and skills:
@@ -258,13 +259,14 @@ class Asides:
         text = clean(said) if isinstance(said, str) else ""
         if mode != "task-notification":
             first = (text.strip().splitlines() or [""])[0]
-            line = f"told ({mode}): {shortened(first)}".rstrip(": ")
+            first = shortened(first)
+            line = f"told ({mode})" + (f": {first}" if first else "")
             return [
                 Event(when, who, Kind.CONTEXT, [line], {"kind": mode, "text": said})
             ]
         status = flat((between(text, "<status>", "</status>") or "ended").strip())
         summary = flat((between(text, "<summary>", "</summary>") or "").strip())
-        line = shortened(f"{status}: {summary}".rstrip(": "))
+        line = shortened(f"{status}: {summary}" if summary else status)
         fields = {"status": status, "summary": summary, "text": said}
         return [Event(when, who, Kind.TASK, [line], fields)]
 
