@@ -41,9 +41,11 @@ At a terminal the Tab key completes the names of commands and of files
 the next, where readline is there to do both.
 
 The Python of macOS is often made with editline in the place of GNU
-readline. It has no keys of a new line, and does not say when it has
-written a prompt: a paste is entered at once there, as one prompt, and
-cannot be typed on."""
+readline. It ends a line at any line break put at its end, and cannot be
+given the start of one. So the lines before a key of a new line, and a
+paste, are kept here and written after the prompt for what is typed to
+go on from: they can be typed on and dropped (Ctrl-C), not changed. A
+key of a new line pressed within a line shows as ^M until it is entered."""
 
 from __future__ import annotations
 
@@ -99,6 +101,17 @@ NAMES_OFFERED = 200
 # the prompt. Most terminals send Enter itself unless set, a line ending
 # with a backslash does the same there.
 NEW_LINE_KEYS = (r"\e[13;2u", r"\e[27;2;13~", r"\e\C-m")
+# The same keys as editline is told them. It reads Enter as the terminal
+# passes it on, a line feed for one that is set so
+EDITLINE_NEW_LINE_KEYS = ("^[[13;2u", "^[[27;2;13~", "^[^M", "^[^J")
+# What editline puts into the line for them, a carriage return as it is
+# (Ctrl-V, Enter), and how it shows it. It ends a line at any line break
+# put at its end, and keeps which one that was until the next line is
+# typed: this one says the line goes on, see _line. Of a key macro it
+# does the first key at once and the rest with the next key pressed, so
+# this is all one can do
+EDITLINE_NEW_LINE = "\r"
+CONTROL_SHOWN = "^M"
 # How long to wait for more of what was pasted after a line break, in
 # seconds: a paste arrives at once, or in chunks close together, a line
 # typed after the one entered never comes this soon
@@ -168,6 +181,9 @@ class Console:
         self._hooked = False
         # What the next line read starts with, the start of a paste
         self._filled = ""
+        # What the line being read starts with that readline does not
+        # have, see _line: editline cannot be given the start of a line
+        self._begun = ""
         # The lines above the prompt, whether the line being read has
         # them, and what is on the screen of it, head and prompt: at a
         # terminal what is erased, anywhere else the head last written
@@ -202,6 +218,13 @@ class Console:
             self._set_up()
 
     @property
+    def _typed_on(self) -> bool:
+        """Whether what was pasted can be the start of the next line
+        read, for the user to type on: put into readline once it says it
+        has written the prompt, or kept here for editline, see _line."""
+        return self._hooked or (self._editline and self._redrawn)
+
+    @property
     def _out(self) -> TextIO:
         """Where lines are written: the standard output as it is when
         written to, unless another was given."""
@@ -225,6 +248,9 @@ class Console:
             # Inserted as it is, where Ctrl-J alone would enter the line
             for keys in NEW_LINE_KEYS:
                 readline.parse_and_bind(f'"{keys}": "\\C-v\\C-j"')
+        else:
+            for keys in EDITLINE_NEW_LINE_KEYS:
+                readline.parse_and_bind(f'bind -s "{keys}" "^V^M"')
         # Editline has the hook and never calls it: a prompt waited for
         # there would never be the line that what is written goes above
         if not editline and hasattr(readline, "set_pre_input_hook"):
@@ -300,6 +326,7 @@ class Console:
                     # Enter went to the next line
                     self._on_screen = False
                 self._reading = self._entering = None
+                self._begun = ""
             # One that came once the line was entered is not for the next
             self._interrupted = False
         if not self.interactive:
@@ -328,13 +355,36 @@ class Console:
                 self._reading = shown
                 if self._redrawn:
                     self._shown = above + shown
+                    # The start of the line, a paste or the lines
+                    # before a key of a new line, which editline cannot
+                    # be given to go on from: written after the prompt
+                    # as typed, and typed on, but not changed
+                    self._begun, self._filled = self._filled, ""
                 elif not self._held or self._asked is not None:
                     self._shown = above
                     self._say(above + shown)
                     self._on_screen = True
+            begun = self._begun
         # Readline counts the columns of a prompt, and takes an escape of
         # colour for none only when told so: a question can be in colour
-        return self._typed(uncounted(above + shown) if self._redrawn else "")
+        typed = self._typed(uncounted(above + shown) + begun if self._redrawn else "")
+        if not (self._editline and self._redrawn):
+            return typed
+        # A key of a new line pressed within the line, see _set_up
+        line = begun + typed.replace(EDITLINE_NEW_LINE, "\n")
+        if line != typed:
+            self._forget(typed)
+            readline.add_history(line)
+        if not readline.get_line_buffer().endswith(EDITLINE_NEW_LINE):
+            return line
+        # The line was ended by a key of a new line: it goes on, as the
+        # start of the next line read
+        with self._lock:
+            shows = line + CONTROL_SHOWN
+            self._say("\x1b[1A" + self._erased(self._shown, shows))
+            self._forget(line)
+            self._filled = line + "\n"
+        return self._line(prompt, headed)
 
     def _typed(self, prompt: str) -> str:
         """Wait for a line, the one place Ctrl-C ends as
@@ -364,7 +414,9 @@ class Console:
                 if not pasted:
                     return line
                 text = line + "\n" + pasted.replace("\r\n", "\n").replace("\r", "\n")
-                unfinished = self._hooked and (self._redrawn or not text.endswith("\n"))
+                unfinished = self._typed_on and (
+                    self._redrawn or not text.endswith("\n")
+                )
                 if self._redrawn:
                     # The line entered alone, written again with the rest
                     out = "\x1b[1A" + self._erased(self._shown, line)
@@ -594,11 +646,17 @@ class Console:
         self._say(out)
 
     def _buffer(self) -> str:
-        """What readline has of the line being typed. Editline keeps the
-        line last entered, its line break at the end, until a key of the
-        next is typed: that one is not being typed."""
+        """What is typed of the line being read, as it is on the screen:
+        what it was begun with, see _line, and what readline has of it.
+        Editline keeps the line last entered, its line break at the end,
+        until a key of the next is typed: that one is not being typed."""
         typed = readline.get_line_buffer()
-        return "" if self._editline and typed.endswith("\n") else typed
+        if self._editline:
+            if typed.endswith(("\n", EDITLINE_NEW_LINE)):
+                typed = ""
+            # A new line put within the line, as editline shows it
+            typed = typed.replace(EDITLINE_NEW_LINE, CONTROL_SHOWN)
+        return self._begun + typed
 
     def _before_cursor(self, typed: str) -> str:
         """What is typed up to the cursor, all of it where readline does

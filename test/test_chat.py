@@ -52,12 +52,13 @@ from claude_airlock.sandbox.mounts import ExtraDir
 from claude_airlock.sandbox.runtime import DOCKERS_OWN
 from claude_airlock.settings import Host, Settings, SocketAccess
 
-# Whether the readline of this Python is the editline of macOS, which has
-# no keys of a new line and does not say when it has written a prompt: a
-# paste cannot be typed on there, see Console
+# Whether the readline of this Python is the editline of macOS, which
+# the console goes about in another way, see Console
 EDITLINE = console.EDITLINE
-gnu_readline = unittest.skipIf(EDITLINE, "needs GNU readline, this is editline")
 editline = unittest.skipUnless(EDITLINE, "what editline does instead")
+# How a line break within the line being typed comes out of the terminal:
+# GNU readline writes its own, editline has what the console wrote
+NEW_ROW = "\r\n" if EDITLINE else "\r\n\r"
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
 # A test at a terminal that waits for what never comes fails after this
@@ -475,46 +476,48 @@ class ChatTest(LauncherTest):
             self.assertIn("> /help", said)
         self.assertNotIn("prompt      /he", said)
 
-    @gnu_readline
     def test_at_a_terminal_shift_enter_starts_a_new_line_of_the_prompt(self):
         said = self.at_a_terminal(
             ("> ", "one\x1b[13;2utwo\x1b[27;2;13~three\x1b\rfour\r"),
             ("first line", "\x04"),
         )
         # Each key a line of its own on the screen, all of them one prompt
-        self.assertIn("> one\n\rtwo\n\rthree\n\rfour\n", said)
+        rows = NEW_ROW.replace("\r\n", "\n")
+        self.assertIn(f"> one{rows}two{rows}three{rows}four\n", said)
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
-    @gnu_readline
+    @editline
+    def test_at_a_terminal_of_editline_a_new_line_within_a_line_is_one_too(self):
+        # The cursor moved back two (Ctrl-B) before the key: shown as
+        # ^M there, and a line break of the prompt once it is entered
+        said = self.at_a_terminal(
+            ("> ", "onetwo\x02\x02\x02\x1b[13;2u"),
+            ("^Mtwo", "\r"),
+            ("first line", "\x04"),
+        )
+        self.assertEqual(said.count("user     prompt      one\n"), 1)
+        self.assertEqual(len(re.findall(r"# turn ", said)), 1)
+
     def test_at_a_terminal_lines_pasted_unmarked_are_one_prompt(self):
         # Without the escapes of a bracketed paste, as a terminal that
         # does not mark one sends it
         said = self.at_a_terminal(
             ("> ", "one\rtwo\rthree\r"),
             # It waits for Enter, the line break at its end or not
-            ("> one\r\n\rtwo\r\n\rthree", " four\r"),
+            (f"> one{NEW_ROW}two{NEW_ROW}three", " four\r"),
             ("first line", "\x04"),
         )
-        self.assertIn("> one\n\rtwo\n\rthree four\n", said)
+        rows = NEW_ROW.replace("\r\n", "\n")
+        self.assertIn(f"> one{rows}two{rows}three four\n", said)
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
-    @editline
-    def test_at_a_terminal_of_editline_lines_pasted_unmarked_are_one_prompt(self):
-        # Entered at once: nothing can be put back to be typed on
-        said = self.at_a_terminal(("> ", "one\rtwo\rthree\r"), ("first line", "\x04"))
-        self.assertEqual(said.count("user     prompt      one\n"), 1)
-        self.assertEqual(len(re.findall(r"# turn ", said)), 1)
-        # The line entered before is not taken for one being typed
-        self.assertNotIn("> one", said.split("user     prompt", 1)[1])
-
-    @gnu_readline
     def test_at_a_terminal_an_unfinished_paste_is_typed_on(self):
         said = self.at_a_terminal(
             ("> ", "one\rtw"),
             # Written again as the start of the line, not entered yet
-            ("> one\r\n\rtw", "o\r"),
+            (f"> one{NEW_ROW}tw", "o\r"),
             ("first line", "\x04"),
         )
         self.assertEqual(said.count("user     prompt      one\n"), 1)
