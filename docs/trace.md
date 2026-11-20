@@ -242,7 +242,8 @@ shortened, for `jq` or to load into a database:
 
 Every object has `session`, `time`, `who` and `what`, the rest depends on
 the event. What happened on the network also has `during`, the ids of the
-tool calls running at that time.
+tool calls running at that time. A command no process was seen of has
+`unseen`, see [What ran](#what-ran).
 
 ## The network
 
@@ -328,6 +329,30 @@ sandbox  listen  tcp 0.0.0.0:8080  OPEN to its network  by: [812] node server.js
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
 missed. The session can neither stop it nor reach its record.
+
+A command in whose time no process at all was seen says so, and the
+header counts them:
+
+```
+claude   bash   $ ./tools/sync.sh
+claude   bash   result: ok, 0.0s
+claude   bash   processes: none seen while it ran
+```
+
+- The command is from the transcript and nothing of what it ran is in the
+  record: what it started is not known, neither that it started nothing.
+  Most of them are short commands that were over between two looks.
+- It goes by the clock, from when the command was issued to when its
+  result came. A process of another command, or of Claude Code's own,
+  first seen in that time passes for one of its, and the line is then
+  not there: it is true where it is said, it is not said of every
+  command it is true of.
+- Not said of a command that was not let run or has no result, of one
+  issued before the sidecar was up or after its record ran out of room
+  for processes, and of one in whose time another session of the project
+  ran whose record cannot tell. Not while a session is followed either:
+  the record stays in the sidecar until the session is over.
+- It is not among what `--failed` keeps. `--json` has it as `unseen`.
 
 The same sidecar notes how the session is doing (`health`), every 30
 seconds: the memory it holds, the CPU it used since the line before (100%

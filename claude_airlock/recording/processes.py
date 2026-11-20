@@ -12,7 +12,9 @@ A connection of the capture is then tied to its process by its ports.
 The sidecar looks many times a second, it is not told: what lived shorter
 than that can be missed, and a connection without a process falls back on
 the clock. It comes up a moment after the session, so the very first
-moment of one is not covered either.
+moment of one is not covered either. A command of the transcript in whose
+time it saw no process is said to be one in a trace, see unseen.py of
+report.
 
 It runs as root, the session can neither stop it nor reach the record,
 which stays in the sidecar until the launcher copies it out. The session
@@ -25,6 +27,7 @@ the session, see host_health.py."""
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import subprocess
@@ -265,15 +268,21 @@ class ProcessRecord:
     # of it was ended for want of memory, see health.py
     samples: list[Sample] = field(default_factory=list)
     ended: list[Ended] = field(default_factory=list)
-    # Whether it stopped at its size limit, and whether it could not see
-    # which process holds a socket
-    full: bool = False
+    # Whether it could not see which process holds a socket
     unreadable: bool = False
+    # When the watcher got to watch, none for one that did not, and when
+    # it stopped noting processes at its size limit, none for one that
+    # never did
+    watched_from: float | None = None
+    full_at: float | None = None
     # The runtime's name when the launcher wrote the record from outside
     # the session, with memory and CPU use only (see host_health.py).
     # Empty for a watcher's record.
     outside: str = ""
     _by_pid: dict[int, list[Process]] = field(default_factory=dict, repr=False)
+    # When each process was noted, the earliest first: the lines of a
+    # record come in that order but for a clock that was set back
+    _noted_at: list[float] = field(default_factory=list, repr=False)
 
     def take(self, line: str) -> None:
         """Take in a line of the record. It is the watcher's own, but it
@@ -290,11 +299,21 @@ class ProcessRecord:
         except (ValueError, KeyError, TypeError, RecursionError):
             return
 
-    def _note(self, _when: float, said: dict) -> None:
-        self.full |= said["note"] == Note.FULL
-        self.unreadable |= said["note"] == Note.UNREADABLE
-        if said["note"] == Note.STARTED:
+    @property
+    def full(self) -> bool:
+        """Whether it stopped at its size limit."""
+        return self.full_at is not None
+
+    def _note(self, when: float, said: dict) -> None:
+        note = said["note"]
+        self.unreadable |= note == Note.UNREADABLE
+        # Each as first said, should a line say it again
+        if note == Note.FULL and self.full_at is None:
+            self.full_at = when
+        if note == Note.STARTED:
             self.outside = str(said.get("outside", ""))
+            if self.watched_from is None:
+                self.watched_from = when
 
     def _limit(self, _when: float, said: dict) -> None:
         if said["limit"] == "pids":
@@ -325,6 +344,7 @@ class ProcessRecord:
         )
         self.processes.append(found)
         self._by_pid.setdefault(found.pid, []).append(found)
+        bisect.insort(self._noted_at, when)
 
     # What a line of the record tells of, by the key only such a line
     # has, in the order they are looked for. A line with none of them is
@@ -378,6 +398,21 @@ class ProcessRecord:
             return []
         at, pids = min(noted, key=lambda found: abs(found[0] - when))
         return self.lineage(max(pids), at) if pids else []
+
+    def noted_processes(
+        self, start: float, end: float, within: float = 0.0
+    ) -> bool | None:
+        """Whether a process was noted between two times, or within so
+        many seconds of them. None when the record cannot tell: the
+        launcher wrote it from outside the session, or its watcher was
+        not up yet at the first of them, or had stopped noting processes
+        by the second."""
+        if self.outside or self.watched_from is None or start < self.watched_from:
+            return None
+        if self.full_at is not None and end > self.full_at:
+            return None
+        first = bisect.bisect_left(self._noted_at, start - within)
+        return first < len(self._noted_at) and self._noted_at[first] <= end + within
 
 
 def read_record(path: Path) -> ProcessRecord:

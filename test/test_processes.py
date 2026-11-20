@@ -4,6 +4,7 @@ what --trace shows of it."""
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -13,13 +14,17 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from harness import LauncherTest, prompts_at
 from test_capture import pcap_file, tcp
 
+from claude_airlock.events import Event, Who
 from claude_airlock.recording import health, processes, procwatch
+from claude_airlock.recording.records import TracedSession
+from claude_airlock.report import unseen
 
 SIDECAR = "claude-proj.procs"
 
@@ -217,6 +222,89 @@ class RecordTest(unittest.TestCase):
 
 
 GIB = 2**30
+
+
+def command(when: float, seconds: float | None = 1.0, **fields: object) -> Event:
+    """A command of a transcript, issued at a time, whose result came so
+    many seconds later, none for one without a result."""
+    took = {} if seconds is None else {"seconds": seconds}
+    return Event(
+        when, Who.CLAUDE, "bash", ["$ true"], {"tool": "Bash", **took, **fields}
+    )
+
+
+class UnseenTest(unittest.TestCase):
+    def setUp(self):
+        self.record = noted({"t": 100.0, "note": "started"}, ran(110.0, 812, 7, "make"))
+        self.session = TracedSession(
+            "claude-proj", "/proj", 99.0, processes="p", end=200.0, until=200.0
+        )
+
+    def marked(self, *events: Event, record: processes.ProcessRecord | None = None):
+        watched = [(self.session, record or self.record)]
+        return unseen.mark_unseen(events, watched), [
+            unseen.UNSEEN in event.fields for event in events
+        ]
+
+    def test_a_command_no_process_was_seen_of_says_so(self):
+        seen, missed = command(109.5), command(120.0, 0.01)
+        self.assertEqual(self.marked(seen, missed), (1, [False, True]))
+        self.assertEqual(missed.details[-1], unseen.SAID)
+        self.assertNotIn(unseen.SAID, seen.details)
+        # Not something gone wrong: the line is not marked as that
+        self.assertEqual(missed.alerts, set())
+
+    def test_a_process_noted_a_moment_after_the_result_is_still_its(self):
+        within = unseen.NOTED_WITHIN
+        self.assertEqual(self.marked(command(109.0, 1 - within / 2))[0], 0)
+        self.assertEqual(self.marked(command(110.0 + within / 2, 0.1))[0], 0)
+        self.assertEqual(self.marked(command(108.0, 1.0))[0], 1)
+
+    def test_what_is_not_known_to_have_run_is_left_alone(self):
+        for event in (
+            # Not let run, without a result, another tool, and a result
+            # said to have come before its command
+            command(120.0, refused=True),
+            command(120.0, None),
+            command(120.0, tool="Read"),
+            command(120.0, -5.0),
+        ):
+            self.assertEqual(self.marked(event), (0, [False]))
+
+    def test_nothing_is_said_where_the_record_cannot_tell(self):
+        # Before the watcher was up, and after the session was over
+        self.assertEqual(self.marked(command(99.5, 0.1))[0], 0)
+        self.assertEqual(self.marked(command(199.5))[0], 0)
+        # Once it had no room for processes, and up to then
+        full = noted(
+            {"t": 100.0, "note": "started"},
+            ran(110.0, 812, 7, "make"),
+            {"t": 150.0, "note": "full"},
+        )
+        self.assertEqual(self.marked(command(160.0), record=full)[0], 0)
+        self.assertEqual(self.marked(command(120.0), record=full)[0], 1)
+        # Written from outside the session, and by a watcher that never
+        # got to watch
+        outside = noted({"t": 100.0, "note": "started", "outside": "gVisor"})
+        self.assertEqual(self.marked(command(120.0), record=outside)[0], 0)
+        self.assertEqual(self.marked(command(120.0), record=noted())[0], 0)
+        self.assertEqual(unseen.mark_unseen([command(120.0)], []), 0)
+
+    def test_a_process_of_any_session_that_ran_then_counts(self):
+        other = dataclasses.replace(self.session, name="claude-proj-2", start=125.0)
+        theirs = noted({"t": 125.0, "note": "started"}, ran(130.0, 9, 7, "true"))
+        watched = [(self.session, self.record), (other, theirs)]
+        self.assertEqual(unseen.mark_unseen([command(130.0, 0.1)], watched), 0)
+        self.assertEqual(unseen.mark_unseen([command(140.0, 0.1)], watched), 1)
+        # Before the other session ran it is not asked, and a command
+        # that was running as it started may be its own
+        self.assertEqual(unseen.mark_unseen([command(120.0, 0.1)], watched), 1)
+        self.assertEqual(unseen.mark_unseen([command(124.5)], watched), 0)
+
+    def test_the_header_counts_them(self):
+        self.assertEqual(unseen.unseen_summary(0), [])
+        self.assertIn("1 command ran with no process", unseen.unseen_summary(1)[0])
+        self.assertIn("3 commands ran with no process", unseen.unseen_summary(3)[0])
 
 
 class FakeSession:
@@ -715,6 +803,53 @@ class SidecarTest(LauncherTest):
         )
         self.assertIn("#   processes 2 seen to run", stdout)
         self.assertNotIn("sandbox  exec", stdout)
+
+    def test_the_trace_says_which_command_no_process_was_seen_of(self):
+        self.watched(session="sleep 1")
+        (copied,) = (self.state / "processes").glob("*.jsonl")
+        (line,) = (self.state / "net-sessions.jsonl").read_text().splitlines()
+        start, end = (json.loads(line)[key] for key in ("start", "end"))
+        # Within the time the session was recorded for, whatever that was
+        step = (end - start) / 10
+        lines = [{"t": start, "note": "started"}, ran(start + step, 812, 7, "make")]
+        copied.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+        def at(when: float) -> str:
+            return datetime.fromtimestamp(when, timezone.utc).isoformat()  # noqa: UP017
+
+        def called(tool_id: str, text: str, began: float) -> list[dict]:
+            block = {"type": "tool_use", "id": tool_id, "name": "Bash"}
+            given = {**block, "input": {"command": text}}
+            back = {"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}
+            return [
+                {
+                    "type": "assistant",
+                    "timestamp": at(began),
+                    "message": {"content": [given]},
+                },
+                {
+                    "type": "user",
+                    "timestamp": at(began + step / 10),
+                    "message": {"content": [back]},
+                },
+            ]
+
+        entries = called("c1", "make all", start + step) + called(
+            "c2", "true", start + 6 * step
+        )
+        self.write_transcript("0a", entries)
+        shown = self.launch("--trace").stdout
+        self.assertEqual(shown.count("processes: none seen while it ran"), 1)
+        self.assertRegex(
+            shown,
+            r"\$ true\n.*result: ok.*\n.*bash +processes: none seen while it ran",
+        )
+        self.assertIn("#   1 command ran with no process seen", shown)
+        # Not what --failed keeps, and a value of its own with --json
+        self.assertNotIn("none seen", self.launch("--trace", "--failed").stdout)
+        events = map(json.loads, self.launch("--trace", "--json").stdout.splitlines())
+        missed = [e["input"]["command"] for e in events if e.get("unseen")]
+        self.assertEqual(missed, ["true"])
 
     def test_verbose_adds_the_processes(self):
         stdout = self.trace("--verbose")

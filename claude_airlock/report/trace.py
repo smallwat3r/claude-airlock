@@ -60,6 +60,7 @@ from .stream import EVERYTHING, Filter, Timeline, ordered
 from .summary import summary
 from .trace_args import picked_session, trace_options
 from .transcript import transcript_events
+from .unseen import mark_unseen, unseen_summary
 
 
 def removed_events(gone: list[dict], project_dir: str, verbose: bool) -> list[Event]:
@@ -159,9 +160,20 @@ def session_events(
     # in what Claude Code says
     noted_rows: list[tuple[str, str]] = []
     noted: list[Event] = []
+    told = [
+        *transcript_side(own, project_dir, verbose),
+        *(
+            event
+            for of_one in subagents
+            for event in transcript_side(of_one, project_dir, verbose)
+        ),
+    ]
     if times:
         start, end = min(times), max(times)
-        net_lines, net_events = network(Recorded.between(host, start, end), verbose)
+        recorded = Recorded.between(host, start, end)
+        net_lines, net_events = network(recorded, verbose)
+        # The commands the record of the processes has nothing of
+        net_lines += unseen_summary(mark_unseen(told, recorded.watched))
         noted_rows, noted = noted_events(host, start, end)
     header = [
         *session_header(own, subagents, project_dir),
@@ -174,16 +186,7 @@ def session_events(
         *(labelled(about, said) for about, said in noted_rows),
         *chosen.header(),
     ]
-    found = [
-        *transcript_side(own, project_dir, verbose),
-        *(
-            event
-            for of_one in subagents
-            for event in transcript_side(of_one, project_dir, verbose)
-        ),
-        *net_events,
-        *noted,
-    ]
+    found = [*told, *net_events, *noted]
     return header, ordered(found, lambda event: event, Timeline(), chosen)
 
 
