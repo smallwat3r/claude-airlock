@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import os
 import queue
 import signal
@@ -30,22 +31,26 @@ from ..files import private_dir
 from ..projects import sandboxed_root
 from ..recording.changes import note_change
 from ..report.layout import (
+    ALERT,
     BOLD,
     BRIGHT_CYAN,
     BRIGHT_GREEN,
     BRIGHT_MAGENTA,
+    HEADER_START,
     ITALIC,
     STYLES,
     Layout,
     painted,
     together,
 )
+from ..report.planted import Planted
 from ..settings import Host
-from .asking import Asked, Asker
+from .asking import YES, Asked, Asker
 from .commands import LOCAL, Commands, Did, Handover, Resume
 from .console import Console, Page
 from .drift import Drift
 from .followed import POLL, Followed
+from .guard import GO_ON, STILL_READ, Guard, stop_said
 from .notices import Notices
 from .pipe import Agent
 from .reply import ReplyStream
@@ -88,6 +93,9 @@ REASON_STYLE = ITALIC
 # Seconds the call claude asks about is given to be written, before the
 # question is put
 ASK_SETTLE = 1.0
+# Seconds a turn that was stopped is given to end, before the
+# conversation is cleared
+STOP_QUIET = 10.0
 # Seconds a session is given to end before a line says how to stop it
 LEAVE_QUIET = 2.0
 # How long a session that was told to stop is waited for, docker gives it
@@ -112,8 +120,14 @@ class Chat:
         console: Console | None = None,
         handover: Handover | None = None,
         start: Event | None = None,
+        guard: Guard | None = None,
     ):
         self._host = host
+        # What a turn is stopped by for what claude was given to read,
+        # none when the user switched that off
+        self._guard = guard
+        # Whether a turn was stopped by it and the user sent nothing since
+        self._guarded = False
         # How the sandbox was started as the launcher noted it, said first
         self._start = start
         # Of the session's container, to stop it by
@@ -278,6 +292,11 @@ class Chat:
         while not self._over:
             if not self._console.interactive:
                 self._wait_for_turn()
+                if self._guarded:
+                    # Nobody is there to say how to go on, and the lines
+                    # that are left were written before this was known
+                    self._page.note("chat", "the lines left are not sent, leaving")
+                    return
             try:
                 if lines:
                     line = self._read(MORE)
@@ -323,6 +342,7 @@ class Chat:
         when it can: within that turn between two of its steps, or as a
         turn of its own after it, which it then says it starts."""
         started = self._begin()
+        self._guarded = False
         self._agent.prompt(text)
         if not started:
             self._page.note("chat", "sent, claude takes it up when it can")
@@ -437,6 +457,9 @@ class Chat:
         """Take in what claude or a subagent of its said, or was given:
         a reply, a tool call or its result."""
         self._turns.current.heard(message)
+        found = self._guard.heard(message) if self._guard else ()
+        if self._guard and found:
+            self._guard_turn(self._guard, found)
         if message.get("type") == "assistant" and own(message):
             self._session.replied(message)
             self._usage.step(message)
@@ -478,25 +501,96 @@ class Chat:
         if more or turn.said or turn.interrupted or ended_badly(result):
             self._page.say([turn_line(turn, result, more)])
         self._status.refresh()
-        self._page.put([ready_line(self._page.layout.colour, self._notices.running)])
+        if not turn.guarded:
+            # Not of a turn that was stopped for what claude read: it has
+            # not finished, and what comes next is said where it stopped
+            ready = ready_line(self._page.layout.colour, self._notices.running)
+            self._page.put([ready])
         if not turn.interrupted and time.monotonic() - turn.started >= LONG_TURN:
             self._console.bell()
         self._console.hold(False)
         self._turns.end()
         self._wake.set()
 
+    def _interrupt_turn(self) -> bool:
+        """Ask claude to end the turn that runs. Whether it was asked:
+        not without a turn, and not twice for one."""
+        turn = self._turns.current
+        if not self._turns.running or turn.interrupted:
+            return False
+        turn.interrupted = True
+        self._agent.request("interrupt")
+        return True
+
     def _stop(self) -> None:
         """Ctrl-C: claude is asked to end the turn that runs, and the
         second time the session is stopped. So is one that is slow to
         leave."""
-        turn = self._turns.current
-        if self._leaving or (self._turns.running and turn.interrupted):
+        if not self._leaving and self._interrupt_turn():
+            self._page.note("chat", "interrupting, Ctrl-C again stops the session")
+        elif self._leaving or self._turns.running:
             self._page.note("chat", "stopping the session")
             docker_ok("stop", self._name)
-        elif self._turns.running:
-            turn.interrupted = True
-            self._agent.request("interrupt")
-            self._page.note("chat", "interrupting, Ctrl-C again stops the session")
+
+    def _guard_turn(self, guard: Guard, found: tuple[Planted, ...]) -> None:
+        """Stop the turn for what claude was just given to read: first of
+        all, its next call may be a moment away. Then say why, under the
+        call it is of. Claude has read the text, so whether it goes on
+        with it is the user's to say, and what it asked meanwhile is
+        refused. The user is asked where there is one to answer, once for
+        all that is found until they did."""
+        stopped = self._interrupt_turn()
+        self._guarded = True
+        if self._turns.running:
+            self._turns.current.guarded = True
+        asks = self._console.interactive
+        first = guard.question() if asks else True
+        if first:
+            # Not the question of an earlier stop, which is for this too
+            self._asker.give_up()
+        self._followed.settle(ASK_SETTLE)
+        said = stop_said(found, stopped, asks)
+        lines = [HEADER_START + line for line in said]
+        colour = self._page.layout.colour
+        self._page.put([painted(ALERT, line) if colour else line for line in lines])
+        self._console.bell()
+        if asks and first:
+            self._asked.then(functools.partial(self._ask_to_go_on, guard))
+
+    def _ask_to_go_on(self, guard: Guard) -> None:
+        """Ask whether claude goes on with what a turn was stopped for in
+        the conversation. A yes keeps it, and is remembered for what was
+        read (see Guard), anything else clears the conversation: the text
+        is in it until then, whatever claude is told. No answer, the user
+        interrupted or left, leaves it as it is."""
+        typed, went_on = None, False
+        try:
+            typed = self._asker.ask(GO_ON)
+            went_on = typed is not None and typed.strip().lower() in YES
+        finally:
+            # Whatever came of it: a question that is never answered for
+            # would be the last one put
+            guard.answered(went_on)
+        if self._gone():
+            return
+        if went_on:
+            kept = "claude has it in the conversation, say how to go on"
+            self._page.note("chat", f"{kept}: not asked again for what it read")
+        elif typed is None:
+            self._page.note("chat", f"not answered: {STILL_READ}")
+        else:
+            self._start_anew()
+
+    def _start_anew(self) -> None:
+        """Clear the conversation, once the turn that was stopped is
+        over: what claude read goes with it."""
+        patience = time.monotonic() + STOP_QUIET
+        while self._turns.running and time.monotonic() < patience:
+            if self._gone():
+                return
+            time.sleep(0.05)
+        self._page.note("chat", "clearing the conversation, what claude read with it")
+        self._send("/clear")
 
     def _leave(self, listener: threading.Thread) -> int:
         """End the session, which leaves when it is told no more prompts
@@ -579,11 +673,13 @@ def chat(
     docker_args: list[str],
     handover: Handover | None = None,
     start: Event | None = None,
+    guarded: bool = False,
 ) -> int:
     """Talk to the session a docker command runs, given its arguments, in
     the sandbox it was started with. Returns how docker ended. What the
     user asked to be done after it is left in handover. With start, how
-    the sandbox was started is said first, as a trace shows it."""
+    the sandbox was started is said first, as a trace shows it. Guarded,
+    a turn is stopped for what claude was given to read, see guard.py."""
     # What is said is dimmed in a trace, where it was read before. Not here.
     styles = {**STYLES, Kind.REPLY: "", Kind.COMMAND: ""}
     layout = dataclasses.replace(
@@ -601,4 +697,5 @@ def chat(
     def connect(on_end: Callable[[], None]) -> Agent:
         return Agent(docker_args, on_end)
 
-    return Chat(host, sandbox, layout, connect, console, handover, start).run()
+    guard = Guard() if guarded else None
+    return Chat(host, sandbox, layout, connect, console, handover, start, guard).run()

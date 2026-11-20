@@ -34,6 +34,9 @@ class Turn:
     said: int = 0
     shown: int = 0
     interrupted: bool = False
+    # Whether it was stopped for what claude was given to read, see
+    # guard.py
+    guarded: bool = False
     # Whether claude is thinking, as far as it says
     thinking: bool = False
     # The tool of each call claude said it made and has no result of yet,

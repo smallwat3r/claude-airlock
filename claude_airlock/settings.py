@@ -82,6 +82,9 @@ class Settings:
     # Whether a session runs in line mode (chat/), not behind Claude
     # Code's own
     line_mode: bool = True
+    # Whether line mode stops a turn for what claude was given to read,
+    # see chat/guard.py
+    injection_stop: bool = True
     # None is ~/claude-shared when it exists, "" no shared directory
     shared_dir: str | None = None
     extra_dirs: tuple[str, ...] = ()
@@ -310,6 +313,11 @@ SETTINGS = (
     Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc-hostnet for gVisor"),
     Setting("ASK", Kind.SWITCH, "1 has Claude Code ask before it uses a tool"),
     Setting("LINE_MODE", Kind.SWITCH, "0 runs Claude Code with its native UI"),
+    Setting(
+        "INJECTION_STOP",
+        Kind.SWITCH,
+        "0 lets a turn in line mode go on after it read what looks forged",
+    ),
     Setting(
         "SHARED_DIR",
         Kind.NAME,

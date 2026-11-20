@@ -326,7 +326,14 @@ def recorded_session(
         through = None
         if plan.is_chat:
             sandbox = Sandbox.started(name, start, host.home)
-            through = partial(chat, host, sandbox, handover=plan.handover, start=said)
+            through = partial(
+                chat,
+                host,
+                sandbox,
+                handover=plan.handover,
+                start=said,
+                guarded=settings.injection_stop,
+            )
         run_args = run_args + agent_args
         try:
             status = run_session(run_args, image, command_args(plan), ending, through)

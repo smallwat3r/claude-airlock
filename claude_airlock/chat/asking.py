@@ -312,9 +312,11 @@ class Asked:
     def __init__(self, asker: Asker, page: Page):
         self._asker = asker
         self._page = page
-        # Each the id claude asked under and the request, then None when
-        # nothing more is asked
-        self._waiting: queue.Queue[tuple[object, dict] | None] = queue.Queue()
+        # Each the id claude asked under and the request, or what the chat
+        # itself has to ask, then None when nothing more is asked
+        self._waiting: queue.Queue[tuple[object, dict] | Callable[[], None] | None] = (
+            queue.Queue()
+        )
         # How many of them have no answer yet, the one being put too
         self._count = 0
         self._counting = threading.Lock()
@@ -330,6 +332,14 @@ class Asked:
         with self._counting:
             self._count += 1
         self._waiting.put((asked, request))
+
+    def then(self, ask: Callable[[], None]) -> None:
+        """Have the chat ask something of its own when its turn comes,
+        on the thread the questions of claude are put on: one question
+        waits for a line at a time."""
+        with self._counting:
+            self._count += 1
+        self._waiting.put(ask)
 
     def close(self) -> None:
         """Nothing more is asked: claude has ended."""
@@ -355,12 +365,27 @@ class Asked:
             waiting = self._waiting.get()
             if waiting is None:
                 return
-            asked, request = waiting
             try:
-                claude.respond(asked, self._asker.decide(request))
-            except Exception as error:  # noqa: BLE001
-                self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
-                claude.refuse(asked, "the question could not be put")
+                if callable(waiting):
+                    self._own(waiting)
+                else:
+                    self._answered(claude, *waiting)
             finally:
                 with self._counting:
                     self._count -= 1
+
+    def _answered(self, claude: Answered, asked: object, request: dict) -> None:
+        """Put what claude asked and give it the answer."""
+        try:
+            claude.respond(asked, self._asker.decide(request))
+        except Exception as error:  # noqa: BLE001
+            self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
+            claude.refuse(asked, "the question could not be put")
+
+    def _own(self, ask: Callable[[], None]) -> None:
+        """Put what the chat itself asks. One that fails is said, the
+        questions after it are still put."""
+        try:
+            ask()
+        except Exception as error:  # noqa: BLE001
+            self._page.note("chat", f"FAILED to ask: {flat(repr(error))}")
