@@ -3,6 +3,7 @@ assembled from them, and the build."""
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
@@ -30,6 +31,11 @@ LSP_MARKER = "# claude-feat-lsp: "
 # into the context by that name.
 PLUGIN_CONTEXT = "claude.plugin"
 PLUGIN_DIR = "/opt/claude-airlock-plugin"
+# What a directory of a feature can come to hold that is not the feature's:
+# left by Finder on macOS, by Python and by an editor. Not copied into the
+# build context and not in the tag, where one would have the image built
+# again. By name, at any depth.
+NOT_THE_FEATURES = (".DS_Store", "__pycache__", "*.pyc", "*~", "#*#", ".#*")
 # What the first was called, in fragments written before. Refused, so that a
 # tool does not drop out of what Claude is told without a word.
 FORMER_CLAUDE_MD_MARKER = "# claude: "
@@ -168,6 +174,21 @@ def sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
     return "\n".join(lines).rstrip("\n")
 
 
+def feature_files(directory: Path) -> list[Path]:
+    """The files of a feature's directory that go into the build, in the
+    order of their names."""
+    return sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file()
+        and not any(
+            fnmatch.fnmatch(part, pattern)
+            for part in path.relative_to(directory).parts
+            for pattern in NOT_THE_FEATURES
+        )
+    )
+
+
 def image_tag(
     host: Host, dockerfile: str, claude_md: str, context_dirs: dict[str, Path]
 ) -> str:
@@ -177,7 +198,7 @@ def image_tag(
     content = f"{host.home}\n{dockerfile}\n{claude_md}\n"
     digest = hashlib.sha256(content.encode())
     for name, directory in context_dirs.items():
-        for file in sorted(path for path in directory.rglob("*") if path.is_file()):
+        for file in feature_files(directory):
             digest.update(f"{name}/{file.relative_to(directory)}\n".encode())
             digest.update(file.read_bytes())
     return f"{IMAGE_NAME}:{digest.hexdigest()[:12]}"
@@ -228,7 +249,11 @@ def build_image(image: Image, host: Host, *build_options: str) -> int:
         ):
             Path(context, name).write_text(content + "\n", encoding="utf-8")
         for name, directory in image.context_dirs.items():
-            shutil.copytree(directory, Path(context, name))
+            shutil.copytree(
+                directory,
+                Path(context, name),
+                ignore=shutil.ignore_patterns(*NOT_THE_FEATURES),
+            )
         manifest = Path(context, PLUGIN_CONTEXT, ".claude-plugin", "plugin.json")
         manifest.parent.mkdir(parents=True)
         manifest.write_text(image.plugin + "\n", encoding="utf-8")

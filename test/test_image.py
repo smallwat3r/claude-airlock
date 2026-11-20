@@ -108,6 +108,26 @@ class ImageTest(LauncherTest):
         built = {call[1] for call in self.calls() if call[0] == "build"}
         self.assertEqual(len(built), 2)
 
+    def test_what_is_left_in_a_features_directory_is_not_the_features(self):
+        tool = self.write_feature("mine", "COPY mine/ /opt/mine/") / "mine"
+        (tool / "lib").mkdir(parents=True)
+        (tool / "lib" / "tool").write_text("one\n")
+        self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
+        # By Finder, Python and an editor, in it and under it
+        (tool / ".DS_Store").write_text("finder")
+        (tool / "lib" / "tool~").write_text("before")
+        (tool / "lib" / "__pycache__").mkdir()
+        (tool / "lib" / "__pycache__" / "tool.cpython-314.pyc").write_text("made")
+        self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
+        out = self.work / "out" / "mine"
+        self.assertEqual(
+            sorted(str(path.relative_to(out)) for path in out.rglob("*")),
+            ["lib", "lib/tool"],
+        )
+        # The same image as without them
+        built = {call[1] for call in self.calls() if call[0] == "build"}
+        self.assertEqual(len(built), 1)
+
     def test_every_feature_assembles(self):
         result = self.launch("--dockerfile")
         self.assertEqual(result.status, 0)
