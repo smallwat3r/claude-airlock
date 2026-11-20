@@ -395,8 +395,11 @@ def settings_help() -> str:
 def read_config_file(path: str) -> dict[str, str]:
     """Defaults for the CLAUDE_AIRLOCK_* settings from the user's config
     file: one NAME=value per line, # comments, the value taken literally
-    (no quotes, no ~ or variable expansion). A line that is not a known
-    setting aborts: a typo must not silently leave a restriction off.
+    (no quotes, no variable expansion, a leading ~ is for the settings
+    that take a path to expand). A line that is not a known setting
+    aborts, and so does a name given twice: a typo must not silently
+    leave a restriction off, nor a later line undo an earlier one. So
+    does a file that cannot be read, which would say nothing.
     Deliberately not read from the project, the session can write there
     and could switch its own sandboxing off for the next run."""
     values: dict[str, str] = {}
@@ -404,7 +407,9 @@ def read_config_file(path: str) -> dict[str, str]:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return values
-    for line in text.split("\n"):
+    except (OSError, UnicodeDecodeError) as err:
+        raise Fatal(f"{path}: cannot be read: {err}") from err
+    for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         name, separator, value = line.partition("=")
@@ -414,6 +419,8 @@ def read_config_file(path: str) -> dict[str, str]:
         )
         if not separator or not known:
             raise Fatal(f"{path}: not a known setting: {line}")
+        if name in values:
+            raise Fatal(f"{path}: set twice: {name}")
         values[name] = value
     return values
 

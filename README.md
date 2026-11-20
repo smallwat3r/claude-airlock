@@ -201,9 +201,12 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 ```
 
 - The environment wins, so one session can override the file. A variable
-  that is set but empty says nothing, the file is asked next.
-- Values are taken literally, without quotes or `~` expansion.
-- An unknown name stops the launcher.
+  that is set but empty says nothing, the file is asked next, but for
+  `CLAUDE_AIRLOCK_FEATURES` and `CLAUDE_AIRLOCK_SHARED_DIR`, where empty
+  says none.
+- Values are taken literally, without quotes. A leading `~` is your home
+  directory in the settings that take a path.
+- A name given twice stops the launcher, as an unknown one does.
 - The file is only read from your config directory, never from the
   project, which a session can write to.
 - `CLAUDE_AIRLOCK_EXTRA_DIRS` and `CLAUDE_AIRLOCK_EXTRA_DIRS_RO` are not

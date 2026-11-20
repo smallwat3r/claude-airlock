@@ -157,18 +157,27 @@ def try_lock_file(path: str) -> int | None:
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except BlockingIOError:
         os.close(descriptor)
         return None
+    except OSError:
+        # Not held by another: a directory that takes no lock, which
+        # must not read as a name that is taken
+        os.close(descriptor)
+        raise
     return descriptor
 
 
-def open_plain(path: str | Path) -> BinaryIO | None:
+def open_plain(path: str | Path, *, links: bool = False) -> BinaryIO | None:
     """A file a session can write, opened to be read, none when it is not
     there or is not a plain file. A session can put something else in its
     place, also after it was listed: never a link to something else on the
-    host, nor a pipe that never ends, nor a directory."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    host, nor a pipe that never ends, nor a directory. With links a link
+    is followed, for what the user may keep as one, and what it leads to
+    is still a plain file or none."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+    if not links:
+        flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -236,19 +245,24 @@ def json_object(text: str | bytes) -> dict | None:
 def settings_object(path: str | Path) -> dict:
     """What a settings file of Claude Code holds, nothing for one that is
     not there, not to be read, or that a session made too large or nested
-    too deep to read."""
+    too deep to read. Through a link, as Claude Code reads it and as a
+    user keeps the one of ~/.claude, but never from a pipe or a device a
+    session put there, which would not end."""
+    file = open_plain(path, links=True)
+    if file is None:
+        return {}
     try:
-        if os.path.getsize(path) > SETTINGS_BYTES:
-            return {}
-        return json_object(Path(path).read_bytes()) or {}
+        with file:
+            content = file.read(SETTINGS_BYTES + 1)
     except OSError:
         return {}
+    return {} if len(content) > SETTINGS_BYTES else json_object(content) or {}
 
 
 def expand_home(path: str, home: str) -> str:
     """A path with a leading ~ as the home directory it stands for. The
-    shell does not expand it everywhere (--add-dir=~/x), and nothing does
-    in a config file or in what git and Claude Code keep."""
+    shell does not expand it everywhere (--add-dir=~/x), and nothing else
+    does in a config file or in what git and Claude Code keep."""
     if path == "~":
         return home
     return home + path[1:] if path.startswith("~/") else path
