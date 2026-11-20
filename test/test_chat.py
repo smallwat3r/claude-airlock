@@ -4,6 +4,7 @@ over pipes in the JSON Lines of its print mode."""
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -14,6 +15,7 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -21,7 +23,7 @@ import unittest.mock
 from datetime import datetime
 from pathlib import Path
 
-from harness import LAUNCHER, LauncherTest
+from harness import LAUNCHER, ROOT, LauncherTest
 
 try:
     import readline
@@ -1048,6 +1050,81 @@ class ChatTest(LauncherTest):
             heart.beat()
             self.assertEqual(terminal._working, "")
         self.assertEqual(lines, [])
+
+
+# Reads two lines at a terminal, and says in a file what readline had of
+# the second while it was typed, at its end and at its cursor
+TYPING = r"""
+import sys, threading, time
+from claude_airlock.chat import console
+
+def look():
+    time.sleep(float(sys.argv[2]))
+    typed = console.readline.get_line_buffer()
+    point = console._point() if console._point else None
+    with open(sys.argv[1], "w") as said:
+        said.write(repr((typed, point)))
+
+input("first> ")
+threading.Thread(target=look, daemon=True).start()
+input("second> ")
+"""
+
+
+@unittest.skipUnless(readline, "this Python has no readline")
+class ReadlineTest(unittest.TestCase):
+    """What the console takes from readline for granted, whichever
+    library it is made with."""
+
+    def test_readline_says_what_is_typed_of_a_line_while_it_is_typed(self):
+        # The console writes the line being typed again under what comes
+        # meanwhile: as readline has it, the line before it left behind
+        with tempfile.TemporaryDirectory() as work:
+            said = Path(work, "said")
+            environment = {**os.environ, "TERM": "xterm", "PYTHONPATH": str(ROOT)}
+            child, terminal = pty.fork()
+            if child == 0:
+                os.execve(
+                    sys.executable,
+                    [sys.executable, "-c", TYPING, str(said), "1.5"],
+                    environment,
+                )
+            try:
+                self.wait_for(terminal, b"first> ")
+                os.write(terminal, b"abcdef\r")
+                self.wait_for(terminal, b"second> ")
+                os.write(terminal, b"xy")
+                deadline = time.monotonic() + PATIENCE
+                while not said.exists() or not said.read_text():
+                    self.assertLess(time.monotonic(), deadline)
+                    self.wait_for(terminal, None, 0.1)
+                os.write(terminal, b"\r")
+            finally:
+                with contextlib.suppress(OSError):
+                    os.kill(child, signal.SIGKILL)
+                os.close(terminal)
+                os.waitpid(child, 0)
+            typed, point = ast.literal_eval(said.read_text())
+        library = "editline" if EDITLINE else "GNU readline"
+        self.assertEqual(typed, "xy", f"with {library}, the cursor at {point}")
+        if point is not None:
+            # In bytes from the start of the line, where it can be read
+            self.assertEqual(point, 2, f"with {library}")
+
+    def wait_for(self, terminal: int, wanted: bytes | None, patience=PATIENCE):
+        """Read what a terminal writes until something is, or for a time."""
+        seen = b""
+        deadline = time.monotonic() + patience
+        while wanted is None or wanted not in seen:
+            if time.monotonic() > deadline:
+                if wanted is None:
+                    return
+                self.fail(f"never wrote {wanted!r}: {seen!r}")
+            if select.select([terminal], [], [], 0.05)[0]:
+                chunk = os.read(terminal, 65536)
+                if not chunk:
+                    self.fail(f"left before it wrote {wanted!r}: {seen!r}")
+                seen += chunk
 
 
 class PipeTest(unittest.TestCase):
