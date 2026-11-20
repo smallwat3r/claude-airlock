@@ -5,7 +5,8 @@ their own way.
 /mode changes the permission mode, which claude is asked for over the
 pipe. /resume goes on with an earlier session of the project, which is
 another launch (see Handover). /mcp lists the MCP servers claude said it
-has. !COMMAND runs a command in the sandbox (see shell.py).
+has. !COMMAND runs a command in the sandbox (see shell.py). /login and
+/logout say where that is done, claude does neither over the pipe.
 
 Each is one line of LOCALS: what completes at the prompt and what /help
 says are made of that."""
@@ -29,6 +30,12 @@ MODE = "/mode"
 # Claude Code's own two are not there in its print mode, these say the
 # status of the chat
 STATUS = ("/status", "/statusline")
+# Claude Code's own two are not there in its print mode either, and
+# these cannot stand in for them: a login is a page to open and a code to
+# type back. The launcher carries the host's login to the session, see
+# sandbox/login.py
+LOGIN = ("/login", "/logout")
+NATIVE_UI = "CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock"
 # What a line starts with that is a command for the sandbox, not a word of
 # its own: the command follows it
 SHELL = "!"
@@ -164,6 +171,19 @@ class Commands:
         self._status()
         return Did.DONE
 
+    def _login(self, _words: list[str]) -> Did:
+        """/login and /logout: where to do it, which is not here."""
+        self._page.say(
+            [
+                labelled(
+                    "chat", "line mode cannot log in or out, do it one of two ways:"
+                ),
+                "  with claude on the host, the sessions are given its login",
+                f"  in a session with Claude Code's own UI: {NATIVE_UI}",
+            ]
+        )
+        return Did.DONE
+
     def _help(self, _words: list[str]) -> Did:
         self._page.say(HELP)
         return Did.DONE
@@ -247,6 +267,12 @@ LOCALS = (
         "!COMMAND",
         "run a command in the sandbox, claude is not told",
         Commands._shelled,
+    ),
+    Local(
+        LOGIN,
+        "/login",
+        "where to log in or out, which line mode cannot do",
+        Commands._login,
     ),
     Local(LEAVE, "/exit, /quit", "leave, as Ctrl-D does", Commands._left),
     Local(("/help",), "", "", Commands._help),
