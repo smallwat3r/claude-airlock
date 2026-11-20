@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import math
 import os
 import queue
 import signal
@@ -101,6 +102,9 @@ ASK_SETTLE = 1.0
 # Seconds a turn that was stopped is given to end, before the
 # conversation is cleared
 STOP_QUIET = 10.0
+# Seconds within which a second Ctrl-C at the prompt leaves, as it does in
+# Claude Code's own UI. One that comes later drops the line again.
+LEAVE_WITHIN = 3.0
 # Seconds a session is given to end before a line says how to stop it
 LEAVE_QUIET = 2.0
 # How long a session that was told to stop is waited for, docker gives it
@@ -305,6 +309,8 @@ class Chat:
         """Read what the user types and do what it asks, until they leave
         or the session has ended."""
         lines: list[str] = []
+        # When Ctrl-C last dropped the line, for the one that follows it
+        dropped = -math.inf
         while not self._over:
             if not self._console.interactive:
                 self._wait_for_turn()
@@ -319,9 +325,18 @@ class Chat:
                 else:
                     line = self._read(PROMPT, headed=True)
             except KeyboardInterrupt:
-                # Ctrl-C drops what was typed, unless the session is over
+                # Ctrl-C drops what was typed, unless the session is over.
+                # A second one right after it leaves, as Ctrl-D does
                 lines = []
+                if self._over:
+                    return
+                now = time.monotonic()
+                if now - dropped <= LEAVE_WITHIN:
+                    return
+                dropped = now
+                self._page.note("chat", "Ctrl-C again leaves")
                 continue
+            dropped = -math.inf
             if line is None:
                 self._console.end_line()
                 return

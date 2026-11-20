@@ -710,6 +710,49 @@ class ChatTest(LauncherTest):
         self.assertIn("# chat        stopping the session", said)
         self.assertIn(["stop", "claude-proj"], self.calls())
 
+    def test_ctrl_c_twice_at_the_prompt_leaves(self):
+        said = self.at_a_terminal(
+            ("> ", "typed\x03"),
+            ("Ctrl-C again leaves", "\x03"),
+        )
+        self.assertEqual(said.count("# chat        Ctrl-C again leaves"), 1)
+        # Left as Ctrl-D leaves, the session is not stopped
+        self.assertNotIn("prompt      typed", said)
+        self.assertNotIn("stopping the session", said)
+        self.assertNotIn(["stop", "claude-proj"], self.calls())
+
+    def test_ctrl_c_at_the_prompt_leaves_only_right_after_another(self):
+        chat = a_chat(self.host())
+        # Each read, with when it is: Ctrl-C, a line, Ctrl-C twice too far
+        # apart, then twice in a row
+        reads = iter(
+            [
+                (0.0, KeyboardInterrupt),
+                (1.0, "   "),
+                (2.0, KeyboardInterrupt),
+                (2.0 + talk.LEAVE_WITHIN + 1, KeyboardInterrupt),
+                (2.0 + talk.LEAVE_WITHIN + 2, KeyboardInterrupt),
+                (99.0, "never read"),
+            ]
+        )
+        clock = [0.0]
+
+        def read(_prompt: str, headed: bool = False) -> str:
+            clock[0], line = next(reads)
+            if line is KeyboardInterrupt:
+                raise KeyboardInterrupt
+            return line
+
+        chat._read = read
+        chat._console.interactive = True
+        with (
+            written() as lines,
+            unittest.mock.patch.object(talk.time, "monotonic", lambda: clock[0]),
+        ):
+            chat._converse()
+        self.assertEqual(sum("Ctrl-C again leaves" in line for line in lines), 3)
+        self.assertEqual(next(reads), (99.0, "never read"))
+
     def test_resuming_is_another_session_once_this_one_is_over(self):
         # Known to the launcher, a session of the project
         self.write_transcript(SESSION, [{"type": "user", "message": {"content": "hi"}}])

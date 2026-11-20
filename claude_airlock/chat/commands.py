@@ -296,4 +296,5 @@ HELP = [
     "  does, and Shift+Enter in a terminal set to tell it from Enter",
     "  Tab completes commands and @files, Ctrl-C interrupts the turn that",
     "  runs and a second one stops the session, at the prompt it drops the line",
+    "  and a second one leaves",
 ]
