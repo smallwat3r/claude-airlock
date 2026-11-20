@@ -79,7 +79,8 @@ answer_when_told() { # channel, tree, host
 
 while read -r channel address host _; do
   [[ "${channel}" =~ ^[0-9]+$ ]] || continue
-  host="${host,,}"
+  # Not with ${host,,}: the tests run this with the bash of macOS, 3.2
+  host="$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"${host}")"
   tree="${ROOT}/${address}"
   answer=ERR
   if [[ "${address}" =~ ${ADDRESS} && "${host}" =~ ${HOST} && -d "${tree}/waiting" ]]; then
