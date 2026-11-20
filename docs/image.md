@@ -72,8 +72,8 @@ in the build context, as `COPY NAME/file ...`.
 The launcher makes one plugin of the `claude-feat-lsp` lines, builds it
 into the image and starts `claude` with it. So a session has
 go-to-definition and find-references for the languages of its image
-without a plugin being enabled on the host. The `python`, `go`, `cpp` and
-`typescript` features have one.
+without a plugin being enabled on the host. The `python`, `go`, `cpp`,
+`typescript` and `terraform` features have one.
 
 ## Rebuilds and pins
 

@@ -1,7 +1,7 @@
 # Last part of the generated Dockerfile (see base.Dockerfile).
 
 # Run by the capture sidecar of CLAUDE_AIRLOCK_NET_LOG, which has the
-# capability for it, a session has not (see claude_airlock/capture.py).
+# capability for it, a session has not (see claude_airlock/recording/capture.py).
 # Here and not in the base, whose layers every feature builds on: what is
 # added to the tail rebuilds the tail alone.
 RUN apt-get update \
@@ -11,7 +11,7 @@ RUN apt-get update \
 # The host's ~/.claude is shared into the container, but its config stores
 # absolute paths under the host home (e.g. plugin marketplace locations).
 # Symlink the host home to /home/sandbox so those paths resolve, and the
-# container runs with HOME set to the host home (see claude_airlock/session.py).
+# container runs with HOME set to the host home (see claude_airlock/sandbox/session.py).
 # Defaults to /home/sandbox, keeping the build a no-op when they already match.
 # The launcher folds the home into the image tag, so an image built for
 # another home is never reused.
@@ -32,8 +32,8 @@ ARG CLAUDE_CODE_VERSION=2.1.326
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
-# ~/.cache is mounted as a named volume (see cache_arg in
-# claude_airlock/session.py). A new volume
+# ~/.cache is mounted as a named volume (see scratch_args in
+# claude_airlock/sandbox/session.py). A new volume
 # takes the owner and mode of the directory it covers, so create it open to
 # whichever host user the container runs as, the way /tmp is.
 # The npm installs above ran as root and, their cache cleaned, still leave
@@ -45,7 +45,7 @@ RUN mkdir -p /home/sandbox/.cache \
 
 # No program of the image runs as another user than the one that starts
 # it. A session cannot gain privileges this way as it is (see
-# no-new-privileges in claude_airlock/session.py), this holds without it.
+# no-new-privileges in claude_airlock/sandbox/session.py), this holds without it.
 RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 USER sandbox
