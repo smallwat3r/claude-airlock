@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import fcntl
 import json
-import sys
 import unittest
 
 from harness import (
     LauncherTest,
     Result,
+    mounts_host_sockets,
 )
 
 from claude_airlock.sandbox import session
@@ -40,7 +40,7 @@ class OptionsTest(LauncherTest):
         self.assertIn("--tmpfs=/home/sandbox/.cache:exec,size=2g", flags)
         self.assertIn("--runtime=runsc", flags)
 
-    @unittest.skipIf(sys.platform == "darwin", "no socket of the host mounts there")
+    @mounts_host_sockets
     def test_the_agent_is_reached_through_the_launcher(self):
         flags = self.launch(
             SSH_AUTH_SOCK="/tmp/agent.sock", CLAUDE_AIRLOCK_SSH_AGENT="1"

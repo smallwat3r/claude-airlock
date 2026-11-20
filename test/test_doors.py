@@ -16,7 +16,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from harness import LauncherTest, follow, network, prompts_at, settings
+from harness import (
+    LauncherTest,
+    follow,
+    mounts_host_sockets,
+    network,
+    prompts_at,
+    settings,
+)
 
 from claude_airlock.recording import doors, socket_watch, ssh_agent
 from claude_airlock.report import door_events
@@ -239,7 +246,7 @@ class AgentDoorTest(LauncherTest):
         self.assertIn("REFUSED by the launcher", event.details[0])
         self.assertEqual(event.fields["error"], "refused by the launcher")
 
-    @unittest.skipIf(sys.platform == "darwin", "no socket of the host mounts there")
+    @mounts_host_sockets
     def test_the_door_is_the_users_alone_and_gone_with_the_session(self):
         flags = self.launch(
             session="true",

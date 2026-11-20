@@ -7,12 +7,19 @@ from __future__ import annotations
 import importlib
 import os
 import unittest
+from pathlib import Path
 
 from harness import LauncherTest, settings
 
 login = importlib.import_module("claude_airlock.sandbox.login")
 
 LOGIN = ".credentials.json"
+
+
+def renewed(login: Path) -> str:
+    """The command that renews a login as Claude Code does: written next
+    to it, then renamed over it."""
+    return f"printf %s renewed > '{login}.tmp' && mv '{login}.tmp' '{login}'"
 
 
 class LoginSessionTest(LauncherTest):
@@ -35,8 +42,7 @@ class LoginSessionTest(LauncherTest):
 
     def test_what_a_session_logs_in_with_is_the_hosts_while_it_runs(self):
         self.ours.write_text("before")
-        # As Claude Code writes it: next to it, then renamed over it
-        renew = f"printf %s renewed > '{self.theirs}.tmp' && mv '{self.theirs}.tmp' '{self.theirs}'"
+        renew = renewed(self.theirs)
         seen = f"sleep 1; cat '{self.ours}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
         self.assertEqual((self.work / "seen").read_text(), "renewed")
@@ -44,7 +50,7 @@ class LoginSessionTest(LauncherTest):
 
     def test_what_the_host_renews_reaches_a_running_session(self):
         self.ours.write_text("before")
-        renew = f"printf %s renewed > '{self.ours}.tmp' && mv '{self.ours}.tmp' '{self.ours}'"
+        renew = renewed(self.ours)
         seen = f"sleep 1; cat '{self.theirs}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
         self.assertEqual((self.work / "seen").read_text(), "renewed")

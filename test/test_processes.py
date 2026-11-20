@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from harness import LauncherTest, prompts_at
+from harness import LauncherTest, prompts_at, reads_proc
 from test_capture import pcap_file, tcp
 
 from claude_airlock.events import Event, Who
@@ -60,7 +60,7 @@ class WatcherTest(unittest.TestCase):
         ):
             self.assertEqual(procwatch.address(encoded), address)
 
-    @unittest.skipUnless(sys.platform == "linux", "reads /proc")
+    @reads_proc
     def test_a_process_and_the_holder_of_a_connection_are_seen(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))
@@ -140,7 +140,7 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual([line["hits"] for line in said], [2, 5])
         self.assertEqual(noted(*said).process_limit, 5)
 
-    @unittest.skipUnless(sys.platform == "linux", "reads /proc")
+    @reads_proc
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))
