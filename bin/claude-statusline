@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Claude Code statusline. Shows the model, the used session limits (5h and
-# 7d rate-limit windows), and inside a claude-airlock container a sandbox
-# badge (the container name, exported by bin/claude-airlock), the network
-# mode, the opt-in doors that are open and the extra mounted directories. Outside the sandbox those are simply absent.
+# Claude Code statusline, for its native UI. Shows the model, the used
+# session limits (5h and 7d rate-limit windows), and inside a claude-airlock
+# container a sandbox badge (the container name, exported by
+# bin/claude-airlock), the network mode, the opt-in doors that are open and
+# the extra mounted directories. Outside the sandbox those are simply absent.
+#
+# Not run in line mode, which claude-airlock sessions use unless
+# CLAUDE_AIRLOCK_LINE_MODE=0: the chat writes a status line of its own there,
+# with /status for the rest.
 
 set -u
 
