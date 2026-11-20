@@ -26,10 +26,6 @@ What you get:
   it. Its tool calls come from its own transcript, which the launcher
   copies as it is written and flags when a line is later changed or
   removed. `--trace` shows it all.
-- **A flag on prompt injection.** What a session reads, a page, a file,
-  the output of a command, is looked at for signs that it was written to
-  instruct the model, and flagged where the session does it. The session
-  is told to treat it as data and to tell you.
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook or a Makefile say.
 - **Line mode.** Claude Code with a simpler UI that shows more than the
