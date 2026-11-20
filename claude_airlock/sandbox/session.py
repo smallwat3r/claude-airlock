@@ -304,7 +304,8 @@ def git_include_paths() -> list[str]:
     """The files the global git config pulls in with include or includeIf."""
     try:
         result = subprocess.run(
-            ["git", "config", "--global", "--get-regexp", r"^include(if\..*)?\.path$"],
+            ["git", "config", "--global", "-z", "--get-regexp"]
+            + [r"^include(if\..*)?\.path$"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -313,8 +314,10 @@ def git_include_paths() -> list[str]:
         )
     except FileNotFoundError:
         return []
-    # One "key value" pair per line
-    return [line.split(" ", 1)[1] for line in result.stdout.splitlines() if " " in line]
+    # Each pair ends in a NUL, the key on a line ahead of its value: the
+    # condition of an includeIf is part of the key and can hold a space
+    pairs = (pair.partition("\n") for pair in result.stdout.split("\0"))
+    return [value for _, separator, value in pairs if separator]
 
 
 # What git reads of its directory in XDG_CONFIG_HOME that is forwarded. Not

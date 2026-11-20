@@ -358,8 +358,11 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
     run_args = session_run_args(plan, name, runtime, capture)
     watched = [host.project_dir] + [extra.path for extra in plan.dirs]
-    check = PendingCheck.begin(host, name, watched)
     collect_all_left_behind(host)
+    # Kept on disk from here: nothing that Ctrl-C can end comes between
+    # this and interrupts_held, a check left for a session that never ran
+    # would be reported as one that ended without it
+    check = PendingCheck.begin(host, name, watched)
     started = time.time()
     # From here to the end of the checks, see interrupts_held
     with interrupts_held():

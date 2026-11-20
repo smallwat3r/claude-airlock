@@ -177,15 +177,22 @@ def file_stamp(path: str) -> str:
 def tree_files(root: str) -> list[str]:
     """Every file under a directory. A link to a directory is listed and not
     entered, the root too: a session can point one at the whole disk, and
-    the link itself is what changed then."""
+    the link itself is what changed then.
+    Without recursion, as module_git_dirs and for the same reason."""
     if os.path.islink(root):
         return [root]
     found = []
-    for directory, subdirs, files in os.walk(root):
-        links = [
-            name for name in subdirs if os.path.islink(os.path.join(directory, name))
-        ]
-        found += [os.path.join(directory, name) for name in (*files, *links)]
+    pending = [root]
+    while pending:
+        try:
+            entries = list(os.scandir(pending.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(entry.path)
+            else:
+                found.append(entry.path)
     return found
 
 
@@ -236,9 +243,13 @@ def moved_hooks_dir(directory: str) -> str | None:
     .git/hooks (husky and the like), when it is inside the project. One
     outside is out of a session's reach, unless it is mounted too and then
     it is the session's choice of what gets read here."""
+    config = os.path.join(directory, ".git", "config")
+    if not os.path.isfile(config):
+        # None, or a pipe a session left for git to wait on
+        return None
     try:
         value = subprocess.run(
-            ["git", "config", "--file", os.path.join(directory, ".git", "config")]
+            ["git", "config", "--file", config]
             + ["--type=path", "--get", "core.hooksPath"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -330,6 +341,8 @@ def host_exec_fingerprint(
     watched = []
     for directory in directories:
         git_dir = os.path.join(directory, ".git")
+        # A file, in a working tree or a submodule: where its directory is
+        watched.append(git_dir)
         modules = module_git_dirs(os.path.join(git_dir, "modules"))
         for each in (git_dir, *modules):
             for config in git_configs(each):
@@ -343,7 +356,8 @@ def host_exec_fingerprint(
         files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
         watched += claude_files(claude_dir, files, CONFIG_TREES, ("settings.json",))
     for directory in memory:
-        watched += tree_files(directory)[:MOST_MEMORY_FILES]
+        # The same ones at the start and the end, in whatever order found
+        watched += sorted(tree_files(directory))[:MOST_MEMORY_FILES]
     for path in watched:
         if os.path.isfile(path) or os.path.islink(path):
             fingerprint[path] = file_hash(path)
@@ -518,9 +532,8 @@ def report_tampering(
     roots = tuple(directory + os.sep for directory in memory)
     remembered = [path for path in differ if path in memory or path.startswith(roots)]
     report_memory(remembered, unchecked)
-    changed = named_changes(
-        [path for path in differ if path not in remembered], claude_dir
-    )
+    others = set(differ).difference(remembered)
+    changed = named_changes([path for path in differ if path in others], claude_dir)
     if not changed:
         return
     if unchecked:

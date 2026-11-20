@@ -21,7 +21,8 @@ PERMISSION_OPTIONS = (
 # replace: with one of these among its arguments, or one of its commands
 # as the first (claude mcp list), it is run as it is. A command that is
 # not known yet shows as what it writes, see Agent of chat/pipe.py.
-NO_CONVERSATION = ("-p", "--print", "-v", "--version", "-h", "--help", "--bg")
+# Not --help, which is the launcher's own (see parse_args of cli.py).
+NO_CONVERSATION = ("-p", "--print", "-v", "--version", "--bg")
 
 
 def option_of(arg: str) -> str:

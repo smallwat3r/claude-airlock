@@ -177,7 +177,12 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
                 if not any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
                     continue
                 path = os.path.join(directory, name)
-                if stat.S_ISREG(os.lstat(path).st_mode):
+                try:
+                    plain = stat.S_ISREG(os.lstat(path).st_mode)
+                except OSError:
+                    # Gone since it was listed, a build or another session
+                    continue
+                if plain:
                     hidden[path] = None
     for path in hidden:
         if ":" in path:
