@@ -12,7 +12,11 @@ What a session is given and what it is kept from.
   What else Claude Code keeps there (its host sessions, jobs, logs) stays
   on the host.
 - The login is one all the same: the launcher carries it between the two
-  while a session runs, so a session starts logged in.
+  while a session runs, so a session starts logged in. On macOS, where
+  Claude Code keeps the login in the Keychain, the launcher reads it
+  there and writes back what a session renews, with `security` as Claude
+  Code does. A locked Keychain is left alone, the session then has the
+  login it was last given.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so one
   session cannot poison another project's dependencies.
   `CLAUDE_AIRLOCK_CACHE=0` goes back to a tmpfs of at most 2g.

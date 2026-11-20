@@ -112,6 +112,12 @@ class Host:
         return os.path.join(self.home, ".claude")
 
     @property
+    def keychain_file(self) -> str:
+        # The login Keychain of macOS, where Claude Code keeps its login
+        # there, see login.py
+        return os.path.join(self.home, "Library", "Keychains", "login.keychain-db")
+
+    @property
     def claude_state_dir(self) -> str:
         # Claude Code's own state, mounted into a session
         return os.path.join(self.home, ".local", "state", "claude")

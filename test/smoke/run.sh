@@ -166,7 +166,18 @@ prepare() {
   mkdir -p "$(dirname "${HOST_SESSION}")" "$(dirname "${HOST_PLUGIN}")"
   touch "${HOST_SESSION}" "${HOST_PLUGIN}"
   # The checksum of the host's login, for inside/defaults.sh to compare with
-  sha256sum <"${HOME}/.claude/.credentials.json" >"${PROJECT}/.smoke-login" 2>/dev/null || true
+  host_login | sha256sum >"${PROJECT}/.smoke-login"
+}
+
+# The login of the host's claude: a file, on macOS an item of the Keychain
+host_login() {
+  local kept
+  if kept="$(security find-generic-password -a "${USER}" \
+    -s "Claude Code-credentials" -w 2>/dev/null)"; then
+    printf '%s' "${kept}"
+  else
+    cat "${HOME}/.claude/.credentials.json" 2>/dev/null || true
+  fi
 }
 
 defaults() {
