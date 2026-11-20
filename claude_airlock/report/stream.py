@@ -5,6 +5,7 @@ that ran then, and those that were asked for chosen."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -18,6 +19,9 @@ DURING_WIDTH = 60
 # Seconds for which the timeline remembers a call that has ended, for the
 # events of the network that are read later than they happened
 TIMELINE_SLACK = 30.0
+# No more calls than this are remembered, the ones started first go: a
+# call whose result never comes is never known to have ended
+MOST_CALLS = 10_000
 
 # What an event comes with, where it is not alone: the transcript it is
 # from, for what follows several sessions
@@ -75,12 +79,17 @@ class Timeline:
         self._calls: dict[str, RunningCall] = {}
         # The latest time seen, the events of the network can come late
         self._now = 0.0
+        # From when the calls are next looked through for those to let
+        # go of, not with every one of them
+        self._next_look = 0.0
 
     def take(self, event: Event) -> None:
         """Note a tool call or its result, or mark an event of the
         network with the calls running at its time."""
         fields = event.fields
-        self._now = max(self._now, event.when)
+        # No later than it is: an entry is the session's to date, and one
+        # dated ahead would have all that is read after it be too long ago
+        self._now = max(self._now, min(event.when, time.time()))
         call = fields.get("id")
         if "tool" in fields and isinstance(call, str):
             self._note(event, call)
@@ -104,14 +113,26 @@ class Timeline:
         # here too
         named = "  ".join([call_label(event) or fields["tool"], *event.notes])
         self._calls[call] = RunningCall(event.when, ended, named[:DURING_WIDTH])
+        self._forget()
+
+    def _forget(self) -> None:
+        """Let go of the calls that ended too long ago to be the one
+        anything read from now on was made during, and of the oldest
+        past MOST_CALLS. As calls are noted, not as the network is
+        marked: what follows a session without a capture marks nothing,
+        and still runs for as long as the session does."""
+        if self._now >= self._next_look:
+            self._next_look = self._now + TIMELINE_SLACK
+            forgotten = self._now - TIMELINE_SLACK
+            for call in [c for c, ran in self._calls.items() if ran.ended < forgotten]:
+                del self._calls[call]
+        while len(self._calls) > MOST_CALLS:
+            del self._calls[next(iter(self._calls))]
 
     def _mark(self, event: Event) -> None:
         if event.when < self._now - TIMELINE_SLACK:
             # Too long ago to tell: the calls of then are forgotten
             return
-        forgotten = self._now - TIMELINE_SLACK
-        for call in [c for c, ran in self._calls.items() if ran.ended < forgotten]:
-            del self._calls[call]
         running = {
             call: ran
             for call, ran in self._calls.items()

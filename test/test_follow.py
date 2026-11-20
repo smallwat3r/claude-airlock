@@ -20,7 +20,10 @@ from unittest import mock
 from harness import LAUNCHER, LauncherTest, follow, pcap
 from test_capture import answer, pcap_file, sample_capture, tcp
 
+from claude_airlock.events import Event, Kind, Stage, Who
+from claude_airlock.report import stream
 from claude_airlock.report.transcript import WalkOptions
+from claude_airlock.settings import Host
 
 # Marks the last thing a test wrote: what came before it has been shown
 # once this is
@@ -193,6 +196,50 @@ class FollowTest(LauncherTest):
         self.assertIn("# session     0b  a new session", shown)
         self.assertIn("# session     0a  long ago", shown)
         self.assertNotIn("prompt      long ago", shown)
+
+    def test_what_a_subagent_did_before_is_not_shown_as_done_now(self):
+        earlier = self.write_transcript("0e" + self.SESSION[2:], [prompt("earlier")])
+        os.utime(earlier, (1, 1))
+        old = earlier.with_suffix("") / "subagents" / "agent-a1.jsonl"
+        old.parent.mkdir(parents=True)
+        add(old, call("s1", "Bash", command="echo before the follow"))
+        host = Host(str(self.home), str(self.project), "", str(self.state))
+        follower = follow.Follower(host, verbose=False)
+        with mock.patch.object(follow.CaptureSidecar, "running", return_value=[]):
+            follower.poll()
+            # The earlier session goes on, with a subagent of now
+            add(earlier, prompt("go on"))
+            add(old, call("s2", "Bash", command="echo during the follow"))
+            shown = []
+            for _ in range(follow.LOOK_EVERY + 1):
+                shown += [event.details[0] for _, event in follower.poll().events]
+        self.assertIn("go on", shown)
+        self.assertIn("$ echo during the follow", shown)
+        self.assertNotIn("$ echo before the follow", shown)
+
+    def test_the_calls_remembered_are_bounded_without_a_capture(self):
+        timeline = stream.Timeline()
+        now = time.time()
+
+        def said(number: int, stage: Stage, when: float) -> Event:
+            fields = {"id": f"c{number}", "tool": "Bash", "stage": stage}
+            return Event(when, Who.CLAUDE, "bash", ["$ make"], fields)
+
+        with mock.patch.object(stream, "MOST_CALLS", 5):
+            for number in range(50):
+                when = now - 5000 + number * 100
+                timeline.take(said(number, Stage.CALL, when))
+                if number % 2:
+                    timeline.take(said(number, Stage.RESULT, when + 1))
+            # Those that ended long ago are let go of, and of those that
+            # never did, the oldest
+            self.assertLessEqual(len(timeline._calls), 5)
+            self.assertIn("c48", timeline._calls)
+        # One dated ahead does not make what is read after it too long ago
+        timeline.take(said(60, Stage.CALL, now + 10**6))
+        late = Event(now, Who.SANDBOX, Kind.NET, ["tcp"], {})
+        timeline.take(late)
+        self.assertIn("during", late.fields)
 
     def test_a_named_session_is_followed_alone(self):
         other = self.write_transcript("0a", [prompt("the other one")])

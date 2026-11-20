@@ -26,6 +26,7 @@ the session's own word, the capture and the proxy's log are the launcher's."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import sys
@@ -112,7 +113,7 @@ class TranscriptTail:
             size = os.fstat(file.fileno()).st_size
             if size < self._offset:
                 # Written anew and shorter: from where it ends now
-                self._offset, self._partial = size, b""
+                self._offset, self._partial, self._dropping = size, b"", False
             file.seek(self._offset)
             while True:
                 data = file.read(READ_SIZE)
@@ -261,8 +262,10 @@ class Follower:
         # The transcript of each subagent that is followed, with that of
         # the session it is of
         self._subagents: dict[Path, tuple[Path, TranscriptTail]] = {}
-        # How long each transcript without a tail was when last looked at
+        # How long each transcript without a tail was when last looked at,
+        # and each of the subagents of one when the following began
         self._sizes: dict[Path, int] = {}
+        self._subagent_sizes: dict[Path, int] = {}
         self._captures: dict[tuple[str, float], CaptureTail] = {}
         self._health: dict[tuple[str, float], HealthTail] = {}
         self._proxy = ProxyTail()
@@ -289,6 +292,8 @@ class Follower:
             self._only = path
             self._tails.clear()
             self._subagents.clear()
+            # The calls of the one before are not running in this one
+            self._timeline = Timeline()
             self._tail(path)
 
     def _ours(self, session: str) -> bool:
@@ -344,6 +349,7 @@ class Follower:
                 continue
             if first:
                 self._sizes[path] = size
+                self._note_subagents(path)
             elif size != self._sizes.get(path, 0):
                 # Grown, or new and so read from its start
                 self._tail(path, self._sizes.get(path, 0))
@@ -352,7 +358,10 @@ class Follower:
         """Start to follow what the subagents of the followed sessions
         do. Claude Code keeps a transcript of each next to that of its
         session, in SESSION/subagents. At first from where they end, as
-        of a session that is not the latest."""
+        of a session that is not the latest. Later from where they ended
+        when the following began, as their session is, see
+        _note_subagents: what a subagent did before that is not shown as
+        done now. One that is new is read from its start."""
         for session in list(self._tails):
             for path in subagent_files(session):
                 if path in self._subagents:
@@ -361,15 +370,23 @@ class Follower:
                     size = path.lstat().st_size
                 except OSError:
                     continue
+                noted = self._subagent_sizes.pop(path, 0)
                 # A result always names its call: the calls of a subagent
                 # are numbered on their own, as those of its session are
                 tail = TranscriptTail(
                     path,
                     project_root(session, self._host),
                     dataclasses.replace(self._walked, name_results=True),
-                    size if self._rounds == 0 else 0,
+                    size if self._rounds == 0 else min(noted, size),
                 )
                 self._subagents[path] = (session, tail)
+
+    def _note_subagents(self, session: Path) -> None:
+        """Note how long the transcripts of the subagents of a session
+        are, one that is not followed yet."""
+        for path in subagent_files(session):
+            with contextlib.suppress(OSError):
+                self._subagent_sizes[path] = path.lstat().st_size
 
     def _look_for_sessions(self, found: Round) -> None:
         """Start to follow the captures and the watchers of the project's
