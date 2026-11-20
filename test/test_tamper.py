@@ -302,7 +302,10 @@ class BoundedCheckTest(unittest.TestCase):
         fingerprint: dict[str, str] = {}
         with unittest.mock.patch.object(tamper, "MOST_MODULES", 2):
             found = tamper.module_git_dirs(str(modules), fingerprint)
-        self.assertEqual([Path(path).name for path in found], ["m0", "m1"])
+        # Which ones is the order the directory is read in, not the same on
+        # every filesystem: only so many of it are read
+        self.assertEqual(len(found), 2)
+        self.assertLess({Path(path).name for path in found}, {"m0", "m1", "m2", "m3"})
         self.assertEqual(list(fingerprint.values()), ["unwatched"])
 
 
