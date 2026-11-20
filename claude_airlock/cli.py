@@ -84,18 +84,32 @@ class ParsedArgs(NamedTuple):
 ACTIONS = {action.option: action for action in Action if action is not Action.RUN}
 
 
+# What ends the launcher's own options: all that follows is claude's, or
+# bash's after --shell
+OPTIONS_END = "--"
+
+
 def parse_args(argv: list[str]) -> ParsedArgs:
-    """Take the launcher's own options out of argv."""
+    """Take the launcher's own options out of argv. Only up to where
+    they end: what follows -- is for claude, or for bash, as it is
+    written, an option of the launcher's name too. One thing to do at a
+    time: a second one is refused, not left to be the one that counts
+    without a word. But after --shell, where what reads as one is for
+    bash or the script it runs: only the directories to mount are the
+    launcher's there."""
     action = Action.RUN
+    asked = ""
     claude_args: list[str] = []
     added: list[tuple[str, bool]] = []
     args = iter(argv)
     for arg in args:
         option, has_value, value = arg.partition("=")
-        if arg == "-h":
-            action = Action.HELP
-        elif arg in ACTIONS:
-            action = ACTIONS[arg]
+        if arg == OPTIONS_END:
+            claude_args += args
+        elif (arg == "-h" or arg in ACTIONS) and action is not Action.SHELL:
+            if asked:
+                raise Fatal(f"{arg} cannot be given with {asked}, one at a time")
+            action, asked = ACTIONS.get(arg, Action.HELP), arg
         elif option in ("--add-dir", "--add-dir-ro"):
             if not has_value:
                 following = next(args, None)

@@ -5,7 +5,9 @@ Builds the sandbox image on first use, then runs claude inside a container
 with the project directory mounted read-write and ~/.claude persisted.
 
   claude-airlock [--add-dir DIR]... [--add-dir-ro DIR]... [claude args]...
-  claude-airlock --shell [bash args]   bash in the same sandbox, not claude
+  claude-airlock --shell [bash args]   bash in the same sandbox, not claude.
+                                 What follows --shell is for bash, but
+                                 --add-dir and --add-dir-ro
   claude-airlock --line-mode [claude args]  one session in line mode, the
                                  default: claude without its native
                                  UI, which only adds lines: a prompt, and
@@ -33,6 +35,10 @@ with the project directory mounted read-write and ~/.claude persisted.
   claude-airlock --worktree [NAME]   second session on its own checkout
   claude-airlock --help, -h      this text, then exit. For claude's own:
                                  claude-airlock --shell -c "claude --help"
+
+One of these at a time, two are refused. What follows -- is for claude, or
+for bash after --shell, as it is written: for an argument that reads as an
+option of the launcher, as in claude-airlock --shell -- run.sh --add-dir x
 
 --worktree is claude's own flag, forwarded like any other claude arg: it
 creates a git worktree and branch under .claude/worktrees/ in the project,

@@ -58,6 +58,22 @@ class OptionsTest(LauncherTest):
         self.assertIn("--entrypoint=bash", result.flags)
         self.assertEqual(result.command, ["-c", "ls"])
 
+    def test_what_follows_shell_is_for_bash_whatever_it_reads_as(self):
+        result = self.launch("--shell", "run.sh", "--prune", "-h", "--trace")
+        self.assertIn("--entrypoint=bash", result.flags)
+        self.assertEqual(result.command, ["run.sh", "--prune", "-h", "--trace"])
+
+    def test_what_follows_the_end_of_the_options_is_passed_as_it_is(self):
+        ref = str(self.home / "ref")
+        result = self.launch("--shell", "--", "run.sh", "--add-dir", ref, "--")
+        self.assertEqual(result.command, ["run.sh", "--add-dir", ref, "--"])
+        self.assertNotIn(f"--volume={ref}:{ref}:z", result.flags)
+
+    def test_a_second_thing_to_do_is_refused(self):
+        for first, second in (("--rebuild", "--shell"), ("--trace", "--prune")):
+            result = self.launch(first, second)
+            self.assert_refused(result, f"{second} cannot be given with {first}")
+
     def test_filtered_egress(self):
         result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1")
         self.assertIn("--network=claude-airlock-net", result.flags)
