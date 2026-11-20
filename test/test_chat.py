@@ -292,8 +292,10 @@ class ChatTest(LauncherTest):
         finally:
             with contextlib.suppress(OSError):
                 os.kill(child, signal.SIGKILL)
-            os.waitpid(child, 0)
+            # Closed before the wait: on macOS a process does not end
+            # while what it wrote to its terminal is yet to be read
             os.close(terminal)
+            os.waitpid(child, 0)
         return seen.decode(errors="replace").replace("\r\n", "\n")
 
     def session_call(self) -> list[str]:
@@ -1926,6 +1928,7 @@ class CommandsTest(LauncherTest):
         self.assertEqual(seen, [True])
         self.assertFalse(self.shell.running)
 
+    @unittest.skipUnless(sys.platform == "linux", "runs setsid and reads /proc")
     def test_ctrl_c_ends_what_a_command_of_the_users_runs_in_the_container(self):
         ours = self.commands()
         # docker's end of it: it passes on what the command writes, and
