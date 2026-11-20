@@ -84,6 +84,9 @@ def _readline_point() -> Callable[[], int] | None:
 
 
 _point = _readline_point() if readline else None
+# Whether readline is the editline of macOS, which does less: see the end
+# of what this module says of itself
+EDITLINE = bool(readline) and "libedit" in (readline.__doc__ or "")
 
 # Lines of history kept from one chat to the next
 HISTORY_LINES = 1000
@@ -189,8 +192,7 @@ class Console:
             and self._out.isatty()
             and os.environ.get("TERM", "dumb") != "dumb"
         )
-        # Whether readline is the editline of macOS, which does less
-        self._editline = bool(readline) and "libedit" in (readline.__doc__ or "")
+        self._editline = EDITLINE
         self._root = root
         self._history = history if self._redrawn else None
         # The commands a line can start with, see completions

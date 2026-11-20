@@ -4,13 +4,18 @@ every call and can play a session."""
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
+import pty
 import re
+import select
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from datetime import datetime, timezone
@@ -150,6 +155,81 @@ class Result:
             if call[0] == "run" and f"--name={name}" in call:
                 return call
         return None
+
+
+# What only Linux has, and what Docker Desktop on macOS does not do
+reads_proc = unittest.skipUnless(sys.platform == "linux", "reads /proc")
+mounts_host_sockets = unittest.skipIf(
+    sys.platform == "darwin", "no socket of the host mounts there"
+)
+
+
+class Terminal:
+    """A command run at a terminal of its own, typed to and read from
+    until it is closed, as contextlib.closing does. All it reads has to
+    come within the patience."""
+
+    def __init__(
+        self,
+        command: list[str],
+        environment: dict[str, str],
+        patience: float,
+        cwd: Path | None = None,
+    ):
+        self.seen = b""
+        self._deadline = time.monotonic() + patience
+        self._child, self._terminal = pty.fork()
+        if self._child == 0:
+            if cwd:
+                os.chdir(cwd)
+            os.execve(command[0], command, environment)
+
+    def close(self) -> None:
+        """End the command and give up its terminal."""
+        with contextlib.suppress(OSError):
+            os.kill(self._child, signal.SIGKILL)
+        # Closed before the wait: on macOS a process does not end while
+        # what it wrote to its terminal is yet to be read
+        os.close(self._terminal)
+        os.waitpid(self._child, 0)
+
+    @property
+    def text(self) -> str:
+        """What was written in all, its line breaks as in a file."""
+        return self.seen.decode(errors="replace").replace("\r\n", "\n")
+
+    def type(self, text: str) -> None:
+        os.write(self._terminal, text.encode())
+
+    def read_until(self, wanted: str, start: int = 0) -> int:
+        """Read until something is written after a place. The place after
+        it, or what AssertionError says was written instead."""
+        while wanted.encode() not in self.seen[start:]:
+            if not self._read():
+                raise AssertionError(f"never wrote {wanted!r}: {self.seen!r}")
+        return self.seen.index(wanted.encode(), start) + len(wanted)
+
+    def read_to_the_end(self) -> None:
+        """Read until the command leaves its terminal."""
+        while self._read():
+            pass
+
+    def _read(self) -> bool:
+        """Read what is there within a moment. Not when the command has
+        left or the patience is over."""
+        if time.monotonic() > self._deadline:
+            return False
+        if select.select([self._terminal], [], [], 0.2)[0]:
+            # A terminal its command has left fails the read on Linux
+            # and reads as empty on macOS
+            try:
+                chunk = os.read(self._terminal, 65536)
+            except OSError:
+                return False
+            if not chunk:
+                return False
+            self.seen += chunk
+        return True
 
 
 class LauncherTest(unittest.TestCase):

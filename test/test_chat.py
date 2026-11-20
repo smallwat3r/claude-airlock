@@ -9,13 +9,10 @@ import contextlib
 import io
 import json
 import os
-import pty
 import re
-import select
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -23,12 +20,7 @@ import unittest.mock
 from datetime import datetime
 from pathlib import Path
 
-from harness import LAUNCHER, ROOT, LauncherTest
-
-try:
-    import readline
-except ImportError:  # pragma: no cover, a Python built without it
-    readline = None  # type: ignore[assignment]
+from harness import LAUNCHER, ROOT, LauncherTest, Terminal, reads_proc
 
 from claude_airlock.chat import (
     asking,
@@ -63,8 +55,9 @@ from claude_airlock.settings import Host, Settings, SocketAccess
 # Whether the readline of this Python is the editline of macOS, which has
 # no keys of a new line and does not say when it has written a prompt: a
 # paste cannot be typed on there, see Console
-EDITLINE = "libedit" in (getattr(readline, "__doc__", None) or "")
-GNU_READLINE = "needs GNU readline, this Python has editline"
+EDITLINE = console.EDITLINE
+gnu_readline = unittest.skipIf(EDITLINE, "needs GNU readline, this is editline")
+editline = unittest.skipUnless(EDITLINE, "what editline does instead")
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
 # A test at a terminal that waits for what never comes fails after this
@@ -256,42 +249,12 @@ class ChatTest(LauncherTest):
         Emacs sends what is long. What was written in all."""
         environment = {**self.environment(), "TERM": term, "COLUMNS": "100"}
         environment["NO_COLOR"] = "1"
-        child, terminal = pty.fork()
-        if child == 0:
-            os.chdir(self.project)
-            os.execve(
-                sys.executable,
-                [sys.executable, str(LAUNCHER), "--line-mode"],
-                environment,
-            )
-        seen = b""
-        deadline = time.monotonic() + PATIENCE
-
-        def read_until(wanted: str, start: int) -> int:
-            """Read until something is written after a place. The place
-            after it, none when it never is."""
-            nonlocal seen
-            while wanted.encode() not in seen[start:]:
-                if time.monotonic() > deadline:
-                    return -1
-                if select.select([terminal], [], [], 0.2)[0]:
-                    # A terminal the chat has left fails the read on
-                    # Linux and reads as empty on macOS
-                    try:
-                        chunk = os.read(terminal, 65536)
-                    except OSError:
-                        return -1
-                    if not chunk:
-                        return -1
-                    seen += chunk
-            return seen.index(wanted.encode(), start) + len(wanted)
-
-        try:
+        command = [sys.executable, str(LAUNCHER), "--line-mode"]
+        chat = Terminal(command, environment, PATIENCE, self.project)
+        with contextlib.closing(chat) as terminal:
             place = 0
             for wanted, typed in steps:
-                place = read_until(wanted, place)
-                if place < 0:
-                    self.fail(f"never wrote {wanted!r}: {seen!r}")
+                place = terminal.read_until(wanted, place)
                 # Not before the chat reads again
                 time.sleep(0.2)
                 for i, bunch in enumerate(
@@ -299,17 +262,9 @@ class ChatTest(LauncherTest):
                 ):
                     if i:
                         time.sleep(BUNCH_GAP)
-                    os.write(terminal, bunch.encode())
-            # Until it leaves
-            read_until("\0", len(seen))
-        finally:
-            with contextlib.suppress(OSError):
-                os.kill(child, signal.SIGKILL)
-            # Closed before the wait: on macOS a process does not end
-            # while what it wrote to its terminal is yet to be read
-            os.close(terminal)
-            os.waitpid(child, 0)
-        return seen.decode(errors="replace").replace("\r\n", "\n")
+                    terminal.type(bunch)
+            terminal.read_to_the_end()
+            return terminal.text
 
     def session_call(self) -> list[str]:
         return next(c for c in self.calls() if c[0] == "run" and "--detach" not in c)
@@ -520,7 +475,7 @@ class ChatTest(LauncherTest):
             self.assertIn("> /help", said)
         self.assertNotIn("prompt      /he", said)
 
-    @unittest.skipIf(EDITLINE, GNU_READLINE)
+    @gnu_readline
     def test_at_a_terminal_shift_enter_starts_a_new_line_of_the_prompt(self):
         said = self.at_a_terminal(
             ("> ", "one\x1b[13;2utwo\x1b[27;2;13~three\x1b\rfour\r"),
@@ -531,7 +486,7 @@ class ChatTest(LauncherTest):
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
-    @unittest.skipIf(EDITLINE, GNU_READLINE)
+    @gnu_readline
     def test_at_a_terminal_lines_pasted_unmarked_are_one_prompt(self):
         # Without the escapes of a bracketed paste, as a terminal that
         # does not mark one sends it
@@ -545,7 +500,7 @@ class ChatTest(LauncherTest):
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
-    @unittest.skipUnless(EDITLINE, "what editline does instead")
+    @editline
     def test_at_a_terminal_of_editline_lines_pasted_unmarked_are_one_prompt(self):
         # Entered at once: nothing can be put back to be typed on
         said = self.at_a_terminal(("> ", "one\rtwo\rthree\r"), ("first line", "\x04"))
@@ -554,7 +509,7 @@ class ChatTest(LauncherTest):
         # The line entered before is not taken for one being typed
         self.assertNotIn("> one", said.split("user     prompt", 1)[1])
 
-    @unittest.skipIf(EDITLINE, GNU_READLINE)
+    @gnu_readline
     def test_at_a_terminal_an_unfinished_paste_is_typed_on(self):
         said = self.at_a_terminal(
             ("> ", "one\rtw"),
@@ -1052,18 +1007,24 @@ class ChatTest(LauncherTest):
         self.assertEqual(lines, [])
 
 
-# Reads two lines at a terminal, and says in a file what readline had of
-# the second while it was typed, at its end and at its cursor
+# Reads two lines at a terminal, and says what readline has of the second
+# once some of it is typed: the line and where the cursor is in it
 TYPING = r"""
-import sys, threading, time
+import threading, time
 from claude_airlock.chat import console
 
 def look():
-    time.sleep(float(sys.argv[2]))
+    typed = ""
+    # Editline has the line before, its line break at the end, until a
+    # key of the next is typed
+    while typed in ("", "abcdef\n"):
+        time.sleep(0.05)
+        typed = console.readline.get_line_buffer()
+    # What is typed comes a key at a time
+    time.sleep(0.3)
     typed = console.readline.get_line_buffer()
     point = console._point() if console._point else None
-    with open(sys.argv[1], "w") as said:
-        said.write(repr((typed, point)))
+    print(f"\nhad {(typed, point)!r} in all", flush=True)
 
 input("first> ")
 threading.Thread(target=look, daemon=True).start()
@@ -1071,7 +1032,7 @@ input("second> ")
 """
 
 
-@unittest.skipUnless(readline, "this Python has no readline")
+@unittest.skipUnless(console.readline, "this Python has no readline")
 class ReadlineTest(unittest.TestCase):
     """What the console takes from readline for granted, whichever
     library it is made with."""
@@ -1079,53 +1040,22 @@ class ReadlineTest(unittest.TestCase):
     def test_readline_says_what_is_typed_of_a_line_while_it_is_typed(self):
         # The console writes the line being typed again under what comes
         # meanwhile: as readline has it, the line before it left behind
-        with tempfile.TemporaryDirectory() as work:
-            said = Path(work, "said")
-            environment = {**os.environ, "TERM": "xterm", "PYTHONPATH": str(ROOT)}
-            child, terminal = pty.fork()
-            if child == 0:
-                os.execve(
-                    sys.executable,
-                    [sys.executable, "-c", TYPING, str(said), "1.5"],
-                    environment,
-                )
-            try:
-                self.wait_for(terminal, b"first> ")
-                os.write(terminal, b"abcdef\r")
-                self.wait_for(terminal, b"second> ")
-                os.write(terminal, b"xy")
-                deadline = time.monotonic() + PATIENCE
-                while not said.exists() or not said.read_text():
-                    self.assertLess(time.monotonic(), deadline)
-                    self.wait_for(terminal, None, 0.1)
-                os.write(terminal, b"\r")
-            finally:
-                with contextlib.suppress(OSError):
-                    os.kill(child, signal.SIGKILL)
-                os.close(terminal)
-                os.waitpid(child, 0)
-            typed, point = ast.literal_eval(said.read_text())
+        environment = {**os.environ, "TERM": "xterm", "PYTHONPATH": str(ROOT)}
+        reader = Terminal([sys.executable, "-c", TYPING], environment, PATIENCE)
+        with contextlib.closing(reader) as shell:
+            shell.read_until("first> ")
+            shell.type("abcdef\r")
+            shell.read_until("second> ")
+            shell.type("xy")
+            start = shell.read_until("had ")
+            end = shell.read_until(" in all", start) - len(" in all")
+        typed, point = ast.literal_eval(shell.seen[start:end].decode())
         library = "editline" if EDITLINE else "GNU readline"
         self.assertEqual(typed, "xy", f"with {library}, the cursor at {point}")
         if point is not None and not EDITLINE:
             # In bytes from the start of the line, where it can be read.
             # Editline leaves it where it was, the console does not ask
             self.assertEqual(point, 2, f"with {library}")
-
-    def wait_for(self, terminal: int, wanted: bytes | None, patience=PATIENCE):
-        """Read what a terminal writes until something is, or for a time."""
-        seen = b""
-        deadline = time.monotonic() + patience
-        while wanted is None or wanted not in seen:
-            if time.monotonic() > deadline:
-                if wanted is None:
-                    return
-                self.fail(f"never wrote {wanted!r}: {seen!r}")
-            if select.select([terminal], [], [], 0.05)[0]:
-                chunk = os.read(terminal, 65536)
-                if not chunk:
-                    self.fail(f"left before it wrote {wanted!r}: {seen!r}")
-                seen += chunk
 
 
 class PipeTest(unittest.TestCase):
@@ -2033,7 +1963,8 @@ class CommandsTest(LauncherTest):
         self.assertEqual(seen, [True])
         self.assertFalse(self.shell.running)
 
-    @unittest.skipUnless(sys.platform == "linux", "runs setsid and reads /proc")
+    # And runs setsid, which macOS does not have
+    @reads_proc
     def test_ctrl_c_ends_what_a_command_of_the_users_runs_in_the_container(self):
         ours = self.commands()
         # docker's end of it: it passes on what the command writes, and
