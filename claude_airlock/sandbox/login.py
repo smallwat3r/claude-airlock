@@ -49,7 +49,9 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
+from typing import Protocol
 
 from ..background import in_background
 from ..files import json_object, open_plain, private_dir, write_whole
@@ -80,8 +82,8 @@ ASK_AGAIN_AFTER = 30
 # write is among its arguments, where other processes can read it: as
 # Claude Code has it
 MOST_TYPED = 4032
-# What security takes between quotes on its input as it is: its input is
-# typed in ASCII, a path with other characters goes among the arguments
+# What security takes between quotes on its input as it is, when it is
+# ASCII too: a path with other characters goes among the arguments
 TYPED_AS_IS = re.compile(r'[^"\\\n]*')
 # How security prints an item that is not one line of text
 HEX = re.compile(rb"(?:[0-9a-fA-F]{2})+")
@@ -113,21 +115,64 @@ class Login:
     # When it was written, in nanoseconds
     written: int = 0
 
-    @property
+    @cached_property
     def said(self) -> bytes | None:
         """What it says, the same for two that differ in how they are
         written alone."""
         return None if self.content is None else as_one_line(self.content)
 
-    @property
+    @cached_property
     def noted(self) -> str:
         """What the state directory keeps of it, not the login itself."""
         said = self.said
         return ABSENT if said is None else hashlib.sha256(said).hexdigest()
 
 
+class LoginStore(Protocol):
+    """What holds a login, the host's or the base's."""
+
+    def read(self) -> Login:
+        """The login it holds, one without content when it holds none.
+        OSError when that cannot be told: a store that does not answer
+        is not a store without a login, which would be a logout."""
+
+    def unchanged(self, login: Login) -> bool:
+        """Whether it still holds the login that was read, nothing was
+        written to it since."""
+
+    def write(self, content: bytes | None) -> bool:
+        """Make it hold a login, whole or not at all, None removes it.
+        Whether it then holds what it was given."""
+
+
+@dataclass(frozen=True)
+class Held:
+    """A login and the store it was read from."""
+
+    store: LoginStore
+    login: Login
+
+    def take(self, other: Login) -> bool:
+        """Make the store hold another login in the place of this one.
+        Not when it was written since this one was read, the next look
+        settles that."""
+        return self.store.unchanged(self.login) and self.store.write(other.content)
+
+
 def version_of(found: os.stat_result) -> tuple[int, ...]:
     return (found.st_ino, found.st_mtime_ns, found.st_size)
+
+
+def as_typed(words: list[str]) -> str | None:
+    """The line that has security take a command and its arguments on
+    its input, the options as they are and what they are given between
+    quotes. None when it cannot be typed: a word with what the quotes do
+    not take, or a line longer than security reads."""
+    if not all(word.isascii() and TYPED_AS_IS.fullmatch(word) for word in words):
+        return None
+    given = (word if word.startswith("-") else f'"{word}"' for word in words[1:])
+    line = " ".join([words[0], *given]) + "\n"
+    return line if len(line) <= MOST_TYPED else None
 
 
 class LoginFile:
@@ -275,14 +320,10 @@ class Keychain:
         """Have security write the item, given as hex digits, for how it
         ended. On its input where that can be: its arguments are for
         every process of the host to read."""
-        typed = (
-            f'add-generic-password -U -a "{self.account}" -s "{KEYCHAIN_ITEM}"'
-            f' -X "{digits}" "{self.path}"\n'
-        )
-        as_is = self.path.isascii() and TYPED_AS_IS.fullmatch(self.path)
-        if as_is and len(typed) <= MOST_TYPED:
-            return self._ask("-i", typed=typed)[0]
         add = ["add-generic-password", "-U", *self._item(), "-X", digits, self.path]
+        typed = as_typed(add)
+        if typed is not None:
+            return self._ask("-i", typed=typed)[0]
         return self._ask(*add)[0]
 
 
@@ -294,32 +335,32 @@ class HostLogin:
         self.keychain = keychain
         self.file = file
 
-    def _kept_in(self) -> tuple[Keychain | LoginFile, Login]:
-        """What holds the login, and the login."""
+    def _held(self) -> Held:
+        """The login, and which of the two holds it."""
         found = self.keychain.read()
         if found.content is not None:
-            return self.keychain, found
+            return Held(self.keychain, found)
         in_file = self.file.read()
         if in_file.content is not None:
-            return self.file, in_file
-        return self.keychain, found
+            return Held(self.file, in_file)
+        return Held(self.keychain, found)
 
     def read(self) -> Login:
-        return self._kept_in()[1]
+        return self._held().login
 
     def unchanged(self, login: Login) -> bool:
         try:
-            kept_in, found = self._kept_in()
+            held = self._held()
         except OSError:
             return False
-        return found.version == login.version and kept_in.unchanged(login)
+        return held.login.version == login.version and held.store.unchanged(login)
 
     def write(self, content: bytes | None) -> bool:
         """Where the login is, a new one in the Keychain. A logout is of
         both, the file would else be the login again."""
         if content is None:
             return self.keychain.write(None) and self.file.write(None)
-        return self._kept_in()[0].write(content)
+        return self._held().store.write(content)
 
 
 def user_name() -> str:
@@ -331,7 +372,7 @@ def user_name() -> str:
         return ""
 
 
-def host_login(host: Host, user: str) -> LoginFile | HostLogin:
+def host_login(host: Host, user: str) -> LoginStore:
     """Where the host's login is kept: in the file, and on macOS (a home
     with a login Keychain, and security to read it with) where Claude
     Code keeps it there."""
@@ -355,12 +396,12 @@ def note_shared(host: Host, login: Login) -> None:
     write_whole(host.login_synced_file, login.noted + "\n")
 
 
-def written_last(one: Login, other: Login) -> Login:
+def written_last(one: Held, other: Held) -> Held:
     """Of two that differ, the one to keep when nothing says which of
     them changed: a login over none, then the later one."""
-    if one.content is None or other.content is None:
-        return other if one.content is None else one
-    return one if one.written >= other.written else other
+    if one.login.content is None or other.login.content is None:
+        return other if one.login.content is None else one
+    return one if one.login.written >= other.login.written else other
 
 
 class LoginPair:
@@ -375,24 +416,21 @@ class LoginPair:
 
     def settle(self) -> None:
         """Make the two the same, from the one that changed."""
-        ours, theirs = self.ours.read(), self.theirs.read()
-        if ours.said == theirs.said:
-            self.note(ours)
+        ours = Held(self.ours, self.ours.read())
+        theirs = Held(self.theirs, self.theirs.read())
+        if ours.login.said == theirs.login.said:
+            self.note(ours.login)
             return
         shared = last_shared(self.host)
-        if shared == theirs.noted:
-            from_host = True
-        elif shared == ours.noted:
-            from_host = False
+        if shared == theirs.login.noted:
+            source = ours
+        elif shared == ours.login.noted:
+            source = theirs
         else:
-            from_host = written_last(ours, theirs) is ours
-        source, target, kept = (
-            (ours, theirs, self.theirs) if from_host else (theirs, ours, self.ours)
-        )
-        # Not when the target was written since it was read, the next
-        # look settles that
-        if kept.unchanged(target) and kept.write(source.content):
-            self.note(source)
+            source = written_last(ours, theirs)
+        target = theirs if source is ours else ours
+        if target.take(source.login):
+            self.note(source.login)
 
     def note(self, login: Login) -> None:
         if self.noted != login.noted:
