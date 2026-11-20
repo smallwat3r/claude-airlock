@@ -11,6 +11,8 @@ import subprocess
 import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from itertools import islice
+from operator import attrgetter
 from pathlib import Path
 
 from ..files import expand_home, private_dir, settings_object, write_whole
@@ -115,6 +117,19 @@ COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.j
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
 HASHED_BYTES = 64 * 1024 * 1024
+# Nor more than this of all the files of one fingerprint: past it a file
+# is told from one written since as file_stamp does, without reading it
+MOST_HASHED_BYTES = 1024 * 1024 * 1024
+# No more files of one tree are watched than this, of a tree whose files
+# are hashed and of one whose files are only told apart (the plugins,
+# thousands of files as they come): a session can write any number
+MOST_TREE_FILES = 5000
+MOST_STAMPED_FILES = 100_000
+# Nor the submodules of more than this many git directories
+MOST_MODULES = 1000
+# What a fingerprint has in the place of a hash for what it does not
+# watch, by a name that says what that is
+UNWATCHED = "unwatched"
 
 
 def sha256_hex(data: bytes) -> str:
@@ -161,6 +176,30 @@ def file_hash(path: str) -> str:
     return digest.hexdigest()
 
 
+def hash_files(paths: list[str], fingerprint: dict[str, str]) -> None:
+    """Add the hash of each file or link among the paths to a
+    fingerprint, while no more than MOST_HASHED_BYTES were read for it.
+    A file that would go past that is told apart as file_stamp does: any
+    number of files of any size is a session's to make, and the check
+    must end. The paths are in the same order at the start and the end
+    of a session, so the same files are read both times unless one of
+    them changed."""
+    left = MOST_HASHED_BYTES
+    for path in paths:
+        if not (os.path.isfile(path) or os.path.islink(path)):
+            continue
+        try:
+            size = min(os.path.getsize(path), HASHED_BYTES)
+        except OSError:
+            # A link to nothing, hashed as where it points
+            size = 0
+        if size > left:
+            fingerprint[path] = "not read: " + file_stamp(path)
+            continue
+        left -= size
+        fingerprint[path] = file_hash(path)
+
+
 def file_stamp(path: str) -> str:
     """What tells a file from one written since, without reading it: where
     it is, how long, and when it and what is known of it last changed. The
@@ -174,26 +213,45 @@ def file_stamp(path: str) -> str:
     return f"{about.st_ino}:{about.st_size}:{about.st_mtime_ns}:{about.st_ctime_ns}"
 
 
-def tree_files(root: str) -> list[str]:
-    """Every file under a directory. A link to a directory is listed and not
-    entered, the root too: a session can point one at the whole disk, and
-    the link itself is what changed then.
-    Without recursion, as module_git_dirs and for the same reason."""
+def tree_files(
+    root: str, fingerprint: dict[str, str], most: int = MOST_TREE_FILES
+) -> list[str]:
+    """The files under a directory, no more than most of them: a tree
+    with more has the rest said as unwatched in the fingerprint, which
+    shows as a change when a session made it so. A link to a directory is
+    listed and not entered, the root too: a session can point one at the
+    whole disk, and the link itself is what changed then. In the order of
+    their names, the files of a directory ahead of what is below it: the
+    same ones at the start and the end of a session, where there are more
+    than are watched. Without recursion, as module_git_dirs and for the
+    same reason."""
     if os.path.islink(root):
         return [root]
-    found = []
+    found: list[str] = []
     pending = [root]
-    while pending:
-        try:
-            entries = list(os.scandir(pending.pop()))
-        except OSError:
-            continue
-        for entry in entries:
+    while pending and len(found) <= most:
+        below = []
+        for entry in listed(pending.pop(), most):
             if entry.is_dir(follow_symlinks=False):
-                pending.append(entry.path)
+                below.append(entry.path)
             else:
                 found.append(entry.path)
-    return found
+        # The first by its name is the next looked into
+        pending += reversed(below)
+    if len(found) > most:
+        fingerprint[f"{root}: more than {most} files, the rest"] = UNWATCHED
+    return found[:most]
+
+
+def listed(directory: str, most: int) -> list[os.DirEntry[str]]:
+    """What a directory holds, in the order of the names, nothing for
+    one that cannot be read. No more than could be watched, and one more
+    to tell that there is more: a session can put any number there."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(islice(entries, most + 1), key=attrgetter("name"))
+    except OSError:
+        return []
 
 
 def is_plugin_use_marker(path: str, cache: str) -> bool:
@@ -209,25 +267,30 @@ def is_plugin_use_marker(path: str, cache: str) -> bool:
     )
 
 
-def module_git_dirs(directory: str) -> Iterator[str]:
+def module_git_dirs(directory: str, fingerprint: dict[str, str]) -> list[str]:
     """The git directories of the submodules kept under a directory, and of
-    theirs. A submodule's name can hold slashes, so they sit at any depth.
-    Without recursion: a session can nest directories deeper than Python
-    calls, and the check must not be made to fail."""
+    theirs, no more than MOST_MODULES of them and of the directories
+    looked into for them: the rest is said as unwatched in the
+    fingerprint. A submodule's name can hold slashes, so they sit at any
+    depth. Without recursion: a session can nest directories deeper than
+    Python calls, and the check must not be made to fail."""
+    found: list[str] = []
     pending = [directory]
-    while pending:
-        try:
-            entries = list(os.scandir(pending.pop()))
-        except OSError:
-            continue
-        for entry in entries:
+    looked = 0
+    while pending and looked <= MOST_MODULES:
+        looked += 1
+        for entry in listed(pending.pop(), MOST_MODULES):
             if not entry.is_dir(follow_symlinks=False):
                 continue
             if os.path.isfile(os.path.join(entry.path, "HEAD")):
-                yield entry.path
+                found.append(entry.path)
                 pending.append(os.path.join(entry.path, "modules"))
             else:
                 pending.append(entry.path)
+    if pending or len(found) > MOST_MODULES:
+        said = f"{directory}: more than {MOST_MODULES} submodules, the rest"
+        fingerprint[said] = UNWATCHED
+    return found[:MOST_MODULES]
 
 
 def git_configs(git_dir: str) -> list[str]:
@@ -311,11 +374,13 @@ def claude_files(
     files: tuple[str, ...],
     trees: tuple[str, ...],
     command_files: tuple[str, ...],
+    fingerprint: dict[str, str],
 ) -> list[str]:
-    """What is watched of a project or of ~/.claude for Claude's sake."""
+    """What is watched of a project or of ~/.claude for Claude's sake,
+    what is not said in the fingerprint, see tree_files."""
     watched = [os.path.join(root, name) for name in files]
     for name in trees:
-        watched += tree_files(os.path.join(root, name))
+        watched += tree_files(os.path.join(root, name), fingerprint)
     for name in command_files:
         watched += named_files(os.path.join(root, name), root)
     return watched
@@ -337,33 +402,34 @@ def host_exec_fingerprint(
     directories, which is said apart (see report_memory). Not seen: a
     CLAUDE.md below the top of a project, and what a script goes on to
     run."""
-    fingerprint = {}
+    fingerprint: dict[str, str] = {}
     watched = []
     for directory in directories:
         git_dir = os.path.join(directory, ".git")
         # A file, in a working tree or a submodule: where its directory is
         watched.append(git_dir)
-        modules = module_git_dirs(os.path.join(git_dir, "modules"))
+        modules = module_git_dirs(os.path.join(git_dir, "modules"), fingerprint)
         for each in (git_dir, *modules):
             for config in git_configs(each):
                 fingerprint[config] = git_config_hash(config)
-            watched += tree_files(os.path.join(each, "hooks"))
+            watched += tree_files(os.path.join(each, "hooks"), fingerprint)
         moved = moved_hooks_dir(directory)
         if moved:
-            watched += tree_files(moved)
-        watched += claude_files(directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES)
+            watched += tree_files(moved, fingerprint)
+        watched += claude_files(
+            directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
+        )
     if claude_dir:
         files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
-        watched += claude_files(claude_dir, files, CONFIG_TREES, ("settings.json",))
+        watched += claude_files(
+            claude_dir, files, CONFIG_TREES, ("settings.json",), fingerprint
+        )
     for directory in memory:
-        # The same ones at the start and the end, in whatever order found
-        watched += sorted(tree_files(directory))[:MOST_MEMORY_FILES]
-    for path in watched:
-        if os.path.isfile(path) or os.path.islink(path):
-            fingerprint[path] = file_hash(path)
+        watched += tree_files(directory, fingerprint, MOST_MEMORY_FILES)
+    hash_files(watched, fingerprint)
     for name in CONFIG_WATCHED_TREES if claude_dir else ():
         root = os.path.join(claude_dir, name)
-        for path in tree_files(root):
+        for path in tree_files(root, fingerprint, MOST_STAMPED_FILES):
             if name == PLUGIN_CACHE and is_plugin_use_marker(path, root):
                 continue
             fingerprint[path] = file_stamp(path)
@@ -381,10 +447,10 @@ def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
         if directory != root:
             watched += below_the_top(directory, names, fingerprint)
         watched += [os.path.join(directory, name) for name in BUILD_FILES & names]
-        for name in BUILD_TREES.intersection(subdirs):
-            watched += tree_files(os.path.join(directory, name))
+        for name in sorted(BUILD_TREES.intersection(subdirs)):
+            watched += tree_files(os.path.join(directory, name), fingerprint)
         if WORKFLOWS[0] in subdirs:
-            watched += tree_files(os.path.join(directory, *WORKFLOWS))
+            watched += tree_files(os.path.join(directory, *WORKFLOWS), fingerprint)
         subdirs[:] = [
             name
             for name in subdirs
@@ -410,12 +476,10 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     except RecursionError:
         # Directories nested deeper than Python walks, a session's doing:
         # said as a change, the check must not be made to fail
-        fingerprint["directories nested too deep to look into"] = "unwatched"
-    for path in watched[:MOST_BUILD_FILES]:
-        if os.path.isfile(path) or os.path.islink(path):
-            fingerprint[path] = file_hash(path)
+        fingerprint["directories nested too deep to look into"] = UNWATCHED
+    hash_files(watched[:MOST_BUILD_FILES], fingerprint)
     if len(watched) > MOST_BUILD_FILES:
-        fingerprint[f"more than {MOST_BUILD_FILES} such files, the rest"] = "unwatched"
+        fingerprint[f"more than {MOST_BUILD_FILES} such files, the rest"] = UNWATCHED
     return fingerprint
 
 
@@ -427,14 +491,16 @@ def below_the_top(
     the files to hash, the git configs hashed as those are."""
     watched: list[str] = []
     if CLAUDE_MARKS & names:
-        watched += claude_files(directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES)
+        watched += claude_files(
+            directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
+        )
     if ".git" in names:
         git_dir = os.path.join(directory, ".git")
         # A file, in a working tree or a submodule: where its directory is
         watched.append(git_dir)
         for config in git_configs(git_dir):
             fingerprint[config] = git_config_hash(config)
-        watched += tree_files(os.path.join(git_dir, "hooks"))
+        watched += tree_files(os.path.join(git_dir, "hooks"), fingerprint)
     return watched
 
 

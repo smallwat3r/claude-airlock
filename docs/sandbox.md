@@ -175,6 +175,13 @@ only when what it holds is no longer what it was. Not looked into:
 `node_modules`, `.venv`, and the working trees of `--worktree`, each the
 whole project again.
 
+The check is bounded, a session can write any number of files of any
+size: 5000 files of each watched directory, 5000 build files, the
+submodules of 1000 git directories, and 1 GB read in all. What is past a
+count is said as `the rest`, unwatched, when a session made it so. A file
+past the size is not read, and still told from one written since by when
+it changed.
+
 A session that ends without its launcher, a killed terminal say, is
 checked by the next `claude-airlock` launch instead.
 

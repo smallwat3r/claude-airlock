@@ -9,7 +9,9 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from harness import (
@@ -18,6 +20,7 @@ from harness import (
 )
 
 from claude_airlock import files
+from claude_airlock.sandbox import tamper
 
 
 class TamperingTest(LauncherTest):
@@ -245,6 +248,62 @@ class BuildFilesTest(LauncherTest):
         result = self.launch(session=f"{deep}; echo x > .git/hooks/pre-commit")
         self.assertIn(f"  {self.project}/.git/hooks/pre-commit\n", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+
+class BoundedCheckTest(unittest.TestCase):
+    """What a session can make any amount of is watched up to a bound."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name, "commands")
+        for name in ("b/2.md", "b/1.md", "a.md", "c/deep/3.md"):
+            file = self.root / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(name)
+
+    def test_the_files_of_a_tree_are_in_one_order(self):
+        found = tamper.tree_files(str(self.root), {})
+        names = [os.path.relpath(path, self.root) for path in found]
+        self.assertEqual(names, ["a.md", "b/1.md", "b/2.md", "c/deep/3.md"])
+
+    def test_a_tree_with_too_many_files_says_the_rest_is_unwatched(self):
+        fingerprint: dict[str, str] = {}
+        found = tamper.tree_files(str(self.root), fingerprint, most=2)
+        self.assertEqual([Path(path).name for path in found], ["a.md", "1.md"])
+        self.assertEqual(
+            fingerprint, {f"{self.root}: more than 2 files, the rest": "unwatched"}
+        )
+        # And nothing is said of one that has no more than are watched
+        fingerprint = {}
+        self.assertEqual(len(tamper.tree_files(str(self.root), fingerprint, 4)), 4)
+        self.assertEqual(fingerprint, {})
+
+    def test_no_more_is_read_than_the_check_may_and_a_change_still_shows(self):
+        paths = tamper.tree_files(str(self.root), {})
+        with unittest.mock.patch.object(tamper, "MOST_HASHED_BYTES", 10):
+            before: dict[str, str] = {}
+            tamper.hash_files(paths, before)
+            unread = [path for path, said in before.items() if "not read" in said]
+            self.assertEqual([Path(path).name for path in unread], ["2.md", "3.md"])
+            again: dict[str, str] = {}
+            tamper.hash_files(paths, again)
+            self.assertEqual(before, again)
+            os.utime(unread[0], ns=(1, 1))
+            after: dict[str, str] = {}
+            tamper.hash_files(paths, after)
+        self.assertEqual(tamper.differing(before, after), [unread[0]])
+
+    def test_no_more_submodules_are_looked_for_than_are_watched(self):
+        modules = self.root / "modules"
+        for number in range(4):
+            (modules / f"m{number}").mkdir(parents=True)
+            (modules / f"m{number}" / "HEAD").touch()
+        fingerprint: dict[str, str] = {}
+        with unittest.mock.patch.object(tamper, "MOST_MODULES", 2):
+            found = tamper.module_git_dirs(str(modules), fingerprint)
+        self.assertEqual([Path(path).name for path in found], ["m0", "m1"])
+        self.assertEqual(list(fingerprint.values()), ["unwatched"])
 
 
 class UncheckedSessionTest(LauncherTest):
