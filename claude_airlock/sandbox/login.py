@@ -80,7 +80,8 @@ ASK_AGAIN_AFTER = 30
 # write is among its arguments, where other processes can read it: as
 # Claude Code has it
 MOST_TYPED = 4032
-# What security takes between quotes on its input as it is
+# What security takes between quotes on its input as it is: its input is
+# typed in ASCII, a path with other characters goes among the arguments
 TYPED_AS_IS = re.compile(r'[^"\\\n]*')
 # How security prints an item that is not one line of text
 HEX = re.compile(rb"(?:[0-9a-fA-F]{2})+")
@@ -90,11 +91,15 @@ ITEM_WRITTEN = re.compile(rb'"mdat"<timedate>=\S+\s+"(\d{14})Z')
 
 def as_one_line(content: bytes) -> bytes:
     """A login as one line of JSON, in characters security prints as they
-    are. One that is no JSON object is left as it is."""
+    are. One that is no JSON object is left as it is, and one nested
+    too deep to write, which is a session's doing."""
     held = json_object(content)
     if held is None:
         return content
-    return json.dumps(held, separators=(",", ":")).encode("ascii")
+    try:
+        return json.dumps(held, separators=(",", ":")).encode("ascii")
+    except (ValueError, RecursionError):
+        return content
 
 
 @dataclass(frozen=True)
@@ -274,7 +279,8 @@ class Keychain:
             f'add-generic-password -U -a "{self.account}" -s "{KEYCHAIN_ITEM}"'
             f' -X "{digits}" "{self.path}"\n'
         )
-        if TYPED_AS_IS.fullmatch(self.path) and len(typed) <= MOST_TYPED:
+        as_is = self.path.isascii() and TYPED_AS_IS.fullmatch(self.path)
+        if as_is and len(typed) <= MOST_TYPED:
             return self._ask("-i", typed=typed)[0]
         add = ["add-generic-password", "-U", *self._item(), "-X", digits, self.path]
         return self._ask(*add)[0]

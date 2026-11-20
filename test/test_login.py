@@ -336,6 +336,17 @@ class KeychainTest(LauncherTest):
         calls = [json.loads(line) for line in self.asked.read_text().splitlines()]
         self.assertIn(["-i", "add-generic-password"], calls)
 
+    def test_a_keychain_at_a_path_not_in_ascii_is_written_all_the_same(self):
+        # security is typed to in ASCII, such a path is among its arguments
+        elsewhere = self.work / "jos\u00e9" / "login.keychain-db"
+        elsewhere.parent.mkdir()
+        elsewhere.touch()
+        kept = login.Keychain(str(elsewhere), "me")
+        self.assertTrue(kept.write(b'{"token":"mine"}'))
+        self.assertEqual(kept.read().content, b'{"token":"mine"}')
+        calls = [json.loads(line) for line in self.asked.read_text().splitlines()]
+        self.assertNotIn(["-i", "add-generic-password"], calls)
+
     def test_a_login_in_the_hosts_file_is_the_hosts_when_the_keychain_has_none(self):
         # Where Claude Code keeps it when the Keychain refused it
         self.ours.write_text('{"token":"file"}')
