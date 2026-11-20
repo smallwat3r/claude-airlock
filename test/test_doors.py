@@ -285,6 +285,39 @@ class AgentDoorTest(LauncherTest):
         lines = Path(self.host.doors_file).read_text().splitlines()
         self.assertEqual([json.loads(line)["path"] for line in lines], ["2", "3", "4"])
 
+    def test_a_session_cannot_fill_the_record_with_uses_that_cost_nothing(self):
+        uses = doors.SessionUses(self.host, "s", doors.Door.SSH_AGENT)
+        uses.note("sign", did="sign", key="SHA256:abc", what="a login as git")
+        with mock.patch.object(doors, "MOST_ALIKE", 3):
+            for _ in range(50):
+                uses.note("list", did="list", keys=2)
+            uses.note("sign", did="sign", key="SHA256:abc", what="a signature for x")
+        with mock.patch.object(doors, "MOST_SESSION_USES", 5):
+            uses.note("sign", did="sign", key="SHA256:abc", what="a signature for y")
+        uses.close()
+        noted = doors.read_uses(self.host, 0, time.time() + 1)
+        # The first of them one by one, then that the rest is counted
+        self.assertEqual(
+            [use.get("did", "counted") for use in noted],
+            ["sign", "list", "list", "list", "counted", "sign", "counted"],
+        )
+        self.assertEqual(noted[-1]["unrecorded"], {"list": 47, "sign": 1})
+        rows, events = door_events.door_events(self.host, 0, time.time() + 1)
+        self.assertEqual(
+            rows,
+            [
+                (
+                    "ssh agent",
+                    "5 requests, 2 signatures, 48 more NOT RECORDED one by one",
+                )
+            ],
+        )
+        self.assertEqual(
+            events[-1].details,
+            ["48 more uses NOT RECORDED one by one: 47 list, 1 sign"],
+        )
+        self.assertIn("error", events[4].fields)
+
     def test_the_uses_of_one_session_can_be_told_from_another(self):
         for session in ("claude-proj", "claude-proj-2"):
             doors.note_use(self.host, session, doors.Door.DOCKER)

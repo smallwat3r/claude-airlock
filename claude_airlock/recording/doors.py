@@ -10,12 +10,25 @@ door_events.py."""
 from __future__ import annotations
 
 import enum
+import json
+import threading
+from collections import Counter
+from contextlib import suppress
 
 from ..settings import Host
 from .notes import Notes
 
 # The lines kept, the oldest go once there are more
 KEPT_USES = 5000
+# No more lines than this are one session's, and no more of them say the
+# same: the record is of all the sessions, and one that could fill it
+# (asking the agent for its keys costs nothing) would be rid of what it,
+# or another, did before. Past these a use is counted, see SessionUses.
+MOST_SESSION_USES = 1000
+MOST_ALIKE = 20
+# In a line of the record: the uses that were counted and not noted one
+# by one, how many of each kind once the session is over
+UNRECORDED = "unrecorded"
 # Who refused a request to the agent, when that was not the agent
 BY_LAUNCHER = "launcher"
 
@@ -46,6 +59,48 @@ def note_use(host: Host, session: str, door: Door, **said: object) -> None:
     """Add a use of a door by a session of this project to the record,
     the oldest go past KEPT_USES."""
     door_record(host).add(host.project_dir, session, door=door.value, **said)
+
+
+class SessionUses:
+    """The uses one session makes of a door, noted as they come. Each is
+    a line of the record until the session has MOST_SESSION_USES of them,
+    or MOST_ALIKE that say the same. From then on a use is counted by its
+    kind: a line says at once that this began, and one says how many
+    there were of each kind when the session is over. Used from several
+    threads at once."""
+
+    def __init__(self, host: Host, session: str, door: Door) -> None:
+        self._host = host
+        self._session = session
+        self._door = door
+        self._lock = threading.Lock()
+        self._noted = 0
+        self._alike: Counter[str] = Counter()
+        self._unrecorded: Counter[str] = Counter()
+
+    def note(self, kind: str, **said: object) -> None:
+        """Note a use, of a kind it is counted as when it is not noted
+        on its own. Raises OSError when the record cannot be written."""
+        same = json.dumps(said, sort_keys=True, default=str)
+        with self._lock:
+            crowded = self._noted >= MOST_SESSION_USES
+            if crowded or self._alike[same] >= MOST_ALIKE:
+                if not self._unrecorded:
+                    note_use(self._host, self._session, self._door, unrecorded=True)
+                self._unrecorded[kind] += 1
+                return
+            self._noted += 1
+            self._alike[same] += 1
+            note_use(self._host, self._session, self._door, **said)
+
+    def close(self) -> None:
+        """Say how many uses were counted and not noted, if any were."""
+        with self._lock:
+            counted, self._unrecorded = dict(self._unrecorded), Counter()
+        if counted:
+            # A full disk or the like: the line that said it began stays
+            with suppress(OSError):
+                note_use(self._host, self._session, self._door, unrecorded=counted)
 
 
 def read_uses(

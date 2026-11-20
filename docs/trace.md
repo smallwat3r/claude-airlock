@@ -442,6 +442,12 @@ sandbox  ssh-agent   signed a login as git with SHA256:Xk3... (me@laptop)
 sandbox  docker      POST /v1.47/containers/create 403  DENIED
 ```
 
+One session has no more than 1000 lines of that record, and no more than
+20 that say the same: the record is of all the sessions, and listing the
+keys of the agent a few thousand times would push out what was signed
+before. Past that the uses are counted by their kind and said as
+`NOT RECORDED one by one`, which `--failed` keeps.
+
 ## When a session ends
 
 The launcher says what is worth a look, and is silent when there is

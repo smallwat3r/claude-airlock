@@ -19,7 +19,7 @@ from ..background import wait_for
 from ..docker import docker_popen
 from ..sandbox.network import has_socket_proxy, session_address, socket_proxy_name
 from ..settings import Host, Settings
-from .doors import Door, note_use
+from .doors import Door, SessionUses
 
 # A line of the socket proxy's log (HAProxy's httplog): the address and
 # port it came from, then further on the status and, quoted, the request
@@ -56,8 +56,7 @@ class SocketWatch:
     calls that came from the session's address."""
 
     def __init__(self, host: Host, session: str, owner: str, proxy: str) -> None:
-        self._host = host
-        self._session = session
+        self._uses = SessionUses(host, session, Door.DOCKER)
         self._owner = owner
         self._proxy = proxy
         self._stop = threading.Event()
@@ -81,6 +80,7 @@ class SocketWatch:
             if self._log and self._log.poll() is None:
                 self._log.terminate()
         self._thread.join()
+        self._uses.close()
 
     def _follow(self) -> subprocess.Popen | None:
         """Start following the proxy's log, none when that cannot be
@@ -114,14 +114,7 @@ class SocketWatch:
                     continue
                 _, method, path, status = call
                 try:
-                    note_use(
-                        self._host,
-                        self._session,
-                        Door.DOCKER,
-                        method=method,
-                        path=path,
-                        status=status,
-                    )
+                    self._uses.note(method, method=method, path=path, status=status)
                 except OSError:
                     continue
 

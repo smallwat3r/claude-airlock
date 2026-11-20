@@ -31,7 +31,7 @@ from ..files import private_dir
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
 from ..settings import Host, Settings
-from .doors import BY_LAUNCHER, AgentUse, Door, note_use
+from .doors import BY_LAUNCHER, AgentUse, Door, SessionUses
 
 # The connections a session can have to the agent at once, and the seconds
 # one can stay open with nothing asked. Each takes a thread and two
@@ -154,8 +154,7 @@ class AgentDoor:
     next."""
 
     def __init__(self, host: Host, session: str, agent: str) -> None:
-        self._host = host
-        self._session = session
+        self._uses = SessionUses(host, session, Door.SSH_AGENT)
         self._agent = agent
         # The comment of each key the agent has listed, by its fingerprint
         self._comments: dict[str, str] = {}
@@ -183,6 +182,7 @@ class AgentDoor:
         self._listener.close()
         with suppress(OSError):
             os.unlink(self.path)
+        self._uses.close()
 
     def _serve(self) -> None:
         while True:
@@ -267,12 +267,7 @@ class AgentDoor:
                 did=AgentUse.OTHER.value, what="sent a request that could not be read"
             )
         try:
-            note_use(
-                self._host,
-                self._session,
-                Door.SSH_AGENT,
-                **said,
-            )
+            self._uses.note(str(said["did"]), **said)
         except OSError:
             # A full disk or the like: the agent goes on without the note
             return
