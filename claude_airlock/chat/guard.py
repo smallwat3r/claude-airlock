@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from dataclasses import dataclass
 
 from ..events import clean, labelled
-from ..report.calls import result_planted
+from ..report.calls import read_source, result_planted, said_source
 from ..report.entries import block_text, content_blocks
 from ..report.planted import Planted
 
@@ -25,12 +26,11 @@ MOST_OPEN = 10_000
 # The signs the user went on with that are remembered, each with where
 # it was read
 MOST_ACCEPTED = 10_000
-# What a call names what it reads by, when it reads one thing: the same
-# file read from another line on is the same source
-SOURCE_KEYS = ("file_path", "notebook_path", "url")
 # What the user is asked once a turn was stopped, where there is one to
-# answer. Anything but a yes clears the conversation
+# answer, and when the answer is no yes: the conversation is cleared for
+# a yes to the second alone, it cannot be brought back
 GO_ON = "go on with it in the conversation? [y/N] "
+CLEAR = "clear the conversation, and what claude read with it? [y/N] "
 # What is said where the user is not asked, or gave no answer: what
 # claude is told next does not take the text back
 STILL_READ = "what it read stays in the conversation, only /clear takes it out"
@@ -41,20 +41,31 @@ def stop_said(found: tuple[Planted, ...], stopped: bool, asked: bool) -> list[st
     no turn left to stop for them: why, and what is the user's to do
     unless they are asked."""
     why = ", ".join(dict.fromkeys(sign.sign for sign in found))
+    sources = ", ".join(dict.fromkeys(sign.where for sign in found if sign.source))
+    where = f" in {sources}" if sources else ""
     what = "STOPPED the turn" if stopped else "no turn left to stop"
-    said = [f"{what}: what claude was given to read {why}"]
+    said = [f"{what}: what claude was given to read{where} {why}"]
     if not asked:
         said.append(STILL_READ)
     return [labelled("chat", line) for line in said]
+
+
+@dataclass(frozen=True)
+class Called:
+    """A call that has no result yet: its tool, what it reads as it is
+    remembered by (see source_of), and where that is said to be from
+    (see said_source)."""
+
+    tool: str
+    source: str
+    said: str
 
 
 def source_of(tool: str, given: object) -> str:
     """What a call reads, as what it is remembered by: the file or the
     page when it names one, else all it was called with. No longer than a
     digest, a command can be of any length."""
-    names = given if isinstance(given, dict) else {}
-    named = [names[key] for key in SOURCE_KEYS if isinstance(names.get(key), str)]
-    what = named[0] if named else clean(given)
+    what = read_source(given) or clean(given)
     return _digest(f"{tool}\0{what}")
 
 
@@ -76,9 +87,8 @@ class Guard:
     the next time is asked of again, it can change between two reads."""
 
     def __init__(self) -> None:
-        # The tool and the source of each call that has no result yet, by
-        # its id
-        self._calls: dict[str, tuple[str, str | None]] = {}
+        # Each call that has no result yet, by its id
+        self._calls: dict[str, Called] = {}
         # Whether the user is asked, or about to be, if claude goes on
         # with what the turns were stopped for
         self._asking = False
@@ -99,9 +109,7 @@ class Guard:
         if message.get("type") == "assistant":
             for block in blocks:
                 if block.get("type") == "tool_use":
-                    tool = str(block.get("name"))
-                    source = source_of(tool, block.get("input"))
-                    self._called(str(block.get("id")), tool, source)
+                    self._called(block)
             return ()
         return tuple(
             sign
@@ -132,8 +140,13 @@ class Guard:
             self._asked.clear()
             self._asking = False
 
-    def _called(self, call: str, tool: str, source: str) -> None:
-        self._calls[call] = (tool, source)
+    def _called(self, block: dict) -> None:
+        """Remember a call until its result is given, the oldest gone
+        for it when there are more than MOST_OPEN."""
+        tool, given = str(block.get("name")), block.get("input")
+        self._calls[str(block.get("id"))] = Called(
+            tool, source_of(tool, given), said_source(given)
+        )
         while len(self._calls) > MOST_OPEN:
             del self._calls[next(iter(self._calls))]
 
@@ -141,15 +154,17 @@ class Guard:
         """The signs in the result of a call that a turn is stopped for,
         of any tool when the call was not seen: its source is not known
         then, and nothing is remembered of it."""
-        tool, source = self._calls.pop(str(block.get("tool_use_id")), ("", None))
-        found = result_planted(tool, block_text(block.get("content")))
-        stops = tuple(sign for sign in found if sign.stops)
-        if source is None:
-            return stops
+        call = self._calls.pop(str(block.get("tool_use_id")), None)
+        output = block_text(block.get("content"))
+        if call is None:
+            return tuple(sign for sign in result_planted("", output) if sign.stops)
+        found = result_planted(call.tool, output, call.said)
         with self._lock:
             new = tuple(
-                sign for sign in stops if _key(source, sign) not in self._accepted
+                sign
+                for sign in found
+                if sign.stops and _key(call.source, sign) not in self._accepted
             )
             if len(self._asked) < MOST_ACCEPTED:
-                self._asked.update(_key(source, sign) for sign in new)
+                self._asked.update(_key(call.source, sign) for sign in new)
         return new

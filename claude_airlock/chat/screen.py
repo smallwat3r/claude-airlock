@@ -11,6 +11,12 @@ import unicodedata
 SGR = re.compile(r"\x1b\[[0-9;]{0,32}m")
 
 
+def uncounted(prompt: str) -> str:
+    """A prompt as readline is given it: each escape of colour between
+    the marks that tell it they take no column."""
+    return SGR.sub(lambda escape: f"\x01{escape.group()}\x02", prompt)
+
+
 def columns_of(text: str) -> int:
     """How many columns of a terminal a text takes: two for the wide
     characters of East Asia, none for what is put on the one before."""

@@ -189,9 +189,12 @@ class Asker:
         if question:
             question.answer(None)
 
-    def ask(self, prompt: str) -> str | None:
+    def ask(self, prompt: str, style: str = "") -> str | None:
         """Put a question to the user and wait for what they say, none
-        for no answer."""
+        for no answer. In a style where there is colour, for a question
+        that must not be missed."""
+        if self._page.layout.colour:
+            prompt = painted(style, prompt)
         question = Question(prompt, stale=bool(self._console.typed()))
         if question.stale:
             # It is written again after the question, where it looks like

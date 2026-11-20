@@ -572,15 +572,24 @@ class ChatTest(LauncherTest):
         done = self.chat("fetch\nhello\n")
         self.assertEqual(done.returncode, 0, done.stderr)
         said = done.stdout
-        self.assertIn("POSSIBLE INJECTION: is written as a turn of the", said)
-        self.assertIn("# chat        STOPPED the turn: what claude was given", said)
+        self.assertIn(
+            "POSSIBLE INJECTION in https://example.org: is written as a turn", said
+        )
+        self.assertIn(
+            "# chat        STOPPED the turn: what claude was given to read in"
+            " https://example.org is written as a turn of the conversation",
+            said,
+        )
         # Claude was told to stop, and the line written before is not sent
         self.assertIn("was stopped", said)
         self.assertIn("# chat        the lines left are not sent, leaving", said)
         self.assertNotIn("hello", said)
         # Asked not to, a chat flags it and goes on
         done = self.chat("fetch\nhello\n", CLAUDE_AIRLOCK_INJECTION_STOP="0")
-        self.assertIn("POSSIBLE INJECTION: is written as a turn of the", done.stdout)
+        self.assertIn(
+            "POSSIBLE INJECTION in https://example.org: is written as a turn",
+            done.stdout,
+        )
         self.assertNotIn("STOPPED", done.stdout)
         self.assertIn("was went on", done.stdout)
         self.assertIn("prompt      hello", done.stdout)
@@ -595,23 +604,43 @@ class ChatTest(LauncherTest):
         )
         self.assertEqual(said.count("STOPPED the turn"), 1, said)
         self.assertNotIn("stays in the conversation", said)
+        # The turn was stopped: what comes next is the user's to type
+        self.assertEqual(said.count("# chat        nothing runs, claude waits"), 1)
         # Flagged each time all the same
-        self.assertEqual(said.count("POSSIBLE INJECTION: "), 2, said)
+        self.assertEqual(said.count("POSSIBLE INJECTION in https://"), 2, said)
         # The turn that was stopped is not said to have finished, the one
         # that went on is
         self.assertEqual(said.count("# ready "), 1, said)
         self.assertLess(said.index("was went on"), said.index("# ready "))
 
-    def test_a_stopped_turn_that_is_not_gone_on_with_is_cleared(self):
+    def test_a_stopped_turn_that_is_not_gone_on_with_is_cleared_once_confirmed(self):
+        clear = "clear the conversation, and what claude read with it? [y/N] "
         said = self.at_a_terminal(
             ("> ", "fetch\r"),
             ("go on with it in the conversation? [y/N] ", "\r"),
+            (clear, "y\r"),
             ("# ready ", "fetch\r"),
             ("go on with it in the conversation? [y/N] ", "\x04"),
         )
         self.assertIn("clearing the conversation, what claude read with it", said)
         self.assertIn("prompt      /clear", said)
+        self.assertNotIn("nothing runs, claude waits", said)
         # Nothing is remembered of what was not gone on with
+        self.assertEqual(said.count("STOPPED the turn"), 2, said)
+
+    def test_a_conversation_is_not_cleared_without_a_yes_to_that(self):
+        clear = "clear the conversation, and what claude read with it? [y/N] "
+        said = self.at_a_terminal(
+            ("> ", "fetch\r"),
+            ("go on with it in the conversation? [y/N] ", "n\r"),
+            (clear, "\r"),
+            ("nothing runs, claude waits for you", "fetch\r"),
+            ("go on with it in the conversation? [y/N] ", "\x04"),
+        )
+        self.assertIn("# chat        not cleared: what it read stays in the", said)
+        self.assertNotIn("clearing the conversation", said)
+        self.assertNotIn("prompt      /clear", said)
+        # Kept, and not gone on with: it stops the next turn too
         self.assertEqual(said.count("STOPPED the turn"), 2, said)
 
     def test_ctrl_c_interrupts_the_turn_that_runs(self):
@@ -1742,6 +1771,17 @@ class GuardTest(LauncherTest):
             "# chat        what it read stays in the conversation, only /clear"
             " takes it out",
         )
+        # The file or the page it was read in is said, when the call
+        # named one
+        asked = self.called("c5", "Read")
+        asked["message"]["content"][0]["input"] = {"file_path": "/p/a.md"}
+        named = self.heard(chat, asked, self.given("c5", self.FORGED))
+        self.assertIn("was given to read in /p/a.md is written as a turn", named[0])
+        # And of a command the address it names
+        asked = self.called("c6", "Bash")
+        asked["message"]["content"][0]["input"] = {"command": "curl https://a.example"}
+        named = self.heard(chat, asked, self.given("c6", self.FORGED))
+        self.assertIn("was given to read in https://a.example is written", named[0])
         # What a subagent is given next stops nothing twice
         more = self.heard(chat, self.given("c9", self.FORGED, parent_tool_use_id="t"))
         self.assertEqual(claude.asked, ["interrupt"])

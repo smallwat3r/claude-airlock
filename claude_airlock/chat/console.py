@@ -56,7 +56,7 @@ from typing import TextIO
 
 from ..events import Event, labelled
 from ..report.layout import Layout, painted
-from .screen import SGR, cursor_back, erased
+from .screen import SGR, cursor_back, erased, uncounted
 
 try:
     import readline
@@ -320,9 +320,9 @@ class Console:
                     self._shown = above
                     self._say(above + shown)
                     self._on_screen = True
-        # Readline counts the columns of the last line of a prompt alone,
-        # the head's escapes of colour are all above it
-        return self._typed(above + shown if self._redrawn else "")
+        # Readline counts the columns of a prompt, and takes an escape of
+        # colour for none only when told so: a question can be in colour
+        return self._typed(uncounted(above + shown) if self._redrawn else "")
 
     def _typed(self, prompt: str) -> str:
         """Wait for a line, the one place Ctrl-C ends as
@@ -419,8 +419,11 @@ class Console:
         out = "\x1b[1A" + self._erased(shown, line)
         if working and self._head:
             out += "\n".join(self._head) + "\n"
-        rows = (prompt + line).split("\n")
-        out += "\n".join(self._styled(row) if styled else row for row in rows)
+        # A prompt in a colour of its own keeps it, a question is: the
+        # style is of what was typed after it
+        own = prompt if SGR.search(prompt) else ""
+        rows = (line if own else prompt + line).split("\n")
+        out += own + "\n".join(self._styled(row) if styled else row for row in rows)
         self._say(out + "\n")
 
     def _styled(self, text: str) -> str:

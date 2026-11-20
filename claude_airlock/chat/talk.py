@@ -39,6 +39,7 @@ from ..report.layout import (
     HEADER_START,
     ITALIC,
     STYLES,
+    YELLOW,
     Layout,
     painted,
     together,
@@ -50,7 +51,7 @@ from .commands import LOCAL, Commands, Did, Handover, Resume
 from .console import Console, Page
 from .drift import Drift
 from .followed import POLL, Followed
-from .guard import GO_ON, STILL_READ, Guard, stop_said
+from .guard import CLEAR, GO_ON, STILL_READ, Guard, stop_said
 from .notices import Notices
 from .pipe import Agent
 from .reply import ReplyStream
@@ -83,6 +84,13 @@ LONG_TURN = 30.0
 # Said once a turn is over, and how in colour: bold bright green
 READY = labelled("ready", "claude has finished, waiting for your input")
 READY_STYLE = together(BOLD, BRIGHT_GREEN)
+# What a chat asks of a turn it stopped, and how in colour: bold yellow,
+# the answer is the user's to give before anything goes on
+ASKED_STYLE = together(BOLD, YELLOW)
+# Said once the user answered for a turn that was stopped and the
+# conversation is kept, in the colour of a turn that is over: nothing
+# goes on until they type
+WAITING = "nothing runs, claude waits for you: type how to go on, or continue"
 # Where each side of the conversation starts, to be found among what the
 # session does: the line over a reply of claude bold and bright cyan, a
 # line the user sent bold and bright magenta
@@ -560,26 +568,42 @@ class Chat:
     def _ask_to_go_on(self, guard: Guard) -> None:
         """Ask whether claude goes on with what a turn was stopped for in
         the conversation. A yes keeps it, and is remembered for what was
-        read (see Guard), anything else clears the conversation: the text
-        is in it until then, whatever claude is told. No answer, the user
-        interrupted or left, leaves it as it is."""
-        typed, went_on = None, False
+        read (see Guard). Anything else asks whether the conversation is
+        cleared, which a yes alone does: the text is in it until then,
+        whatever claude is told, and what is cleared is not brought back.
+        No answer, the user interrupted or left, leaves it as it is. The
+        turn was stopped either way, so a conversation that is kept says
+        that the next line is the user's to type."""
+        went_on, clears = None, None
         try:
-            typed = self._asker.ask(GO_ON)
-            went_on = typed is not None and typed.strip().lower() in YES
+            went_on = self._said_yes(GO_ON)
+            if went_on is False:
+                clears = self._said_yes(CLEAR)
         finally:
             # Whatever came of it: a question that is never answered for
             # would be the last one put
-            guard.answered(went_on)
+            guard.answered(bool(went_on))
         if self._gone():
             return
-        if went_on:
-            kept = "claude has it in the conversation, say how to go on"
-            self._page.note("chat", f"{kept}: not asked again for what it read")
-        elif typed is None:
-            self._page.note("chat", f"not answered: {STILL_READ}")
-        else:
+        if clears:
             self._start_anew()
+            return
+        if went_on:
+            kept = "kept: not asked again for what it read"
+        elif clears is None:
+            kept = f"not answered: {STILL_READ}"
+        else:
+            kept = f"not cleared: {STILL_READ}"
+        layout = self._page.layout
+        # Written together: the prompt that comes back is under both
+        said = layout.header([labelled("chat", kept)])
+        self._page.put([*said, waiting_line(layout.colour)])
+
+    def _said_yes(self, question: str) -> bool | None:
+        """Put a question of a turn that was stopped, where it is not
+        missed. Whether it was answered with a yes, none for no answer."""
+        typed = self._asker.ask(question, ASKED_STYLE)
+        return None if typed is None else typed.strip().lower() in YES
 
     def _start_anew(self) -> None:
         """Clear the conversation, once the turn that was stopped is
@@ -652,6 +676,13 @@ class Chat:
         # The call it asks about first, the question comes under it
         self._followed.settle(ASK_SETTLE)
         self._asked.put(asked, request)
+
+
+def waiting_line(colour: bool) -> str:
+    """The line that says a turn that was stopped is not gone on with
+    until the user types, as a turn that is over is said."""
+    line = HEADER_START + labelled("chat", WAITING)
+    return painted(READY_STYLE, line) if colour else line
 
 
 def ready_line(colour: bool, running: int = 0) -> str:
