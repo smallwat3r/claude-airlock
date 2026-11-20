@@ -13,7 +13,8 @@ SHELLCHECK ?= shellcheck
 LAUNCHER := bin/claude-airlock
 PYTHON_SOURCES := $(LAUNCHER) claude_airlock test docker/update-pins.py \
 	docker/features/excalidraw/excalidraw-export
-SHELL_SOURCES := bin/claude-statusline test/smoke/run.sh \
+SHELL_SOURCES := bin/claude-statusline docker/squid-ask-helper.sh \
+	test/smoke/run.sh \
 	$(wildcard test/smoke/inside/*.sh)
 
 .DEFAULT_GOAL := help

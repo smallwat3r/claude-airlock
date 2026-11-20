@@ -28,7 +28,8 @@ not made a path of before it is seen to be one.
 The conversation itself, the threads it takes and how it ends, is in
 talk.py. What a chat does itself with a line (/mode, /resume, !COMMAND)
 is in commands.py and shell.py, what it says of claude's doings besides
-answering in notices.py. What claude says over the pipe is checked for
+answering in notices.py. What the egress filter asks the user about a
+host it does not allow is put by hosts.py. What claude says over the pipe is checked for
 being what it should be in said.py."""
 
 from .commands import Handover

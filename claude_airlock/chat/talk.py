@@ -39,19 +39,19 @@ from ..report.layout import (
     HEADER_START,
     ITALIC,
     STYLES,
-    YELLOW,
     Layout,
     painted,
     together,
 )
 from ..report.planted import Planted
 from ..settings import Host
-from .asking import YES, Asked, Asker
+from .asking import ASKED_STYLE, YES, Asked, Asker
 from .commands import LOCAL, Commands, Did, Handover, Resume
 from .console import Console, Page
 from .drift import Drift
 from .followed import POLL, Followed
 from .guard import CLEAR, GO_ON, STILL_READ, Guard, stop_said
+from .hosts import HostQuestions, Hosts
 from .notices import Notices
 from .pipe import Agent
 from .reply import ReplyStream
@@ -84,9 +84,6 @@ LONG_TURN = 30.0
 # Said once a turn is over, and how in colour: bold bright green
 READY = labelled("ready", "claude has finished, waiting for your input")
 READY_STYLE = together(BOLD, BRIGHT_GREEN)
-# What a chat asks of a turn it stopped, and how in colour: bold yellow,
-# the answer is the user's to give before anything goes on
-ASKED_STYLE = together(BOLD, YELLOW)
 # Said once the user answered for a turn that was stopped and the
 # conversation is kept, in the colour of a turn that is over: nothing
 # goes on until they type
@@ -129,6 +126,7 @@ class Chat:
         handover: Handover | None = None,
         start: Event | None = None,
         guard: Guard | None = None,
+        hosts: Hosts | None = None,
     ):
         self._host = host
         # What a turn is stopped by for what claude was given to read,
@@ -171,6 +169,16 @@ class Chat:
         )
         # What claude asked and has no answer to yet, see _leave
         self._asked = Asked(self._asker, self._page)
+        # What the egress filter asks the user about, none when it does
+        # not ask
+        self._hosts = hosts and HostQuestions(
+            hosts,
+            self._page,
+            self._asker,
+            self._asked,
+            self._console.interactive,
+            lambda: self._followed.settle(ASK_SETTLE),
+        )
         self._heartbeat = Heartbeat(self._page, self._turns, lambda: self._asker.asking)
         self._status = StatusLine(
             self._page, sandbox, self._session, self._usage, self._drift
@@ -388,6 +396,8 @@ class Chat:
                 try:
                     self._heard(message)
                     self._followed.show()
+                    if self._hosts:
+                        self._hosts.look()
                     self._heartbeat.beat()
                     stumbled = 0
                 except Exception as error:
@@ -705,12 +715,15 @@ def chat(
     handover: Handover | None = None,
     start: Event | None = None,
     guarded: bool = False,
+    hosts: Hosts | None = None,
 ) -> int:
     """Talk to the session a docker command runs, given its arguments, in
     the sandbox it was started with. Returns how docker ended. What the
     user asked to be done after it is left in handover. With start, how
     the sandbox was started is said first, as a trace shows it. Guarded,
-    a turn is stopped for what claude was given to read, see guard.py."""
+    a turn is stopped for what claude was given to read, see guard.py.
+    With hosts, the user is asked about those the egress filter does not
+    allow, see hosts.py."""
     # What is said is dimmed in a trace, where it was read before. Not here.
     styles = {**STYLES, Kind.REPLY: "", Kind.COMMAND: ""}
     layout = dataclasses.replace(
@@ -729,4 +742,6 @@ def chat(
         return Agent(docker_args, on_end)
 
     guard = Guard() if guarded else None
-    return Chat(host, sandbox, layout, connect, console, handover, start, guard).run()
+    return Chat(
+        host, sandbox, layout, connect, console, handover, start, guard, hosts
+    ).run()

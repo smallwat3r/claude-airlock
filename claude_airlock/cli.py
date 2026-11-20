@@ -30,6 +30,7 @@ from .recording.started import Start, note_end, note_start
 from .report.digest import report_session
 from .report.follow import follow
 from .report.trace import trace
+from .sandbox.asked_hosts import hosts_asked
 from .sandbox.claude_args import has_a_conversation, resumed_args
 from .sandbox.ending import Ending, ending_passed_on, interrupts_held
 from .sandbox.history import history_args
@@ -126,7 +127,7 @@ def main(argv: list[str], usage: str = "") -> int:
         return (follow if following else trace)(host, claude_args)
     if action is Action.NET_RELOAD:
         with sidecars_locked(host):
-            start_egress_proxy()
+            start_egress_proxy(host)
         return 0
 
     if action is Action.RUN and settings.line_mode and has_a_conversation(claude_args):
@@ -307,6 +308,9 @@ def recorded_session(
         ):
             running.enter_context(recording)
         hit = running.enter_context(limits_watched(settings, name))
+        hosts = running.enter_context(
+            hosts_asked(settings, host, name, owner, plan.is_chat)
+        )
         agent = ssh_agent_door(settings, host, name, os.environ)
         agent_args = running.enter_context(agent)
         # How the sandbox is started, noted for a trace and what
@@ -318,6 +322,7 @@ def recorded_session(
             plan.dirs,
             # The agent's door is open when the host has an agent
             ssh_agent=bool(agent_args),
+            net_ask=hosts is not None,
             plugins=enabled_plugins(host.claude_dir, host.project_dir),
             # A --shell session runs bash, which is given no plugin
             servers=image.language_servers if plan.runs_claude else (),
@@ -333,6 +338,7 @@ def recorded_session(
                 handover=plan.handover,
                 start=said,
                 guarded=settings.injection_stop,
+                hosts=hosts,
             )
         run_args = run_args + agent_args
         try:

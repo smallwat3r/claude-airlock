@@ -65,6 +65,8 @@ class Start:
     # Empty for all of the machine's CPUs
     cpus: str
     net_filter: bool
+    # Whether the user is asked about a host the filter does not allow
+    net_ask: bool = False
     # What the launcher records of the session from outside it
     recorded: tuple[str, ...] = ()
     # What is open to the session that is closed by default
@@ -86,11 +88,13 @@ class Start:
         dirs: Iterable[ExtraDir],
         *,
         ssh_agent: bool,
+        net_ask: bool = False,
         plugins: Iterable[str] = (),
         servers: Iterable[str] = (),
     ) -> Start:
         """The start of a session with those settings, under that runtime
         and in a container of that image, the SSH agent forwarded or
+        not, the user asked about the hosts its filter does not allow or
         not, with those plugins switched on and those language servers
         of the image."""
         recorded = []
@@ -118,6 +122,7 @@ class Start:
             pids=settings.pids,
             cpus=settings.cpus,
             net_filter=settings.net_filter,
+            net_ask=net_ask,
             recorded=tuple(recorded),
             open=tuple(name for on, name in switches if on),
             dirs=tuple(
@@ -157,7 +162,15 @@ class Start:
 
     @property
     def network(self) -> str:
+        if self.asks:
+            return "filtered, asks"
         return "filtered" if self.net_filter else "open"
+
+    @property
+    def asks(self) -> bool:
+        """Whether the user is asked about the hosts the filter does not
+        allow. Only a filter asks, whatever a note says."""
+        return self.net_filter and self.net_ask
 
 
 def start_record(host: Host) -> Notes:
@@ -222,6 +235,8 @@ def _shown(said: dict) -> Event:
     start = Start.from_note(said)
     container = _text(said, "session")
     filtered = "filtered to the allowed domains" if start.net_filter else "open"
+    if start.asks:
+        filtered += ", the user is asked about others"
     details = [
         start.under(container) + (f", image {start.image}" if start.image else ""),
         f"limits: {start.limits}",

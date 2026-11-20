@@ -209,3 +209,12 @@ container escape. Command lines and logs can still carry secrets.
   first, the quickest way to find what a project needs.
 - An edited allowlist is picked up by the next filtered session, or at once
   with `claude-airlock --net-reload`.
+- With `CLAUDE_AIRLOCK_NET_ASK=1` as well, a host that is not on the list
+  is yours to allow, in [line mode](line-mode.md). The proxy holds the
+  request, you are asked, and a yes lets it through. Nothing is looked up
+  or sent for the host before that. The answer is for that host alone,
+  not the names under it, and holds until the session ends: the list is
+  not changed. A session that is not in line mode has nowhere to ask, its
+  filter refuses as without this, and says so when it starts. A request
+  made in the first moment of a session, before the launcher knows its
+  address, is refused too.

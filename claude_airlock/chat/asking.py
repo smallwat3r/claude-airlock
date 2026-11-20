@@ -25,18 +25,24 @@ from typing import Protocol
 from ..events import clean, flat, labelled
 from ..report.calls import call_details
 from ..report.layout import (
+    BOLD,
     CYAN,
     GREEN,
     HEADER_START,
     RED,
     WHAT_WIDTH,
+    YELLOW,
     painted,
     prefixed,
+    together,
 )
 from .console import Console, Page
 from .reply import reply_lines, wrapped
 from .said import is_number
 
+# How a question that must not be missed is put in colour, bold yellow:
+# something waits until the user has answered it
+ASKED_STYLE = together(BOLD, YELLOW)
 # What the question whether a tool may be used is answered with
 YES = ("y", "yes")
 ALWAYS = ("a", "always")

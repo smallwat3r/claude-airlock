@@ -58,6 +58,9 @@ class Settings:
     # None falls back to features.txt, then to every feature, "" selects none
     features: str | None = None
     net_filter: bool = False
+    # Whether line mode asks about a host the filter does not allow, see
+    # sandbox/asked_hosts.py. Nothing without the filter.
+    net_ask: bool = False
     net_log: bool = True
     proc_log: bool = True
     telemetry: bool = False
@@ -191,6 +194,13 @@ class Host:
         return os.path.join(self.state_dir, "net-sessions.jsonl")
 
     @property
+    def asked_hosts_dir(self) -> str:
+        # What the egress filter asks the user about, and what they said,
+        # see asked_hosts.py. Mounted into the egress proxy, never into a
+        # session.
+        return os.path.join(self.state_dir, "asked-hosts")
+
+    @property
     def captures_dir(self) -> str:
         return os.path.join(self.state_dir, "captures")
 
@@ -276,6 +286,11 @@ class Setting:
 SETTINGS = (
     Setting("FEATURES", Kind.NAME, "features to build in, space or comma separated"),
     Setting("NET_FILTER", Kind.SWITCH, "1 restricts egress to allowed-domains.txt"),
+    Setting(
+        "NET_ASK",
+        Kind.SWITCH,
+        "1 has line mode ask before the filter refuses a host",
+    ),
     Setting("NET_LOG", Kind.SWITCH, "0 stops recording what a session connects to"),
     Setting("PROC_LOG", Kind.SWITCH, "0 stops recording the processes of a session"),
     Setting(

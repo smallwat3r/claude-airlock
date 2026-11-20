@@ -141,6 +141,7 @@ The doors, all closed by default:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_NET_FILTER` | `0` | `1` allows only the domains in `docker/allowed-domains.txt`, over HTTP, HTTPS and git over SSH |
+| `CLAUDE_AIRLOCK_NET_ASK` | `0` | `1` has the filter ask you in line mode before it refuses a host, a yes lets the request through and holds until the session ends |
 | `CLAUDE_AIRLOCK_SSH_AGENT` | `0` | `1` forwards your SSH agent, so git over SSH and `ssh` work with your keys |
 | `CLAUDE_AIRLOCK_CONNECTORS` | `0` | `1` loads the connectors of your claude.ai account (Gmail, Google Drive...), with their tools in every request |
 | `CLAUDE_AIRLOCK_DOCKER_SOCKET` | `0` | `1` allows `docker ps` and `docker logs` against the host, `full` adds `inspect`, `stats` and `top` |

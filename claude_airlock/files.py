@@ -113,6 +113,17 @@ def lock_file(path: str, *, shared: bool = False) -> int:
 
 
 @contextmanager
+def locked(path: str) -> Iterator[None]:
+    """Hold the lock of lock_file on a file, alone, for as long as the
+    block lasts."""
+    lock = lock_file(path)
+    try:
+        yield
+    finally:
+        os.close(lock)
+
+
+@contextmanager
 def open_locked(path: str | Path, mode: str) -> Iterator[IO[Any]]:
     """Open a file of the launcher's, made for the user alone as needed,
     with a mode of LOCKED_MODES, and lock it alone until it is closed:

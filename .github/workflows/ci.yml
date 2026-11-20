@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: shellcheck bin/claude-statusline test/smoke/run.sh test/smoke/inside/*.sh
+      - run: shellcheck bin/claude-statusline docker/squid-ask-helper.sh test/smoke/run.sh test/smoke/inside/*.sh
       - run: pipx run ruff check bin/claude-airlock claude_airlock test docker/update-pins.py docker/features/excalidraw/excalidraw-export
       - run: pipx run ruff format --check bin/claude-airlock claude_airlock test docker/update-pins.py docker/features/excalidraw/excalidraw-export
       - run: pipx run mypy claude_airlock bin/claude-airlock

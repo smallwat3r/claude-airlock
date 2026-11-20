@@ -68,6 +68,8 @@ and CPU the sandbox uses](img/line-mode.png)
   `NO ANSWER`).
 - Each request the egress filter refused (`DENIED`), and each use of the
   SSH agent and of the Docker socket.
+- With `CLAUDE_AIRLOCK_NET_ASK=1`, a host the egress filter does not
+  allow, before it is refused: see [What you type](#what-you-type).
 - After a turn, how long it took and what it cost.
 - Above the prompt, the status: the model, how full the context is, the
   limits of your account, and the sandbox with its network mode.
@@ -95,6 +97,13 @@ A line can be typed at any time, claude takes it up when it can.
 
 When claude asks whether it may use a tool, `y` allows that one call, `a`
 allows calls like it until the session ends, and anything else refuses it.
+
+With `CLAUDE_AIRLOCK_NET_ASK=1`, the egress filter asks whether the
+session may reach a host that is not on its list, and holds the request
+meanwhile. `y` lets it through, anything else refuses it, and either
+holds for that host until the session ends. Ctrl-C refuses the request
+that waits and is asked again at the next one. Where the lines are not
+typed, a file or a pipe, the host is refused.
 
 ## Stopping a turn for what it read
 

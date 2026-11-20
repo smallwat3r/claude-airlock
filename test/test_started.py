@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 import unittest
@@ -48,6 +49,31 @@ class StartTest(unittest.TestCase):
         # The host had no agent to forward
         self.assertEqual(start.open, ("config:rw", "telemetry"))
         self.assertEqual(start.dirs, ("/home/me/ref (ro)", "/srv/data"))
+
+    def test_a_filter_that_asks_is_said_to_and_no_other(self):
+        def network(start: started.Start) -> str:
+            event = started.start_event(
+                {**note(5.0, "claude-proj"), **dataclasses.asdict(start)}
+            )
+            return next(d for d in event.details if d.startswith("network: "))
+
+        filtered = settings.Settings(net_filter=True, net_ask=True)
+        asks = started.Start.of(
+            filtered, runtime.DOCKERS_OWN, "", [], ssh_agent=False, net_ask=True
+        )
+        self.assertEqual(asks.network, "filtered, asks")
+        self.assertEqual(
+            network(asks),
+            "network: filtered to the allowed domains, the user is asked about others",
+        )
+        # Asked for, where there was no place to ask: not of the settings
+        silent = started.Start.of(
+            filtered, runtime.DOCKERS_OWN, "", [], ssh_agent=False
+        )
+        self.assertEqual(silent.network, "filtered")
+        self.assertEqual(network(silent), "network: filtered to the allowed domains")
+        # A note of before there was this
+        self.assertFalse(started.Start.from_note({"net_filter": True}).net_ask)
 
     def test_what_is_switched_off_is_not_said_to_be_recorded(self):
         chosen = settings.Settings(net_log=False, proc_log=False)

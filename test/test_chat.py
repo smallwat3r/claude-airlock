@@ -77,7 +77,9 @@ BUNCH_GAP = 0.12
 # the two modes it knows here. A prompt that starts with a slash is a
 # command of Claude Code's: the turn it ends used nothing. One that starts
 # with "fetch" is given a page that is written to pass for the system,
-# and says whether it was then told to stop.
+# and says whether it was then told to stop. One that starts with "reach"
+# asks for a host the egress filter does not allow, as the proxy's helper
+# says it, and says what became of the request.
 FAKE_CLAUDE = """
 import json, os, select, sys, time
 from datetime import datetime, timezone
@@ -149,6 +151,18 @@ def fetched():
     request = after.get("request", {}) if after else {}
     return "stopped" if request.get("subtype") == "interrupt" else "went on"
 
+def reached():
+    tree = os.environ["FAKE_ASKED"]
+    waiting = os.path.join(tree, "waiting", "example.com")
+    patience = time.time() + 20
+    while not os.path.isdir(os.path.dirname(waiting)) and time.time() < patience:
+        time.sleep(0.05)
+    open(waiting, "w").close()
+    while os.path.exists(waiting) and time.time() < patience:
+        time.sleep(0.05)
+    allowed = os.path.exists(os.path.join(tree, "allowed", "example.com"))
+    return "let through" if allowed else "refused"
+
 while True:
     said = told()
     if said is None:
@@ -171,6 +185,8 @@ while True:
         reply("was told: " + allowed())
     elif asked.startswith("fetch"):
         reply("was " + fetched())
+    elif asked.startswith("reach"):
+        reply("was " + reached())
     elif asked.startswith("slow"):
         reply("one\\ntwo\\nthree", ["one\\n", "two\\n", "three"])
     else:
@@ -243,12 +259,16 @@ class ChatTest(LauncherTest):
         )
 
     def at_a_terminal(
-        self, *steps: tuple[str, str | tuple[str, ...]], term: str = "xterm"
+        self,
+        *steps: tuple[str, str | tuple[str, ...]],
+        term: str = "xterm",
+        **settings: str,
     ) -> str:
         """Run a chat at a terminal: for each step, wait for something to
         be written, then type, in bunches a moment apart when several, as
         Emacs sends what is long. What was written in all."""
         environment = {**self.environment(), "TERM": term, "COLUMNS": "100"}
+        environment.update(settings)
         environment["NO_COLOR"] = "1"
         command = [sys.executable, str(LAUNCHER), "--line-mode"]
         chat = Terminal(command, environment, PATIENCE, self.project)
@@ -636,6 +656,46 @@ class ChatTest(LauncherTest):
         self.assertNotIn("prompt      /clear", said)
         # Kept, and not gone on with: it stops the next turn too
         self.assertEqual(said.count("STOPPED the turn"), 2, said)
+
+    def asking(self) -> dict[str, str]:
+        """The settings of a filtered chat whose user is asked about the
+        hosts the filter does not allow, at the address docker gives."""
+        return {
+            "CLAUDE_AIRLOCK_NET_FILTER": "1",
+            "CLAUDE_AIRLOCK_NET_ASK": "1",
+            "FAKE_IP": "172.20.0.7",
+            "FAKE_ASKED": str(self.state / "asked-hosts" / "172.20.0.7"),
+        }
+
+    def test_a_host_the_filter_does_not_allow_goes_through_with_a_yes(self):
+        said = self.at_a_terminal(
+            ("> ", "reach\r"),
+            ("let the session reach example.com? [y/N] ", "y\r"),
+            ("was let through", "\x04"),
+            **self.asking(),
+        )
+        self.assertIn("network: filtered to the allowed domains, the user is", said)
+        self.assertIn("# net         a request for example.com waits", said)
+        self.assertIn("# net         allowed example.com until the session ends", said)
+        self.assertIn("net:ask", said)
+        # What was allowed goes with the session
+        self.assertEqual(list((self.state / "asked-hosts").iterdir()), [])
+
+    def test_a_host_the_filter_does_not_allow_is_refused_without_a_yes(self):
+        said = self.at_a_terminal(
+            ("> ", "reach\r"),
+            ("let the session reach example.com? [y/N] ", "\r"),
+            ("was refused", "\x04"),
+            **self.asking(),
+        )
+        self.assertIn("# net         REFUSED example.com until the session ends", said)
+
+    def test_a_host_is_refused_where_nobody_is_there_to_ask(self):
+        done = self.chat("reach\n", **self.asking())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("REFUSED example.com: not allowed, nobody to ask", done.stdout)
+        self.assertIn("was refused", done.stdout)
+        self.assertNotIn("let the session reach", done.stdout)
 
     def test_ctrl_c_interrupts_the_turn_that_runs(self):
         said = self.at_a_terminal(

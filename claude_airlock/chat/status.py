@@ -126,6 +126,8 @@ class Sandbox:
 
     name: str
     net_filter: bool = False
+    # Whether the user is asked about a host the filter does not allow
+    net_ask: bool = False
     # What is open to it that is closed by default, as a start names it
     open: tuple[str, ...] = ()
     # Each as it is shown, (ro) after one that is read-only
@@ -135,13 +137,14 @@ class Sandbox:
     def started(cls, name: str, start: Start, home: str) -> Sandbox:
         """The sandbox of a session of that name, started so."""
         dirs = tuple(home_relative(mounted, home) for mounted in start.dirs)
-        return cls(name, start.net_filter, start.open, dirs)
+        return cls(name, start.net_filter, start.asks, start.open, dirs)
 
     def parts(self) -> list[Part]:
         """The sandbox as parts of the status, with of what is open to
         it what OPEN_STYLES names."""
         parts = [(NAME_STYLE, f"[{flat(self.name)}]")]
-        parts.append((DIM, "net:filtered") if self.net_filter else (YELLOW, "net:open"))
+        filtered = "net:ask" if self.net_ask else "net:filtered"
+        parts.append((DIM, filtered) if self.net_filter else (YELLOW, "net:open"))
         parts += [
             (OPEN_STYLES[opened], opened)
             for opened in self.open

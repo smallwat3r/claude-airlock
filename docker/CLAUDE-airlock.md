@@ -42,6 +42,12 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   direct connections, DNS lookups and other protocols (a database, say)
   fail. A 403 from the proxy is a blocked domain, tell the user to add it
   to docker/allowed-domains.txt of their claude-airlock checkout.
+- CLAUDE_AIRLOCK_NET_ASK (off unless 1, with the filter). On, a request
+  for a domain that is not listed waits while the user is asked, and goes
+  through when they say yes: it can take as long as they do, do not cut
+  it short or retry meanwhile. A 403 then says they refused that host for
+  this session, or were not there to answer. Say which host and why you
+  need it, do not look for another way to it.
 - CLAUDE_AIRLOCK_NET_LOG and CLAUDE_AIRLOCK_PROC_LOG (on unless 0) record
   for the user's review every connection, UDP send, ping and name lookup,
   and the processes that run. They block nothing. The root-owned python3

@@ -199,6 +199,9 @@ egress_filter() {
       docker exec claude-egress-proxy test -f /var/log/squid/access.log.0"
   check "--net-log also reads the rotated log" \
     bash -c "'${LAUNCHER}' --net-log | grep -q example.com"
+  # The proxy --net-reload started is still up, no session ended since
+  check "the proxy asks about a host through what the launcher keeps" \
+    python_check asked_hosts claude-egress-proxy
 }
 
 # The capture and the record of processes. Under a runtime where a watcher

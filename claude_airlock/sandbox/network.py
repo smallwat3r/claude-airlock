@@ -34,7 +34,7 @@ from ..docker import (
     running_containers,
 )
 from ..errors import Fatal
-from ..files import lock_file, private_dir, try_lock_file
+from ..files import lock_file, locked, private_dir, try_lock_file
 from ..settings import DOCKERFILE_DIR, EGRESS_PORT, Host, Settings, SocketAccess
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
@@ -57,6 +57,11 @@ EGRESS_LOG_DIR = "/var/log/squid"
 # Where the proxy logs each request, in it
 EGRESS_ACCESS_LOG = f"{EGRESS_LOG_DIR}/access.log"
 EGRESS_LOG_LIMIT = 10 * 1024 * 1024
+# How the proxy asks about a host that is not on its list, and where it
+# finds what the launchers of the sessions that ask keep for it (see
+# asked_hosts.py and docker/squid-ask-helper.sh)
+ASK_HELPER = "squid-ask-helper.sh"
+ASKED_HOSTS_MOUNT = "/var/lib/claude-airlock/asked"
 # Filtered mode joins an internal network with no route out, open mode a
 # plain bridge network. Both are user-defined so container names resolve.
 # Each of the two is one network per socket mode, so that a session only
@@ -266,18 +271,35 @@ def config_hash(*parts: bytes) -> str:
 def egress_config_hash() -> str:
     files = (
         Path(DOCKERFILE_DIR, name).read_bytes()
-        for name in ("squid.conf", "allowed-domains.txt")
+        for name in ("squid.conf", "allowed-domains.txt", ASK_HELPER)
     )
     return config_hash(SQUID_IMAGE.encode(), *files)
 
 
-def start_egress_proxy() -> None:
+def asked_hosts_root(host: Host) -> str:
+    """The directory the proxy is given to ask through, made as needed.
+    The proxy runs as a user of its own and has to get into it, so it is
+    not for the user alone as the rest of the launcher's state is: the
+    state directory above it is, which keeps everyone else on the host
+    out of it."""
+    private_dir(host.state_dir)
+    root = host.asked_hosts_dir
+    os.makedirs(root, exist_ok=True)
+    # Whatever the umask made of it
+    os.chmod(root, 0o755)
+    return root
+
+
+def start_egress_proxy(host: Host) -> None:
     """(Re)create the squid sidecar on the internal networks, then give it
     its other leg on the default bridge. Labelled with a hash of its config
     and image, so an edited allowlist is noticed (see egress_proxy_current)."""
     ensure_network(FILTER_NET, internal=True)
     squid = "/etc/squid"
     options = [
+        mount_arg(f"{DOCKERFILE_DIR}/{ASK_HELPER}", f"{squid}/ask-helper", "ro,z"),
+        # Written to by the proxy too: the hosts that wait for an answer
+        mount_arg(asked_hosts_root(host), ASKED_HOSTS_MOUNT, "z"),
         mount_arg(f"{DOCKERFILE_DIR}/squid.conf", f"{squid}/squid.conf", "ro,z"),
         mount_arg(
             f"{DOCKERFILE_DIR}/allowed-domains.txt",
@@ -353,7 +375,7 @@ def namespace_args(settings: Settings) -> list[str]:
     return [network, "--dns=127.0.0.1"]
 
 
-def prepare_network(settings: Settings) -> None:
+def prepare_network(settings: Settings, host: Host) -> None:
     """Create the session's network as needed, and in filtered mode start
     the egress proxy, or replace one started from another config."""
     network = network_name(settings)
@@ -367,7 +389,7 @@ def prepare_network(settings: Settings) -> None:
     if not settings.net_filter:
         return
     if not egress_proxy_current():
-        start_egress_proxy()
+        start_egress_proxy(host)
     # Not yet when the network was made since the proxy started, or made
     # anew (see isolate_network). Refused when it has joined already.
     docker_ok("network", "connect", network, EGRESS_PROXY)
@@ -380,11 +402,8 @@ def sidecars_locked(host: Host) -> Iterator[None]:
     proxies, which the sessions of every project share: two that start
     together would each remove and start the same proxy, and one of them
     fail."""
-    lock = lock_file(os.path.join(private_dir(host.state_dir), "sidecars.lock"))
-    try:
+    with locked(os.path.join(private_dir(host.state_dir), "sidecars.lock")):
         yield
-    finally:
-        os.close(lock)
 
 
 def session_proxies(settings: Settings) -> list[str]:
@@ -431,7 +450,7 @@ def session_network(settings: Settings, host: Host) -> Iterator[None]:
     the proxies it goes through, started as needed and said to be in use.
     When it is over, the proxies no session uses any more are removed."""
     with sidecars_locked(host):
-        prepare_network(settings)
+        prepare_network(settings, host)
         start_socket_proxy(settings)
         uses = [
             lock_file(proxy_use_file(host, proxy), shared=True)
@@ -475,6 +494,8 @@ def network_args(settings: Settings, capture: str = "") -> list[str]:
         env_arg("https_proxy", f"http://{proxy}"),
         env_arg("NO_PROXY", no_proxy),
         env_arg("no_proxy", no_proxy),
+        # Told to the session, see docker/CLAUDE-airlock.md
+        *([env_arg("CLAUDE_AIRLOCK_NET_ASK", 1)] if settings.net_ask else []),
         # Direct port 22 is blocked on the internal net, so tunnel
         # git-over-SSH through the proxy as a CONNECT to :22
         env_arg(
