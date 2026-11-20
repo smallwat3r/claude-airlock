@@ -132,7 +132,8 @@ class AgentDoorTest(LauncherTest):
         answers = self.through_the_door(b"\x0b")
         self.assertEqual(len(answers), 1)
         path = self.door.path
-        before = len(os.listdir("/proc/self/fd"))
+        # /dev/fd is there on Linux and on macOS, /proc only on the first
+        before = len(os.listdir("/dev/fd"))
         held = []
         self.addCleanup(lambda: [each.close() for each in held])
         for _ in range(ssh_agent.AGENT_CONNECTIONS * 4):
@@ -149,7 +150,7 @@ class AgentDoorTest(LauncherTest):
         time.sleep(0.5)
         # Ours, and for each that was let in the door's two
         most = len(held) + 2 * ssh_agent.AGENT_CONNECTIONS
-        self.assertLessEqual(len(os.listdir("/proc/self/fd")) - before, most + 2)
+        self.assertLessEqual(len(os.listdir("/dev/fd")) - before, most + 2)
         # Those past the bound were closed at once, and the door still serves
         self.assertEqual(held[-1].recv(1), b"")
         for each in held:

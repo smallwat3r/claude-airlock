@@ -341,8 +341,8 @@ make upgrade        # refresh the pins, then rebuild the image
   tamper check, the records of a session, `--trace` and line mode.
   `test/launcher_test.py` runs them all side by side, `--jobs` says how
   many at a time. Each file also runs on its own, and `pytest test` works.
-- **CI** runs them on Python 3.9 and the latest, with ruff, mypy,
-  shellcheck and a small image build.
+- **CI** runs them on Python 3.9 and the latest on Linux and on the
+  latest on macOS, with ruff, mypy, shellcheck and a small image build.
 - **The smoke test** (`test/smoke/run.sh`) is run by hand on the host
   against a real Docker daemon. It starts open, filtered and socket-proxy
   sessions in a throwaway project and checks the sandbox from the inside.
