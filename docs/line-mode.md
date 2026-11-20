@@ -94,6 +94,7 @@ A line can be typed at any time, claude takes it up when it can.
 | `/mode plan` | Changes the permission mode |
 | `/resume` | Leaves this session for an earlier one of the project |
 | `!make test` | Runs a command in the sandbox, claude is not told |
+| `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 
 When claude asks whether it may use a tool, `y` allows that one call, `a`
 allows calls like it until the session ends, and anything else refuses it.

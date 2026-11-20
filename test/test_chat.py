@@ -2140,6 +2140,18 @@ class CommandsTest(LauncherTest):
             "#   !COMMAND       run a command in the sandbox, claude is not told", lines
         )
 
+    def test_a_login_is_not_asked_of_claude_which_has_none_over_the_pipe(self):
+        ours = self.commands()
+        for line in ("/login", "/logout"):
+            with written() as lines:
+                self.assertIs(ours.do(line), commands.Did.DONE)
+            self.assertEqual(
+                lines[0],
+                "# chat        line mode cannot log in or out, do it one of two ways:",
+            )
+            self.assertIn("CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock", lines[2])
+        self.assertEqual(self.requests, [])
+
     def test_the_mode_is_asked_of_claude_and_said_when_it_answers(self):
         ours = self.commands()
         with written() as lines:
@@ -2170,8 +2182,8 @@ class CommandsTest(LauncherTest):
                 self.assertIn(f"  {local.typed}", said)
         self.assertEqual(
             sorted(commands.LOCAL),
-            ["/exit", "/help", "/mcp", "/mode", "/quit", "/resume", "/status"]
-            + ["/statusline"],
+            ["/exit", "/help", "/login", "/logout", "/mcp", "/mode", "/quit"]
+            + ["/resume", "/status", "/statusline"],
         )
 
     def test_a_session_to_resume_is_left_for_the_launcher(self):
