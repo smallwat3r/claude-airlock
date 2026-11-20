@@ -71,7 +71,7 @@ class WatcherTest(unittest.TestCase):
                 with socket.create_connection(server.getsockname()) as client:
                     port = client.getsockname()[1]
                     key = (port, "127.0.0.1", server.getsockname()[1])
-                    found = procwatch.connections()
+                    found, _ = procwatch.sockets()
                     self.assertIn(key, found)
                     holders = procwatch.Holders().of({found[key]}, [os.getpid()])
                     self.assertEqual(holders, {found[key]: [os.getpid()]})
@@ -147,8 +147,9 @@ class WatcherTest(unittest.TestCase):
             server.bind(("127.0.0.1", 0))
             server.listen(1)
             port = server.getsockname()[1]
-            self.assertIn((port, "127.0.0.1", 0), procwatch.connections(listening=True))
-            self.assertNotIn(port, [key[0] for key in procwatch.connections()])
+            connected, waiting = procwatch.sockets()
+            self.assertIn((port, "127.0.0.1", 0), waiting)
+            self.assertNotIn(port, [key[0] for key in connected])
             out = io.StringIO()
             watch = procwatch.Watch(out)
             watch.look()

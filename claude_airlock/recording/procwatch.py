@@ -91,6 +91,8 @@ WELL_BELOW = 5
 OUT_OF_TURN_EVERY = 5.0
 # The largest processes that are named, and the tmpfs that are looked at
 LARGEST = 3
+# The processes that hold a socket that are named, the ones started last
+MOST_HOLDERS = 8
 MOST_TMPFS = 16
 NAME_LENGTH = 64
 # Where a container finds what it uses and may use, under the root of one
@@ -223,13 +225,6 @@ def sockets() -> tuple[Sockets, Sockets]:
             elif key[2]:
                 connected[key] = inode
     return connected, waiting
-
-
-def connections(listening: bool = False) -> Sockets:
-    """The TCP connections of the network namespace, with listening the
-    sockets that wait for connections instead, see sockets."""
-    connected, waiting = sockets()
-    return waiting if listening else connected
 
 
 def limit_hits(pid: int, root: str = "/proc") -> int | None:
@@ -526,13 +521,18 @@ class Health(CgroupHealth):
             pass
         tmpfs = {}
         try:
-            for place in session_tmpfs(f"{self._first}/mounts"):
-                about = os.statvfs(f"{self._first}/root{place}")
-                size = about.f_blocks * about.f_frsize
-                limited[place] = (size - about.f_bfree * about.f_frsize, size)
-                tmpfs[place] = list(limited[place])
+            places = session_tmpfs(f"{self._first}/mounts")
         except OSError:
-            pass
+            places = []
+        for place in places:
+            try:
+                about = os.statvfs(f"{self._first}/root{place}")
+            except OSError:
+                # One that cannot be looked at does not hide the others
+                continue
+            size = about.f_blocks * about.f_frsize
+            limited[place] = (size - about.f_bfree * about.f_frsize, size)
+            tmpfs[place] = list(limited[place])
         if tmpfs:
             said["tmpfs"] = tmpfs
         return said, limited
@@ -691,7 +691,7 @@ class Watch:
                 port=port,
                 to=to,
                 to_port=to_port,
-                pids=sorted(held_by)[:8],
+                pids=sorted(held_by)[-MOST_HOLDERS:],
             )
         if not self._holders.readable and not self._said_unreadable:
             self._said_unreadable = True
@@ -722,7 +722,7 @@ class Watch:
         for key, inode in new.items():
             self._listening.add(key)
             port, on, _ = key
-            held_by = sorted(holders.get(inode, []))[:8]
+            held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
             self.note(reserved=True, listen=port, on=on, pids=held_by)
 
 

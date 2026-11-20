@@ -17,19 +17,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..events import Event, Kind, Who, flat
+from . import procwatch
 
-# The percent of a limit from which a session is said to be at it, as in
-# procwatch.py, and the percent of the time it waited for memory from
-# which it is said to be stalled
-AT_LIMIT = 90
+# The percent of the time a session waited for memory from which it is
+# said to be stalled
 STALLED = 10
 # Below this many percent a tmpfs is not worth a word in a line, nor is a
 # wait
 TMPFS_SHOWN = 50
 WAIT_SHOWN = 1
-# Of the header: below this many percent what was used of a limit other
-# than memory is left out
-NEAR_LIMIT = 70
+# The percent of a limit from which a session is near it and at it, the
+# watcher's own. Of the header: what was used of a limit other than
+# memory is left out below the first
+NEAR_LIMIT, AT_LIMIT = procwatch.NEAR_LIMIT
 
 
 def amount(count: float) -> str:
@@ -41,11 +41,6 @@ def amount(count: float) -> str:
             )
             return shown.removesuffix(".0") + unit
     return f"{count:.0f}b"
-
-
-def share(used: float, most: float | None) -> int | None:
-    """The percent of a limit that is used, none without a limit."""
-    return int(100 * used / most) if most else None
 
 
 def of_limit(used: str, most: str | None, percent: int | None) -> str:
@@ -130,16 +125,20 @@ class Sample:
         limited = {"memory": self.memory, "pids": self.pids, **self.tmpfs}
         found = {}
         for name, used in limited.items():
-            percent = share(*used) if used else None
+            percent = procwatch.percent(*used) if used else None
             if percent is not None:
                 found[name] = percent
         return found
+
+    def _at_limit(self) -> list[str]:
+        """The limits the session is at, by what they are of."""
+        return [name for name, percent in self.shares().items() if percent >= AT_LIMIT]
 
     def wrong(self) -> str:
         """What is wrong with the session at this time, nothing as a
         rule: the limits it is at, and that it is stalled for want of
         memory."""
-        full = [name for name, percent in self.shares().items() if percent >= AT_LIMIT]
+        full = self._at_limit()
         said = [f"ALMOST OUT OF {', '.join(full)}"] if full else []
         if self.stalled.get("memory", 0.0) >= STALLED:
             said.append("STALLED for want of memory")
@@ -148,7 +147,8 @@ class Sample:
     def _said_of_limits(self) -> list[str]:
         """What is wrong, and what the sample was noted out of turn for."""
         wrong = self.wrong()
-        nearer = [name for name in self.rose if name not in wrong]
+        full = self._at_limit()
+        nearer = [name for name in self.rose if name not in full]
         said = [wrong] if wrong else []
         return said + ([f"running low on {', '.join(nearer)}"] if nearer else [])
 
@@ -157,7 +157,7 @@ class Sample:
             return []
         used, most = self.memory
         limit = None if most is None else amount(most)
-        return ["mem " + of_limit(amount(used), limit, share(used, most))]
+        return ["mem " + of_limit(amount(used), limit, procwatch.percent(used, most))]
 
     def _said_of_cpu(self) -> list[str]:
         if self.cpu is None:
@@ -295,7 +295,9 @@ def health_summary(samples: list[Sample], ended: list[Ended]) -> list[str]:
         used, most = max(held, key=lambda memory: memory[0])
         limit = None if most is None else amount(most)
         lines.append(
-            "  memory " + of_limit(amount(used), limit, share(used, most)) + " at most"
+            "  memory "
+            + of_limit(amount(used), limit, procwatch.percent(used, most))
+            + " at most"
         )
     timed = [sample for sample in samples if sample.cpu is not None and sample.seconds]
     if timed:
