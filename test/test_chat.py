@@ -23,6 +23,11 @@ from pathlib import Path
 
 from harness import LAUNCHER, LauncherTest
 
+try:
+    import readline
+except ImportError:  # pragma: no cover, a Python built without it
+    readline = None  # type: ignore[assignment]
+
 from claude_airlock.chat import (
     asking,
     commands,
@@ -52,6 +57,12 @@ from claude_airlock.sandbox import claude_args
 from claude_airlock.sandbox.mounts import ExtraDir
 from claude_airlock.sandbox.runtime import DOCKERS_OWN
 from claude_airlock.settings import Host, Settings, SocketAccess
+
+# Whether the readline of this Python is the editline of macOS, which has
+# no keys of a new line and does not say when it has written a prompt: a
+# paste cannot be typed on there, see Console
+EDITLINE = "libedit" in (getattr(readline, "__doc__", None) or "")
+GNU_READLINE = "needs GNU readline, this Python has editline"
 
 SESSION = "3fa9c0de-1111-4222-8333-444455556666"
 # A test at a terminal that waits for what never comes fails after this
@@ -500,9 +511,14 @@ class ChatTest(LauncherTest):
         self.assertRegex(said, r"user     prompt      y\n")
 
     def test_at_a_terminal_tab_completes_a_command(self):
+        # The help is written: the line was entered as the command it is
         said = self.at_a_terminal(("> ", "/he\t\r"), ("drops the line", "\x04"))
-        self.assertIn("> /help", said)
+        if not EDITLINE:
+            # Editline writes the rest of the word where the cursor is
+            self.assertIn("> /help", said)
+        self.assertNotIn("prompt      /he", said)
 
+    @unittest.skipIf(EDITLINE, GNU_READLINE)
     def test_at_a_terminal_shift_enter_starts_a_new_line_of_the_prompt(self):
         said = self.at_a_terminal(
             ("> ", "one\x1b[13;2utwo\x1b[27;2;13~three\x1b\rfour\r"),
@@ -513,6 +529,7 @@ class ChatTest(LauncherTest):
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
+    @unittest.skipIf(EDITLINE, GNU_READLINE)
     def test_at_a_terminal_lines_pasted_unmarked_are_one_prompt(self):
         # Without the escapes of a bracketed paste, as a terminal that
         # does not mark one sends it
@@ -526,6 +543,16 @@ class ChatTest(LauncherTest):
         self.assertEqual(said.count("user     prompt      one\n"), 1)
         self.assertEqual(len(re.findall(r"# turn ", said)), 1)
 
+    @unittest.skipUnless(EDITLINE, "what editline does instead")
+    def test_at_a_terminal_of_editline_lines_pasted_unmarked_are_one_prompt(self):
+        # Entered at once: nothing can be put back to be typed on
+        said = self.at_a_terminal(("> ", "one\rtwo\rthree\r"), ("first line", "\x04"))
+        self.assertEqual(said.count("user     prompt      one\n"), 1)
+        self.assertEqual(len(re.findall(r"# turn ", said)), 1)
+        # The line entered before is not taken for one being typed
+        self.assertNotIn("> one", said.split("user     prompt", 1)[1])
+
+    @unittest.skipIf(EDITLINE, GNU_READLINE)
     def test_at_a_terminal_an_unfinished_paste_is_typed_on(self):
         said = self.at_a_terminal(
             ("> ", "one\rtw"),

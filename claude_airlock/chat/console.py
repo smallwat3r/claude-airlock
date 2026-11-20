@@ -38,7 +38,12 @@ _with_paste. At a terminal a paste waits for Enter, to be typed on.
 
 At a terminal the Tab key completes the names of commands and of files
 (@src/main.py), and the lines typed are kept from one chat of a project to
-the next, where readline is there to do both."""
+the next, where readline is there to do both.
+
+The Python of macOS is often made with editline in the place of GNU
+readline. It has no keys of a new line, and does not say when it has
+written a prompt: a paste is entered at once there, as one prompt, and
+cannot be typed on."""
 
 from __future__ import annotations
 
@@ -183,6 +188,8 @@ class Console:
             and self._out.isatty()
             and os.environ.get("TERM", "dumb") != "dumb"
         )
+        # Whether readline is the editline of macOS, which does less
+        self._editline = bool(readline) and "libedit" in (readline.__doc__ or "")
         self._root = root
         self._history = history if self._redrawn else None
         # The commands a line can start with, see completions
@@ -205,7 +212,7 @@ class Console:
         readline.set_completer(self._complete)
         readline.set_completer_delims(" \t\n")
         # The editline of macOS is told its keys in another way
-        editline = "libedit" in (readline.__doc__ or "")
+        editline = self._editline
         readline.parse_and_bind("bind ^I rl_complete" if editline else "tab: complete")
         if not editline:
             # Python turns bracketed paste off when readline is imported,
@@ -215,7 +222,9 @@ class Console:
             # Inserted as it is, where Ctrl-J alone would enter the line
             for keys in NEW_LINE_KEYS:
                 readline.parse_and_bind(f'"{keys}": "\\C-v\\C-j"')
-        if hasattr(readline, "set_pre_input_hook"):
+        # Editline has the hook and never calls it: a prompt waited for
+        # there would never be the line that what is written goes above
+        if not editline and hasattr(readline, "set_pre_input_hook"):
             readline.set_pre_input_hook(self._prompted)
             self._hooked = True
         if self._history:
@@ -522,7 +531,7 @@ class Console:
         with self._lock:
             if self._reading is None or not self._redrawn:
                 return ""
-            return readline.get_line_buffer()
+            return self._buffer()
 
     def write(self, lines: list[str]) -> None:
         """Write lines, above the line being typed when one is."""
@@ -555,7 +564,7 @@ class Console:
         if was is None:
             out = text
         elif self._redrawn:
-            typed = readline.get_line_buffer()
+            typed = self._buffer()
             before = self._before_cursor(typed)
             shown = above + (prompt or "")
             # Erased from where the cursor is, and the cursor put back
@@ -580,6 +589,13 @@ class Console:
         if was is not None:
             self._reading = prompt
         self._say(out)
+
+    def _buffer(self) -> str:
+        """What readline has of the line being typed. Editline keeps the
+        line last entered, its line break at the end, until a key of the
+        next is typed: that one is not being typed."""
+        typed = readline.get_line_buffer()
+        return "" if self._editline and typed.endswith("\n") else typed
 
     @staticmethod
     def _before_cursor(typed: str) -> str:
