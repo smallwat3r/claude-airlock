@@ -156,6 +156,11 @@ class Asker:
         self._gone = gone
         self._on_ask = on_ask
         self._question: Question | None = None
+        # How often what was asked was given up on, and how often it had
+        # been when what is now put was asked, none for what the chat
+        # asks itself: what claude asked before the last time is not put
+        self._given_up = 0
+        self._attended: int | None = None
         # The tools the user allowed until the session ends, where claude
         # had no rule to suggest
         self._allowed: set[str] = set()
@@ -189,16 +194,39 @@ class Asker:
         return True
 
     def give_up(self) -> None:
-        """Leave the question that waits without an answer: the user left
-        or interrupted the turn."""
+        """Leave the question that waits without an answer, and what
+        claude asked that waits to be put (see attend): the user left or
+        interrupted the turn. Not for the handler of a signal: a question
+        is answered under a lock the thread it interrupts may hold."""
+        self._given_up += 1
         question = self._question
         if question:
             question.answer(None)
 
+    @property
+    def given_up(self) -> int:
+        """How often what was asked was given up on, to tell what was
+        asked before the last time, see attend."""
+        return self._given_up
+
+    def attend(self, asked_at: int | None) -> bool:
+        """Turn to what was asked when given_up was as said, none for
+        what the chat asks itself. Whether it is still to be put: not
+        what claude asked of a turn that was interrupted since, nor
+        anything once nobody is left to ask."""
+        self._attended = asked_at
+        return self._wanted()
+
+    def _wanted(self) -> bool:
+        return not self._gone() and self._attended in (None, self._given_up)
+
     def ask(self, prompt: str, style: str = "") -> str | None:
         """Put a question to the user and wait for what they say, none
         for no answer. In a style where there is colour, for a question
-        that must not be missed."""
+        that must not be missed. None without a word when it is no longer
+        wanted, see attend."""
+        if not self._wanted():
+            return None
         if self._page.layout.colour:
             prompt = painted(style, prompt)
         question = Question(prompt, stale=bool(self._console.typed()))
@@ -321,11 +349,12 @@ class Asked:
     def __init__(self, asker: Asker, page: Page):
         self._asker = asker
         self._page = page
-        # Each the id claude asked under and the request, or what the chat
-        # itself has to ask, then None when nothing more is asked
-        self._waiting: queue.Queue[tuple[object, dict] | Callable[[], None] | None] = (
-            queue.Queue()
-        )
+        # Each the id claude asked under, the request and how often the
+        # asker had given up by then, or what the chat itself has to ask,
+        # then None when nothing more is asked
+        self._waiting: queue.Queue[
+            tuple[object, dict, int] | Callable[[], None] | None
+        ] = queue.Queue()
         # How many of them have no answer yet, the one being put too
         self._count = 0
         self._counting = threading.Lock()
@@ -340,7 +369,7 @@ class Asked:
         listens to claude is not held up by it."""
         with self._counting:
             self._count += 1
-        self._waiting.put((asked, request))
+        self._waiting.put((asked, request, self._asker.given_up))
 
     def then(self, ask: Callable[[], None]) -> None:
         """Have the chat ask something of its own when its turn comes,
@@ -383,10 +412,16 @@ class Asked:
                 with self._counting:
                     self._count -= 1
 
-    def _answered(self, claude: Answered, asked: object, request: dict) -> None:
-        """Put what claude asked and give it the answer."""
+    def _answered(
+        self, claude: Answered, asked: object, request: dict, asked_at: int
+    ) -> None:
+        """Put what claude asked and give it the answer. What it asked
+        of a turn the user interrupted since is refused unseen, as the
+        question that was on the screen then was: claude waits for an
+        answer to each."""
         try:
-            claude.respond(asked, self._asker.decide(request))
+            wanted = self._asker.attend(asked_at)
+            claude.respond(asked, self._asker.decide(request) if wanted else REFUSED)
         except Exception as error:  # noqa: BLE001
             self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
             claude.refuse(asked, "the question could not be put")
@@ -395,6 +430,7 @@ class Asked:
         """Put what the chat itself asks. One that fails is said, the
         questions after it are still put."""
         try:
+            self._asker.attend(None)
             ask()
         except Exception as error:  # noqa: BLE001
             self._page.note("chat", f"FAILED to ask: {flat(repr(error))}")

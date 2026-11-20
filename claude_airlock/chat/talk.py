@@ -270,9 +270,9 @@ class Chat:
             self._shell.interrupt()
             return
         if self._leaving or (self._turns.running and not self._over):
+            # Acted on by the thread that listens, see _listen: what
+            # claude asked is refused with it, which is not done from here
             self._interrupt = True
-            # What claude asked is refused with it
-            self._asker.give_up()
         elif self._reading:
             # Where the wait for the line can be ended, see there
             self._console.interrupt()
@@ -407,6 +407,8 @@ class Chat:
                     continue
                 if self._interrupt:
                     self._interrupt = False
+                    # What claude asked is refused with it
+                    self._asker.give_up()
                     self._stop()
                 try:
                     self._heard(message)
