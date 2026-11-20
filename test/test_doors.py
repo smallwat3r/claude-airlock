@@ -144,7 +144,9 @@ class AgentDoorTest(LauncherTest):
                 try:
                     client.connect(path)
                     break
-                except BlockingIOError:
+                except (BlockingIOError, ConnectionRefusedError):
+                    # A door with too many waiting: Linux has the next
+                    # one wait, macOS refuses it
                     time.sleep(0.01)
             client.settimeout(5)
         time.sleep(0.5)

@@ -140,6 +140,7 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual([line["hits"] for line in said], [2, 5])
         self.assertEqual(noted(*said).process_limit, 5)
 
+    @unittest.skipUnless(sys.platform == "linux", "reads /proc")
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))

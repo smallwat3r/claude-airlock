@@ -36,7 +36,7 @@ class LoginSessionTest(LauncherTest):
     def test_what_a_session_logs_in_with_is_the_hosts_while_it_runs(self):
         self.ours.write_text("before")
         # As Claude Code writes it: next to it, then renamed over it
-        renew = f"echo -n renewed > '{self.theirs}.tmp' && mv '{self.theirs}.tmp' '{self.theirs}'"
+        renew = f"printf %s renewed > '{self.theirs}.tmp' && mv '{self.theirs}.tmp' '{self.theirs}'"
         seen = f"sleep 1; cat '{self.ours}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
         self.assertEqual((self.work / "seen").read_text(), "renewed")
@@ -44,16 +44,14 @@ class LoginSessionTest(LauncherTest):
 
     def test_what_the_host_renews_reaches_a_running_session(self):
         self.ours.write_text("before")
-        renew = (
-            f"echo -n renewed > '{self.ours}.tmp' && mv '{self.ours}.tmp' '{self.ours}'"
-        )
+        renew = f"printf %s renewed > '{self.ours}.tmp' && mv '{self.ours}.tmp' '{self.ours}'"
         seen = f"sleep 1; cat '{self.theirs}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
         self.assertEqual((self.work / "seen").read_text(), "renewed")
 
     def test_what_a_session_writes_as_it_ends_is_not_lost(self):
         self.ours.write_text("before")
-        self.launch(session=f"echo -n last > '{self.theirs}'")
+        self.launch(session=f"printf %s last > '{self.theirs}'")
         self.assertEqual(self.ours.read_text(), "last")
 
     def test_a_logout_in_a_session_is_the_hosts_too(self):
@@ -63,7 +61,7 @@ class LoginSessionTest(LauncherTest):
 
     def test_a_login_kept_in_the_sandbox_alone_is_carried_to_the_host(self):
         # macOS, where the host's own is in the Keychain
-        self.launch(session=f"echo -n mine > '{self.theirs}'")
+        self.launch(session=f"printf %s mine > '{self.theirs}'")
         self.assertEqual(self.ours.read_text(), "mine")
         self.launch(session="true")
         self.assertEqual(self.theirs.read_text(), "mine")

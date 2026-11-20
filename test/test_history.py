@@ -46,7 +46,9 @@ class HistoryTest(LauncherTest):
 
     def test_the_transcripts_of_other_projects_are_covered(self):
         flags = self.launch().flags
-        self.assertEqual(self.covered(flags), ["-somewhere-else", f"{self.own}-other"])
+        # In the order of their names, which that of the project's place decides
+        others = sorted(["-somewhere-else", f"{self.own}-other"])
+        self.assertEqual(self.covered(flags), others)
 
     def test_what_is_kept_per_project_is_mounted_in_place_of_the_shared(self):
         flags = self.launch().flags
