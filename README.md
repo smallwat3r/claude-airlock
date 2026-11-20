@@ -78,19 +78,6 @@ claude-airlock -p "summarise this" < notes.txt   # piped, no TTY needed
 
 Any other argument is forwarded to `claude`.
 
-### Login
-
-A session has the login of `claude` on the host, and what either renews
-is the other's a moment later. On macOS that login is in the Keychain,
-where the launcher reads and writes it.
-
-So log in with `claude` on the host. Or in a session, with the native UI,
-as [line mode](#line-mode) has no `/login`:
-
-```
-CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock   # then /login
-```
-
 The container is the sandbox, so `claude` is started with
 `--dangerously-skip-permissions` and does not ask before it uses a tool.
 `CLAUDE_AIRLOCK_ASK=1` has it ask, and a `--permission-mode` of your own is
@@ -127,6 +114,19 @@ claude-airlock --trace --follow      # what the sessions here do, as they do it
 
 # Claude Code's native UI in place of line mode, see "Line mode"
 CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock  # or in the config file, for every session
+```
+
+### Login
+
+A session has the login of `claude` on the host, and what either renews
+is the other's a moment later. On macOS that login is in the Keychain,
+where the launcher reads and writes it.
+
+So log in with `claude` on the host. Or in a session, with the native UI,
+as [line mode](#line-mode) has no `/login`:
+
+```
+CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock   # then /login
 ```
 
 ### Settings
