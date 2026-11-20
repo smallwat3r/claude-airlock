@@ -1,5 +1,10 @@
 # claude-airlock
 
+> [!NOTE]
+> claude-airlock is still under development. It works today, but expect
+> changes, including breaking ones to settings and behaviour. It is mostly
+> developed on Linux, macOS should work too but sees less daily use.
+
 Run [Claude Code](https://claude.com/claude-code) inside a hardened Docker
 container, with only the current project mounted, and see everything it
 does there. Every connection and process of a session is recorded from
