@@ -326,6 +326,10 @@ can reach it, those of other projects too.
 sandbox  listen  tcp 0.0.0.0:8080  OPEN to its network  by: [812] node server.js < bash < claude
 ```
 
+A connection the sidecar saw and found no process for says
+`by: a process that cannot be looked into`: a process can close itself to
+the others of its user, its connection is noted all the same.
+
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
 missed. The session can neither stop it nor reach its record.

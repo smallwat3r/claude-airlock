@@ -399,6 +399,19 @@ class ProcessRecord:
         at, pids = min(noted, key=lambda found: abs(found[0] - when))
         return self.lineage(max(pids), at) if pids else []
 
+    def hidden_holder(
+        self, source_port: int, address: str, port: int, when: float
+    ) -> bool:
+        """Whether a connection made at a time was only ever noted
+        without a process that holds it: the watcher saw it and could
+        look into none that did, see procwatch.py."""
+        noted = [
+            pids
+            for at, pids in self.holders.get((source_port, address, port), [])
+            if abs(at - when) <= HELD_WITHIN
+        ]
+        return bool(noted) and not any(noted)
+
     def noted_processes(
         self, start: float, end: float, within: float = 0.0
     ) -> bool | None:

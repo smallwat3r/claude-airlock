@@ -669,21 +669,26 @@ class Watch:
             self._processes[pid] = (what, known[1], now)
 
     def _look_at_connections(self, current: Sockets, pids: list[int]) -> None:
+        """Note each new connection with the processes that hold it. One
+        whose holder is not found is looked at again, it may be the next
+        time. After MOST_TRIES it is noted without one: it is there all
+        the same, held by a process that cannot be looked into, which a
+        process can make itself, and a connection must not go without a
+        word for that."""
         self._connections &= current.keys()
         self._tries = {key: n for key, n in self._tries.items() if key in current}
         new = {
-            key: inode
-            for key, inode in current.items()
-            if key not in self._connections and self._tries.get(key, 0) < MOST_TRIES
+            key: inode for key, inode in current.items() if key not in self._connections
         }
         if not new:
             return
         holders = self._holders.of(set(new.values()), pids)
         for key, inode in new.items():
-            held_by = holders.get(inode)
+            held_by = holders.get(inode, [])
             if not held_by:
                 self._tries[key] = self._tries.get(key, 0) + 1
-                continue
+                if self._tries[key] < MOST_TRIES:
+                    continue
             self._connections.add(key)
             port, to, to_port = key
             self.note(

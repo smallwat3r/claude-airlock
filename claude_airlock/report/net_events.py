@@ -23,6 +23,8 @@ from .shown import over, reached, size, verdict
 
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
+# What is said of a connection the watcher saw and found no process for
+HIDDEN_HOLDER = "a process that cannot be looked into"
 
 
 def proxy_summary(
@@ -283,10 +285,12 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
         fields = event.fields
         if event.what != Kind.NET or "source_port" not in fields:
             continue
-        lineage = record.holder(
-            fields["source_port"], fields["address"], fields["port"], event.when
-        )
+        made = (fields["source_port"], fields["address"], fields["port"], event.when)
+        lineage = record.holder(*made)
         if not lineage:
+            if record.hidden_holder(*made):
+                fields["process"] = None
+                event.notes.append(f"by: {HIDDEN_HOLDER}")
             continue
         made_it = lineage[0]
         fields["process"] = {
