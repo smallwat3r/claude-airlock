@@ -163,13 +163,17 @@ class DigestTest(LauncherTest):
 
     def test_a_transcript_changed_during_the_session_is_said(self):
         entries = prompts_at(time.time(), time.time() + 1, time.time() + 2)
-        transcript = self.write_transcript("0abcdef012", entries)
-        kept = json.dumps(entries[0])
+        kept, *taken_out = map(json.dumps, entries)
+        transcript = self.write_transcript("0abcdef012", entries[:1])
+        # Written to in the session, as a transcript is copied for: one
+        # left as it was before the session is not the session's
+        added = self.work / "added"
+        added.write_text("".join(line + "\n" for line in taken_out))
         # Not cut before the launcher has copied it, however long that takes
         copies = self.state / "transcripts"
-        copied = f"find '{copies}' -type f -size +0 2>/dev/null | grep -q ."
+        copied = f"[ $(cat '{copies}'/*/* 2>/dev/null | wc -l) -ge {len(entries)} ]"
         wait = f"n=0; until {copied} || [ $n -ge 300 ]; do sleep 0.1; n=$((n+1)); done"
-        cut = f"{wait}; echo '{kept}' > '{transcript}'"
+        cut = f"cat '{added}' >> '{transcript}'; {wait}; echo '{kept}' > '{transcript}'"
         said = self.session(session=cut)
         self.assertIn(
             "  the transcript of 0abcdef0 was changed: 2 lines the launcher copied",
