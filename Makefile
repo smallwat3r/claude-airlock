@@ -38,8 +38,9 @@ types: ## mypy
 	$(MYPY) claude_airlock $(LAUNCHER)
 
 .PHONY: test
-test: ## The unit tests, without Docker. One topic: make test K=trace
+test: ## The unit tests and the Dockerfile's assembly, without Docker. One topic: make test K=trace
 	$(PYTHON) test/launcher_test.py $(if $(K),-k $(K))
+	$(PYTHON) $(LAUNCHER) --dockerfile | grep -q '^ENTRYPOINT'
 
 .PHONY: smoke
 smoke: ## The end-to-end test, on the host against a real Docker daemon
