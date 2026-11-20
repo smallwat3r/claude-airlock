@@ -42,11 +42,10 @@ def door_record(host: Host) -> Notes:
     return Notes(host.doors_file, KEPT_USES)
 
 
-def note_use(
-    host: Host, project: str, session: str, door: Door, **said: object
-) -> None:
-    """Add a use of a door to the record, the oldest go past KEPT_USES."""
-    door_record(host).add(project, session, door=door.value, **said)
+def note_use(host: Host, session: str, door: Door, **said: object) -> None:
+    """Add a use of a door by a session of this project to the record,
+    the oldest go past KEPT_USES."""
+    door_record(host).add(host.project_dir, session, door=door.value, **said)
 
 
 def read_uses(

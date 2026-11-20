@@ -116,7 +116,6 @@ class SocketWatch:
                 try:
                     note_use(
                         self._host,
-                        self._host.project_dir,
                         self._session,
                         Door.DOCKER,
                         method=method,

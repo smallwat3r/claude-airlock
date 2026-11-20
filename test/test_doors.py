@@ -281,15 +281,13 @@ class AgentDoorTest(LauncherTest):
     def test_only_the_latest_uses_stay_in_the_record(self):
         with mock.patch.object(doors, "KEPT_USES", 3):
             for number in range(5):
-                doors.note_use(
-                    self.host, "/p", "s", doors.Door.DOCKER, path=str(number)
-                )
+                doors.note_use(self.host, "s", doors.Door.DOCKER, path=str(number))
         lines = Path(self.host.doors_file).read_text().splitlines()
         self.assertEqual([json.loads(line)["path"] for line in lines], ["2", "3", "4"])
 
     def test_the_uses_of_one_session_can_be_told_from_another(self):
         for session in ("claude-proj", "claude-proj-2"):
-            doors.note_use(self.host, self.host.project_dir, session, doors.Door.DOCKER)
+            doors.note_use(self.host, session, doors.Door.DOCKER)
         mine = doors.read_uses(self.host, 0, time.time() + 1, "claude-proj-2")
         self.assertEqual([use["session"] for use in mine], ["claude-proj-2"])
         self.assertEqual(len(doors.read_uses(self.host, 0, time.time() + 1)), 2)
@@ -301,9 +299,7 @@ class AgentDoorTest(LauncherTest):
 
         def note(path: str) -> None:
             with mock.patch.object(time, "time", return_value=moment):
-                doors.note_use(
-                    self.host, self.host.project_dir, "s", doors.Door.DOCKER, path=path
-                )
+                doors.note_use(self.host, "s", doors.Door.DOCKER, path=path)
 
         def followed() -> list[str]:
             found = follow.Round()
@@ -429,10 +425,8 @@ class SocketWatchTest(LauncherTest):
             str(self.home / ".config"),
             str(self.home / ".local" / "state"),
         )
-        project = str(self.project)
         doors.note_use(
             host,
-            project,
             "claude-proj",
             doors.Door.DOCKER,
             method="POST",
@@ -441,7 +435,6 @@ class SocketWatchTest(LauncherTest):
         )
         doors.note_use(
             host,
-            project,
             "claude-proj",
             doors.Door.SSH_AGENT,
             did="sign",
@@ -449,8 +442,12 @@ class SocketWatchTest(LauncherTest):
             comment="me@laptop\x1b[31m",
             what="a login as git",
         )
-        doors.note_use(
-            host, "/elsewhere", "claude-x", doors.Door.DOCKER, method="GET", path="/y"
+        doors.door_record(host).add(
+            "/elsewhere",
+            "claude-x",
+            door=doors.Door.DOCKER.value,
+            method="GET",
+            path="/y",
         )
         self.write_transcript("0a", prompts_at(now - 5, now + 5))
         stdout = self.launch("--trace").stdout

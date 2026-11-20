@@ -42,6 +42,9 @@ AGENT_CONNECTIONS = 16
 AGENT_IDLE = 120.0
 # The longest message an agent takes, as OpenSSH has it
 AGENT_LONGEST = 256 * 1024
+# No more of a name is kept in the record than this, a key's comment or
+# what a session says a signature is for
+MOST_NAMED = 200
 
 
 class AgentMessage(enum.IntEnum):
@@ -100,19 +103,24 @@ def text(reader: Cursor) -> bytes:
     return reader.take(reader.number(4))
 
 
+def named(name: bytes) -> str:
+    """A name the agent or a session gave, the start of it: a session's
+    can be as long as a request, and every one is kept in the record."""
+    return name.decode("utf-8", "replace")[:MOST_NAMED]
+
+
 def signed_for(data: bytes) -> str:
     """What a signature was asked for, from what was to be signed: a
     login says as whom, a signature of a file (a git commit) says for
     what. Anything else is not told apart."""
     try:
         if data.startswith(b"SSHSIG"):
-            namespace = text(Cursor(data, 6)).decode("utf-8", "replace")
-            return f"a signature for {namespace}"
+            return f"a signature for {named(text(Cursor(data, 6)))}"
         reader = Cursor(data)
         text(reader)  # what the two ends agreed on, which names the session
         if reader.number(1) != USERAUTH_REQUEST:
             raise NotThis
-        return f"a login as {text(reader).decode('utf-8', 'replace')}"
+        return f"a login as {named(text(reader))}"
     except NotThis:
         return "a signature"
 
@@ -169,6 +177,9 @@ class AgentDoor:
         threading.Thread(target=self._serve, daemon=True).start()
 
     def close(self) -> None:
+        # Shut first: closing alone leaves _serve waiting in accept
+        with suppress(OSError):
+            self._listener.shutdown(socket.SHUT_RDWR)
         self._listener.close()
         with suppress(OSError):
             os.unlink(self.path)
@@ -258,7 +269,6 @@ class AgentDoor:
         try:
             note_use(
                 self._host,
-                self._host.project_dir,
                 self._session,
                 Door.SSH_AGENT,
                 **said,
@@ -275,7 +285,7 @@ class AgentDoor:
         count = reader.number(4)
         for _ in range(min(count, 1000)):
             key = fingerprint(text(reader))
-            self._comments[key] = text(reader).decode("utf-8", "replace")[:200]
+            self._comments[key] = named(text(reader))
         return count
 
 

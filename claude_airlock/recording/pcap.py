@@ -73,8 +73,6 @@ DNS_MANY_NAMES = 30
 TLS_HANDSHAKE = 0x16
 TLS_CLIENT_HELLO = 0x01
 TLS_SERVER_NAME = 0
-# Retransmitted connection attempts closer than this count as one
-RETRY_SECONDS = 5.0
 
 
 class LinkType(enum.IntEnum):
@@ -214,9 +212,6 @@ class Connection:
     # started from when it answered
     sequence: int
     answer_sequence: int | None = None
-    # When it was last attempted. An attempt sent again got no answer in
-    # the second or so the kernel waits for one.
-    attempted: float = 0.0
     retried: bool = False
     refused: bool = False
     ended: float | None = None
@@ -439,8 +434,10 @@ class Capture:
 
     def _add_connection(self, packet: Packet, key: tuple[int, str, int]) -> None:
         known = self._open.get(key)
-        if known and packet.when - known.attempted < RETRY_SECONDS:
-            known.attempted = packet.when
+        # The same attempt sent again, which starts from the same number:
+        # it got no answer in the time the kernel waits for one, a second
+        # at first and twice as long each time after
+        if known and packet.sequence == known.sequence:
             if not known.answered and not known.retried:
                 known.retried = True
                 self.endings.append((packet.when, Went.NO_ANSWER, known))
@@ -451,7 +448,6 @@ class Capture:
             packet.port,
             packet.source_port,
             packet.sequence,
-            attempted=packet.when,
         )
         self.connections.append(connection)
         self._open[key] = connection
