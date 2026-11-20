@@ -21,6 +21,7 @@ from .calls import (
     call_event,
     call_label,
     outcome,
+    said_source,
     tell_result,
 )
 from .entries import (
@@ -171,6 +172,8 @@ class OpenCall:
     event: Event | None
     # Its number in a live walk, see Event
     number: int | None = None
+    # Where what it reads is said to be from, see said_source
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -363,7 +366,10 @@ class Walk:
             event.number = self._calls
             event.fields = {"stage": Stage.CALL, **event.fields}
         kept = None if self._live else event
-        self._open[call] = OpenCall(who, name, started, label, kept, event.number)
+        source = said_source(block.get("input"))
+        self._open[call] = OpenCall(
+            who, name, started, label, kept, event.number, source
+        )
         self._remember(self._open)
         self._last_call = call
         return event
@@ -375,7 +381,14 @@ class Walk:
         issued = self._open.pop(call, None)
         if issued is None:
             return []
-        ended = outcome(issued.started, entry, block, self._project_dir, issued.name)
+        ended = outcome(
+            issued.started,
+            entry,
+            block,
+            self._project_dir,
+            issued.name,
+            issued.source,
+        )
         if issued.event:
             self._ended(issued.event, ended)
             return []

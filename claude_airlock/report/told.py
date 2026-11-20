@@ -67,10 +67,12 @@ class Instructions:
         return {**about, **flagged(self.planted)}
 
 
-def instructions_planted(kind: str, content: object) -> tuple[Planted, ...]:
-    """The signs in a file read as instructions (see planted.py), none
-    for one of the user's own."""
-    return () if kind in OWN_INSTRUCTIONS else planted(content)
+def instructions_planted(
+    kind: str, content: object, path: str = ""
+) -> tuple[Planted, ...]:
+    """The signs in a file read as instructions (see planted.py), each
+    with the file it is in, none for one of the user's own."""
+    return () if kind in OWN_INSTRUCTIONS else planted(content, path)
 
 
 def instruction_files(given: dict) -> tuple[Instructions, ...]:
@@ -81,8 +83,9 @@ def instruction_files(given: dict) -> tuple[Instructions, ...]:
             continue
         kind, content = kept(file.get("type")) or "?", file.get("content")
         size = len(content) if isinstance(content, str) else 0
-        signs = instructions_planted(kind, content)
-        files.append(Instructions(kept(file["path"]), kind, size, signs))
+        path = kept(file["path"])
+        signs = instructions_planted(kind, content, path)
+        files.append(Instructions(path, kind, size, signs))
     return tuple(files)
 
 

@@ -47,6 +47,15 @@ FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
 NOT_READ = frozenset(
     {*FILE_TOOLS, "TodoWrite", "AskUserQuestion", "ExitPlanMode", "Agent", "Task"}
 )
+# What a call names what it reads by, when it reads one thing: the same
+# file read from another line on is the same source
+SOURCE_KEYS = ("file_path", "notebook_path", "url")
+# An address a command names, up to what ends a word of a shell. A
+# command is the session's to write and can be of any length: one class
+# of characters, a pass over it
+_ADDRESS = re.compile(r"https?://[^\s'\"`<>|;&()\\]+", re.IGNORECASE)
+# What a sentence ends an address with, and is no part of it
+_ADDRESS_END = ".,:"
 # What tells the plugin a call is of, each value of the event with what
 # its line starts with
 PLUGIN_SAID = {"plugin": "plugin", "plugin_server": "plugin server"}
@@ -366,14 +375,49 @@ class Outcome:
         return {**fields, **flagged(self.planted)}
 
 
-def result_planted(tool: str, output: str) -> tuple[Planted, ...]:
-    """The signs in what a tool call gave the session to read, none for a
-    tool whose result is no such thing, see NOT_READ."""
-    return () if tool in NOT_READ else planted(output)
+def read_source(tool_input: object) -> str:
+    """The file or the page a call reads, as the call names it, empty
+    for a call that names none: a command, a search, a tool of a
+    server."""
+    given = tool_input if isinstance(tool_input, dict) else {}
+    named = (given.get(key) for key in SOURCE_KEYS)
+    return next((name for name in named if isinstance(name, str) and name), "")
+
+
+def _command_addresses(tool_input: object) -> tuple[str, ...]:
+    """The addresses the command of a call names, each once and in the
+    order they are written, none for a call that is no command."""
+    given = tool_input if isinstance(tool_input, dict) else {}
+    command = given.get("command")
+    if not isinstance(command, str):
+        return ()
+    found = (address.rstrip(_ADDRESS_END) for address in _ADDRESS.findall(command))
+    return tuple(dict.fromkeys(filter(None, found)))
+
+
+def said_source(tool_input: object) -> str:
+    """Where what a call read is said to be from: the file or the page
+    it names (see read_source), else the addresses its command names.
+    Those are what the command was written with, not what it was seen to
+    fetch, and what it read can be of something else it ran. Empty when
+    it names none."""
+    return read_source(tool_input) or ", ".join(_command_addresses(tool_input))
+
+
+def result_planted(tool: str, output: str, source: str = "") -> tuple[Planted, ...]:
+    """The signs in what a tool call gave the session to read, each with
+    the source the call named, see said_source. None for a tool whose
+    result is no such thing, see NOT_READ."""
+    return () if tool in NOT_READ else planted(output, source)
 
 
 def outcome(
-    call: dict, entry: dict, block: dict, project_dir: str, tool: str
+    call: dict,
+    entry: dict,
+    block: dict,
+    project_dir: str,
+    tool: str,
+    source: str = "",
 ) -> Outcome:
     """How a tool call ended, from the entry it is in, the entry of its
     result, the result itself and the name of the tool: whether it
@@ -382,7 +426,7 @@ def outcome(
     of a command besides its output: that it was interrupted, what its
     exit code means, where its output was kept, and the files it changed.
     And the signs that the output was written to instruct the session,
-    see planted.py."""
+    with the source the call read when it named one, see planted.py."""
     output = block_text(block.get("content"))
     started, finished = local_time(call), local_time(entry)
     said = entry.get("toolUseResult")
@@ -405,7 +449,7 @@ def outcome(
         output_kept=output_kept,
         output_size=held,
         changed=tuple(files_changed(entry, project_dir)),
-        planted=result_planted(tool, output),
+        planted=result_planted(tool, output, source),
     )
 
 

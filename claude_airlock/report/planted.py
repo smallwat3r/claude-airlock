@@ -41,6 +41,9 @@ CUT = "..."
 QUOTED = "| "
 # What starts the line that tells of a sign
 FLAG = "POSSIBLE INJECTION"
+# Of where a sign was read, how much is said with it: a path or an
+# address is the session's to write, and can be of any length
+SOURCE_WIDTH = 200
 # What an event names the signs found in what it tells of, for --json
 # and for what went wrong
 INJECTION = "injection"
@@ -272,31 +275,47 @@ class Planted:
     excerpt: str
     # Whether a turn is stopped for it, see Sign
     stops: bool = False
+    # Where it was read, as the call or the launcher names it: a file, a
+    # page, the addresses of a command. Empty when none is named
+    source: str = ""
+
+    @property
+    def where(self) -> str:
+        """Where it was read as it is said, on one line and no longer
+        than SOURCE_WIDTH, empty without a source."""
+        named = flat(self.source)
+        return named if len(named) <= SOURCE_WIDTH else named[:SOURCE_WIDTH] + CUT
 
     @property
     def shown(self) -> str:
-        """The sign and under it what was found, each line of that
-        marked as one of what was read."""
+        """The sign, where it was read when that is known, and under it
+        what was found, each line of that marked as one of what was
+        read."""
+        where = f" in {self.where}" if self.source else ""
         quoted = (f"\n{QUOTED}{line}" for line in self.excerpt.splitlines())
-        return f"{FLAG}: {self.sign}:" + "".join(quoted)
+        return f"{FLAG}{where}: {self.sign}:" + "".join(quoted)
 
     def fields(self) -> dict:
         """The sign as one of the values of the event it is of."""
-        return {"sign": self.sign, "excerpt": self.excerpt}
+        found = {"sign": self.sign, "excerpt": self.excerpt}
+        return {**found, "source": self.source} if self.source else found
 
 
-def planted(text: object) -> tuple[Planted, ...]:
+def planted(text: object, source: str = "") -> tuple[Planted, ...]:
     """The signs a text shows of being written to instruct who reads it,
     each once, with the first place it is found: in the text as it reads
-    (see as_read), which is how what was found is shown too. None for
-    what is no text."""
+    (see as_read), which is how what was found is shown too. Each with
+    the file or the page the text was read in, when it is known. None
+    for what is no text."""
     if not isinstance(text, str) or not text:
         return ()
     text = text[:MOST_SCANNED]
     read = as_read(text)
     found = ((sign, sign.find(text if sign.as_written else read)) for sign in SIGNS)
     return tuple(
-        Planted(sign.name, excerpt, sign.stops) for sign, excerpt in found if excerpt
+        Planted(sign.name, excerpt, sign.stops, source)
+        for sign, excerpt in found
+        if excerpt
     )
 
 
