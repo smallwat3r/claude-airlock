@@ -165,8 +165,11 @@ class DigestTest(LauncherTest):
         entries = prompts_at(time.time(), time.time() + 1, time.time() + 2)
         transcript = self.write_transcript("0abcdef012", entries)
         kept = json.dumps(entries[0])
-        # Long enough for the launcher to have copied it before it is cut
-        cut = f"sleep 1.5; echo '{kept}' > '{transcript}'"
+        # Not cut before the launcher has copied it, however long that takes
+        copies = self.state / "transcripts"
+        copied = f"find '{copies}' -type f -size +0 2>/dev/null | grep -q ."
+        wait = f"n=0; until {copied} || [ $n -ge 300 ]; do sleep 0.1; n=$((n+1)); done"
+        cut = f"{wait}; echo '{kept}' > '{transcript}'"
         said = self.session(session=cut)
         self.assertIn(
             "  the transcript of 0abcdef0 was changed: 2 lines the launcher copied",
