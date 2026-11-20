@@ -99,7 +99,8 @@ class Agent:
                     # Not an object: claude run for something else than a
                     # conversation, which is then shown as it is written
                     plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
-                    self.messages.put(json_object(line) or plain)
+                    found = json_object(line)
+                    self.messages.put(plain if found is None else found)
                 # The rest of a line that was too long goes with its start
                 dropping = not complete
         finally:

@@ -40,6 +40,10 @@ _HEADING = re.compile(r"(\s*)#{1,6}\s+(\S.*)")
 _CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 # Not the power of a number in code that was written without backticks
 _BOLD_SPAN = re.compile(r"(?<![\w*])\*\*(\S(?:.*?\S)?)\*\*(?![\w*])")
+# A line longer than this is not looked through for marks: every mark that
+# is opened and not closed is looked for to the end of the line, and a
+# line of those is the model's to write
+MOST_MARKED = 4000
 
 
 def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
@@ -61,7 +65,10 @@ def _code_marked(text: str) -> str:
 
 def _marked(line: str) -> str:
     """A line of prose with its Markdown marks replaced by those of this
-    module. What is between backticks is code, whatever else it holds."""
+    module. What is between backticks is code, whatever else it holds.
+    A line past MOST_MARKED is as it was."""
+    if len(line) > MOST_MARKED:
+        return line
     heading = _HEADING.fullmatch(line)
     if heading:
         title = _code_marked(heading[2].replace("**", ""))

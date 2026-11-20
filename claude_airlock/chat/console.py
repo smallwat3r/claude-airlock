@@ -173,8 +173,10 @@ class Console:
         self._sent = sent
         # The prompt of the line being read, none while none is
         self._reading: str | None = None
-        # The prompt to read with instead of the one asked for, see ask
+        # The prompt to read with instead of the one asked for, see ask,
+        # and the one asked for, to go back to
         self._asked: str | None = None
+        self._usual = ""
         # The prompt of a line readline is about to read, and whether it
         # says when it has written it
         self._entering: str | None = None
@@ -258,6 +260,9 @@ class Console:
             self._hooked = True
         if self._history:
             readline.set_history_length(HISTORY_LINES)
+            # Not on top of those of the chat before this one, which a
+            # resumed one follows in the same launcher
+            readline.clear_history()
             with contextlib.suppress(OSError):
                 readline.read_history_file(self._history)
 
@@ -332,10 +337,10 @@ class Console:
         if not self.interactive:
             # Nobody typed it: said here, for what is written to read as
             # a conversation and to start on a line of its own
-            self._say(self._styled(line) + "\n")
-        if self._redrawn and line.strip() and not keep():
-            with contextlib.suppress(ValueError):
-                readline.remove_history_item(readline.get_current_history_length() - 1)
+            with self._lock:
+                self._say(self._styled(line) + "\n")
+        if self._redrawn and not keep():
+            self._forget(line)
         return line
 
     def _line(self, prompt: str, headed: bool) -> str:
@@ -344,6 +349,7 @@ class Console:
         in the moment between would put the prompt there twice."""
         with self._lock:
             self._headed = headed
+            self._usual = prompt
             shown = prompt if self._asked is None else self._asked
             above = self._above()
             if self._redrawn and self._hooked:
@@ -403,9 +409,7 @@ class Console:
         a terminal that does not mark one, would be a prompt for each of
         its lines. At a terminal it is the start of the line typed on,
         written again, a line break at its end or not: the same as with
-        those escapes, Enter enters it. A shell buffer of Emacs sends
-        nothing until Enter is pressed, what ends with a line break there
-        is entered, what does not is typed on."""
+        those escapes, Enter enters it."""
         while True:
             with self._lock:
                 # Nothing is written meanwhile, the screen is as readline
@@ -414,9 +418,7 @@ class Console:
                 if not pasted:
                     return line
                 text = line + "\n" + pasted.replace("\r\n", "\n").replace("\r", "\n")
-                unfinished = self._typed_on and (
-                    self._redrawn or not text.endswith("\n")
-                )
+                unfinished = self._typed_on
                 if self._redrawn:
                     # The line entered alone, written again with the rest
                     out = "\x1b[1A" + self._erased(self._shown, line)
@@ -555,11 +557,16 @@ class Console:
     def ask(self, prompt: str | None) -> None:
         """Have the next line read with a prompt of its own, the one being
         read too, or with none for the usual one again. For a question
-        that comes while the user is at the prompt."""
+        that comes while the user is at the prompt, and for one that is
+        over without a line: the line being read is not its answer."""
         with self._lock:
-            self._asked = prompt
-            if self._reading is not None and prompt is not None:
-                self._put("", prompt)
+            was, self._asked = self._asked, prompt
+            if self._reading is None or prompt == was:
+                return
+            shown = self._usual if prompt is None else prompt
+            self._put("", shown)
+            # Also where the prompt is held back and nothing was written
+            self._reading = shown
 
     def hold(self, held: bool) -> None:
         """Hold the prompt back where nothing is erased, while a turn

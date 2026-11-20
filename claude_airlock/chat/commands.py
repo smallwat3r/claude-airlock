@@ -17,6 +17,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..errors import Fatal
 from ..events import flat, labelled
 from ..report.entries import session_files, sessions_named
 from ..report.trace import session_rows
@@ -91,7 +92,11 @@ class Resume:
         if self._turns.running:
             self._page.note("chat", "not while a turn runs")
             return False
-        files = session_files(self._host)
+        try:
+            files = session_files(self._host)
+        except Fatal:
+            self._page.note("chat", "no session of this project to resume")
+            return False
         if names:
             found = sessions_named(files, names[0])
             if len(found) != 1:
@@ -112,7 +117,7 @@ class Resume:
     def _picked(self, files: list) -> str:
         """Ask which of the project's latest sessions, by a number. Its
         id, empty for none."""
-        rows = session_rows(files)[:RESUME_LISTED]
+        rows = session_rows(files[:RESUME_LISTED])
         self._page.say(
             [labelled("chat", "the latest sessions of this project:")]
             + [f"  {number}. {line}" for number, (_, line) in enumerate(rows, 1)]

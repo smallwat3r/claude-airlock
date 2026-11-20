@@ -715,11 +715,11 @@ def ready_line(colour: bool, running: int = 0) -> str:
     stopped and the prompt is the user's again: bright green in colour.
     With tasks of claude's that still run, it says so: the turn is over
     and the work is not, claude takes up again when one of them ends."""
-    line = f"# {READY}"
+    line = HEADER_START + READY
     if running:
         tasks = "1 task still runs" if running == 1 else f"{running} tasks still run"
         said = f"claude has paused, {tasks}, it goes on when one ends"
-        line = f"# {labelled('ready', said)}"
+        line = HEADER_START + labelled("ready", said)
     return painted(READY_STYLE, line) if colour else line
 
 

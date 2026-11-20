@@ -1,6 +1,7 @@
 """The status of a chat, above its prompt as the head of a shell's prompt
-is: the model, the permission mode when it changed, how full its context is, the limits of the account, what
-the session cost, and the sandbox it runs in. Written again at the end of
+is: the model, the permission mode when it changed, how full its context
+is, the limits of the account, what the session cost, and the sandbox it
+runs in. Written again at the end of
 each turn, and when /status asks, which says it in a line too.
 
 The chat makes it of what it knows: what claude says as it goes, and what
@@ -24,7 +25,16 @@ from ..recording.started import (
     Start,
 )
 from ..report.entries import LATEST, measured
-from ..report.layout import BOLD, DIM, GREEN, RED, YELLOW, painted, together
+from ..report.layout import (
+    BOLD,
+    DIM,
+    GREEN,
+    HEADER_START,
+    RED,
+    YELLOW,
+    painted,
+    together,
+)
 from .console import Page
 from .drift import Drift
 from .said import Session
@@ -109,7 +119,7 @@ class Limits:
         if used is not None and used <= 1:
             window["used_percentage"] = round(used * 100, 1)
         resets = measured(said.get("resetsAt"))
-        # A time that can be shown as one, see LATEST of transcript.py
+        # A time that can be shown as one, see LATEST of report/entries.py
         if resets and resets <= LATEST:
             window["resets_at"] = int(resets)
         self.windows[kind] = {**self.windows.get(kind, {}), **window}
@@ -243,6 +253,6 @@ class StatusLine:
         line = self.refresh()
         head = labelled("status", "")
         if self._page.layout.colour:
-            self._page.put([painted(DIM, "# " + head) + line])
+            self._page.put([painted(DIM, HEADER_START + head) + line])
         else:
-            self._page.put([f"# {head}{line}"])
+            self._page.put([HEADER_START + head + line])
