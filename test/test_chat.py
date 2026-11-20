@@ -1107,8 +1107,9 @@ class ReadlineTest(unittest.TestCase):
             typed, point = ast.literal_eval(said.read_text())
         library = "editline" if EDITLINE else "GNU readline"
         self.assertEqual(typed, "xy", f"with {library}, the cursor at {point}")
-        if point is not None:
-            # In bytes from the start of the line, where it can be read
+        if point is not None and not EDITLINE:
+            # In bytes from the start of the line, where it can be read.
+            # Editline leaves it where it was, the console does not ask
             self.assertEqual(point, 2, f"with {library}")
 
     def wait_for(self, terminal: int, wanted: bytes | None, patience=PATIENCE):
@@ -2569,8 +2570,18 @@ class ConsoleTest(LauncherTest):
             buffer.return_value = typed
             # The cursor is on the first of its two rows: nothing above
             # it is erased, and it is put back after the third character
+            screen._editline = False
             screen.write(["one"])
-        self.assertEqual(out.getvalue(), "\r\x1b[Jone\n> " + typed + "\x1b[1A\r\x1b[5C")
+            self.assertEqual(
+                out.getvalue(), "\r\x1b[Jone\n> " + typed + "\x1b[1A\r\x1b[5C"
+            )
+            # Editline does not keep where the cursor is: taken to be at
+            # the end, on the second row, and left there
+            out.seek(0)
+            out.truncate()
+            screen._editline = True
+            screen.write(["one"])
+            self.assertEqual(out.getvalue(), "\x1b[1A\r\x1b[Jone\n> " + typed)
         back = screens.cursor_back
         # At its end it is where it was written to, on the next row
         # when that was to the edge

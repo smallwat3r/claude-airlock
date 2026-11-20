@@ -72,8 +72,9 @@ except ImportError:  # pragma: no cover, a Python built without it
 def _readline_point() -> Callable[[], int] | None:
     """What reads where the cursor is in the line being typed, in bytes
     from its start. The module of Python does not say, the library it is
-    made with does (rl_point, of GNU readline and of editline alike).
-    None where that cannot be had."""
+    made with does (rl_point). None where that cannot be had. Editline
+    has it too, left where it was when the line was started: not asked
+    there, see _before_cursor."""
     try:
         library = ctypes.CDLL(getattr(readline, "__file__", None))
         point = ctypes.c_int.in_dll(library, "rl_point")
@@ -597,11 +598,11 @@ class Console:
         typed = readline.get_line_buffer()
         return "" if self._editline and typed.endswith("\n") else typed
 
-    @staticmethod
-    def _before_cursor(typed: str) -> str:
+    def _before_cursor(self, typed: str) -> str:
         """What is typed up to the cursor, all of it where readline does
-        not say where the cursor is. It counts in bytes."""
-        if _point is None:
+        not say where the cursor is. It counts in bytes. Editline has the
+        place and does not keep it while a line is typed."""
+        if _point is None or self._editline:
             return typed
         encoding = sys.stdin.encoding or "utf-8"
         raw = typed.encode(encoding, "replace")
