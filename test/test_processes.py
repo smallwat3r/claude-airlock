@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -375,6 +376,15 @@ class HealthWatchTest(unittest.TestCase):
         quiet = mock.patch.object(sys, "stdout", io.StringIO())
         quiet.start()
         self.addCleanup(quiet.stop)
+        # Its tmpfs is a directory of this machine, whose disk is as full
+        # as it is: a quarter of the 4 GiB the session's is said to have
+        block = 4096
+        tmpfs = types.SimpleNamespace(
+            f_frsize=block, f_blocks=4 * GIB // block, f_bfree=3 * GIB // block
+        )
+        measured = mock.patch.object(procwatch.os, "statvfs", lambda _place: tmpfs)
+        measured.start()
+        self.addCleanup(measured.stop)
         self.watch = procwatch.Watch(self.out)
         self.watch._processes[812] = (
             ("9", "/usr/bin/node", ["node", "build.js"]),
@@ -409,7 +419,7 @@ class HealthWatchTest(unittest.TestCase):
         self.assertEqual((health["throttled"], health["seconds"]), (0.5, 2.0))
         self.assertEqual(health["stalled"], {"memory": 0.0, "cpu": 0.0})
         # Of the tmpfs only the session's own, as large as it is
-        self.assertEqual(list(health["tmpfs"]), ["/tmp"])
+        self.assertEqual(health["tmpfs"], {"/tmp": [GIB, 4 * GIB]})
         self.assertEqual(health["top"][0], [812, 900 * 2**20, "node"])
         self.assertNotIn("rose", health)
         # Not again before its time, then with what was used since
