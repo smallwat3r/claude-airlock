@@ -583,7 +583,7 @@ class ChatTest(LauncherTest):
         self.assertEqual(len(re.findall(r"# turn ", done.stdout)), 1)
 
     def test_a_guarded_chat_stops_the_turn_and_sends_no_line_after_it(self):
-        done = self.chat("fetch\nhello\n")
+        done = self.chat("fetch\nhello\n", CLAUDE_AIRLOCK_INJECTION_STOP="1")
         self.assertEqual(done.returncode, 0, done.stderr)
         said = done.stdout
         self.assertIn(
@@ -598,8 +598,8 @@ class ChatTest(LauncherTest):
         self.assertIn("was stopped", said)
         self.assertIn("# chat        the lines left are not sent, leaving", said)
         self.assertNotIn("hello", said)
-        # Asked not to, a chat flags it and goes on
-        done = self.chat("fetch\nhello\n", CLAUDE_AIRLOCK_INJECTION_STOP="0")
+        # Not asked to, a chat flags it and goes on
+        done = self.chat("fetch\nhello\n")
         self.assertIn(
             "POSSIBLE INJECTION in https://example.org: is written as a turn",
             done.stdout,
@@ -615,6 +615,7 @@ class ChatTest(LauncherTest):
             (question, "y\r"),
             ("not asked again for what it read", "fetch\r"),
             ("was went on", "\x04"),
+            CLAUDE_AIRLOCK_INJECTION_STOP="1",
         )
         self.assertEqual(said.count("STOPPED the turn"), 1, said)
         self.assertNotIn("stays in the conversation", said)
@@ -635,6 +636,7 @@ class ChatTest(LauncherTest):
             (clear, "y\r"),
             ("# ready ", "fetch\r"),
             ("go on with it in the conversation? [y/N] ", "\x04"),
+            CLAUDE_AIRLOCK_INJECTION_STOP="1",
         )
         self.assertIn("clearing the conversation, what claude read with it", said)
         self.assertIn("prompt      /clear", said)
@@ -650,6 +652,7 @@ class ChatTest(LauncherTest):
             (clear, "\r"),
             ("nothing runs, claude waits for you", "fetch\r"),
             ("go on with it in the conversation? [y/N] ", "\x04"),
+            CLAUDE_AIRLOCK_INJECTION_STOP="1",
         )
         self.assertIn("# chat        not cleared: what it read stays in the", said)
         self.assertNotIn("clearing the conversation", said)
@@ -1948,8 +1951,8 @@ class GuardTest(LauncherTest):
         lines = self.heard(guarded, self.called("c1"), self.given("c1", self.WORDS))
         self.assertEqual((claude.asked, lines), ([], []))
 
-    def test_a_turn_is_stopped_unless_that_is_switched_off(self):
-        self.assertTrue(Settings().injection_stop)
+    def test_a_turn_is_stopped_only_when_that_is_switched_on(self):
+        self.assertFalse(Settings().injection_stop)
 
 
 class NoticesTest(unittest.TestCase):

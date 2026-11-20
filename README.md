@@ -172,7 +172,7 @@ How Claude Code runs:
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's native UI |
 | `CLAUDE_AIRLOCK_ASK` | `0` | `1` has Claude Code ask before it uses a tool, as it does outside the sandbox |
-| `CLAUDE_AIRLOCK_INJECTION_STOP` | `1` | Line mode stops a turn when what it read looks written to pass for the system or the user, see [docs/line-mode.md](docs/line-mode.md#stopping-a-turn-for-what-it-read). `0` flags it and goes on |
+| `CLAUDE_AIRLOCK_INJECTION_STOP` | `0` | `1` has line mode stop a turn when what it read looks written to pass for the system or the user, see [docs/line-mode.md](docs/line-mode.md#stopping-a-turn-for-what-it-read). `0` flags it and goes on |
 | `CLAUDE_AIRLOCK_TELEMETRY` | `0` | `1` lets Claude Code send usage events and crash reports |
 
 The container and its image:
@@ -231,9 +231,9 @@ do on its own, also when something it read told it to:
 - What it reads is looked at for signs of that, and flagged (see
   [What it read](docs/trace.md#what-it-read)). The flag knows a few ways
   of writing: text in other words goes unflagged, and the session had
-  read it either way. In line mode the turn is stopped for two of the
-  signs (`CLAUDE_AIRLOCK_INJECTION_STOP=0` switches that off), Claude
-  Code's native UI stops for none.
+  read it either way. With `CLAUDE_AIRLOCK_INJECTION_STOP=1` line mode
+  stops the turn for two of the signs, Claude Code's native UI stops
+  for none.
 - Anything in the project can be changed, including files that run code on
   the host later. The launcher warns about git's and Claude's own, and
   about the build files, hook managers and nested `CLAUDE.md` it knows by

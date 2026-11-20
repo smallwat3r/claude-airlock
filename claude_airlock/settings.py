@@ -86,8 +86,10 @@ class Settings:
     # Code's own
     line_mode: bool = True
     # Whether line mode stops a turn for what claude was given to read,
-    # see chat/guard.py
-    injection_stop: bool = True
+    # see chat/guard.py. Off unless asked for: a sign can be a false
+    # positive, the session is in a sandbox already, and what is flagged
+    # is flagged and recorded either way
+    injection_stop: bool = False
     # None is ~/claude-shared when it exists, "" no shared directory
     shared_dir: str | None = None
     extra_dirs: tuple[str, ...] = ()
@@ -337,7 +339,7 @@ SETTINGS = (
     Setting(
         "INJECTION_STOP",
         Kind.SWITCH,
-        "0 lets a turn in line mode go on after it read what looks forged",
+        "1 stops a turn in line mode once it read what looks forged",
     ),
     Setting(
         "SHARED_DIR",

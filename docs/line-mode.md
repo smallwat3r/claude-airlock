@@ -108,8 +108,12 @@ typed, a file or a pipe, the host is refused.
 
 ## Stopping a turn for what it read
 
-A turn is interrupted as soon as claude is given something to read that
-is flagged as a [possible injection](trace.md#what-it-read):
+With `CLAUDE_AIRLOCK_INJECTION_STOP=1`, for a session or in the config
+file for all of them, a turn is interrupted as soon as claude is given
+something to read that is flagged as a
+[possible injection](trace.md#what-it-read). It is off unless asked for:
+a sign can be a false positive, the session is in a sandbox already, and
+what is flagged is flagged and recorded either way.
 
 ```
 claude   webfetch  result: ok, 1.2s, 48 lines out
@@ -157,8 +161,6 @@ until it is answered.
   and stops nothing, claude has it before the first turn.
 - What stops a turn is a guess: a session that reads the transcripts or
   the source of Claude Code, or this launcher's, is stopped by them.
-  `CLAUDE_AIRLOCK_INJECTION_STOP=0` flags and goes on, for a session or
-  in the config file for all of them.
 
 Claude Code's menus are not there: `/config`, `/permissions`, and `/rewind`
 (Esc twice), which undoes the last turns of the conversation and the edits
