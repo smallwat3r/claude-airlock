@@ -46,6 +46,7 @@ from .sandbox.mounts import (
     protect_args,
     protect_env_args,
     protected_dirs,
+    refuse_links_out,
     refuse_unsafe_dir,
     shadow_args,
 )
@@ -159,6 +160,7 @@ def main(argv: list[str], usage: str = "") -> int:
     dirs = configured_extra_dirs(settings, host)
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
+    refuse_links_out(dirs, host)
     dirs, protected = protected_dirs(dirs, settings, host)
     plan = Plan(settings, host, image, action, dirs, protected, claude_args)
     return chats(plan) if plan.is_chat else session(plan)

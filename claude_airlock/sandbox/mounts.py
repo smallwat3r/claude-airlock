@@ -27,17 +27,63 @@ class ExtraDir:
     read_only: bool = False
 
 
+def kept_out(host: Host) -> list[str]:
+    """The directories of the home that are never a session's to have,
+    nor anything in them or around them: the user's keys, and what
+    decides how the next session is sandboxed and what it is told, the
+    launcher's settings and records and Claude's own directory. What a
+    session needs of the last is mounted by the launcher, see home.py."""
+    return [
+        os.path.join(host.home, ".ssh"),
+        os.path.join(host.home, ".gnupg"),
+        host.claude_dir,
+        host.user_conf,
+        host.state_dir,
+    ]
+
+
+def reaches(one: str, other: str) -> bool:
+    """Whether one of two directories is the other or is inside it,
+    either way round: mounting the first brings in the second, or a part
+    of it."""
+    one, other = one.rstrip("/") + "/", other.rstrip("/") + "/"
+    return one.startswith(other) or other.startswith(one)
+
+
 def refuse_unsafe_dir(path: str, host: Host) -> None:
     """Refuse the filesystem root, the home directory or any of its parents:
     mounting one read-write would expose the whole home and defeat the
-    sandbox. By the path as it is written and by where it leads, a link
-    to the home directory is the home directory."""
-    for home, directory in (
-        (host.home, path),
-        (os.path.realpath(host.home), os.path.realpath(path)),
-    ):
+    sandbox. And what is kept out of every session, see kept_out, with
+    the directories around it. By the path as it is written and by where
+    it leads, a link to the home directory is the home directory."""
+    real = os.path.realpath(path)
+    for home, directory in ((host.home, path), (os.path.realpath(host.home), real)):
         if (home.rstrip("/") + "/").startswith(directory.rstrip("/") + "/"):
             raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
+    for kept in kept_out(host):
+        if reaches(path, kept) or reaches(real, os.path.realpath(kept)):
+            raise Fatal(
+                f"refusing to mount {path}: {kept} is not a session's to have,"
+                " it would defeat the sandbox"
+            )
+
+
+def refuse_links_out(dirs: list[ExtraDir], host: Host) -> None:
+    """Refuse a directory to mount that is named by a path in the project,
+    or in another directory a session can write, and is not in there: it
+    is reached through a link, which a session could have left for this,
+    to be given the next time what it points to. One the user keeps such
+    a link to is named by where it is."""
+    writable = [host.project_dir, *(each.path for each in dirs if not each.read_only)]
+    for extra in dirs:
+        for root in writable:
+            inside = extra.path.startswith(root.rstrip("/") + "/")
+            if inside and within(extra.path, root) is None:
+                raise Fatal(
+                    f"refusing to mount {extra.path}: it is a link out of {root},"
+                    " which a session could have made. Name the directory it"
+                    " leads to"
+                )
 
 
 def absolute_path(raw: str, host: Host) -> str:

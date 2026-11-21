@@ -5,7 +5,16 @@ What a session is given and what it is kept from.
 ## Mounts
 
 - The project and any extra directories, read-write at their host paths.
-  Never the home directory, its parents or the filesystem root.
+  Never the home directory, its parents or the filesystem root. Nor what
+  is kept out of every session, whether named itself, by something in it
+  or by a directory around it: `~/.ssh`, `~/.gnupg`, `~/.claude`, and the
+  launcher's own settings and records (`~/.config/claude-airlock`,
+  `~/.local/state/claude-airlock`). A session that could write those
+  would decide how the next one is sandboxed.
+- An extra directory is named by where it is. A path inside the project,
+  or inside another directory a session can write, that leads out of it
+  through a link is refused: a session could have left the link there, to
+  be given what it points to the next time.
 - As `~/.claude`, a directory of the launcher's that the sandboxed sessions
   share, not yours. Of your own `~/.claude` only the configuration listed
   below, `plugins` and `projects` (the transcripts) are mounted into it.

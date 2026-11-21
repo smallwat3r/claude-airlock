@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from harness import LauncherTest
 
@@ -94,6 +95,50 @@ class ExtraDirsTest(LauncherTest):
         link.symlink_to(self.home)
         result = self.launch("--add-dir", str(link))
         self.assert_refused(result, "it would defeat the sandbox")
+
+    def test_what_is_kept_out_of_every_session_is_refused(self):
+        (self.home / ".ssh").mkdir()
+        self.write_config("")
+        kept = self.home / ".ssh"
+        for directory, refused in (
+            ("~/.ssh", kept),
+            ("~/.claude/skills", self.home / ".claude"),
+            # Around the launcher's settings, and in its records
+            ("~/.config", self.home / ".config" / "claude-airlock"),
+            (str(self.state), self.state),
+        ):
+            with self.subTest(directory=directory):
+                Path(self.state).mkdir(parents=True, exist_ok=True)
+                result = self.launch("--add-dir-ro", directory)
+                self.assert_refused(result, f"{refused} is not a session's to have")
+        # As the project too, and by where a link leads
+        result = self.launch(cwd=self.home / ".claude" / "skills")
+        self.assert_refused(result, "is not a session's to have")
+        link = self.work / "keys"
+        link.symlink_to(kept)
+        result = self.launch("--add-dir", str(link))
+        self.assert_refused(result, "is not a session's to have")
+
+    def test_a_link_out_of_what_a_session_can_write_is_refused(self):
+        # What a session could have left, to be given what it points to
+        outside = self.home / "documents"
+        outside.mkdir()
+        (self.project / "vendor").symlink_to(outside)
+        result = self.launch("--add-dir", "vendor")
+        self.assert_refused(result, f"it is a link out of {self.project}")
+        self.shared.mkdir()
+        (self.shared / "notes").symlink_to(outside)
+        result = self.launch("--add-dir-ro", "~/claude-shared/notes")
+        self.assert_refused(result, f"it is a link out of {self.shared}")
+        # Named by where it is, and a link the session cannot have made
+        self.assertEqual(self.launch("--add-dir", str(outside)).status, 0)
+        mine = self.home / "mine"
+        mine.symlink_to(outside)
+        self.assertEqual(self.launch("--add-dir", str(mine)).status, 0)
+        # In a directory it can only read
+        (self.ref / "more").symlink_to(outside)
+        result = self.launch("--add-dir-ro", "~/ref", "--add-dir", "~/ref/more")
+        self.assertEqual(result.status, 0, result.stderr)
 
     def test_a_dir_inside_the_project_has_its_secrets_hidden_once(self):
         inside = self.project / "sub"
