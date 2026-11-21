@@ -2544,6 +2544,30 @@ class ConsoleTest(LauncherTest):
         self.assertEqual(offered("@/etc/pas"), [])
         self.assertEqual(offered("plain"), [])
 
+    def test_a_name_that_is_not_shown_as_it_is_is_not_offered(self):
+        # The names are a session's to choose, readline writes them out
+        for name in ("plain.py", "es\x1b[2Jcape", "bi\u202edi", "line\nbreak"):
+            (self.project / "made" / name).parent.mkdir(exist_ok=True)
+            (self.project / "made" / name).touch()
+        offered = console.completions("@made/", False, [], str(self.project))
+        self.assertEqual(offered, ["@made/plain.py"])
+
+    def test_a_link_out_of_the_project_is_not_gone_into(self):
+        outside = self.home / "private"
+        outside.mkdir()
+        (outside / "secret").touch()
+        (self.project / "out").symlink_to(outside)
+        (self.project / "src2").mkdir()
+        (self.project / "src2" / "a.py").touch()
+        (self.project / "in").symlink_to(self.project / "src2")
+        root = str(self.project)
+        self.assertEqual(console.completions("@out/", False, [], root), [])
+        self.assertEqual(console.completions("@in/", False, [], root), ["@in/a.py"])
+        # A root written with its last slash is the same root
+        self.assertEqual(
+            console.completions("@in/", False, [], root + "/"), ["@in/a.py"]
+        )
+
     def test_what_is_written_while_a_line_is_read_goes_before_the_prompt(self):
         screen = console.Console(str(self.project))
         out = io.StringIO()

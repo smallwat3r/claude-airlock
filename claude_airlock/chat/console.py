@@ -61,7 +61,7 @@ import time
 from collections.abc import Callable
 from typing import TextIO
 
-from ..events import Event, labelled
+from ..events import Event, clean, labelled
 from ..report.layout import Layout, painted
 from .screen import SGR, cursor_back, erased, uncounted
 
@@ -128,16 +128,20 @@ NARROWEST = 20
 def completions(word: str, first: bool, commands: list[str], root: str) -> list[str]:
     """What a word being typed may become: a command when it starts the
     line with a slash, a file of the project after an @. Directories end
-    with a slash, to be gone into."""
+    with a slash, to be gone into. The names are a session's to choose,
+    and readline writes them to the terminal as they are: one with
+    anything in it that is not shown as it is (see clean) is passed over.
+    So is what a link leads to outside the project, a session has nothing
+    else mounted there and could have made the link."""
     if first and word.startswith("/"):
         return sorted(name for name in commands if name.startswith(word))
     if not word.startswith("@"):
         return []
     typed = word[1:]
     directory, _, start = typed.rpartition("/")
-    place = os.path.normpath(os.path.join(root, directory))
-    if os.path.commonpath([root, place]) != root:
-        # Not out of the project, a session has nothing else mounted there
+    place = os.path.realpath(os.path.join(root, directory))
+    real_root = os.path.realpath(root)
+    if os.path.commonpath([real_root, place]) != real_root:
         return []
     try:
         names = sorted(os.listdir(place))
@@ -146,6 +150,8 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
     found = []
     for name in names:
         if not name.startswith(start) or (name.startswith(".") and not start):
+            continue
+        if clean(name) != name or "\n" in name or "\t" in name:
             continue
         ending = "/" if os.path.isdir(os.path.join(place, name)) else ""
         found.append("@" + (f"{directory}/" if directory else "") + name + ending)
