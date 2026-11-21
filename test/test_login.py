@@ -65,10 +65,15 @@ else:
 """
 
 
+# A login as a session leaves one: only what reads as a login is carried
+# from the sandbox to the host
+RENEWED = '{"token":"renewed"}'
+
+
 def renewed(login: Path) -> str:
     """The command that renews a login as Claude Code does: written next
     to it, then renamed over it."""
-    return f"printf %s renewed > '{login}.tmp' && mv '{login}.tmp' '{login}'"
+    return f"printf %s '{RENEWED}' > '{login}.tmp' && mv '{login}.tmp' '{login}'"
 
 
 class LoginSessionTest(LauncherTest):
@@ -94,7 +99,7 @@ class LoginSessionTest(LauncherTest):
         renew = renewed(self.theirs)
         seen = f"sleep 1; cat '{self.ours}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
-        self.assertEqual((self.work / "seen").read_text(), "renewed")
+        self.assertEqual((self.work / "seen").read_text(), RENEWED)
         self.assertEqual(self.ours.stat().st_mode & 0o777, 0o600)
 
     def test_what_the_host_renews_reaches_a_running_session(self):
@@ -102,12 +107,19 @@ class LoginSessionTest(LauncherTest):
         renew = renewed(self.ours)
         seen = f"sleep 1; cat '{self.theirs}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
-        self.assertEqual((self.work / "seen").read_text(), "renewed")
+        self.assertEqual((self.work / "seen").read_text(), RENEWED)
 
     def test_what_a_session_writes_as_it_ends_is_not_lost(self):
         self.ours.write_text("before")
-        self.launch(session=f"printf %s last > '{self.theirs}'")
-        self.assertEqual(self.ours.read_text(), "last")
+        self.launch(session=f"printf %s '{RENEWED}' > '{self.theirs}'")
+        self.assertEqual(self.ours.read_text(), RENEWED)
+
+    def test_what_a_session_leaves_that_is_no_login_is_not_the_hosts(self):
+        self.ours.write_text("before")
+        self.launch(session=f"printf %s 'not a login' > '{self.theirs}'")
+        self.assertEqual(self.ours.read_text(), "before")
+        # The host's is put back, the next session starts logged in
+        self.assertEqual(self.theirs.read_text(), "before")
 
     def test_a_logout_in_a_session_is_the_hosts_too(self):
         self.ours.write_text("login")
@@ -115,10 +127,10 @@ class LoginSessionTest(LauncherTest):
         self.assertFalse(self.ours.exists())
 
     def test_a_login_kept_in_the_sandbox_alone_is_carried_to_the_host(self):
-        self.launch(session=f"printf %s mine > '{self.theirs}'")
-        self.assertEqual(self.ours.read_text(), "mine")
+        self.launch(session=f"printf %s '{RENEWED}' > '{self.theirs}'")
+        self.assertEqual(self.ours.read_text(), RENEWED)
         self.launch(session="true")
-        self.assertEqual(self.theirs.read_text(), "mine")
+        self.assertEqual(self.theirs.read_text(), RENEWED)
 
 
 class LoginPairTest(LauncherTest):
@@ -141,9 +153,9 @@ class LoginPairTest(LauncherTest):
         self.ours.write_text("one")
         self.settled("one", "one")
         # Whichever was written last: the host's is older here and newer below
-        self.theirs.write_text("two")
+        self.theirs.write_text(RENEWED)
         os.utime(self.ours, (2**31, 2**31))
-        self.settled("two", "two")
+        self.settled(RENEWED, RENEWED)
         self.ours.write_text("three")
         os.utime(self.theirs, (2**31, 2**31))
         self.settled("three", "three")
@@ -160,9 +172,37 @@ class LoginPairTest(LauncherTest):
         self.ours.write_text("one")
         self.settled("one", "one")
         self.ours.write_text("host")
-        self.theirs.write_text("sandbox")
+        self.theirs.write_text(RENEWED)
         os.utime(self.ours, (1, 1))
-        self.settled("sandbox", "sandbox")
+        self.settled(RENEWED, RENEWED)
+
+    def test_only_what_reads_as_a_login_is_carried_to_the_host(self):
+        self.ours.write_text("host")
+        self.settled("host", "host")
+        account = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}
+        unfit = (
+            "not json",
+            "[1, 2]",
+            '{"claudeAiOauth": "text"}',
+            '{"claudeAiOauth": {"accessToken": ""}}',
+            json.dumps({"claudeAiOauth": {**account, "refreshToken": 7}}),
+            "[" * 100_000,
+        )
+        for content in unfit:
+            with self.subTest(content=content[:40]):
+                self.theirs.write_text(content)
+                # Whichever was written last
+                os.utime(self.ours, (1, 1))
+                self.settled("host", "host")
+        fit = json.dumps({"claudeAiOauth": account, "mcpOAuth": {}})
+        self.theirs.write_text(fit)
+        self.settled(fit, fit)
+
+    def test_what_is_no_login_in_the_sandbox_alone_is_dropped(self):
+        self.theirs.write_text("not a login")
+        self.pair.settle()
+        self.assertFalse(self.ours.exists())
+        self.assertFalse(self.theirs.exists())
 
     def test_what_is_noted_is_not_the_login(self):
         self.ours.write_text("secret")

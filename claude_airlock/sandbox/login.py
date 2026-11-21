@@ -31,8 +31,9 @@ digits, so a login goes into the Keychain as one line of JSON, and two
 logins are the same when they say the same, however they are written.
 
 Not a boundary: a session can read and replace the login, as it could
-before. Hence the care with what is read from the base, which is a
-session's to write."""
+before, with that of another account too, which then is the host's.
+Hence the care with what is read from the base, which is a session's
+to write: what does not read as a login is never carried to the host."""
 
 from __future__ import annotations
 
@@ -62,6 +63,10 @@ LOGIN = ".credentials.json"
 LOOK_EVERY = 0.2
 # No login is this large, and the one in the base could be made so
 MOST_READ = 1024 * 1024
+# What a login holds of the account at claude.ai, and what of that is
+# always text
+ACCOUNT_LOGIN = "claudeAiOauth"
+TOKENS = ("accessToken", "refreshToken")
 # What is noted when the two last agreed that there is no login
 ABSENT = "absent"
 # What reads and writes the Keychain of macOS, and the item Claude Code
@@ -104,6 +109,22 @@ def as_one_line(content: bytes) -> bytes:
         return content
 
 
+def reads_as_login(content: bytes) -> bool:
+    """Whether what a file holds is a login as Claude Code writes one: a
+    JSON object, its account at claude.ai, when it has one, an object
+    with its tokens as text. Not whose login it is, which nothing in it
+    says."""
+    held = json_object(content)
+    if held is None:
+        return False
+    if ACCOUNT_LOGIN not in held:
+        return True
+    account = held[ACCOUNT_LOGIN]
+    return isinstance(account, dict) and all(
+        isinstance(account.get(token), str) and account[token] for token in TOKENS
+    )
+
+
 @dataclass(frozen=True)
 class Login:
     """A login as it was found."""
@@ -120,6 +141,12 @@ class Login:
         """What it says, the same for two that differ in how they are
         written alone."""
         return None if self.content is None else as_one_line(self.content)
+
+    @cached_property
+    def fit(self) -> bool:
+        """Whether it can be another store's: no login, or what reads
+        as one."""
+        return self.content is None or reads_as_login(self.content)
 
     @cached_property
     def noted(self) -> str:
@@ -415,14 +442,18 @@ class LoginPair:
         self.noted: str | None = None
 
     def settle(self) -> None:
-        """Make the two the same, from the one that changed."""
+        """Make the two the same, from the one that changed. Never from
+        the base when what is there does not read as a login: the base
+        is a session's to write, and the host's own claude would be
+        logged in with whatever was carried over. The host's is then
+        put back in its place."""
         ours = Held(self.ours, self.ours.read())
         theirs = Held(self.theirs, self.theirs.read())
         if ours.login.said == theirs.login.said:
             self.note(ours.login)
             return
         shared = last_shared(self.host)
-        if shared == theirs.login.noted:
+        if shared == theirs.login.noted or not theirs.login.fit:
             source = ours
         elif shared == ours.login.noted:
             source = theirs
