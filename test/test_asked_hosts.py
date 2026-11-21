@@ -257,6 +257,62 @@ class AskedHostsTest(LauncherTest):
         self.assertFalse(outside.exists())
         self.assertEqual(list((self.tree / "waiting").iterdir()), [])
 
+    def test_only_a_name_of_the_public_dns_is_asked_about(self):
+        # Not what the proxy reaches without asking the DNS: an address
+        # in any notation, the bare name of a container on its networks
+        asked = self.asked()
+        unasked = (
+            "172.17.0.1",
+            "169.254.169.254",
+            "2130706433",
+            "0x7f.1",
+            "127.0.0.0x1",
+            "claude-other",
+            "localhost",
+            "example.com.",
+            "a..b.com",
+            "-a.com",
+            "a-.com",
+            "example.com\n",
+            "a" * 64 + ".com",
+            ".".join(["a" * 60] * 5) + ".com",
+        )
+        for name in unasked:
+            with self.subTest(name=name):
+                self.assertFalse(asked_hosts.is_host(name))
+        lines = [name for name in unasked if "\n" not in name]
+        requests = [f"{n} {ADDRESS} {name} -" for n, name in enumerate(lines)]
+        said = self.helper(*requests)
+        self.assertEqual(said, sorted(f"{n} ERR" for n in range(len(lines))))
+        self.assertEqual(list((self.tree / "waiting").iterdir()), [])
+        for name in ("example.com", "a-b.example.co.uk", "1.example.xn--p1ai"):
+            with self.subTest(name=name):
+                self.assertTrue(asked_hosts.is_host(name))
+                asked.answer(name, True)
+                self.assertEqual(self.helper(f"0 {ADDRESS} {name} -"), ["0 OK"])
+
+    def test_the_helper_and_the_launcher_take_the_same_for_a_host(self):
+        script = HELPER.read_text()
+        self.assertIn(f"HOST='{asked_hosts.HOST_PATTERN}'\n", script)
+        self.assertIn(f"LONGEST_HOST={asked_hosts.LONGEST_HOST}\n", script)
+
+    def test_the_proxy_looks_no_host_up_before_it_is_allowed(self):
+        # A rule is read left to right and a dst looks the host up, which
+        # says the name to whoever serves its domain
+        conf = (ROOT / "docker" / "squid.conf").read_text().splitlines()
+        rules = [line.split() for line in conf if line.startswith("http_access")]
+        looked_up = {"to_own", "!to_own", "to_private", "!to_private"}
+        for rule in rules:
+            with self.subTest(rule=rule):
+                at = [n for n, word in enumerate(rule) if word in looked_up]
+                if at:
+                    self.assertEqual(rule[1], "allow")
+                    self.assertIn(rule[2], ("allowed", "confirmed"))
+                    self.assertGreater(min(at), 2)
+        self.assertIn(["http_access", "allow", "allowed", "!to_own"], rules)
+        asked = ["http_access", "allow", "confirmed", "!to_own", "!to_private"]
+        self.assertIn(asked, rules)
+
     def test_the_helper_lets_only_so_many_hosts_of_a_session_wait(self):
         self.asked()
         requests = [f"{n} {ADDRESS} h{n}.test -" for n in range(12)]

@@ -165,6 +165,21 @@ class OptionsTest(LauncherTest):
             fcntl.flock(held, fcntl.LOCK_SH)
             self.assertEqual(removed(), ["claude-airlock-ps-proxy"])
 
+    def test_a_session_never_takes_the_name_of_a_proxy(self):
+        # It would be taken for the proxy, and removed as an idle one
+        for name, proxy in (
+            ("egress-proxy", "claude-egress-proxy"),
+            ("airlock-proxy", "claude-airlock-proxy"),
+            ("airlock-ps-proxy", "claude-airlock-ps-proxy"),
+        ):
+            with self.subTest(name=name):
+                project = self.home / name
+                project.mkdir()
+                (self.work / "log").unlink(missing_ok=True)
+                flags = self.launch(cwd=project).flags
+                self.assertIn(f"--name={proxy}-2", flags)
+                self.assertNotIn(f"--name={proxy}", flags)
+
     def test_two_launchers_do_not_take_the_same_name(self):
         self.assertIn("--name=claude-proj", self.launch().flags)
         (self.work / "log").unlink()

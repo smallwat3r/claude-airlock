@@ -50,8 +50,18 @@ ALLOWED = "allowed"
 REFUSED = "refused"
 # Whose the directory is: the session's container and its launcher
 OWNER = "owner"
-# A host as the helper takes one for a file name, see there
-HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+# A host as the helper takes one for a file name, see there, written the
+# same in both: a name of the public DNS, labels with dots between them,
+# the last one starting with a letter. So never a path, and never what
+# the proxy would reach without asking the DNS for it, which the user
+# cannot tell from a name: an address, in whatever notation, or the bare
+# name of a container on the proxy's networks, another session's for one.
+HOST_PATTERN = (
+    r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+)
+HOST = re.compile(HOST_PATTERN)
+# How long such a name is at most
+LONGEST_HOST = 253
 # The hosts taken of those that wait, the helper lets no more wait
 MOST_WAITING = 8
 # What a directory that is being made or dropped is named with first: no
@@ -109,6 +119,11 @@ def drop_left_behind(host: Host) -> None:
                 shutil.rmtree(tree, ignore_errors=True)
             elif not _owned(tree):
                 _drop(root, name)
+
+
+def is_host(name: str) -> bool:
+    """Whether a name is one the user is asked about, see HOST_PATTERN."""
+    return len(name) <= LONGEST_HOST and HOST.fullmatch(name) is not None
 
 
 class AskedHosts:
@@ -171,13 +186,13 @@ class AskedHosts:
             names = os.listdir(self._path(WAITING))
         except OSError:
             return []
-        return sorted(name for name in names if HOST.fullmatch(name))[:MOST_WAITING]
+        return sorted(name for name in names if is_host(name))[:MOST_WAITING]
 
     def answer(self, host: str, allowed: bool | None) -> None:
         """Say whether the session may reach a host, for as long as it
         lasts. None says neither: the requests that wait are refused, and
         the next one for the host is asked about again."""
-        if not self._address or not HOST.fullmatch(host):
+        if not self._address or not is_host(host):
             return
         with contextlib.suppress(OSError):
             if allowed is not None:

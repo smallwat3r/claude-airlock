@@ -23,8 +23,12 @@
 # this request alone.
 #
 # What a session chooses is the host, so that is taken for a file name
-# only when it is one of letters, digits, dots and dashes that starts and
-# ends with a letter or a digit: never a path.
+# only when it is a name of the public DNS: labels of letters, digits and
+# dashes with dots between them, the last one starting with a letter.
+# Never a path, and never what squid would reach without asking the DNS
+# for it, which the user cannot tell from a name: an address, in whatever
+# notation, or the bare name of a container on the proxy's networks,
+# another session's for one.
 
 set -u
 shopt -s nullglob
@@ -39,7 +43,9 @@ LOOKS="${ASK_LOOKS:-1200}"
 # questions, nor the directory with files
 MOST_WAITING=8
 
-HOST='^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$'
+# The same as HOST_PATTERN and LONGEST_HOST of asked_hosts.py
+HOST='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+LONGEST_HOST=253
 ADDRESS='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
 
 # The answer the launcher has about a host, nothing when it has none
@@ -83,7 +89,8 @@ while read -r channel address host _; do
   host="$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"${host}")"
   tree="${ROOT}/${address}"
   answer=ERR
-  if [[ "${address}" =~ ${ADDRESS} && "${host}" =~ ${HOST} && -d "${tree}/waiting" ]]; then
+  if [[ "${address}" =~ ${ADDRESS} && "${host}" =~ ${HOST} ]] &&
+    ((${#host} <= LONGEST_HOST)) && [[ -d "${tree}/waiting" ]]; then
     answer="$(answered "${tree}" "${host}")"
     if [[ -z "${answer}" ]] && wait_for "${tree}" "${host}"; then
       answer_when_told "${channel}" "${tree}" "${host}" &

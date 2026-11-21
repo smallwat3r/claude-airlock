@@ -37,6 +37,7 @@ from .claude_args import is_a_command, says_permissions
 from .ending import Ending
 from .home import home_args, session_state, statusline_of
 from .image import Image
+from .network import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
 
@@ -66,7 +67,10 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
     directory = private_dir(host.names_dir)
     candidate, number = base, 2
     while True:
-        claim = claim_name(directory, candidate)
+        # Never the name of a proxy, running or not: a session of that
+        # name would be taken for it, and removed as one that is idle
+        reserved = candidate in PROXY_NETWORKS
+        claim = None if reserved else claim_name(directory, candidate)
         if claim is not None:
             if not docker_ok("container", "inspect", candidate):
                 break

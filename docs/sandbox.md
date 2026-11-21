@@ -244,7 +244,12 @@ container escape. Command lines and logs can still carry secrets.
   request, you are asked, and a yes lets it through. Nothing is looked up
   or sent for the host before that. The answer is for that host alone,
   not the names under it, and holds until the session ends: the list is
-  not changed. A session that is not in line mode has nowhere to ask, its
+  not changed. Only a name of the public DNS is asked about, never an
+  address or the bare name of a container, and a yes does not reach a
+  private address the name leads to: a host of your own network goes on
+  the list. Nothing gets through the proxy to its own loopback or link
+  (169.254.0.0/16, where a cloud keeps a machine's credentials), on the
+  list or not. A session that is not in line mode has nowhere to ask, its
   filter refuses as without this, and says so when it starts. A request
   made in the first moment of a session, before the launcher knows its
   address, is refused too.
