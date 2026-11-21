@@ -260,6 +260,14 @@ do on its own, also when something it read told it to:
   Claude Code keeps by session rather than by project (`jobs`, its debug
   log) of the other sandboxed sessions. Those of the host are not there.
 - The login is in the sandbox, a session can read it and use it elsewhere.
+  It can replace it too: what a session writes as its login is carried to
+  the host, as a renewal has to be, so a session can log the host's
+  `claude` out, or into another account. Only what does not read as a
+  login is kept from the host.
+- The sandboxed sessions of every project share one `.claude.json`. An
+  MCP server a session adds there is started by the next session of
+  another project. The launcher says so when the session ends, it does
+  not prevent it.
 - The egress allowlist includes GitHub, so with a forwarded SSH agent or a
   `GH_TOKEN` a session can still push data out to a repository or gist.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)

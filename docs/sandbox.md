@@ -180,6 +180,12 @@ Said apart too, as something to read before the next session here:
   tell it something to keep, and what is there is given to every later
   session as your own notes: something a session read can have it leave
   instructions for the next ones.
+- The MCP servers of the config the sandboxed sessions share (the
+  `.claude.json` of their `~/.claude`), those set up for every project and
+  for each one. A server is a command: one a session added there is
+  started by the next session of another project too, in that project's
+  sandbox. Only the servers are compared, every session rewrites the rest
+  of that file.
 
 All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:

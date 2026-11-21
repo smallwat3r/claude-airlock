@@ -15,10 +15,18 @@ from itertools import islice
 from operator import attrgetter
 from pathlib import Path
 
-from ..files import expand_home, private_dir, settings_object, write_whole
+from ..files import (
+    expand_home,
+    json_object,
+    open_plain,
+    private_dir,
+    settings_object,
+    write_whole,
+)
 from ..launcher import Launcher, session_alive
 from ..projects import memory_dirs
 from ..settings import CONFIG_FILES, CONFIG_TREES, Host
+from .home import CONFIG
 from .plugins import INSTALLED
 
 # What Claude follows or starts in a project, on the host as in a session:
@@ -127,6 +135,11 @@ MOST_TREE_FILES = 5000
 MOST_STAMPED_FILES = 100_000
 # Nor the submodules of more than this many git directories
 MOST_MODULES = 1000
+# The servers of the config the sandboxed sessions share, by this name
+# wherever in it they are: those of every project, and those of each
+SERVERS = "mcpServers"
+# No more of that config is read than this, it is a session's to write
+SERVERS_BYTES = 16 * 1024 * 1024
 # What a fingerprint has in the place of a hash for what it does not
 # watch, by a name that says what that is
 UNWATCHED = "unwatched"
@@ -174,6 +187,44 @@ def file_hash(path: str) -> str:
     except OSError:
         return "unreadable"
     return digest.hexdigest()
+
+
+def servers_in(value: object, at: tuple[str, ...] = ()) -> Iterator[tuple[str, str]]:
+    """Every set of servers a config holds, at whatever depth: where it
+    is and what it says. Not one that names no server, which is what a
+    project that was only run in the sandbox has."""
+    if not isinstance(value, dict):
+        return
+    for key, inner in value.items():
+        if key == SERVERS:
+            if inner:
+                yield "/".join(at), json.dumps(inner, sort_keys=True)
+        else:
+            yield from servers_in(inner, (*at, str(key)))
+
+
+def servers_hash(config: str) -> str:
+    """Hash of the servers a config of Claude Code starts, see servers_in,
+    and of nothing else in it: the rest is rewritten by every session.
+    The file is a session's to write, so one that is not a plain file
+    says so, and one too large or too odd to read is told from one
+    written since as file_stamp does."""
+    file = open_plain(config)
+    if file is None:
+        return "absent"
+    try:
+        with file:
+            content = file.read(SERVERS_BYTES + 1)
+    except OSError:
+        return "unreadable"
+    held = None if len(content) > SERVERS_BYTES else json_object(content)
+    if held is None:
+        return "not read: " + file_stamp(config)
+    try:
+        said = sorted(servers_in(held))
+    except (ValueError, RecursionError):
+        return "not read: " + file_stamp(config)
+    return sha256_hex(json.dumps(said).encode())
 
 
 def hash_files(paths: list[str], fingerprint: dict[str, str]) -> None:
@@ -387,7 +438,10 @@ def claude_files(
 
 
 def host_exec_fingerprint(
-    directories: list[str], claude_dir: str = "", memory: Sequence[str] = ()
+    directories: list[str],
+    claude_dir: str = "",
+    memory: Sequence[str] = (),
+    shared_config: str = "",
 ) -> dict[str, str]:
     """Hashes, by path, of the files a session can write that run commands
     on the host once it is over, or that Claude follows there. In each
@@ -399,9 +453,10 @@ def host_exec_fingerprint(
     git and claude to work, so instead of locking them the launcher compares
     this before and after a session (see report_tampering). With them
     what Claude remembers of the project, the files of the memory
-    directories, which is said apart (see report_memory). Not seen: a
-    CLAUDE.md below the top of a project, and what a script goes on to
-    run."""
+    directories, which is said apart (see report_memory), and the
+    servers of the config the sandboxed sessions share, which is too
+    (see report_servers). Not seen: a CLAUDE.md below the top of a
+    project, and what a script goes on to run."""
     fingerprint: dict[str, str] = {}
     watched = []
     for directory in directories:
@@ -433,6 +488,8 @@ def host_exec_fingerprint(
             if name == PLUGIN_CACHE and is_plugin_use_marker(path, root):
                 continue
             fingerprint[path] = file_stamp(path)
+    if shared_config:
+        fingerprint[shared_config] = servers_hash(shared_config)
     return fingerprint
 
 
@@ -583,22 +640,45 @@ def report_memory(changed: list[str], unchecked: str = "") -> None:
     )
 
 
+def report_servers(config: str, unchecked: str = "") -> None:
+    """Say that the servers of the config the sandboxed sessions share
+    have changed. Said apart from the rest: nothing of it runs on the
+    host, but a server is a command, and one a session of this project
+    added there for every project, or for another one, is started by
+    the next session of that project, in its sandbox and with its
+    files."""
+    whose = f"the session {unchecked}" if unchecked else "this session"
+    print(
+        f"claude-airlock: {whose} changed the MCP servers that sandboxed sessions"
+        " start, of other projects too:",
+        f"  {config}",
+        "Look at them (claude mcp list in a session) before the next session.",
+        sep="\n",
+        file=sys.stderr,
+    )
+
+
 def report_tampering(
     before: dict[str, str],
     after: dict[str, str],
     unchecked: str = "",
     claude_dir: str = "",
     memory: Sequence[str] = (),
+    shared_config: str = "",
 ) -> None:
     """Name the files that differ, see named_changes for how, those of
-    the memory directories apart (see report_memory). unchecked is the
+    the memory directories apart (see report_memory), and the servers of
+    the sandbox's own config (see report_servers). unchecked is the
     name of an earlier session that ended without this check, when the
     report is the late one for it."""
     differ = differing(before, after)
     roots = tuple(directory + os.sep for directory in memory)
     remembered = [path for path in differ if path in memory or path.startswith(roots)]
     report_memory(remembered, unchecked)
-    others = set(differ).difference(remembered)
+    # Not for a check saved by a version that did not watch them
+    if shared_config and shared_config in differ and shared_config in before:
+        report_servers(shared_config, unchecked)
+    others = set(differ).difference(remembered, [shared_config])
     changed = named_changes([path for path in differ if path in others], claude_dir)
     if not changed:
         return
@@ -650,12 +730,18 @@ class HostCheck:
     before: dict[str, str]
     # None in a check saved by a version that did not take it
     build: dict[str, str] | None
+    # The config the sandboxed sessions share, empty in a check saved by
+    # a version that did not watch it
+    shared_config: str = ""
 
     @classmethod
-    def take(cls, watched: list[str], claude_dir: str, memory: list[str]) -> HostCheck:
+    def take(
+        cls, watched: list[str], claude_dir: str, memory: list[str], shared_config: str
+    ) -> HostCheck:
         """The check of a session about to start."""
-        before = host_exec_fingerprint(watched, claude_dir, memory)
-        return cls(watched, claude_dir, memory, before, build_fingerprint(watched))
+        before = host_exec_fingerprint(watched, claude_dir, memory, shared_config)
+        build = build_fingerprint(watched)
+        return cls(watched, claude_dir, memory, before, build, shared_config)
 
     def as_fields(self) -> dict[str, object]:
         return {
@@ -664,6 +750,7 @@ class HostCheck:
             "before": self.before,
             "build": self.build or {},
             "memory": self.memory,
+            "shared_config": self.shared_config,
         }
 
     @classmethod
@@ -677,14 +764,24 @@ class HostCheck:
             texts(pending.get("memory", [])),
             fingerprint_of(pending["before"]),
             fingerprint_of(pending["build"]) if "build" in pending else None,
+            str(pending.get("shared_config", "")),
         )
 
     def report(self, unchecked: str = "") -> None:
         """Compare with how the files are now and say what changed.
         unchecked is the name of an earlier session that ended without
         this check, when the report is the late one for it."""
-        after = host_exec_fingerprint(self.watched, self.claude_dir, self.memory)
-        report_tampering(self.before, after, unchecked, self.claude_dir, self.memory)
+        after = host_exec_fingerprint(
+            self.watched, self.claude_dir, self.memory, self.shared_config
+        )
+        report_tampering(
+            self.before,
+            after,
+            unchecked,
+            self.claude_dir,
+            self.memory,
+            self.shared_config,
+        )
         if self.build is not None:
             report_build_changes(self.build, build_fingerprint(self.watched), unchecked)
 
@@ -708,7 +805,10 @@ class PendingCheck:
         and drops one it cannot read."""
         file = Path(host.pending_checks_dir, session + ".json")
         report_unchecked_sessions(file.parent)
-        check = HostCheck.take(watched, host.claude_dir, memory_dirs(host))
+        shared_config = os.path.join(host.sandbox_claude_dir, CONFIG)
+        check = HostCheck.take(
+            watched, host.claude_dir, memory_dirs(host), shared_config
+        )
         private_dir(str(file.parent))
         pending = {**Launcher.current().as_fields(), **check.as_fields()}
         write_whole(str(file), json.dumps(pending))
