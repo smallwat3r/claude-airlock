@@ -312,6 +312,7 @@ compares the two. The header says what came of it:
 # transcript  as it is now, the launcher has no copy of it to compare
 # transcript  REMOVED, it is no longer there: the 212 lines the launcher copied are shown as REMOVED
 # transcript  NOT ALL COPIED: the launcher stops at 512 MB, what came later cannot be compared
+# transcript  NOT COMPARED: more than 1000000 lines, what was taken out of it is not known
 # transcript  1 lines CANNOT BE READ, shown as UNREADABLE: what was done there is not told
 ```
 
@@ -323,6 +324,10 @@ compares the two. The header says what came of it:
 - A line that holds no entry is not Claude Code's doing: half a line
   written ahead of an entry makes that entry unreadable. It is shown as
   `UNREADABLE`, with `--failed` too.
+- What a session can make large is read within bounds: a transcript as
+  far as 512 MB, the rest is one `UNREADABLE` line that says so, the diff
+  of an Edit over its first 5000 lines (500 without `--verbose`), and of
+  the lines found gone 64 MB are shown, the others counted.
 - The copy is made half a second or so after a line is written. One a
   session takes back within that moment is out of reach.
 - The transcripts of subagents are copied and compared the same way.

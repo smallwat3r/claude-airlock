@@ -24,7 +24,8 @@ from harness import (
 from claude_airlock import files, settings
 from claude_airlock.events import Event, Who
 from claude_airlock.recording import egress_log
-from claude_airlock.report import trace
+from claude_airlock.report import calls, trace
+from claude_airlock.report import entries as entries_module
 from claude_airlock.report.calls import call_details, call_label, without_heredocs
 from claude_airlock.report.entries import read_entries
 from claude_airlock.report.layout import Layout, event_json, folded
@@ -273,6 +274,42 @@ class TraceTest(LauncherTest):
         self.assertIn(
             "$   import os\n", self.launch("--trace", "0c", "--verbose").stdout
         )
+
+    def test_a_transcript_is_read_as_far_as_its_limit(self):
+        path = self.write_transcript("0a", prompts_at(1e9, 1e9 + 1, 1e9 + 2))
+        whole = read_entries(path)
+        self.assertEqual(len(whole), 3)
+        first = len(path.read_bytes().splitlines(keepends=True)[0])
+        with unittest.mock.patch.object(entries_module, "MOST_READ", first):
+            cut = read_entries(path)
+        self.assertEqual(cut[0], whole[0])
+        self.assertEqual(
+            cut[1:], [{"type": files.UNREADABLE, "text": entries_module.NOT_ALL_READ}]
+        )
+        # One that ends at the limit has no rest to speak of
+        size = path.stat().st_size
+        with unittest.mock.patch.object(entries_module, "MOST_READ", size):
+            self.assertEqual(read_entries(path), whole)
+
+    def test_an_edit_is_compared_as_far_as_its_first_lines(self):
+        # Comparing takes the square of the lines, a session's to write
+        long = calls.DIFFED_LINES + 10
+        old = "\n".join(f"old {n}" for n in range(long))
+        new = "\n".join(f"new {n}" for n in range(long))
+        edit = {"file_path": "/p/a", "old_string": old, "new_string": new}
+        began = time.monotonic()
+        whole = call_details("Edit", edit, None, "/p", True)
+        brief = call_details("Edit", edit, None, "/p", False)
+        self.assertLess(time.monotonic() - began, 5)
+        said = f"only the first {calls.DIFFED_LINES} of {long} lines compared"
+        self.assertEqual(whole[-1], f"diff: ... {said}")
+        self.assertEqual(len(whole), 2 * calls.DIFFED_LINES + 3)
+        self.assertIn("diff: -old 0", brief)
+        self.assertIn("more lines, see --verbose", brief[-1])
+        # One that is short is compared whole, and says nothing of it
+        short = {"file_path": "/p/a", "old_string": "a\nb", "new_string": "a\nc"}
+        shown = call_details("Edit", short, None, "/p", False)
+        self.assertEqual(shown[-2:], ["diff: -b", "diff: +c"])
 
     def test_a_list_of_todos_is_said_as_how_far_it_is(self):
         todos = [

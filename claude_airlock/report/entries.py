@@ -35,6 +35,10 @@ MOST_LISTED = 50
 KEPT_WIDTH = 4096
 # More than a session could count: a number above it is not a count
 MOST_COUNTED = 10**15
+# Of a transcript, as much as is read: what the launcher copies of one at
+# most (see recorder.py). What is said in the place of the rest.
+MOST_READ = 512 * 1024 * 1024
+NOT_ALL_READ = f"(the rest of the transcript, past {MOST_READ >> 20} MB, was not read)"
 # Of a session id, as much as names it in a line
 SHORT_ID = 8
 
@@ -69,7 +73,10 @@ def short_id(path: Path) -> str:
 
 
 def read_entries(path: Path) -> list[dict]:
-    """The transcript's entries, none for one that cannot be read."""
+    """The transcript's entries, none for one that cannot be read. Of one
+    longer than MOST_READ those of its start, then an entry that says the
+    rest was not read: a session can make its transcript as long as the
+    disk, and all of it is held here."""
     file = open_plain(path)
     if file is None:
         return []
@@ -83,6 +90,10 @@ def read_entries(path: Path) -> list[dict]:
                 entry = json_object(line)
             if entry:
                 entries.append(entry)
+            if file.tell() >= MOST_READ:
+                if file.read(1):
+                    entries.append({"type": UNREADABLE, "text": NOT_ALL_READ})
+                break
     return entries
 
 

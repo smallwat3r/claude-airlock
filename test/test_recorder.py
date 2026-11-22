@@ -96,6 +96,29 @@ class RecorderTest(LauncherTest):
         self.assertEqual(len(compared.gone), 1)
         self.assertIn("evil.test", json.dumps(compared.gone))
 
+    def test_a_transcript_of_too_many_lines_is_said_not_to_be_compared(self):
+        recorder.catch_up(self.transcript, self.copy)
+        edited = self.transcript.read_text().replace("evil.test", "good.test")
+        self.transcript.write_text(edited)
+        with unittest.mock.patch.object(recorder, "MOST_COMPARED", 2):
+            compared = recorder.compare(self.host, self.transcript)
+            said = "\n".join(compared.header())
+        self.assertTrue(compared.uncompared)
+        self.assertEqual((compared.copied, compared.gone), (True, []))
+        self.assertEqual(compared.lines, len(self.entries))
+        self.assertIn("NOT COMPARED: more than 2 lines", said)
+
+    def test_of_the_lines_found_gone_only_so_much_is_held(self):
+        recorder.catch_up(self.transcript, self.copy)
+        self.rewrite(self.entries[:1])
+        longest = max(len(json.dumps(entry)) for entry in self.entries) + 1
+        with unittest.mock.patch.object(recorder, "MOST_GONE_BYTES", longest):
+            compared = recorder.compare(self.host, self.transcript)
+        gone = len(self.entries) - 1
+        self.assertEqual(len(compared.gone), 1)
+        self.assertEqual((compared.more_gone, compared.missing), (gone - 1, gone))
+        self.assertIn(f"{gone} lines the launcher copied", compared.header()[0])
+
     def test_a_transcript_rewritten_shorter_keeps_its_earlier_copy(self):
         recorder.catch_up(self.transcript, self.copy)
         self.rewrite([self.entries[0], *self.entries[3:]])

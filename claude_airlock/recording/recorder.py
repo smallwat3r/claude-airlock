@@ -54,6 +54,11 @@ CHUNK = 1 << 20
 # many times: what a session can make the launcher keep is bounded
 MOST_COPIED = 512 * 1024 * 1024
 MOST_PUT_ASIDE = 5
+# A transcript of more different lines than this is not compared with its
+# copies, and of the lines found gone no more bytes are held than this:
+# both are a session's to make large
+MOST_COMPARED = 1_000_000
+MOST_GONE_BYTES = 64 * 1024 * 1024
 # Copies older than this many days go, as long as Claude Code keeps a
 # transcript by default
 KEPT_DAYS = 30
@@ -234,16 +239,30 @@ def transcripts_copied(host: Host) -> Iterator[None]:
             )
 
 
-def lines_of(path: Path) -> list[bytes]:
-    """The whole lines of a transcript or of a copy, none for one that
-    cannot be read. A last line without its end is still being written,
-    or was when the copy was made. Not a line too long to be held, see
-    bounded_lines: a trace shows that one as it is found."""
+def lines_of(path: Path) -> Iterator[bytes]:
+    """The whole lines of a transcript or of a copy, one at a time, none
+    for one that cannot be read. A last line without its end is still
+    being written, or was when the copy was made. Not a line too long to
+    be held, see bounded_lines: a trace shows that one as it is found."""
     file = open_plain(path)
     if file is None:
-        return []
+        return
     with file:
-        return [line for line in bounded_lines(file) if line and line.endswith(b"\n")]
+        for line in bounded_lines(file):
+            if line and line.endswith(b"\n"):
+                yield line
+
+
+def line_digests(path: Path, most: int) -> set[bytes] | None:
+    """What stands for each line of a transcript, none for one of more
+    than so many different lines: they are not all held to be compared
+    with, a transcript can be made of lines of a byte each."""
+    digests: set[bytes] = set()
+    for line in lines_of(path):
+        digests.add(hashlib.sha256(line).digest())
+        if len(digests) > most:
+            return None
+    return digests
 
 
 def removed_transcripts(host: Host) -> list[Path]:
@@ -307,6 +326,18 @@ class Compared:
     # Whether the copy stopped at its size limit with more to copy: what
     # the transcript holds past it has nothing to be compared with
     cut_short: bool = False
+    # How many more lines are gone than the entries of gone, which holds
+    # no more than MOST_GONE_BYTES of them
+    more_gone: int = 0
+    # Whether the transcript has more lines than are compared: what was
+    # taken out of it is then not known
+    uncompared: bool = False
+
+    @property
+    def missing(self) -> int:
+        """How many lines the copies have that the transcript no longer
+        does."""
+        return len(self.gone) + self.more_gone
 
     def header(self, subagents: int = 0) -> list[str]:
         """The line of a trace that says how far its transcript is to be
@@ -322,13 +353,18 @@ class Compared:
             f" {MOST_COPIED >> 20} MB, what came later cannot be compared"
         )
         limit = [stopped] if self.cut_short else []
+        if self.uncompared:
+            limit.append(
+                f"{name}NOT COMPARED: more than {MOST_COMPARED} lines, what was"
+                f" taken out of {it} is not known"
+            )
         if self.removed and not subagents:
             said = f"the {self.lines} lines the launcher copied are shown as REMOVED"
             return [f"{name}REMOVED, it is no longer there: {said}", *limit]
         if not self.gone and not self.rewritten:
             said = f"{name}as the launcher copied {it} ({self.lines} lines)"
             return limit or [said]
-        said = f"{len(self.gone)} lines the launcher copied are gone or altered"
+        said = f"{self.missing} lines the launcher copied are gone or altered"
         if self.rewritten:
             said += f", rewritten {self.rewritten} times"
         return [f"{name}CHANGED: {said}, they are shown as REMOVED", *limit]
@@ -342,6 +378,8 @@ class Compared:
             self.rewritten + other.rewritten,
             self.removed or other.removed,
             self.cut_short or other.cut_short,
+            self.more_gone + other.more_gone,
+            self.uncompared or other.uncompared,
         )
 
 
@@ -351,23 +389,35 @@ def compare(host: Host, transcript: Path) -> Compared:
     place, without making it shorter."""
     copy = copy_path(host, transcript)
     copies = [*put_aside(copy), copy]
-    copied = [line for path in copies for line in lines_of(path)]
-    found = Compared(bool(copied), len(copied), rewritten=len(copies) - 1)
-    if not copied:
+    found = Compared(rewritten=len(copies) - 1)
+    # Neither side is held whole: the copies are read a line at a time,
+    # against what stands for each line of the transcript
+    current = line_digests(transcript, MOST_COMPARED)
+    seen: set[bytes] = set()
+    held = 0
+    for line in (line for path in copies for line in lines_of(path)):
+        found.lines += 1
+        if current is None:
+            continue
+        digest = hashlib.sha256(line).digest()
+        if digest in current or digest in seen:
+            continue
+        if len(seen) < MOST_COMPARED:
+            seen.add(digest)
+        if held + len(line) > MOST_GONE_BYTES:
+            found.more_gone += 1
+            continue
+        # One that holds no entry is said to be gone too, as that
+        entry = line_entry(line)
+        if entry:
+            held += len(line)
+            found.gone.append(entry)
+    found.copied = bool(found.lines)
+    if not found.copied:
         return found
+    found.uncompared = current is None
     found.removed = not plain_file(transcript)
     found.cut_short = (length(copy) or 0) >= MOST_COPIED and (
         length(transcript) or 0
     ) > (length(copy) or 0)
-    current = {hashlib.sha256(line).digest() for line in lines_of(transcript)}
-    seen: set[bytes] = set()
-    for line in copied:
-        digest = hashlib.sha256(line).digest()
-        if digest in current or digest in seen:
-            continue
-        seen.add(digest)
-        # One that holds no entry is said to be gone too, as that
-        entry = line_entry(line)
-        if entry:
-            found.gone.append(entry)
     return found

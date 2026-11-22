@@ -30,6 +30,10 @@ from .entries import (
 from .planted import Planted, flagged, planted
 from .shown import size
 
+# The lines of each side of an Edit that are compared, with --verbose and
+# without: only the start of a diff is shown then
+DIFFED_LINES = 5000
+DIFFED_LINES_BRIEF = 500
 # Of the output of a call, how many lines of its start and of its end are
 # shown: when it failed, and with --verbose. The end comes first in worth, it
 # is where a command says what went wrong. All of it is in --json.
@@ -179,16 +183,24 @@ def bash_details(
     return details
 
 
-def edit_diff(tool_input: dict) -> list[str]:
-    """What an Edit call changes, as the lines of a unified diff."""
-    diff = difflib.unified_diff(
-        clean(tool_input.get("old_string", "")).splitlines(),
-        clean(tool_input.get("new_string", "")).splitlines(),
-        lineterm="",
-        n=1,
-    )
+def edit_diff(tool_input: dict, verbose: bool = True) -> list[str]:
+    """What an Edit call changes, as the lines of a unified diff. Of the
+    first DIFFED_LINES of each side, fewer when only the start of the diff
+    is shown: comparing takes the square of the lines, which are the
+    session's to write, and a line says so when there were more."""
+    most = DIFFED_LINES if verbose else DIFFED_LINES_BRIEF
+    sides = [
+        clean(tool_input.get(side, "")).splitlines()
+        for side in ("old_string", "new_string")
+    ]
+    old, new = (side[:most] for side in sides)
     # Without the --- and +++ lines, the file is named with the call
-    return list(diff)[2:]
+    diff = list(difflib.unified_diff(old, new, lineterm="", n=1))[2:]
+    longest = max(map(len, sides))
+    if longest > most:
+        hint = "" if verbose else ", more of it with --verbose"
+        diff.append(f"... only the first {most} of {longest} lines compared{hint}")
+    return diff
 
 
 def file_details(
@@ -199,7 +211,8 @@ def file_details(
     about = "file: " + flat(path)
     changes: list[str] = []
     if name == "Edit":
-        changes = ["diff: " + line for line in clip(edit_diff(tool_input), verbose)]
+        diff = edit_diff(tool_input, verbose)
+        changes = ["diff: " + line for line in clip(diff, verbose)]
     elif name == "Write":
         content = clean(tool_input.get("content", "")).splitlines()
         about += f" ({len(content)} lines)"

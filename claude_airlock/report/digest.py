@@ -245,12 +245,14 @@ def transcript_lines(host: Host, start: float) -> list[str]:
         if compared.gone or compared.rewritten:
             lines.append(
                 f"{named} was changed:"
-                f" {len(compared.gone)} lines the launcher copied are gone or altered"
+                f" {compared.missing} lines the launcher copied are gone or altered"
             )
         if read.unreadable:
             lines.append(f"{named} has {read.unreadable} lines that cannot be read")
         if compared.cut_short:
             lines.append(f"{named} was not all copied, it is past the launcher's limit")
+        if compared.uncompared:
+            lines.append(f"{named} has too many lines to compare with its copy")
     for path in removed_transcripts(host):
         if copied_at(host, path) >= start:
             lines.append(
