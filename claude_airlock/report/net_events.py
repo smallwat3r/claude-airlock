@@ -19,7 +19,7 @@ from ..recording.pcap import Capture, Connection, Flow, Lookup, Request, Went
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
 from .recorded import Recorded, Traced
-from .shown import over, reached, size, verdict
+from .shown import STOPPED, over, reached, size, verdict
 
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
@@ -130,7 +130,7 @@ def connection_event(
     address, port = connection.address, connection.port
     fields: dict = {
         "protocol": over("tcp", port),
-        "name": capture.names.get(address),
+        "name": capture.name_of(address, connection.when),
         "address": address,
         "port": port,
         "source_port": connection.source_port,
@@ -150,7 +150,8 @@ def connection_event(
             bytes_in=connection.received,
         )
     went = how_it_went(connection, outcome)
-    detail = reached(capture, address, port) + (f"  {went}" if went else "")
+    detail = reached(capture, address, port, "tcp", connection.when)
+    detail += f"  {went}" if went else ""
     return Event(when, Who.SANDBOX, Kind.NET, [detail], fields)
 
 
@@ -161,11 +162,11 @@ def flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
     protocol = over(flow.transport, flow.port)
     fields: dict = {
         "protocol": protocol,
-        "name": capture.names.get(flow.address),
+        "name": capture.name_of(flow.address, flow.when),
         "address": flow.address,
         "port": flow.port,
     }
-    detail = reached(capture, flow.address, flow.port, flow.transport)
+    detail = reached(capture, flow.address, flow.port, flow.transport, flow.when)
     if live:
         fields["stage"] = Stage.OPEN
     else:
@@ -217,7 +218,7 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
     """Each destination with its number of connections, the busiest
     first, how many of them failed and how many names were looked up."""
     count = Counter(
-        reached(capture, connection.address, connection.port)
+        reached(capture, connection.address, connection.port, "tcp", connection.when)
         for connection in capture.connections
     )
     lines = [
@@ -225,7 +226,7 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         for destination in sorted(count, key=lambda to: (-count[to], to))
     ]
     lines += [
-        f"  {reached(capture, flow.address, flow.port, flow.transport)}"
+        f"  {reached(capture, flow.address, flow.port, flow.transport, flow.when)}"
         f"  {sent_by(flow)}"
         for flow in sorted(capture.flows, key=lambda flow: -flow.sent)
     ]
@@ -392,7 +393,8 @@ def captured_connections(
     if record:
         name_processes(events, record)
     name_container(events, session.name, recorded.several)
-    return [heading, *capture_summary(capture, verbose)], events
+    stopped = [f"  {STOPPED.format(flat(session.stopped))}"] if session.stopped else []
+    return [heading, *capture_summary(capture, verbose), *stopped], events
 
 
 def watched_events(record: ProcessRecord, verbose: bool) -> list[Event]:

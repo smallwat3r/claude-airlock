@@ -18,7 +18,7 @@ names = {process.name for process in record.processes}
 require("curl" in names, names)
 holders = [
     record.holder(made.source_port, made.address, made.port, made.when)
-    for made in read_capture(only_file(sys.argv[2])).connections
+    for made in read_capture(only_file(sys.argv[2], ".pcap")).connections
     if made.port == 443
 ]
 require(any(line and line[0].name == "curl" for line in holders), holders)

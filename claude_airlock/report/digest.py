@@ -37,7 +37,7 @@ from .entries import modified, short_id
 from .noted import noted_events
 from .planted import FLAG, read_said
 from .recorded import ReadTranscript, Recorded
-from .shown import reached, size
+from .shown import STOPPED, reached, size
 from .summary import planted_reads
 
 # To one destination in one session, from this many bytes on it is said
@@ -75,12 +75,13 @@ def destinations(capture: Capture) -> dict[str, str]:
     shown: by its transport, its name (its address without one) and its
     port."""
     found: dict[str, str] = {}
-    reaches = [(c.address, c.port, "tcp") for c in capture.connections]
-    reaches += [(f.address, f.port, f.transport) for f in capture.flows]
-    for address, port, transport in reaches:
-        name = capture.names.get(address, address).lower()
+    reaches = [(c.address, c.port, "tcp", c.when) for c in capture.connections]
+    reaches += [(f.address, f.port, f.transport, f.when) for f in capture.flows]
+    for address, port, transport, when in reaches:
+        name = (capture.name_of(address, when) or address).lower()
         found.setdefault(
-            f"{transport} {name} {port}", reached(capture, address, port, transport)
+            f"{transport} {name} {port}",
+            reached(capture, address, port, transport, when),
         )
     return found
 
@@ -93,12 +94,14 @@ def uploads(capture: Capture, filtered: bool) -> list[str]:
     for connection in capture.connections:
         behind_proxy = filtered and connection.port == EGRESS_PORT
         if not behind_proxy and not is_model_api(connection.address):
-            where = reached(capture, connection.address, connection.port)
+            where = reached(
+                capture, connection.address, connection.port, "tcp", connection.when
+            )
             # None of one left open, or reset by the other end: not known
             sent[where] += connection.sent or 0
     for flow in capture.flows:
         if not is_model_api(flow.address):
-            where = reached(capture, flow.address, flow.port, flow.transport)
+            where = reached(capture, flow.address, flow.port, flow.transport, flow.when)
             sent[where] += flow.sent
     return [
         f"sent {size(count)} to {where}"
@@ -180,6 +183,8 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
         )
         if cut_short(capture):
             lines.append("its capture stopped at its packet limit")
+        if kept.session.stopped:
+            lines.append(STOPPED.format(flat(kept.session.stopped)))
     new = newly_reached(host, found) if recorded.captured else []
     return [*headed("reached for the first time from this project:", new), *lines]
 

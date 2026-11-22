@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from harness import LAUNCHER, LauncherTest, follow, pcap
-from test_capture import answer, pcap_file, sample_capture, tcp
+from test_capture import answer, dns_response, pcap_file, sample_capture, tcp
 
 from claude_airlock.events import Event, Kind, Stage, Who
 from claude_airlock.report import stream
@@ -347,6 +347,20 @@ class FollowNetworkTest(LauncherTest):
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
         self.ps = f"{self.SIDECAR}\t{json.dumps(about)}"
 
+    def test_what_the_other_parts_of_the_capture_hold_is_followed_too(self):
+        main, dns = self.work / "capture.pcap", self.work / "dns.pcap"
+        main.write_bytes(pcap_file([(self.now + 2, tcp("198.51.100.7", 443), True)]))
+        answer_ = dns_response("good.test", "198.51.100.7")
+        dns.write_bytes(pcap_file([(self.now + 1, answer_, False)]))
+        following = Following(
+            self,
+            FAKE_PS=self.ps,
+            FAKE_CAPTURE=str(main),
+            FAKE_CAPTURE_DNS=str(dns),
+        )
+        shown = following.until("198.51.100.7")
+        self.assertIn("tcp/https good.test (198.51.100.7):443", shown)
+
     def test_connections_show_as_the_capture_grows(self):
         captured = self.work / "capture.pcap"
         captured.write_bytes(sample_capture(self.now))
@@ -609,7 +623,7 @@ class PcapReaderTest(unittest.TestCase):
             for start in range(0, len(whole), size):
                 pcap.take_frames(found, reader.feed(whole[start : start + size]))
             self.assertEqual(len(found.connections), 3)
-            self.assertEqual(found.packets, 10)
+            self.assertEqual(found.packets, 11)
 
     def test_nothing_is_read_past_what_is_not_a_capture(self):
         reader = pcap.PcapReader()

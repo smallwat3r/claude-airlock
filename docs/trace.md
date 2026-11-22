@@ -279,6 +279,25 @@ sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually lo
 The name of a destination is what the session looked up or asked for, the
 address is what was reached. Trust the address where the two matter.
 
+- The name is the one the address had when the connection was made: the
+  last answer before it, so a lookup made later does not rename it. An
+  answer counts when it comes from a resolver in reply to a query the
+  session sent. A session that can put packets on its own loopback can
+  still make one that looks like both, so a name is only as good as the
+  session: the address is the fact.
+- A name asked for and never answered is a lookup of its own, `no answer`.
+  An answer too long for the capture keeps the addresses that fit, and DNS
+  over TCP is read as DNS over UDP is, when a message starts in a packet.
+- The capture has three parts, each with a limit of 100,000 packets of its
+  own: TCP (the start, answer and end of connections, the TLS hello, plain
+  HTTP), DNS, and what is not TCP. A session that floods one cannot fill
+  what the others have. A part that reaches its limit is said as
+  `STOPPED at its packet limit`, and one whose tcpdump ended before the
+  session did as `INCOMPLETE`, what came after is not in it.
+- Not told: a name for QUIC that no lookup gave (its hello is encrypted),
+  and the process that sent UDP or a ping, which is known for TCP
+  connections alone.
+
 ## The transcript
 
 The tool calls come from Claude Code's transcript, which is written from

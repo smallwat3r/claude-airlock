@@ -48,15 +48,28 @@ def over(transport: str, port: int) -> str:
         return transport
 
 
+# What is said of a capture that stopped before its session did, see
+# CaptureSidecar.stopped_early
+STOPPED = "its capture is INCOMPLETE, a recorder ended before the session did: {}"
+
+
 def verdict(denied: bool) -> str:
     return "DENIED" if denied else "allowed"
 
 
-def reached(capture: Capture, address: str, port: int, transport: str = "tcp") -> str:
+def reached(
+    capture: Capture,
+    address: str,
+    port: int,
+    transport: str = "tcp",
+    when: float | None = None,
+) -> str:
     """A destination as shown: tcp/https name (address):port, the name
     left out when the capture has none for the address, the port for a
-    protocol without ports. An IPv6 address is in brackets ahead of one."""
-    known = capture.names.get(address)
+    protocol without ports. An IPv6 address is in brackets ahead of one.
+    The name is the one the address had when the destination was reached,
+    see Capture.name_of."""
+    known = capture.name_of(address, when)
     if port:
         literal = f"[{address}]" if ":" in address else address
         where = f"{known} ({address}):{port}" if known else f"{literal}:{port}"

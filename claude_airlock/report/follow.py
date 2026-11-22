@@ -41,7 +41,7 @@ from ..errors import Fatal
 from ..events import Event, clean, flat, labelled
 from ..files import LINE_LIMIT, line_entry, open_plain
 from ..projects import project_root, subagent_files, transcript_files
-from ..recording.capture import CaptureSidecar, captured_since, cut_short
+from ..recording.capture import PARTS, CaptureSidecar, captured_since, cut_short
 from ..recording.egress_log import logged_since
 from ..recording.health import Ended, Sample
 from ..recording.host_health import running_health, said_in
@@ -144,8 +144,9 @@ class CaptureTail:
         self.sidecar = sidecar
         self.session = CaptureSidecar.session_of(sidecar)
         self._verbose = verbose
-        self._offset = 0
-        self._reader = PcapReader()
+        # Where each part of the capture has been read to, and its reader
+        self._offsets = {part.name: 0 for part in PARTS}
+        self._readers = {part.name: PcapReader() for part in PARTS}
         self._capture = Capture()
         self._said_cut_short = False
 
@@ -154,12 +155,13 @@ class CaptureTail:
         opened, what became of the open ones, the plain HTTP requests, and
         with --verbose the lookups. Nothing while it cannot be read: it can
         again later, or its session has ended."""
-        data = captured_since(self.sidecar, self._offset)
-        if not data:
-            return []
-        self._offset += len(data)
         past = self._capture.marks()
-        take_frames(self._capture, self._reader.feed(data))
+        for part in PARTS:
+            data = captured_since(self.sidecar, self._offsets[part.name], part.file)
+            if data:
+                self._offsets[part.name] += len(data)
+                frames = self._readers[part.name].feed(data)
+                take_frames(self._capture, frames, part.name)
         return capture_events(self._capture, self._verbose, past)
 
     def newly_cut_short(self) -> bool:

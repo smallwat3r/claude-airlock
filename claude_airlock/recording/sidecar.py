@@ -196,6 +196,10 @@ class Sidecar:
         """Whether a file copied out of the sidecar holds a record."""
         return True
 
+    def pruned(self, directory: Path) -> None:
+        """Called once the oldest copies have gone, for a kind that keeps
+        more than one file of each."""
+
     def nothing_recorded(self) -> None:
         """Called when there was nothing to keep, while the sidecar is
         still there to say why."""
@@ -228,6 +232,7 @@ class Sidecar:
                     copied.unlink(missing_ok=True)
                 self.nothing_recorded()
             keep_latest(Path(directory), f"*.{self.EXTENSION}", self.KEPT)
+            self.pruned(Path(directory))
         except OSError as problem:
             # Said and passed over: this runs as a session ends, and what
             # is left to do then (the check of tamper.py) matters more

@@ -248,7 +248,7 @@ capture_and_processes() {
   fi
   session filtered-capture CLAUDE_AIRLOCK_NET_FILTER=1 CLAUDE_AIRLOCK_NET_LOG=1
   check "the filtered session was captured too" \
-    bash -c "[ \"\$(ls '${captured}'* | wc -l)\" -eq 2 ]"
+    bash -c "[ \"\$(ls '${captured}'*.pcap | wc -l)\" -eq 2 ]"
 }
 
 socket_proxy() {

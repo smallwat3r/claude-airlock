@@ -63,8 +63,19 @@ if args[0] == "cp" and ".procs:" in args[1]:
     if "FAKE_PROCESSES" not in os.environ:
         sys.exit(1)
     shutil.copy(os.environ["FAKE_PROCESSES"], args[-1])
+elif args[0] == "cp" and args[1].endswith(".status"):
+    part, _, code = os.environ.get("FAKE_CAPTURE_DIED", "").partition(":")
+    if not code or "/" + part + ".pcap.status" not in args[1]:
+        sys.exit(1)
+    open(args[-1], "w").write(code + "\\n")
 elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
-    shutil.copy(os.environ["FAKE_CAPTURE"], args[-1])
+    # The parts that are not the main one have a file of their own, or none
+    other = {{"/dns.pcap": "FAKE_CAPTURE_DNS", "/flows.pcap": "FAKE_CAPTURE_FLOWS"}}
+    where = [env for path, env in other.items() if args[1].endswith(path)]
+    source = os.environ.get(where[0]) if where else os.environ["FAKE_CAPTURE"]
+    if source is None:
+        sys.exit(1)
+    shutil.copy(source, args[-1])
 if args[0] == "logs" and "FAKE_PROXY_LOG" in os.environ:
     with open(os.environ["FAKE_PROXY_LOG"]) as proxy_log:
         sys.stdout.write(proxy_log.read())
@@ -72,7 +83,11 @@ if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
 if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.environ:
-    with open(os.environ["FAKE_CAPTURE"], "rb") as captured:
+    other = {{"/dns.pcap": "FAKE_CAPTURE_DNS", "/flows.pcap": "FAKE_CAPTURE_FLOWS"}}
+    source = os.environ.get(other.get(args[5], "FAKE_CAPTURE"))
+    if source is None:
+        sys.exit(1)
+    with open(source, "rb") as captured:
         sys.stdout.buffer.write(captured.read()[int(args[4]) - 1 :])
 if args[0] == "exec" and "stat -c" in args[4] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"], "rb") as access_log:

@@ -60,6 +60,9 @@ class TracedSession:
     end: float | None = None
     # Until when it ran as far as the record tells, see recorded_sessions
     until: float = math.inf
+    # Of a capture that a tcpdump of it ended before it was told to, which
+    # of them and how, empty when none did
+    stopped: str = ""
 
     def as_line(self) -> str:
         """The session as its line of the record."""
@@ -72,6 +75,8 @@ class TracedSession:
             kept["processes"] = self.processes
         if self.end is not None:
             kept["end"] = self.end
+        if self.stopped:
+            kept["stopped"] = self.stopped
         return json.dumps(kept)
 
     @classmethod
@@ -100,7 +105,9 @@ class TracedSession:
             return None
         if not ip and not capture and not processes:
             return None
-        return cls(name, project, start, ip, capture, processes, end)
+        stopped = said.get("stopped", "")
+        stopped = stopped[:200] if isinstance(stopped, str) else ""
+        return cls(name, project, start, ip, capture, processes, end, stopped=stopped)
 
 
 def record_traced_session(host: Host, session: TracedSession) -> None:

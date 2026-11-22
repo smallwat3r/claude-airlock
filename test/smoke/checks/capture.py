@@ -6,12 +6,14 @@ Usage: capture.py CAPTURE_PREFIX"""
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from records import only_file, require
 
-from claude_airlock.recording.pcap import read_capture
+from claude_airlock.recording.capture import read_parts
 
-capture = read_capture(only_file(sys.argv[1]))
+# The main file, the other parts of the capture are next to it
+capture = read_parts(Path(only_file(sys.argv[1], ".pcap")))
 connected = {(made.address, made.port) for made in capture.connections}
 require(("1.1.1.1", 53) in connected, connected)
 require("example.com" in capture.names.values(), capture.names)

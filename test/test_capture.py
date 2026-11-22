@@ -23,6 +23,9 @@ from harness import (
     records,
     settings,
 )
+from harness import (
+    capture as capture_module,
+)
 
 
 def unnamed_port() -> int:
@@ -132,10 +135,58 @@ def lookups_under(parent: str, count: int) -> list[bytes]:
     ]
 
 
-def pcap_file(packets: list[tuple[float, bytes, bool]], link_type: int = 276) -> bytes:
+def dns_query(name: str, kind: int = 1, ident: int = 7) -> bytes:
+    """The session asking Docker's resolver for a name."""
+    labels = b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
+    question = labels + b"\x00" + struct.pack("!HH", kind, 1)
+    message = struct.pack("!HHHHHH", ident, 0x0100, 1, 0, 0, 0) + question
+    datagram = struct.pack("!HHHH", 50000, 41234, 8 + len(message), 0) + message
+    return ipv4(17, "127.0.0.1", "127.0.0.11", datagram)
+
+
+def asked_for(response: bytes) -> bytes | None:
+    """The query a response from Docker's resolver answers, none for any
+    other packet."""
+    if response[9:10] != b"\x11" or response[12:16] != socket.inet_aton("127.0.0.11"):
+        return None
+    message = response[28:]
+    at = 12
+    while message[at]:
+        at += message[at] + 1
+    kind = struct.unpack("!H", message[at + 1 : at + 3])[0]
+    labels = message[12:at]
+    name = ".".join(
+        labels[i + 1 : i + 1 + labels[i]].decode() for i in _label_starts(labels)
+    )
+    ident = struct.unpack("!H", message[:2])[0]
+    return dns_query(name, kind, ident)
+
+
+def _label_starts(labels: bytes) -> list[int]:
+    starts, at = [], 0
+    while at < len(labels):
+        starts.append(at)
+        at += labels[at] + 1
+    return starts
+
+
+def pcap_file(
+    packets: list[tuple[float, bytes, bool]], link_type: int = 276, asked: bool = True
+) -> bytes:
     """A capture file as tcpdump writes it for its "any" device: packets
-    given as when, the IP packet and whether the session sent it."""
+    given as when, the IP packet and whether the session sent it. Each
+    response of Docker's resolver is preceded by the query it answers,
+    which is what makes it an answer, unless told not to (asked)."""
     data = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, link_type)
+    if asked:
+        withheld = [(when, packet, sent) for when, packet, sent in packets]
+        packets = []
+        for when, packet, sent in withheld:
+            query = asked_for(packet)
+            if query is not None:
+                # As a capture has what is on loopback: once, as come in
+                packets.append((when, query, False))
+            packets.append((when, packet, sent))
     for when, packet, sent in packets:
         kind = 4 if sent else 0
         carries = 0x86DD if packet[:1] and packet[0] >> 4 == 6 else 0x0800
@@ -195,7 +246,7 @@ class CaptureFileTest(unittest.TestCase):
             )
             looked_up = pcap.Lookup(1001.0, "good.test", "A", ("198.51.100.7",), "")
             self.assertEqual(found.lookups, [looked_up])
-            self.assertEqual(found.packets, 10)
+            self.assertEqual(found.packets, 11)
 
     def test_an_answer_the_session_sent_out_names_nothing(self):
         forged = ipv4(
@@ -335,6 +386,212 @@ class CaptureFileTest(unittest.TestCase):
             pcap.dns_answer(0.0, loop)
 
 
+def dns_over(
+    source: str,
+    destination: str,
+    message: bytes,
+    ports: tuple[int, int],
+    flags: int = 0x18,
+) -> bytes:
+    """A DNS message in a TCP packet, after its length."""
+    header = struct.pack("!HHIIBBHHH", *ports, 0, 0, 0x50, flags, 0, 0, 0)
+    return ipv4(
+        6, source, destination, header + struct.pack("!H", len(message)) + message
+    )
+
+
+def dns_message_of(packet: bytes) -> bytes:
+    """What a UDP packet made by the helpers above carries."""
+    return packet[28:]
+
+
+class DnsTrustTest(unittest.TestCase):
+    """What is taken for a name of an address: only what the resolver said
+    of what the session asked it."""
+
+    def read(self, packets: list[tuple[float, bytes, bool]], asked: bool = True):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory, "capture.pcap")
+            file.write_bytes(pcap_file(packets, asked=asked))
+            return pcap.read_capture(file)
+
+    def test_an_answer_from_somewhere_else_on_loopback_names_nothing(self):
+        for source in ("127.0.0.1", "127.0.0.2"):
+            forged = ipv4(
+                17, source, "127.0.0.1", dns_response("a.test", "6.6.6.6")[20:]
+            )
+            for sent in (True, False):
+                with self.subTest(source=source, sent=sent):
+                    found = self.read(
+                        [
+                            (0.5, dns_query("a.test"), True),
+                            (1.0, forged, sent),
+                            (2.0, tcp("6.6.6.6", 443), True),
+                        ],
+                        asked=False,
+                    )
+                    self.assertEqual(found.names, {})
+                    self.assertEqual(found.lookups[0].error, "no answer")
+
+    def test_an_answer_nobody_asked_for_names_nothing(self):
+        found = self.read(
+            [(1.0, dns_response("a.test", "6.6.6.6"), False)], asked=False
+        )
+        self.assertEqual(found.names, {})
+        self.assertEqual(found.lookups, [])
+        # Nor one for another name, or with another id
+        for query in (dns_query("b.test"), dns_query("a.test", ident=9)):
+            found = self.read(
+                [(0.5, query, True), (1.0, dns_response("a.test", "6.6.6.6"), False)],
+                asked=False,
+            )
+            self.assertEqual(found.names, {})
+
+    def test_what_is_looked_up_later_does_not_rename_what_was_reached(self):
+        found = self.read(
+            [
+                (1.0, dns_response("good.test", "198.51.100.7"), False),
+                (2.0, tcp("198.51.100.7", 443), True),
+                (3.0, dns_response("github.com", "198.51.100.7"), False),
+            ]
+        )
+        address = "198.51.100.7"
+        self.assertIsNone(found.name_of(address, 0.5))
+        self.assertEqual(found.name_of(address, 2.0), "good.test")
+        self.assertEqual(found.name_of(address, 3.5), "github.com")
+        self.assertEqual(found.name_of(address), "github.com")
+        # What the hello says is only for what has no answer before it
+        self.assertEqual(
+            self.read(
+                [
+                    (
+                        1.0,
+                        tcp("203.0.113.9", 443, 0x18, client_hello("sni.test")),
+                        True,
+                    ),
+                    (2.0, dns_response("later.test", "203.0.113.9"), False),
+                ]
+            ).name_of("203.0.113.9", 1.0),
+            "sni.test",
+        )
+
+    def test_a_query_that_was_never_answered_is_a_lookup_without_one(self):
+        found = self.read([(1.0, dns_query("lost.test", 28), True)], asked=False)
+        (lookup,) = found.lookups
+        self.assertEqual(
+            (lookup.when, lookup.name, lookup.kind, lookup.addresses, lookup.error),
+            (1.0, "lost.test", "AAAA", (), "no answer"),
+        )
+
+    def test_a_query_is_given_up_on_as_the_capture_goes_on(self):
+        capture = pcap.Capture()
+        pcap.take_frames(
+            capture,
+            pcap.PcapReader().feed(
+                pcap_file([(1.0, dns_query("slow.test"), True)], asked=False)
+            ),
+        )
+        self.assertEqual(capture.lookups, [])
+        later = pcap_file([(20.0, dns_query("other.test"), True)], asked=False)
+        pcap.take_frames(capture, pcap.PcapReader().feed(later))
+        self.assertEqual([lookup.name for lookup in capture.lookups], ["slow.test"])
+        # The answer when it does come is still the answer
+        late = pcap_file(
+            [(21.0, dns_response("slow.test", "198.51.100.7"), False)], asked=False
+        )
+        pcap.take_frames(capture, pcap.PcapReader().feed(late))
+        self.assertEqual(capture.name_of("198.51.100.7", 22.0), "slow.test")
+
+    def test_an_answer_cut_short_by_the_capture_keeps_what_came_before(self):
+        name = "big.test"
+        labels = b"".join(bytes([len(p)]) + p.encode() for p in name.split("."))
+        question = labels + b"\x00" + struct.pack("!HH", 1, 1)
+        addresses = [f"198.51.100.{n}" for n in range(1, 6)]
+        records = b"".join(
+            b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton(a)
+            for a in addresses
+        )
+        message = struct.pack("!HHHHHH", 7, 0x8180, 1, 5, 0, 0) + question + records
+        # Cut in the middle of the fourth record
+        cut = message[: len(message) - 16 - 5]
+        datagram = struct.pack("!HHHH", 41234, 50000, 8 + len(cut), 0) + cut
+        found = self.read([(1.0, ipv4(17, "127.0.0.11", "127.0.0.1", datagram), False)])
+        (lookup,) = found.lookups
+        self.assertEqual(lookup.addresses, tuple(addresses[:3]))
+        self.assertEqual(found.name_of(addresses[0]), name)
+
+    def test_dns_over_tcp_is_read(self):
+        query = dns_message_of(dns_query("tcp.test"))
+        response = dns_message_of(dns_response("tcp.test", "198.51.100.7"))
+        packets = [
+            (1.0, dns_over("127.0.0.1", "127.0.0.11", query, (40000, 53)), True),
+            (1.1, dns_over("127.0.0.11", "127.0.0.1", response, (53, 40000)), False),
+        ]
+        found = self.read(packets, asked=False)
+        self.assertEqual(found.name_of("198.51.100.7"), "tcp.test")
+        self.assertEqual([lookup.name for lookup in found.lookups], ["tcp.test"])
+        # The same from somewhere that is not a resolver, by no port of one
+        elsewhere = [
+            (1.0, dns_over("127.0.0.1", "127.0.0.1", query, (40000, 5353)), True),
+            (1.1, dns_over("127.0.0.1", "127.0.0.1", response, (5353, 40000)), True),
+        ]
+        self.assertEqual(self.read(elsewhere, asked=False).lookups, [])
+
+    def test_each_part_of_a_capture_counts_its_own_packets(self):
+        capture = pcap.Capture()
+        frames = list(pcap.PcapReader().feed(sample_capture(1000.0)))
+        pcap.take_frames(capture, frames, "tcp")
+        pcap.take_frames(capture, frames[:2], "dns")
+        self.assertEqual(capture.part_packets, {"tcp": len(frames), "dns": 2})
+        self.assertEqual(capture.packets, len(frames) + 2)
+        limit = capture_module.PACKET_LIMIT
+        self.assertFalse(capture_module.cut_short(capture))
+        capture.part_packets["dns"] = limit
+        self.assertTrue(capture_module.cut_short(capture))
+        # Many packets in all, none of the parts at its limit
+        capture.part_packets = {"tcp": limit - 1, "dns": limit - 1, "flows": limit - 1}
+        self.assertFalse(capture_module.cut_short(capture))
+
+    def test_the_parts_are_read_together_and_one_that_is_missing_is_passed_over(self):
+        with tempfile.TemporaryDirectory() as directory:
+            main, dns = Path(directory, "a.pcap"), Path(directory, "a.pcap.dns")
+            main.write_bytes(pcap_file([(2.0, tcp("198.51.100.7", 443), True)]))
+            dns.write_bytes(
+                pcap_file([(1.0, dns_response("good.test", "198.51.100.7"), False)])
+            )
+            found = pcap.read_capture(main, [dns, Path(directory, "a.pcap.flows")])
+        self.assertEqual(found.name_of("198.51.100.7", 2.0), "good.test")
+        self.assertEqual(found.part_packets, {"tcp": 1, "dns": 2})
+
+    def test_loopback_is_not_what_the_filter_takes_of_udp(self):
+        filters = {part.name: part.filter for part in capture_module.PARTS}
+        self.assertNotIn("udp and net 127", filters["dns"])
+        self.assertIn("host 127.0.0.11", filters["dns"])
+        for name in ("tcp", "flows"):
+            self.assertNotIn("(udp and net 127.0.0.0/8)", filters[name])
+        # No packet is in two parts, the reader would take it for two
+        self.assertNotIn("outbound", filters["tcp"])
+        for name in ("tcp", "flows"):
+            self.assertTrue(
+                filters[name].startswith("not port 53 and not host 127.0.0.11 and (")
+            )
+            self.assertTrue(filters[name].endswith(")"))
+
+    def test_queries_never_answered_do_not_keep_later_answers_out(self):
+        most = pcap.DNS_MOST_PENDING
+        lost = [
+            (1.0, dns_query(f"n{number}.lost.test", ident=number % 65536), True)
+            for number in range(most + 5)
+        ]
+        found = self.read(
+            [*lost, (2.0, dns_response("good.test", "198.51.100.7"), False)]
+        )
+        self.assertEqual(found.name_of("198.51.100.7"), "good.test")
+        # Each of them is still said to have had no answer, once
+        unanswered = [lookup for lookup in found.lookups if lookup.error]
+        self.assertEqual(len(unanswered), most + 5)
+
+
 class OtherTrafficTest(unittest.TestCase):
     """What is not TCP over IPv4: IPv6, and what a session sends by UDP or
     as a ping."""
@@ -472,8 +729,11 @@ class CaptureSessionTest(LauncherTest):
         # It runs tcpdump and outlives it: the session's way out is the
         # sidecar's, and would go with one that ended at its packet limit
         script = sidecar[sidecar.index("-c") + 1]
-        self.assertIn('tcpdump "$@" &', script)
-        self.assertIn("sleep infinity", script)
+        self.assertEqual(script.count("tcpdump $common"), 3)
+        self.assertIn("while :", script)
+        # A tcpdump for each part, and the filter of each after the script
+        filters = sidecar[sidecar.index("sh", sidecar.index("-c")) + 1 :]
+        self.assertEqual(filters, [part.filter for part in capture_module.PARTS])
         self.assertLess(
             result.calls.index(sidecar),
             next(
@@ -510,7 +770,53 @@ class CaptureSessionTest(LauncherTest):
         self.assertEqual(session["capture"], copied.name)
         self.assertEqual(session["project"], str(self.project))
         ending = [c[0] for c in result.calls if self.SIDECAR in c[-1] or c[0] == "cp"]
-        self.assertEqual(ending[-3:], ["stop", "cp", "rm"])
+        stopped = ending.index("stop")
+        self.assertEqual(ending[stopped + 1 : -1], ["cp"] * (len(ending) - stopped - 2))
+        self.assertEqual(ending[-1], "rm")
+
+    def test_the_other_parts_are_copied_out_beside_the_main_one(self):
+        dns = self.work / "dns.pcap"
+        dns.write_bytes(
+            pcap_file([(self.now + 1, dns_response("a.test", "192.0.2.9"), False)])
+        )
+        self.captured(FAKE_CAPTURE_DNS=str(dns))
+        (main,) = (self.state / "captures").glob("*.pcap")
+        beside = sorted(p.name for p in (self.state / "captures").iterdir())
+        # No file of the flows part: it wrote none
+        self.assertEqual(beside, [main.name, main.name + ".dns"])
+        self.assertEqual(
+            (main.parent / (main.name + ".dns")).read_bytes(), dns.read_bytes()
+        )
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        self.assertIn("lookup a.test", self.launch("--trace", "--verbose").stdout)
+
+    def test_parts_whose_capture_was_let_go_of_are_let_go_of(self):
+        captures = self.state / "captures"
+        captures.mkdir(parents=True, exist_ok=True)
+        (captures / "claude-gone-1.pcap.dns").write_bytes(b"x")
+        (captures / "claude-kept-2.pcap").write_bytes(b"x")
+        (captures / "claude-kept-2.pcap.dns").write_bytes(b"x")
+        self.captured()
+        self.assertFalse((captures / "claude-gone-1.pcap.dns").exists())
+        self.assertTrue((captures / "claude-kept-2.pcap.dns").exists())
+
+    def test_a_tcpdump_that_died_is_said_in_the_record_and_the_trace(self):
+        self.captured(FAKE_CAPTURE_DIED="dns:137")
+        (session,) = map(
+            json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
+        )
+        self.assertEqual(session["stopped"], "dns (status 137)")
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        stdout = self.launch("--trace").stdout
+        self.assertIn("INCOMPLETE, a recorder ended before the session did", stdout)
+        self.assertIn("dns (status 137)", stdout)
+
+    def test_a_tcpdump_that_ended_at_its_limit_is_not_a_death(self):
+        self.captured(FAKE_CAPTURE_DIED="dns:0")
+        (session,) = map(
+            json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
+        )
+        self.assertNotIn("stopped", session)
 
     def test_what_is_kept_is_for_the_user_alone(self):
         self.captured()
