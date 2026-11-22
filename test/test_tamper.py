@@ -37,6 +37,44 @@ class TamperingTest(LauncherTest):
         )
         self.assertIn(f"  {self.project}/.git/config\n", result.stderr)
 
+    def test_a_pipe_in_the_place_of_a_watched_file_does_not_hold_the_check(self):
+        # Nobody writes to it: opened as a file, the check would wait
+        result = self.launch(session="rm .git/config; mkfifo .git/config")
+        # The config that became one is a change all the same
+        self.assertIn(f"  {self.project}/.git/config\n", result.stderr)
+        for made in (
+            "mkfifo .git/hooks/pre-commit",
+            "mkfifo pipe; ln -s ../../pipe .git/hooks/pre-push",
+        ):
+            with self.subTest(made=made):
+                result = self.launch(session=made)
+                self.assertEqual(result.status, 0, result.stderr)
+
+    def test_a_git_that_does_not_end_is_not_waited_for(self):
+        config = self.project / ".git" / "config"
+        with unittest.mock.patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired("git", tamper.GIT_SECONDS),
+        ) as ran:
+            self.assertEqual(
+                tamper.git_config_hash(str(config)), tamper.file_hash(str(config))
+            )
+            self.assertIsNone(tamper.moved_hooks_dir(str(self.project)))
+        for call in ran.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], tamper.GIT_SECONDS)
+
+    def test_what_is_no_plain_file_is_hashed_as_unreadable(self):
+        pipe = self.work / "pipe"
+        os.mkfifo(pipe)
+        self.assertEqual(tamper.file_hash(str(pipe)), "unreadable")
+        self.assertEqual(tamper.git_config_hash(str(pipe)), "unreadable")
+        self.assertEqual(tamper.file_hash(str(self.work / "none")), "unreadable")
+        # A link to one says where it leads, and is not opened either
+        link = self.work / "link"
+        link.symlink_to(pipe)
+        self.assertNotEqual(tamper.file_hash(str(link)), "unreadable")
+
     def test_new_project_claude_settings_are_reported(self):
         result = self.launch(session='mkdir .claude; echo "{}" > .claude/settings.json')
         self.assertIn(f"  {self.project}/.claude/settings.json\n", result.stderr)

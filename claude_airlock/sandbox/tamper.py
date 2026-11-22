@@ -135,6 +135,9 @@ MOST_TREE_FILES = 5000
 MOST_STAMPED_FILES = 100_000
 # Nor the submodules of more than this many git directories
 MOST_MODULES = 1000
+# The seconds git is given to read a config, it takes a moment: a file a
+# session swapped for a pipe must not have the check wait on it
+GIT_SECONDS = 10
 # The servers of the config the sandboxed sessions share, by this name
 # wherever in it they are: those of every project, and those of each
 SERVERS = "mcpServers"
@@ -153,16 +156,26 @@ def git_config_hash(file: str) -> str:
     """Hash of a git config without its branch tracking entries, they change
     on every push -u or checkout and cannot run anything. One that cannot
     be read says so: the file is the session's, which can take the right
-    to read it away, and the check must not be made to fail."""
+    to read it away, and the check must not be made to fail. Nor to wait:
+    git is not given what is no plain file, a pipe a session of this
+    project that still runs can put there, and is given GIT_SECONDS for
+    one that was swapped in since."""
+    probe = open_plain(file, links=True)
+    if probe is None:
+        return file_hash(file)
+    probe.close()
     try:
         listing = subprocess.run(
             ["git", "config", "--file", file, "--list"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=True,
+            timeout=GIT_SECONDS,
         ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        # Unparseable, or no git: fall back to the file as it is
+    except (OSError, subprocess.SubprocessError):
+        # Unparseable, no git, or one that did not end: fall back to the
+        # file as it is
         return file_hash(file)
     kept = [line for line in listing.split(b"\n") if not line.startswith(b"branch.")]
     return sha256_hex(b"\n".join(kept))
@@ -170,14 +183,19 @@ def git_config_hash(file: str) -> str:
 
 def file_hash(path: str) -> str:
     """Hash of a file, of a link where it points and what is there. Of a
-    file past HASHED_BYTES, its start and its size."""
+    file past HASHED_BYTES, its start and its size. What is no plain file
+    is unreadable, and is not opened to find out: a pipe would have the
+    check wait for whoever writes to it."""
     digest = hashlib.sha256()
     try:
         if os.path.islink(path):
             digest.update(b"link:" + os.fsencode(os.readlink(path)) + b"\n")
             if not os.path.isfile(path):
                 return digest.hexdigest()
-        with open(path, "rb") as file:
+        file = open_plain(path, links=True)
+        if file is None:
+            return "unreadable"
+        with file:
             left = HASHED_BYTES
             while left > 0 and (chunk := file.read(min(left, 1024 * 1024))):
                 digest.update(chunk)
@@ -365,13 +383,15 @@ def moved_hooks_dir(directory: str) -> str | None:
         value = subprocess.run(
             ["git", "config", "--file", config]
             + ["--type=path", "--get", "core.hooksPath"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=True,
             text=True,
             errors="replace",
+            timeout=GIT_SECONDS,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     hooks = os.path.realpath(os.path.join(directory, value))
     inside = hooks.startswith(os.path.realpath(directory) + os.sep)
