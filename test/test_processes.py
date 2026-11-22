@@ -847,7 +847,7 @@ class SidecarTest(LauncherTest):
         copied.write_text("".join(json.dumps(line) + "\n" for line in lines))
 
         def at(when: float) -> str:
-            return datetime.fromtimestamp(when, timezone.utc).isoformat()  # noqa: UP017
+            return datetime.fromtimestamp(when, timezone.utc).isoformat()
 
         def called(tool_id: str, text: str, began: float) -> list[dict]:
             block = {"type": "tool_use", "id": tool_id, "name": "Bash"}

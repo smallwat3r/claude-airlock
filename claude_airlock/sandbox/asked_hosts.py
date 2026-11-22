@@ -163,7 +163,7 @@ class AskedHosts:
             for name, mode in ((WAITING, 0o777), (ALLOWED, 0o755), (REFUSED, 0o755)):
                 os.mkdir(os.path.join(made, name))
                 os.chmod(os.path.join(made, name), mode)
-            os.chmod(made, 0o755)
+            os.chmod(made, 0o755)  # noqa: S103
             os.rename(made, os.path.join(root, address))
             self._address = address
         return True

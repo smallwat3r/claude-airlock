@@ -1,5 +1,6 @@
 # Shortcuts for working on the sandbox itself. The checks are the ones CI
-# runs (.github/workflows/ci.yml), keep the two in step.
+# runs (.github/workflows/ci.yml), keep the two in step. What ruff and mypy
+# check, and by which rules, is in pyproject.toml.
 
 # A Python tool from PATH, else run by uvx or pipx, as CI does
 python_tool = $(or $(shell command -v $(1) 2>/dev/null),$(if \
@@ -11,8 +12,6 @@ MYPY ?= $(call python_tool,mypy)
 SHELLCHECK ?= shellcheck
 
 LAUNCHER := bin/claude-airlock
-PYTHON_SOURCES := $(LAUNCHER) claude_airlock test docker/update-pins.py \
-	docker/features/excalidraw/excalidraw-export
 SHELL_SOURCES := bin/claude-statusline docker/squid-ask-helper.sh \
 	test/smoke/run.sh \
 	$(wildcard test/smoke/inside/*.sh)
@@ -29,13 +28,13 @@ check: lint types test ## Everything CI checks but the image build
 
 .PHONY: lint
 lint: ## ruff, its formatter and shellcheck
-	$(RUFF) check $(PYTHON_SOURCES)
-	$(RUFF) format --check $(PYTHON_SOURCES)
+	$(RUFF) check
+	$(RUFF) format --check
 	$(SHELLCHECK) $(SHELL_SOURCES)
 
 .PHONY: types
 types: ## mypy
-	$(MYPY) claude_airlock $(LAUNCHER)
+	$(MYPY)
 
 .PHONY: test
 test: ## The unit tests and the Dockerfile's assembly, without Docker. One topic: make test K=trace

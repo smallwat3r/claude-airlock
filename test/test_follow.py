@@ -342,7 +342,7 @@ class FollowNetworkTest(LauncherTest):
     def setUp(self):
         super().setUp()
         self.now = time.time()
-        stamp = datetime.fromtimestamp(self.now + 20, timezone.utc).isoformat()  # noqa: UP017
+        stamp = datetime.fromtimestamp(self.now + 20, timezone.utc).isoformat()
         self.last = {"type": "user", "timestamp": stamp, "message": {"content": DONE}}
         self.file = self.write_transcript("0a", [prompt("long ago")])
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
@@ -475,7 +475,7 @@ class FollowNetworkTest(LauncherTest):
         captured.write_bytes(pcap_file([]))
         following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
         following.until("long ago")
-        now = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()  # noqa: UP017
+        now = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
         running = call("t1", "Bash", command="curl good.test")
         add(self.file, {**running, "timestamp": now})
         following.until("$ curl good.test")

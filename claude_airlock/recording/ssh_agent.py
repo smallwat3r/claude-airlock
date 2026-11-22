@@ -88,7 +88,7 @@ SESSION_BIND = b"session-bind@openssh.com"
 # In what is signed to log in, the message that asks for it
 USERAUTH_REQUEST = 50
 # Where the session finds the agent
-AGENT_TARGET = "/tmp/ssh-agent.sock"
+AGENT_TARGET = "/tmp/ssh-agent.sock"  # noqa: S108, in the session's own tmpfs
 # Where Docker Desktop on macOS has the host's agent, inside its machine
 MACOS_AGENT = "/run/host-services/ssh-auth.sock"
 

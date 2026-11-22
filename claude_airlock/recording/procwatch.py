@@ -281,7 +281,7 @@ def session_tmpfs(mounts: str) -> list[str]:
         if len(parts) < 3 or parts[2] != "tmpfs":
             continue
         place = parts[1]
-        kernels = place.startswith(("/proc", "/sys", "/dev")) and place != "/dev/shm"
+        kernels = place.startswith(("/proc", "/sys", "/dev")) and place != "/dev/shm"  # noqa: S108
         # A space in a path is written as its number there, none of
         # these has one
         if not kernels and "\\" not in place:

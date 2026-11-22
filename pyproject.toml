@@ -1,0 +1,45 @@
+# The configuration of the checks, which make lint and make types run and
+# CI with them. Nothing is built or installed from this: the launcher runs
+# from its checkout, on the standard library alone.
+
+[tool.ruff]
+# The oldest Python the launcher promises to run on
+target-version = "py39"
+# The scripts that have no extension to be found by
+extend-include = ["bin/claude-airlock", "docker/features/excalidraw/excalidraw-export"]
+
+[tool.ruff.lint]
+# On top of ruff's defaults: likely bugs, security, and how large and how
+# branched a function gets
+extend-select = ["B", "S", "C90", "PLR"]
+ignore = [
+    # The launcher is made of subprocess calls, each an argument list with
+    # no shell, and it finds docker and git on PATH as the user does
+    "S603",
+    "S607",
+    # Field counts and status codes, said by the comment next to each
+    "PLR2004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, bind and write where they please, and run a shell to stand
+# in for a session
+"test/**" = ["S101", "S104", "S108", "S602", "S606"]
+
+# The limits below are the worst of the code as it is, not a goal: they
+# keep it from growing, lower them as it is brought down.
+[tool.ruff.lint.mccabe]
+max-complexity = 14
+
+[tool.ruff.lint.pylint]
+max-args = 9
+max-positional-args = 9
+max-branches = 14
+max-returns = 8
+
+# Checked as the Python mypy runs on: it no longer takes 3.9 as a target,
+# the tests of CI on 3.9 are what hold the launcher to it
+[tool.mypy]
+files = ["claude_airlock", "bin/claude-airlock"]
+warn_unused_ignores = true
+warn_redundant_casts = true

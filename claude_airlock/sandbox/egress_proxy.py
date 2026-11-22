@@ -61,7 +61,7 @@ def asked_hosts_root(host: Host) -> str:
     root = host.asked_hosts_dir
     os.makedirs(root, exist_ok=True)
     # Whatever the umask made of it
-    os.chmod(root, 0o755)
+    os.chmod(root, 0o755)  # noqa: S103, the proxy's user reads it
     return root
 
 

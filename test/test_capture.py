@@ -971,10 +971,10 @@ class CaptureSessionTest(LauncherTest):
         ran = {"type": "tool_use", "id": "t1", "name": "Bash"}
         ran["input"] = {"command": "curl plain.test/a"}
         call = {"type": "assistant", "message": {"content": [ran]}}
-        call["timestamp"] = stamp(self.now + 1, timezone.utc).isoformat()  # noqa: UP017
+        call["timestamp"] = stamp(self.now + 1, timezone.utc).isoformat()
         done = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
         result = {"type": "user", "message": {"content": [done]}}
-        result["timestamp"] = stamp(self.now + 5, timezone.utc).isoformat()  # noqa: UP017
+        result["timestamp"] = stamp(self.now + 5, timezone.utc).isoformat()
         self.write_transcript("0a", [first, call, result, last])
         traced = self.launch("--trace", *args, **env)
         self.assertEqual(traced.status, 0, traced.stderr)

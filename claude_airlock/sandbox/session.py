@@ -238,7 +238,7 @@ def statusline_args(host: Host) -> list[str]:
 # test binaries run. Each is sized, a tmpfs is as large as half of the
 # machine's memory otherwise.
 SCRATCH = (
-    Tmpfs("/tmp", 4096, runs=True),
+    Tmpfs("/tmp", 4096, runs=True),  # noqa: S108
     Tmpfs(f"{CONTAINER_HOME}/.config", 64),
     Tmpfs(f"{CONTAINER_HOME}/.npm", 1024, runs=True),
 )

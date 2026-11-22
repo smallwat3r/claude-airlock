@@ -128,7 +128,7 @@ def prompts_at(*times: float) -> list[dict]:
     return [
         {
             "type": "user",
-            "timestamp": datetime.fromtimestamp(when, timezone.utc).isoformat(),  # noqa: UP017
+            "timestamp": datetime.fromtimestamp(when, timezone.utc).isoformat(),
             "message": {"content": "hello"},
         }
         for when in times

@@ -52,7 +52,7 @@ INJECTION = "injection"
 _NUMBERED = r"(?:[ \t]*\d+\t)?[ \t]*"
 # What a session holds that is worth sending out
 _SECRET = (
-    r"(?:api[\s_-]?keys?|(?:access\s+|auth\w*\s+)?tokens?|passwords?|credentials?"
+    r"(?:api[\s_-]?keys?|(?:access\s+|auth\w*\s+)?tokens?|passwords?|credentials?"  # noqa: S105
     r"|secrets?|private\s+keys?|ssh\s+keys?|\.env\b|environment\s+variables?"
     r"|cookies?)"
 )
