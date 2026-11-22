@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ from ..docker import (
 )
 from ..files import json_object, private_dir
 from ..launcher import Launcher, session_alive
+from ..notice import warn
 from ..settings import Host
 from .records import TracedSession, record_traced_session
 
@@ -236,9 +236,8 @@ class Sidecar:
         except OSError as problem:
             # Said and passed over: this runs as a session ends, and what
             # is left to do then (the check of tamper.py) matters more
-            print(
-                f"claude-airlock: the {self.RECORD} was not kept: {problem}",
-                file=sys.stderr,
+            warn(
+                f"the {self.RECORD} was not kept: {problem}",
             )
         finally:
             self.remove()

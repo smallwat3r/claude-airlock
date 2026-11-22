@@ -34,6 +34,7 @@ CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
+# What the launcher is called, and says its own word under
 NAME = "claude-airlock"
 
 

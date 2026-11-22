@@ -31,7 +31,6 @@ import bisect
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -42,6 +41,7 @@ from typing import ClassVar
 
 from ..background import in_background, wait_for
 from ..docker import container_running, docker, docker_output, mount_arg
+from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
 from .pcap import is_loopback
@@ -161,11 +161,10 @@ def say_not_recorded(watcher: Watcher) -> None:
     runs the terminal is the session's."""
     if time.time() - watcher.start < SOON_OVER:
         return
-    print(
-        "claude-airlock: the processes of this session were not recorded,"
+    warn(
+        "the processes of this session were not recorded,"
         " CLAUDE_AIRLOCK_PROC_LOG=0 runs a session without the attempt:\n"
         f"{watcher.last_said(5)}",
-        file=sys.stderr,
     )
 
 

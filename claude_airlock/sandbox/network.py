@@ -15,7 +15,6 @@ import hashlib
 import ipaddress
 import os
 import stat
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -35,6 +34,7 @@ from ..docker import (
 )
 from ..errors import Fatal
 from ..files import lock_file, locked, private_dir, try_lock_file
+from ..notice import warn
 from ..settings import DOCKERFILE_DIR, EGRESS_PORT, Host, Settings, SocketAccess
 
 # Sidecar images. They hold the host Docker socket and the egress path, so
@@ -190,11 +190,10 @@ def isolate_network(name: str, state: NetworkState) -> NetworkState:
     if not can_isolate():
         return state
     if state.sessions:
-        print(
-            f"claude-airlock: the docker network {name} lets a session reach what"
+        warn(
+            f"the docker network {name} lets a session reach what"
             " the host listens on. It is made anew, without that, by the first"
             " session started once none is on it.",
-            file=sys.stderr,
         )
         return state
     for proxy in state.containers:
@@ -329,10 +328,8 @@ def wait_for_egress_proxy(timeout: float = 15.0) -> None:
         if docker_ok("exec", EGRESS_PROXY, "bash", "-c", probe):
             return
         time.sleep(0.2)
-    print(
-        "claude-airlock: the egress proxy is slow to start,"
-        " the session's first requests may fail",
-        file=sys.stderr,
+    warn(
+        "the egress proxy is slow to start, the session's first requests may fail",
     )
 
 

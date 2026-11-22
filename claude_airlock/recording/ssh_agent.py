@@ -28,6 +28,7 @@ from contextlib import contextmanager, suppress
 from ..docker import env_arg, mount_arg
 from ..errors import Fatal
 from ..files import private_dir
+from ..notice import warn
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
 from ..settings import Host, Settings
@@ -359,9 +360,8 @@ def ssh_agent_door(
         try:
             door = AgentDoor(host, session, agent)
         except OSError as problem:
-            print(
-                f"claude-airlock: the use of the SSH agent is not recorded: {problem}",
-                file=sys.stderr,
+            warn(
+                f"the use of the SSH agent is not recorded: {problem}",
             )
     mount = (
         mount_arg(door.path, AGENT_TARGET, "z")

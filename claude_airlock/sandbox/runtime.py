@@ -33,11 +33,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from dataclasses import dataclass
 from typing import ClassVar
 
 from ..docker import docker_output
+from ..notice import warn
 from ..settings import Settings
 
 
@@ -240,9 +240,7 @@ def say_runtime_notes(runtime: Runtime, settings: Settings) -> None:
     the terminal belongs to the session."""
     notes = runtime.notes(settings)
     if notes:
-        print(
-            f"claude-airlock: under {runtime.shown}:",
+        warn(
+            f"under {runtime.shown}:",
             *(f"  {note}" for note in notes),
-            sep="\n",
-            file=sys.stderr,
         )

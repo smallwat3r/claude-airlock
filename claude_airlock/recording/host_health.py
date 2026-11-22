@@ -27,7 +27,6 @@ session ends."""
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -39,6 +38,7 @@ from ..background import in_background, wait_for
 from ..docker import docker_output
 from ..files import json_object, private_dir
 from ..launcher import Launcher, session_alive
+from ..notice import warn
 from ..settings import Host
 from .health import Ended, Sample
 from .processes import KEPT_RECORDS, SOON_OVER, Watcher, health_said
@@ -240,9 +240,8 @@ def health_recorded(host: Host, session: str, runtime: str) -> Iterator[None]:
         for record in records:
             record.keep(host, time.time())
         if not records and time.time() - started >= SOON_OVER:
-            print(
-                "claude-airlock: the memory and CPU use of this session was"
+            warn(
+                "the memory and CPU use of this session was"
                 " not recorded, because the cgroup of its container was not"
                 " found on this host",
-                file=sys.stderr,
             )

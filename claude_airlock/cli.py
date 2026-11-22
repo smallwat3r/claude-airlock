@@ -18,6 +18,7 @@ from .action import Action
 from .chat import CHAT_ARGS, Handover, Sandbox, chat
 from .docker import docker_ok
 from .errors import Fatal
+from .notice import warn
 from .recording.address import session_address_recorded
 from .recording.capture import CaptureSidecar, session_captured
 from .recording.egress_log import net_log
@@ -68,7 +69,7 @@ from .sandbox.session import (
     session_args,
 )
 from .sandbox.tamper import PendingCheck
-from .settings import NAME, Host, Settings, detect_host, load_settings, settings_help
+from .settings import Host, Settings, detect_host, load_settings, settings_help
 
 
 class ParsedArgs(NamedTuple):
@@ -413,7 +414,7 @@ def cli(usage: str = "") -> int:
         sys.stdout.flush()
         return status
     except Fatal as err:
-        print(f"{NAME}: {err}", file=sys.stderr)
+        warn(str(err))
         return 1
     except KeyboardInterrupt:
         return 130

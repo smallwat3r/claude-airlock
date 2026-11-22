@@ -8,7 +8,6 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import islice
@@ -24,6 +23,7 @@ from ..files import (
     write_whole,
 )
 from ..launcher import Launcher, session_alive
+from ..notice import warn
 from ..projects import memory_dirs
 from ..settings import CONFIG_FILES, CONFIG_TREES, Host
 from .home import CONFIG
@@ -608,15 +608,13 @@ def report_build_changes(
     if not changed:
         return
     whose = f"the session {unchecked} started" if unchecked else "this session started"
-    print(
-        f"claude-airlock: since {whose}, these files that your tools run on the"
+    warn(
+        f"since {whose}, these files that your tools run on the"
         " host (make, a package manager, a test runner, a hook manager, an"
         " editor), or that git and Claude follow below the top of the"
         " project, have changed:",
         *first_named(changed),
         "Read them before you build, test or commit there outside the sandbox.",
-        sep="\n",
-        file=sys.stderr,
     )
 
 
@@ -650,13 +648,11 @@ def report_memory(changed: list[str], unchecked: str = "") -> None:
     if not changed:
         return
     whose = f"the session {unchecked}" if unchecked else "this session"
-    print(
-        f"claude-airlock: {whose} changed what Claude remembers of this project,"
+    warn(
+        f"{whose} changed what Claude remembers of this project,"
         " which every later session here is told:",
         *first_named(changed),
         "Read them, a later session follows what they say.",
-        sep="\n",
-        file=sys.stderr,
     )
 
 
@@ -668,13 +664,11 @@ def report_servers(config: str, unchecked: str = "") -> None:
     the next session of that project, in its sandbox and with its
     files."""
     whose = f"the session {unchecked}" if unchecked else "this session"
-    print(
-        f"claude-airlock: {whose} changed the MCP servers that sandboxed sessions"
+    warn(
+        f"{whose} changed the MCP servers that sandboxed sessions"
         " start, of other projects too:",
         f"  {config}",
         "Look at them (claude mcp list in a session) before the next session.",
-        sep="\n",
-        file=sys.stderr,
     )
 
 
@@ -704,21 +698,19 @@ def report_tampering(
         return
     if unchecked:
         heading = (
-            f"claude-airlock: the session {unchecked} ended without its check. Since"
+            f"the session {unchecked} ended without its check. Since"
             " it started, by its doing or yours, these files that can run commands"
             " on the host, or that Claude follows there, have changed:"
         )
     else:
         heading = (
-            "claude-airlock: this session changed files that can run commands"
+            "this session changed files that can run commands"
             " on the host, or that Claude follows there:"
         )
-    print(
+    warn(
         heading,
         *(f"  {path}" for path in changed),
         "Review them before using git or claude there outside the sandbox.",
-        sep="\n",
-        file=sys.stderr,
     )
 
 
@@ -855,9 +847,8 @@ def report_unchecked_sessions(directory: Path) -> None:
             check = HostCheck.from_fields(pending)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Said out loud, a check must not vanish without a word
-            print(
-                f"claude-airlock: dropping an unreadable pending check: {file}",
-                file=sys.stderr,
+            warn(
+                f"dropping an unreadable pending check: {file}",
             )
             file.unlink(missing_ok=True)
             continue

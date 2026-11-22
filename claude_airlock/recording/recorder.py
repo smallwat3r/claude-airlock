@@ -28,7 +28,6 @@ import contextlib
 import glob
 import hashlib
 import os
-import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -38,6 +37,7 @@ from pathlib import Path
 
 from ..background import in_background
 from ..files import bounded_lines, line_entry, open_locked, open_plain, private_dir
+from ..notice import warn
 from ..projects import (
     SUBAGENTS_DIR,
     session_transcripts,
@@ -231,11 +231,10 @@ def transcripts_copied(host: Host) -> Iterator[None]:
         if copier.failed:
             # What was written and taken back meanwhile is not in the
             # copy, and a session can be what made the copying fail
-            print(
-                "claude-airlock: the transcripts could not be copied at"
+            warn(
+                "the transcripts could not be copied at"
                 f" {copier.failed} looks, what the session took out of them"
                 f" meanwhile is not known: {copier.problem}",
-                file=sys.stderr,
             )
 
 

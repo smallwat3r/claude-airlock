@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import sys
 import time
 from collections import Counter
 
 from ..errors import Fatal
 from ..events import flat
 from ..files import json_object, open_locked, private_dir
+from ..notice import warn
 from ..projects import project_root, session_transcripts, subagent_session
 from ..recording.capture import cut_short
 from ..recording.pcap import Capture
@@ -301,9 +301,7 @@ def report_session(
         lines = [f"this could not be worked out: {flat(repr(problem))[:200]}"]
     lines = [*(heard or []), *lines]
     if lines:
-        print(
-            "claude-airlock: of this session, claude-airlock --trace has the rest:",
+        warn(
+            "of this session, claude-airlock --trace has the rest:",
             *(f"  {line}" for line in lines),
-            sep="\n",
-            file=sys.stderr,
         )
