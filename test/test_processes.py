@@ -293,6 +293,26 @@ class UnseenTest(unittest.TestCase):
         self.assertEqual(self.marked(command(120.0), record=noted())[0], 0)
         self.assertEqual(unseen.mark_unseen([command(120.0)], []), 0)
 
+    def test_a_watcher_that_stopped_before_the_command_cannot_tell(self):
+        # It says every 10 seconds that it is there, and said so until 130
+        died = noted(
+            {"t": 100.0, "note": "started", "beat": 10.0},
+            {"t": 130.0, "note": "alive"},
+            ran(110.0, 812, 7, "make"),
+        )
+        self.assertEqual(self.marked(command(120.0), record=died)[0], 1)
+        self.assertEqual(self.marked(command(150.0), record=died)[0], 1)
+        # Past what it would be silent for, nothing seen is not none ran
+        self.assertEqual(self.marked(command(190.0), record=died)[0], 0)
+        # One that never said it would is taken as it always was
+        silent = noted({"t": 100.0, "note": "started"}, ran(110.0, 812, 7, "make"))
+        self.assertEqual(self.marked(command(190.0), record=silent)[0], 1)
+        # Any line is a sign of life, not only the beat
+        busy = noted(
+            {"t": 100.0, "note": "started", "beat": 10.0}, ran(180.0, 812, 7, "make")
+        )
+        self.assertEqual(self.marked(command(190.0), record=busy)[0], 1)
+
     def test_a_process_of_any_session_that_ran_then_counts(self):
         other = dataclasses.replace(self.session, name="claude-proj-2", start=125.0)
         theirs = noted({"t": 125.0, "note": "started"}, ran(130.0, 9, 7, "true"))

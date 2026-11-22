@@ -64,6 +64,8 @@ SOON_OVER = 5.0
 # How long before a connection of the capture its process may have been
 # noted to hold it, and how long after: the two are read at their own pace
 HELD_WITHIN = 5.0
+# A watcher that said nothing for so many of its beats has ended, or hung
+SILENT_BEATS = 2.5
 
 
 class Watcher(Sidecar):
@@ -275,6 +277,10 @@ class ProcessRecord:
     # never did
     watched_from: float | None = None
     full_at: float | None = None
+    # Every how many seconds the watcher said it was there, none for one
+    # that did not say it would, and the time of the last line it wrote
+    beat: float | None = None
+    last_line: float = 0.0
     # The runtime's name when the launcher wrote the record from outside
     # the session, with memory and CPU use only (see host_health.py).
     # Empty for a watcher's record.
@@ -291,6 +297,7 @@ class ProcessRecord:
         try:
             said = json.loads(line)
             when = float(said["t"])
+            self.last_line = max(self.last_line, when)
             for key, taken in self._KINDS:
                 if key in said:
                     taken(self, when, said)
@@ -311,6 +318,9 @@ class ProcessRecord:
         if note == Note.FULL and self.full_at is None:
             self.full_at = when
         if note == Note.STARTED:
+            beat = said.get("beat")
+            if isinstance(beat, (int, float)) and not isinstance(beat, bool):
+                self.beat = float(beat) if beat > 0 else None
             self.outside = str(said.get("outside", ""))
             if self.watched_from is None:
                 self.watched_from = when
@@ -423,6 +433,10 @@ class ProcessRecord:
         if self.outside or self.watched_from is None or start < self.watched_from:
             return None
         if self.full_at is not None and end > self.full_at:
+            return None
+        if self.beat and end > self.last_line + self.beat * SILENT_BEATS:
+            # It said nothing for longer than it ever does: it had ended,
+            # and what ran after that is not in the record
             return None
         first = bisect.bisect_left(self._noted_at, start - within)
         return first < len(self._noted_at) and self._noted_at[first] <= end + within

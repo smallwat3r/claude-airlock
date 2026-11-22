@@ -80,6 +80,8 @@ LIMITS_EVERY = 1.0
 PIDS_EVENTS = ("sys/fs/cgroup/pids.events", "sys/fs/cgroup/pids/pids.events")
 # Where docker's own resolver waits in every container, not the session's
 RESOLVER = "127.0.0.11"
+# Seconds between two notes that the watcher is still there
+HEARTBEAT_EVERY = 30.0
 # Seconds between two lines on how the session is doing
 HEALTH_EVERY = 30.0
 # The percent of a limit from which the session is near it, and at it. A
@@ -112,6 +114,10 @@ class Note(str, enum.Enum):
     FULL = "full"
     # The watcher could not see which process holds a socket
     UNREADABLE = "unreadable"
+    # The watcher is still there: said every HEARTBEAT_EVERY seconds, so
+    # that a record that stops being written to for want of a watcher
+    # (killed, crashed) is told from a session with nothing to note
+    ALIVE = "alive"
 
 
 def take_identity(uid: int, gid: int) -> None:
@@ -586,6 +592,7 @@ class Watch:
         # and when that was last looked at
         self._limit_hits = 0
         self._limits_seen = 0.0
+        self._beat = time.monotonic()
         self._health = Health(self.say, self.name_of)
 
     def name_of(self, pid: int) -> str:
@@ -642,6 +649,9 @@ class Watch:
         connected, waiting = sockets()
         self._look_at_connections(connected, pids)
         self._look_at_listeners(waiting, pids)
+        if now - self._beat >= HEARTBEAT_EVERY:
+            self._beat = now
+            self.note(reserved=True, note=Note.ALIVE)
         if now - self._limits_seen >= LIMITS_EVERY:
             self._limits_seen = now
             self._look_at_limits(pids)
@@ -737,7 +747,7 @@ def main(args: list[str]) -> int:
         if len(args) > 1:
             take_identity(int(args[1]), int(args[2]))
         watch = Watch(out)
-        watch.note(reserved=True, note=Note.STARTED)
+        watch.note(reserved=True, note=Note.STARTED, beat=HEARTBEAT_EVERY)
         while True:
             watch.look()
             time.sleep(INTERVAL)
