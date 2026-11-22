@@ -1648,6 +1648,35 @@ class AskingTest(unittest.TestCase):
         self.assertTrue(left.answered.is_set())
         self.assertIsNone(left.said)
 
+    def test_a_line_does_not_take_the_place_of_the_next_question(self):
+        # The one it was read for is given up on and the next put, by
+        # another thread, between the look at the question and its end
+        asker = asking.Asker(
+            page(), console.Console("/nowhere"), "/p", lambda: False, lambda: None
+        )
+        first = asking.Question("allow? ", stale=False)
+        following = asking.Question("and this? ", stale=False)
+        asker._question = first
+
+        def replaced(question: asking.Question) -> bool:
+            first.answer(None)
+            asker._question = following
+            return let_go(question)
+
+        let_go = asker._let_go
+        with written(), unittest.mock.patch.object(asker, "_let_go", replaced):
+            self.assertFalse(asker.take("y"))
+        self.assertIs(asker._question, following)
+        self.assertFalse(following.answered.is_set())
+        self.assertIsNone(first.said)
+        with written():
+            self.assertTrue(asker.take("y"))
+        self.assertEqual(following.said, "y")
+        self.assertEqual(
+            [asking.said_yes(typed) for typed in (None, " Y ", "yes", "n", "", "yep")],
+            [None, True, True, False, False, False],
+        )
+
     def test_a_question_without_anyone_to_ask_has_no_answer(self):
         asker = asking.Asker(
             page(), console.Console("/nowhere"), "/p", lambda: True, lambda: None

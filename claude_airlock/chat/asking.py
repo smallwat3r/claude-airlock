@@ -45,6 +45,14 @@ from .said import is_number
 ASKED_STYLE = together(BOLD, YELLOW)
 # What the question whether a tool may be used is answered with
 YES = ("y", "yes")
+
+
+def said_yes(typed: str | None) -> bool | None:
+    """Whether what was typed to a question is a yes, none for no answer.
+    Anything else is a no: what is not asked for is not allowed."""
+    return None if typed is None else typed.strip().lower() in YES
+
+
 ALWAYS = ("a", "always")
 REFUSED = {"behavior": "deny", "message": "The user refused this call."}
 # Of what a tool is asked to do, in the question whether it may
@@ -156,6 +164,10 @@ class Asker:
         self._gone = gone
         self._on_ask = on_ask
         self._question: Question | None = None
+        # Held to put a question and to let go of one: the thread that
+        # reads what is typed lets go of the one it answers, and must not
+        # take the next for it, which another thread has put meanwhile
+        self._putting = threading.Lock()
         # How often what was asked was given up on, and how often it had
         # been when what is now put was asked, none for what the chat
         # asks itself: what claude asked before the last time is not put
@@ -188,10 +200,22 @@ class Asker:
             return False
         # Over before the next line is read, and before its answer wakes
         # the thread that puts the next question: that one must stay
-        self._question = None
-        self._console.ask(None)
+        if not self._let_go(question):
+            # Given up on meanwhile, the line is no answer to what is
+            # asked now
+            return False
         question.answer(line)
         return True
+
+    def _let_go(self, question: Question) -> bool:
+        """No longer ask a question, whether it was the one being asked:
+        not when another has been put since, which stays."""
+        with self._putting:
+            if self._question is not question:
+                return False
+            self._question = None
+            self._console.ask(None)
+            return True
 
     def give_up(self) -> None:
         """Leave the question that waits without an answer, and what
@@ -237,17 +261,16 @@ class Asker:
             self._page.say(
                 [labelled("chat", f"{not_it}, enter it or drop it (Ctrl-U) first")]
             )
-        self._question = question
-        self._console.ask(prompt)
+        with self._putting:
+            self._question = question
+            self._console.ask(prompt)
         self._console.bell()
         self._on_ask()
         while not question.answered.wait(LOOK_EVERY):
             if self._gone():
                 break
-        if self._question is question:
-            # Not answered by a line, which would have let go of it
-            self._question = None
-            self._console.ask(None)
+        # Unless answered by a line, which has let go of it
+        self._let_go(question)
         self._page.touched()
         return question.said
 
@@ -303,7 +326,7 @@ class Asker:
         if answer in ALWAYS:
             self._allowed.add(tool)
             return allowed
-        return allowed if answer in YES else REFUSED
+        return allowed if said_yes(typed) else REFUSED
 
     def _questions(self, tool_input: dict) -> dict:
         """Put the questions claude has for the user, each with its

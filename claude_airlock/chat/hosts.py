@@ -18,7 +18,7 @@ import functools
 from collections.abc import Callable
 from typing import Protocol
 
-from .asking import ASKED_STYLE, YES, Asked, Asker
+from .asking import ASKED_STYLE, Asked, Asker, said_yes
 from .console import Page
 
 # The label of what a chat says about a host that is asked about
@@ -83,7 +83,7 @@ class HostQuestions:
             typed = self._asker.ask(
                 f"let the session reach {host}? [y/N] ", ASKED_STYLE
             )
-            allowed = None if typed is None else typed.strip().lower() in YES
+            allowed = said_yes(typed)
             self._hosts.answer(host, allowed)
             if allowed is None:
                 said = f"not answered: the request for {host} is refused"

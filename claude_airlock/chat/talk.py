@@ -46,7 +46,7 @@ from ..report.layout import (
 )
 from ..report.planted import Planted
 from ..settings import Host
-from .asking import ASKED_STYLE, YES, Asked, Asker
+from .asking import ASKED_STYLE, Asked, Asker, said_yes
 from .commands import LOCAL, Commands, Did, Handover, Resume
 from .console import Console, Page
 from .drift import Drift
@@ -630,7 +630,7 @@ class Chat:
         """Put a question of a turn that was stopped, where it is not
         missed. Whether it was answered with a yes, none for no answer."""
         typed = self._asker.ask(question, ASKED_STYLE)
-        return None if typed is None else typed.strip().lower() in YES
+        return said_yes(typed)
 
     def _start_anew(self) -> None:
         """Clear the conversation, once the turn that was stopped is
