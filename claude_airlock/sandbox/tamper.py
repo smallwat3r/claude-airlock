@@ -92,6 +92,8 @@ BUILD_FILES = frozenset(
         *(".pre-commit-config.yaml", "lefthook.yml", ".lefthook.yml"),
         *(".envrc", ".tool-versions", "mise.toml", ".mise.toml"),
         *(".gitattributes", ".gitmodules", ".gitlab-ci.yml"),
+        # What Emacs sets for the files of a directory, eval forms too
+        *(".dir-locals.el", ".dir-locals-2.el"),
         *("Dockerfile", "Vagrantfile", "Tiltfile"),
         *("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"),
     )

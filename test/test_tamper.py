@@ -286,6 +286,17 @@ class BuildFilesTest(LauncherTest):
         # Apart from what git and Claude run of their own accord
         self.assertNotIn(TamperingTest.REPORT, result.stderr)
 
+    def test_what_emacs_sets_for_a_directory_is_reported(self):
+        # Its eval forms run when a file there is visited
+        (self.project / ".dir-locals.el").write_text("((nil . ((fill-column . 80))))\n")
+        result = self.launch(
+            session="echo '((nil . ((eval . (shell-command \"id\")))))' > .dir-locals.el;"
+            " mkdir lisp; echo '()' > lisp/.dir-locals-2.el"
+        )
+        self.assertIn(self.REPORT, result.stderr)
+        for changed in (".dir-locals.el", "lisp/.dir-locals-2.el"):
+            self.assertIn(f"  {self.project}/{changed}\n", result.stderr)
+
     def test_what_is_as_it_was_is_not_reported(self):
         (self.project / "Makefile").write_text("all:\n\ttrue\n")
         result = self.launch(session="touch Makefile; echo code > main.go")

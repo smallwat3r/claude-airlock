@@ -168,7 +168,7 @@ Said apart, as something to read before you build, test or commit there:
   directory: Makefiles and other build files, `package.json`,
   `pyproject.toml`, `conftest.py`, the configuration of a hook manager
   (`.pre-commit-config.yaml`, `.husky`), `.envrc`, CI workflows, and what
-  an editor runs (`.vscode`, `.devcontainer`).
+  an editor runs (`.vscode`, `.devcontainer`, `.dir-locals.el`).
 - Below the top of a project: `CLAUDE.md` and the `.claude` of a
   subdirectory, and the config and hooks of a repository that is there, or
   that a session planted there.
