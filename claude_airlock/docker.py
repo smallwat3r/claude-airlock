@@ -110,10 +110,17 @@ def mount_arg(source: str, target: str, options: str = "") -> str:
     """A bind mount or named volume. The z option relabels a bind mount so
     containers can read it on SELinux hosts. The three are told apart by
     colons, so a path that has one cannot be mounted: refused here, docker
-    would take a part of it for something else."""
+    would take a part of it for something else. A source that is a path
+    and is not there is refused too: docker would make a directory of it,
+    owned by root, in the place of the file that was meant."""
     for path in (source, target):
         if ":" in path:
             raise Fatal(f"cannot mount {path}: docker takes no path with a colon")
+    if source.startswith("/") and not os.path.lexists(source):
+        raise Fatal(
+            f"cannot mount {source}: it does not exist, docker would make a"
+            " directory of it, owned by root"
+        )
     return "--volume=" + ":".join(part for part in (source, target, options) if part)
 
 

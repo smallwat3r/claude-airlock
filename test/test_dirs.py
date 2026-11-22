@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
 from harness import LauncherTest
+
+from claude_airlock.docker import mount_arg
+from claude_airlock.errors import Fatal
 
 
 class ExtraDirsTest(LauncherTest):
@@ -175,6 +179,32 @@ class ExtraDirsTest(LauncherTest):
     def test_a_missing_named_shared_dir_aborts(self):
         result = self.launch(CLAUDE_AIRLOCK_SHARED_DIR="/nonexistent")
         self.assert_refused(result, "not a directory: /nonexistent")
+
+
+class MountArgTest(unittest.TestCase):
+    def test_a_bind_source_that_is_not_there_is_refused(self):
+        # Docker would make a directory of it, owned by root
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory, "moved.py")
+            with self.assertRaises(Fatal) as refused:
+                mount_arg(str(missing), "/moved.py", "ro,z")
+            self.assertIn("does not exist", str(refused.exception))
+            self.assertFalse(missing.exists())
+
+    def test_a_source_that_is_there_and_a_volume_are_taken(self):
+        with tempfile.TemporaryDirectory() as directory:
+            there = Path(directory, "here.py")
+            there.touch()
+            self.assertEqual(
+                mount_arg(str(there), "/here.py", "ro,z"),
+                f"--volume={there}:/here.py:ro,z",
+            )
+            # A link that leads nowhere is there as a link, docker follows it
+            dangling = Path(directory, "link")
+            dangling.symlink_to(Path(directory, "nowhere"))
+            mount_arg(str(dangling), "/link")
+        # A named volume has no path to be missing
+        self.assertEqual(mount_arg("a-volume", "/data"), "--volume=a-volume:/data")
 
 
 if __name__ == "__main__":
