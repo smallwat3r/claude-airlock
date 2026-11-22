@@ -16,8 +16,8 @@ import threading
 from dataclasses import dataclass
 
 from ..events import clean, labelled
-from ..report.calls import read_source, result_planted, said_source
 from ..report.entries import block_text, content_blocks
+from ..report.outcomes import read_source, result_planted, said_source
 from ..report.planted import Planted
 
 # The calls without a result yet whose tool is remembered, what claude

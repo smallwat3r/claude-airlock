@@ -32,9 +32,10 @@ from ..recording.pcap import Capture
 from ..recording.recorder import copied_at, removed_transcripts
 from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
-from .calls import outside, written_paths
+from .calls import written_paths
 from .entries import modified, short_id
 from .noted import noted_events
+from .outcomes import outside
 from .planted import FLAG, read_said
 from .recorded import ReadTranscript, Recorded
 from .shown import STOPPED, reached, size
