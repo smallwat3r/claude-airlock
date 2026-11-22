@@ -89,6 +89,10 @@ if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.en
         sys.exit(1)
     with open(source, "rb") as captured:
         sys.stdout.buffer.write(captured.read()[int(args[4]) - 1 :])
+if args[0] == "exec" and "grep -Hs" in " ".join(args[2:5]):
+    part, _, code = os.environ.get("FAKE_CAPTURE_DIED", "").partition(":")
+    if code:
+        print("/" + part + ".pcap.status:" + code)
 if args[0] == "exec" and "stat -c" in args[4] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"], "rb") as access_log:
         logged = access_log.read()

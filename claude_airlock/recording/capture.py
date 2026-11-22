@@ -190,7 +190,7 @@ class CaptureSidecar(Sidecar):
         """What the sidecar says of a tcpdump that ended before it was
         told to, other than at its packet limit: empty when none did. The
         sidecar is stopped by now, and still there to be read from."""
-        died = []
+        statuses = {}
         with tempfile.TemporaryDirectory() as directory:
             for part in PARTS:
                 target = Path(directory, part.name)
@@ -198,12 +198,10 @@ class CaptureSidecar(Sidecar):
                 if not docker_ok("cp", source, str(target)):
                     continue
                 try:
-                    status = target.read_text().strip()
+                    statuses[part.name] = target.read_text()
                 except OSError:
                     continue
-                if status != "0":
-                    died.append(f"{part.name} (status {status[:8]})")
-        return ", ".join(died)
+        return died(statuses)
 
     def copy_out(self, directory: str) -> Path | None:
         """The main capture, and the others next to it under the same
@@ -224,6 +222,34 @@ class CaptureSidecar(Sidecar):
             for file in directory.glob(f"*.{self.EXTENSION}{part.suffix}"):
                 if not file.with_suffix("").exists():
                     file.unlink(missing_ok=True)
+
+
+def died(statuses: dict[str, str]) -> str:
+    """The parts whose tcpdump died, by the status each part that ended
+    left, as it is said: empty when none did. 0 is a packet limit, which
+    is not a death."""
+    return ", ".join(
+        f"{part.name} (status {statuses[part.name].strip()[:8]})"
+        for part in PARTS
+        if statuses.get(part.name, "0").strip() not in ("0", "")
+    )
+
+
+def died_so_far(sidecar: str) -> str:
+    """The parts of the capture of a running session whose tcpdump has
+    died, as died says them. Empty when none has, and when the sidecar
+    cannot be asked."""
+    files = {part.file + STATUS_SUFFIX: part.name for part in PARTS}
+    # Each file that is there with what it holds, as file:status
+    said = docker_bytes(
+        "exec", sidecar, "sh", "-c", 'grep -Hs . "$@"; true', "sh", *files
+    )
+    statuses = {}
+    for line in (said or b"").decode("ascii", "replace").splitlines():
+        file, _, status = line.partition(":")
+        if file in files:
+            statuses[files[file]] = status
+    return died(statuses)
 
 
 def start_capture(

@@ -293,7 +293,8 @@ address is what was reached. Trust the address where the two matter.
   HTTP), DNS, and what is not TCP. A session that floods one cannot fill
   what the others have. A part that reaches its limit is said as
   `STOPPED at its packet limit`, and one whose tcpdump ended before the
-  session did as `INCOMPLETE`, what came after is not in it.
+  session did as `INCOMPLETE`, what came after is not in it. `--follow`
+  says so too, within a few seconds of it.
 - Not told: a name for QUIC that no lookup gave (its hello is encrypted),
   and the process that sent UDP or a ping, which is known for TCP
   connections alone.

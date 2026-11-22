@@ -41,7 +41,13 @@ from ..errors import Fatal
 from ..events import Event, clean, flat, labelled
 from ..files import LINE_LIMIT, line_entry, open_plain
 from ..projects import project_root, subagent_files, transcript_files
-from ..recording.capture import PARTS, CaptureSidecar, captured_since, cut_short
+from ..recording.capture import (
+    PARTS,
+    CaptureSidecar,
+    captured_since,
+    cut_short,
+    died_so_far,
+)
 from ..recording.egress_log import logged_since
 from ..recording.health import Ended, Sample
 from ..recording.host_health import running_health, said_in
@@ -67,6 +73,8 @@ HISTORY = 10
 # Seconds between two questions to a watcher on how its session is doing:
 # it says so every 30 seconds, and at once when a limit is near
 HEALTH_EVERY = 10.0
+# Seconds between two looks at whether a tcpdump of a capture has died
+DIED_EVERY = 5.0
 READ_SIZE = 1 << 20
 
 
@@ -149,6 +157,9 @@ class CaptureTail:
         self._readers = {part.name: PcapReader() for part in PARTS}
         self._capture = Capture()
         self._said_cut_short = False
+        # The parts already said to have died, and when that was last asked
+        self._said_died = ""
+        self._asked_died = 0.0
 
     def poll(self) -> list[Event]:
         """What the capture has since the last time: the connections that
@@ -163,6 +174,21 @@ class CaptureTail:
                 frames = self._readers[part.name].feed(data)
                 take_frames(self._capture, frames, part.name)
         return capture_events(self._capture, self._verbose, past)
+
+    def newly_died(self) -> str:
+        """The parts whose tcpdump is found to have died since the last
+        time, empty as a rule. Asked every DIED_EVERY seconds: what such a
+        part would have captured since is missing, and a session that goes
+        on is not to look quiet for it."""
+        now = time.monotonic()
+        if now - self._asked_died < DIED_EVERY:
+            return ""
+        self._asked_died = now
+        found = died_so_far(self.sidecar)
+        if found == self._said_died:
+            return ""
+        self._said_died = found
+        return found
 
     def newly_cut_short(self) -> bool:
         """Whether the capture ran into its packet limit, once."""
@@ -484,6 +510,15 @@ class Follower:
             events = capture.poll()
             name_container(events, capture.session, several)
             found.events += [(None, event) for event in events]
+            dead = capture.newly_died()
+            if dead:
+                found.notes.append(
+                    labelled(
+                        "network",
+                        f"the capture of {clean(capture.session)} is INCOMPLETE,"
+                        f" a recorder ended before the session did: {flat(dead)}",
+                    )
+                )
             if capture.newly_cut_short():
                 name = clean(capture.session)
                 found.notes.append(

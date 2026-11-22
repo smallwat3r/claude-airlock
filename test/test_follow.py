@@ -361,6 +361,34 @@ class FollowNetworkTest(LauncherTest):
         shown = following.until("198.51.100.7")
         self.assertIn("tcp/https good.test (198.51.100.7):443", shown)
 
+    def test_a_tcpdump_that_died_is_said_while_following(self):
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(sample_capture(self.now))
+        following = Following(
+            self,
+            FAKE_PS=self.ps,
+            FAKE_CAPTURE=str(captured),
+            FAKE_CAPTURE_DIED="dns:137",
+        )
+        shown = following.until("INCOMPLETE")
+        self.assertIn(
+            "# network     the capture of claude-proj is INCOMPLETE, a recorder"
+            " ended before the session did: dns (status 137)",
+            shown,
+        )
+        # Once, not at every look
+        add(self.file, self.last)
+        self.assertNotIn("INCOMPLETE", following.until(DONE))
+
+    def test_a_tcpdump_at_its_packet_limit_is_not_said_to_have_died(self):
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(sample_capture(self.now))
+        following = Following(
+            self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured), FAKE_CAPTURE_DIED="dns:0"
+        )
+        add(self.file, self.last)
+        self.assertNotIn("INCOMPLETE", following.until(DONE))
+
     def test_connections_show_as_the_capture_grows(self):
         captured = self.work / "capture.pcap"
         captured.write_bytes(sample_capture(self.now))
