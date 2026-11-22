@@ -17,7 +17,8 @@ from contextlib import contextmanager
 
 from ..background import wait_for
 from ..docker import docker_popen
-from ..sandbox.network import has_socket_proxy, session_address, socket_proxy_name
+from ..sandbox.networks import session_address
+from ..sandbox.socket_proxy import has_socket_proxy, socket_proxy_name
 from ..settings import Host, Settings
 from .doors import Door, SessionUses
 

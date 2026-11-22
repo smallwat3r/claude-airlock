@@ -40,7 +40,8 @@ from ..background import in_background, wait_for
 from ..files import json_object, locked, private_dir, write_whole
 from ..launcher import Launcher, session_alive
 from ..settings import NAME, Host, Settings
-from .network import asked_hosts_root, session_address
+from .egress_proxy import asked_hosts_root
+from .networks import session_address
 
 # In the directory of a session: the hosts a request waits for an answer
 # about, written by the proxy's helper, and those the user allowed and

@@ -20,13 +20,13 @@ from harness import (
     LauncherTest,
     follow,
     mounts_host_sockets,
-    network,
     prompts_at,
     settings,
 )
 
 from claude_airlock.recording import doors, socket_watch, ssh_agent
 from claude_airlock.report import door_events
+from claude_airlock.sandbox import socket_proxy
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (
@@ -390,7 +390,7 @@ class SocketWatchTest(LauncherTest):
 
     def watched(self) -> list[dict]:
         """The uses noted of a session whose proxy logged PROXY_LOG. Called
-        directly, the socket path is a constant of the network module."""
+        directly, the socket path is a constant of the socket_proxy module."""
         host = settings.Host(
             str(self.home),
             str(self.project),
@@ -402,7 +402,7 @@ class SocketWatchTest(LauncherTest):
             "FAKE_IP": "172.20.0.5",
             "FAKE_PROXY_LOG": str(self.proxy_log),
         }
-        with mock.patch.object(network, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
+        with mock.patch.object(socket_proxy, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
             with mock.patch.dict(os.environ, environment):
                 asked = settings.Settings(docker_socket=settings.SocketAccess.LIMITED)
                 with socket_watch.socket_proxy_watched(

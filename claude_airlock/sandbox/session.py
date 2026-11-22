@@ -37,7 +37,7 @@ from .claude_args import is_a_command, says_permissions
 from .ending import Ending
 from .home import home_args, session_state, statusline_of
 from .image import Image
-from .network import PROXY_NETWORKS
+from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
 

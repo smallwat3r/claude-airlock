@@ -3,10 +3,9 @@ for, and what it refused them.
 
 The proxy logs each request with the address it came from, which a
 container without capabilities cannot forge: that is what tells the
-sessions in the one log apart (see session_address_recorded in
-network.py). Read for --net-log, for --trace and for the lines said when
+sessions in the one log apart (see address.py). Read for --net-log, for --trace and for the lines said when
 a session ends. The proxy itself, and the volume its log is kept in, are
-network.py's."""
+egress_proxy.py's."""
 
 from __future__ import annotations
 
@@ -18,13 +17,13 @@ from urllib.parse import urlsplit
 
 from ..docker import docker, docker_bytes, docker_ok
 from ..errors import Fatal
-from ..sandbox.network import (
+from ..sandbox.egress_proxy import (
     EGRESS_ACCESS_LOG,
     EGRESS_LOG_DIR,
     EGRESS_LOG_VOLUME,
-    EGRESS_PROXY,
     SQUID_IMAGE,
 )
+from ..sandbox.networks import EGRESS_PROXY
 from .records import TracedSession
 
 # The fields of a line that says how much the session sent, the last of them

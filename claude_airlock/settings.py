@@ -41,7 +41,7 @@ NAME = "claude-airlock"
 class SocketAccess(enum.Enum):
     """What of the host's Docker daemon a session reaches, each by what
     CLAUDE_AIRLOCK_DOCKER_SOCKET says for it, see socket_proxy_options of
-    network.py."""
+    socket_proxy.py."""
 
     OFF = "0"
     # docker ps and docker logs

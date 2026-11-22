@@ -1,6 +1,6 @@
 """The launcher's record of the sessions that left something to trace
 besides their transcript: a line per session in its state directory, with
-the address a filtered one had on the internal network (see network.py),
+the address a filtered one had on the internal network (see networks.py),
 the file of its capture (see capture.py) or the file of its processes
 (see processes.py). Written as a session runs and ends, read by --trace.
 

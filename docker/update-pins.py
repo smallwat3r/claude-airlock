@@ -3,7 +3,7 @@
 
 Covers the Dockerfile parts (base, tail, features, plus your own features in
 ~/.config/claude-airlock/features) and the sidecar images in
-claude_airlock/sandbox/network.py.
+claude_airlock/sandbox/egress_proxy.py and socket_proxy.py.
 A pin that appears in none of the files is skipped, so removing a feature
 needs no change here.
 
@@ -292,7 +292,8 @@ def default_paths() -> list[Path]:
         here / "tail.Dockerfile",
         *sorted((here / "features").glob("*.Dockerfile")),
         *sorted((config / "claude-airlock" / "features").glob("*.Dockerfile")),
-        here.parent / "claude_airlock" / "sandbox" / "network.py",
+        here.parent / "claude_airlock" / "sandbox" / "egress_proxy.py",
+        here.parent / "claude_airlock" / "sandbox" / "socket_proxy.py",
     ]
 
 

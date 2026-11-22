@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from ..background import in_background, wait_for
-from ..sandbox.network import session_address
+from ..sandbox.networks import session_address
 from ..settings import Host, Settings
 from .records import TracedSession, record_traced_session
 

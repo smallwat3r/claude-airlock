@@ -33,6 +33,7 @@ from .report.follow import follow
 from .report.trace import trace
 from .sandbox.asked_hosts import hosts_asked
 from .sandbox.claude_args import has_a_conversation, resumed_args
+from .sandbox.egress_proxy import start_egress_proxy
 from .sandbox.ending import Ending, ending_passed_on, interrupts_held
 from .sandbox.history import history_args
 from .sandbox.home import prepare_home, protect_config_args
@@ -51,14 +52,9 @@ from .sandbox.mounts import (
     refuse_unsafe_dir,
     shadow_args,
 )
-from .sandbox.network import (
-    network_args,
-    session_network,
-    sidecars_locked,
-    socket_proxy_args,
-    start_egress_proxy,
-)
+from .sandbox.network import network_args, session_network
 from .sandbox.plugins import enabled_plugins
+from .sandbox.proxy_use import sidecars_locked
 from .sandbox.runtime import Runtime, say_runtime_notes, session_runtime
 from .sandbox.session import (
     base_args,
@@ -68,6 +64,7 @@ from .sandbox.session import (
     run_session,
     session_args,
 )
+from .sandbox.socket_proxy import socket_proxy_args
 from .sandbox.tamper import PendingCheck
 from .settings import Host, Settings, detect_host, load_settings, settings_help
 

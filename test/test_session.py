@@ -14,9 +14,10 @@ from unittest import mock
 
 from harness import (
     LauncherTest,
-    network,
     settings,
 )
+
+from claude_airlock.sandbox import socket_proxy
 
 
 class DefaultSessionTest(LauncherTest):
@@ -250,7 +251,7 @@ class HomeTest(LauncherTest):
 
 
 class SocketProxyTest(LauncherTest):
-    """Called directly, the socket path is a constant of the network module."""
+    """Called directly, the socket path is a constant of the socket_proxy module."""
 
     def setUp(self):
         super().setUp()
@@ -263,7 +264,7 @@ class SocketProxyTest(LauncherTest):
         self.addCleanup(server.close)
         server.bind(socket_path)
         for patch in (
-            mock.patch.object(network, "DOCKER_SOCK", socket_path),
+            mock.patch.object(socket_proxy, "DOCKER_SOCK", socket_path),
             mock.patch.dict(os.environ, self.fake_docker_env()),
         ):
             patch.start()
@@ -271,8 +272,8 @@ class SocketProxyTest(LauncherTest):
 
     def sidecar_for(self, mode: settings.SocketAccess) -> tuple[list[str], list[str]]:
         asked = settings.Settings(docker_socket=mode)
-        network.start_socket_proxy(asked)
-        args = network.socket_proxy_args(asked)
+        socket_proxy.start_socket_proxy(asked)
+        args = socket_proxy.socket_proxy_args(asked)
         sidecars = [call for call in self.calls() if call[0] == "run"]
         self.assertEqual(len(sidecars), 1)
         return args, sidecars[0]
@@ -295,16 +296,16 @@ class SocketProxyTest(LauncherTest):
     def test_the_socket_is_mounted_read_only(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         self.assertIn(
-            f"--volume={network.DOCKER_SOCK}:/var/run/docker.sock:ro", sidecar
+            f"--volume={socket_proxy.DOCKER_SOCK}:/var/run/docker.sock:ro", sidecar
         )
 
     def test_off_by_default(self):
-        self.assertEqual(network.socket_proxy_args(settings.Settings()), [])
+        self.assertEqual(socket_proxy.socket_proxy_args(settings.Settings()), [])
         self.assertEqual(self.calls(), [])
 
     def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
         names = {
-            mode: network.network_name(settings.Settings(docker_socket=mode))
+            mode: socket_proxy.network_name(settings.Settings(docker_socket=mode))
             for mode in settings.SocketAccess
         }
         self.assertEqual(

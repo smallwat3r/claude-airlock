@@ -20,8 +20,8 @@ from typing import Any
 
 from ..events import Event, Kind, Who, flat
 from ..sandbox.mounts import ExtraDir
-from ..sandbox.network import has_socket_proxy
 from ..sandbox.runtime import Runtime
+from ..sandbox.socket_proxy import has_socket_proxy
 from ..settings import Host, Settings, SocketAccess
 from .notes import Notes
 
