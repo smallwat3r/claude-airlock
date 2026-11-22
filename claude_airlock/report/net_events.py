@@ -11,11 +11,12 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 
-from ..events import Event, Kind, Stage, Who, clean, flat, labelled
+from ..events import Event, Kind, Stage, Who, Wrong, clean, flat, labelled
 from ..recording.capture import cut_short
 from ..recording.egress_log import ProxyRequest
 from ..recording.health import health_summary
-from ..recording.pcap import Capture, Connection, Flow, Lookup, Request, Went
+from ..recording.payloads import Lookup
+from ..recording.pcap import Capture, Connection, Flow, Request, Went
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
 from .recorded import Recorded, Traced
@@ -73,7 +74,8 @@ def proxy_event(request: ProxyRequest) -> Event:
         "seconds": request.seconds,
         **({"bytes_out": request.sent} if request.sent is not None else {}),
     }
-    return Event(request.began, Who.SANDBOX, Kind.NET, [detail], fields)
+    wrong = Wrong.THROUGHOUT if request.denied else Wrong.NO
+    return Event(request.began, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
 
 
 def name_container(events: list[Event], name: str, shown: bool) -> None:
@@ -152,7 +154,8 @@ def connection_event(
     went = how_it_went(connection, outcome)
     detail = reached(capture, address, port, "tcp", connection.when)
     detail += f"  {went}" if went else ""
-    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields)
+    wrong = Wrong.THROUGHOUT if outcome in Went.WRONG else Wrong.NO
+    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
 
 
 def flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
@@ -184,7 +187,9 @@ def flag_event(why: str, lookup: Lookup) -> Event:
     """A lookup that stands out, see pcap.py for what makes one."""
     fields = {"name": lookup.name, "type": lookup.kind, "flagged": why}
     detail = flat(f"lookup {lookup.name} {lookup.kind} FLAGGED: {why}")
-    return Event(lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields)
+    return Event(
+        lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields, wrong=Wrong.THROUGHOUT
+    )
 
 
 def request_event(request: Request) -> Event:
@@ -211,7 +216,8 @@ def lookup_event(lookup: Lookup) -> Event:
         "error": lookup.error,
     }
     detail = flat(f"lookup {lookup.name} {lookup.kind} {said}")
-    return Event(lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields)
+    wrong = Wrong.THROUGHOUT if lookup.error else Wrong.NO
+    return Event(lookup.when, Who.SANDBOX, Kind.DNS, [detail], fields, wrong=wrong)
 
 
 def capture_summary(capture: Capture, verbose: bool) -> list[str]:

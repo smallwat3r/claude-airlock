@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 from ..errors import Fatal
-from ..events import Event, Kind, flat, labelled
+from ..events import Event, Kind, Wrong, flat, labelled
 from ..projects import project_root, subagent_files
 from ..recording.recorder import (
     Compared,
@@ -57,7 +57,7 @@ from .net_events import network
 from .noted import noted_events
 from .recorded import ReadTranscript, Recorded
 from .stream import EVERYTHING, Filter, Timeline, ordered
-from .summary import summary
+from .summary import planted_shown, summary
 from .trace_args import picked_session, trace_options
 from .transcript import transcript_events
 from .unseen import mark_unseen, unseen_summary
@@ -70,6 +70,7 @@ def removed_events(gone: list[dict], project_dir: str, verbose: bool) -> list[Ev
     for event in events:
         event.notes.append("REMOVED FROM THE TRANSCRIPT")
         event.fields["removed"] = True
+        event.went_wrong(Wrong.THROUGHOUT)
     return events
 
 
@@ -101,11 +102,16 @@ def subagents_header(compared: list[Compared]) -> list[str]:
 
 
 def session_header(
-    own: ReadTranscript, subagents: list[ReadTranscript], project_dir: str
+    own: ReadTranscript,
+    subagents: list[ReadTranscript],
+    project_dir: str,
+    planted: int | None = None,
 ) -> list[str]:
     """The lines of the header that the transcripts of a session and of
     its subagents give: which session it is, how far they are to be
-    believed, and what to know of it before reading on."""
+    believed, and what to know of it before reading on. planted is how
+    many of what they read show signs of being written to instruct the
+    session, as their events tell (see planted_shown)."""
     theirs = [entry for of_one in subagents for entry in of_one.known]
     unreadable = own.unreadable + sum(
         unreadable_lines(of_one.known) for of_one in subagents
@@ -120,18 +126,19 @@ def session_header(
         *own.compared.header(),
         *subagents_header([of_one.compared for of_one in subagents]),
         *([cannot_be_read] if unreadable else []),
-        *summary(own.known + theirs, project_dir),
+        *summary(own.known + theirs, project_dir, planted),
     ]
 
 
 def transcript_side(
     read: ReadTranscript, project_dir: str, verbose: bool
-) -> list[Event]:
+) -> tuple[list[Event], list[Event]]:
     """The events of a transcript, with those of what was taken out of
-    it."""
-    return transcript_events(read.entries, project_dir, verbose) + removed_events(
-        read.compared.gone, project_dir, verbose
-    )
+    it, and of them those of what it is known to hold (see
+    ReadTranscript.known): the ones its header is about."""
+    left = transcript_events(read.entries, project_dir, verbose)
+    removed = removed_events(read.compared.gone, project_dir, verbose)
+    return left + removed, left if read.entries else removed
 
 
 def session_events(
@@ -160,14 +167,10 @@ def session_events(
     # in what Claude Code says
     noted_rows: list[tuple[str, str]] = []
     noted: list[Event] = []
-    told = [
-        *transcript_side(own, project_dir, verbose),
-        *(
-            event
-            for of_one in subagents
-            for event in transcript_side(of_one, project_dir, verbose)
-        ),
-    ]
+    sides = [transcript_side(read, project_dir, verbose) for read in (own, *subagents)]
+    told = [event for events, _ in sides for event in events]
+    # Counted from the events: what was read is looked through once
+    planted = planted_shown(event for _, known in sides for event in known)
     if times:
         start, end = min(times), max(times)
         recorded = Recorded.between(host, start, end)
@@ -176,7 +179,7 @@ def session_events(
         net_lines += unseen_summary(mark_unseen(told, recorded.watched))
         noted_rows, noted = noted_events(host, start, end)
     header = [
-        *session_header(own, subagents, project_dir),
+        *session_header(own, subagents, project_dir, planted),
         *(
             labelled("sandbox", start_summary(event))
             for event in noted

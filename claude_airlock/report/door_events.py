@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 
-from ..events import Event, Who, flat
+from ..events import Event, Who, Wrong, flat
 from ..recording.doors import BY_LAUNCHER, UNRECORDED, AgentUse, Door, read_uses
 from ..settings import Host
 
@@ -36,7 +36,9 @@ def unrecorded_event(when: float, door: str, counted: dict[str, int]) -> Event:
     else:
         detail = "more uses than are recorded one by one, counted from here"
     fields = {UNRECORDED: counted, "error": "not recorded one by one"}
-    return Event(when, Who.SANDBOX, door, [flat(detail)], fields)
+    return Event(
+        when, Who.SANDBOX, door, [flat(detail)], fields, wrong=Wrong.THROUGHOUT
+    )
 
 
 def ssh_agent_event(when: float, said: dict) -> Event:
@@ -64,7 +66,10 @@ def ssh_agent_event(when: float, said: dict) -> Event:
         by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
         detail += f"  REFUSED by the {by}"
         fields["error"] = f"refused by the {by}"
-    return Event(when, Who.SANDBOX, Door.SSH_AGENT.value, [flat(detail)], fields)
+    wrong = Wrong.THROUGHOUT if refused else Wrong.NO
+    return Event(
+        when, Who.SANDBOX, Door.SSH_AGENT.value, [flat(detail)], fields, wrong=wrong
+    )
 
 
 def docker_event(when: float, said: dict) -> Event:
@@ -80,7 +85,10 @@ def docker_event(when: float, said: dict) -> Event:
     }
     if denied:
         detail += "  DENIED"
-    return Event(when, Who.SANDBOX, Door.DOCKER.value, [flat(detail)], fields)
+    wrong = Wrong.THROUGHOUT if denied else Wrong.NO
+    return Event(
+        when, Who.SANDBOX, Door.DOCKER.value, [flat(detail)], fields, wrong=wrong
+    )
 
 
 # How the use of each door is shown, by the door

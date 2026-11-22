@@ -17,9 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..events import Event, Kind, labelled
-from ..recording.pcap import Went
-from .planted import INJECTION
+from ..events import Event, Kind, Wrong, labelled
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -79,36 +77,14 @@ STYLES = {
 }
 
 
-def wrong_throughout(fields: dict) -> bool:
-    """Whether an event tells of something gone wrong that every line of
-    it is about: a request the filter refused, a connection that was
-    refused or not answered, a lookup that failed or that stands out, a
-    use of the SSH agent it refused, what was taken out of the
-    transcript, and a line of it that cannot be read."""
-    return bool(
-        fields.get("denied")
-        or fields.get("outcome") in Went.WRONG
-        or fields.get("error")
-        or fields.get("flagged")
-        # Not the names an event of another kind keeps under that name
-        or fields.get("removed") is True
-        or fields.get("unreadable_line")
-    )
-
-
 def went_wrong(event: Event) -> bool:
-    """Whether an event tells of something gone wrong: a call that failed
-    or was not allowed to run, a write outside the project, something
-    read that shows signs of being written to instruct the session (see
-    planted.py), and what wrong_throughout names."""
-    fields = event.fields
-    return bool(
-        fields.get("failed")
-        or fields.get("refused")
-        or fields.get("outside_project")
-        or fields.get(INJECTION)
-        or wrong_throughout(fields)
-    )
+    """Whether an event tells of something gone wrong, as what made it
+    said: a call that failed or was not allowed to run, a write outside
+    the project, something read that shows signs of being written to
+    instruct the session (see planted.py), a request the filter refused,
+    a connection that was refused or not answered, a lookup that failed
+    or that stands out, what was taken out of the transcript."""
+    return event.wrong is not Wrong.NO
 
 
 def alerting(event: Event, index: int) -> bool:
@@ -116,7 +92,7 @@ def alerting(event: Event, index: int) -> bool:
     what went wrong, see went_wrong: one that what made the event marked
     (how a call ended that failed or was refused, the file of a write
     outside the project), and every one of what is wrong throughout."""
-    return index in event.alerts or wrong_throughout(event.fields)
+    return index in event.alerts or event.wrong is Wrong.THROUGHOUT
 
 
 def shown_what(what: str) -> str:

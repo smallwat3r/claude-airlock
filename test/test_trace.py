@@ -22,12 +22,13 @@ from harness import (
 )
 
 from claude_airlock import files, settings
-from claude_airlock.events import Event, Who
+from claude_airlock.events import Event, Who, Wrong
 from claude_airlock.recording import egress_log
 from claude_airlock.report import calls, trace
 from claude_airlock.report import entries as entries_module
-from claude_airlock.report.calls import call_details, call_label, without_heredocs
+from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.entries import read_entries
+from claude_airlock.report.heredocs import without_heredocs
 from claude_airlock.report.layout import Layout, event_json, folded
 from claude_airlock.report.transcript import WalkOptions
 
@@ -441,7 +442,9 @@ class TraceTest(LauncherTest):
 
     def test_the_same_thing_on_the_network_again_is_said_once(self):
         def reached(when: float, where: str, **fields: object) -> Event:
-            return Event(when, Who.SANDBOX, "net", [f"tcp/https {where}:443"], fields)
+            wrong = Wrong.THROUGHOUT if fields else Wrong.NO
+            line = f"tcp/https {where}:443"
+            return Event(when, Who.SANDBOX, "net", [line], fields, wrong=wrong)
 
         said = Event(5.0, Who.CLAUDE, "reply", ["done"], {})
         events = [

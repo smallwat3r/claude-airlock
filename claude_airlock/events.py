@@ -21,6 +21,18 @@ _UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff" + _BIDI + "]")
 LABEL_WIDTH = 12
 
 
+class Wrong(enum.IntEnum):
+    """How much of an event tells of something gone wrong, said by what
+    makes the event: it knows what its values mean, what shows the event
+    does not guess it from their names."""
+
+    NO = 0
+    # Some of its lines, those among its alerts
+    PART = 1
+    # Every line of it: a request that was refused, a lookup that failed
+    THROUGHOUT = 2
+
+
 class Who(enum.Enum):
     """Who did something, the value being how the output names them."""
 
@@ -97,6 +109,8 @@ class Event:
     notes: list[str] = field(default_factory=list)
     # Which of the details tell of what went wrong, by their place
     alerts: set[int] = field(default_factory=set)
+    # Whether it tells of something gone wrong, and in how much of it
+    wrong: Wrong = Wrong.NO
 
     @property
     def lines(self) -> list[str]:
@@ -112,6 +126,11 @@ class Event:
         if alert:
             self.alerts.add(len(self.details))
         self.details.append(line)
+
+    def went_wrong(self, how: Wrong = Wrong.PART) -> None:
+        """Say that it tells of something gone wrong, in so much of it:
+        never less than was said before."""
+        self.wrong = max(self.wrong, how)
 
 
 def clean(value: object) -> str:

@@ -13,17 +13,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..events import Event, Kind, Stage, Who, clean, flat
+from ..events import Event, Kind, Stage, Who, Wrong, clean, flat
 from ..files import UNREADABLE
 from .brief import TALK_LINES, amount, between, clip, shortened
-from .calls import (
-    Outcome,
-    call_event,
-    call_label,
-    outcome,
-    said_source,
-    tell_result,
-)
+from .calls import call_event, call_label, tell_result
 from .entries import (
     INPUT_TOKENS,
     claude_of,
@@ -33,6 +26,7 @@ from .entries import (
     step_tokens,
     step_usage,
 )
+from .outcomes import Outcome, outcome, said_source
 from .told import Asides, typed_while_working
 
 # A live walk of a transcript lets go of the oldest calls once this many
@@ -122,7 +116,9 @@ def unreadable_event(when: float, entry: dict) -> Event:
     shown = shortened(flat(text if isinstance(text, str) else ""))
     details = [f"UNREADABLE line of the transcript: {shown}"]
     fields = {"unreadable_line": True, "text": text}
-    return Event(when, Who.SANDBOX, Kind.TRANSCRIPT, details, fields)
+    return Event(
+        when, Who.SANDBOX, Kind.TRANSCRIPT, details, fields, wrong=Wrong.THROUGHOUT
+    )
 
 
 def read_anew(used: dict[str, int], before: int) -> int:

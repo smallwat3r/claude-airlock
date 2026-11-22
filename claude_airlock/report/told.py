@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..events import Event, Kind, Who, clean, flat
+from ..events import Event, Kind, Who, Wrong, clean, flat
 from .brief import PREVIEW_WIDTH, amount, between, shortened
 from .entries import MOST_LISTED, claude_of, counted, kept, listed, seconds
 from .planted import Planted, flagged, planted
@@ -32,6 +32,8 @@ PROMPT_MODE = "prompt"
 # Any other file of instructions came with the project or was written in
 # a session.
 OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
+# The kind of the event that tells of the files read as instructions
+INSTRUCTIONS = "instructions"
 
 Reader = Callable[[dict, float, Who], list[Event]]
 
@@ -75,8 +77,9 @@ def instructions_planted(
     return () if kind in OWN_INSTRUCTIONS else planted(content, path)
 
 
-def instruction_files(given: dict) -> tuple[Instructions, ...]:
-    """The files an entry says were read as instructions."""
+def instruction_files(given: dict, scan: bool = True) -> tuple[Instructions, ...]:
+    """The files an entry says were read as instructions, each with the
+    signs it shows unless told not to look: for what only names them."""
     files = []
     for file in listed(given.get("files")):
         if not isinstance(file, dict) or not isinstance(file.get("path"), str):
@@ -84,7 +87,7 @@ def instruction_files(given: dict) -> tuple[Instructions, ...]:
         kind, content = kept(file.get("type")) or "?", file.get("content")
         size = len(content) if isinstance(content, str) else 0
         path = kept(file["path"])
-        signs = instructions_planted(kind, content, path)
+        signs = instructions_planted(kind, content, path) if scan else ()
         files.append(Instructions(path, kind, size, signs))
     return tuple(files)
 
@@ -113,7 +116,7 @@ def instructions_read(entries: list[dict]) -> list[str]:
     files = {
         (flat(file.path), flat(file.kind))
         for entry in entries
-        for file in instruction_files(attachment(entry))
+        for file in instruction_files(attachment(entry), scan=False)
     }
     lines = ["instructions read"] if files else []
     shown = sorted(files)[:MOST_LISTED]
@@ -212,11 +215,13 @@ class Asides:
             return []
         self._instructions = files
         fields = {
-            "kind": "instructions",
+            "kind": INSTRUCTIONS,
             "files": [file.fields for file in files],
             **flagged(sign for file in files for sign in file.planted),
         }
         event = Event(when, who, Kind.CONTEXT, [], fields)
+        if any(file.planted for file in files):
+            event.went_wrong()
         for file in files:
             event.say(f"instructions: {file.shown}")
             for sign in file.planted:
@@ -320,7 +325,7 @@ class Asides:
         if attempt:
             line += f" (retry {attempt}" + (f" of {most})" if most else ")")
             fields.update(retry=attempt, retries=most)
-        return [Event(when, who, Kind.API, [line], fields)]
+        return [Event(when, who, Kind.API, [line], fields, wrong=Wrong.THROUGHOUT)]
 
     def _compacted(self, entry: dict, when: float, who: Who) -> list[Event]:
         """The conversation was summed up to make room: what the model

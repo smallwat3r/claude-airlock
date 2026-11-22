@@ -10,11 +10,12 @@ events.py."""
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
-from ..events import flat, labelled
+from ..events import Event, flat, labelled
 from .brief import PREVIEW_WIDTH, amount
-from .calls import outside_flag, refused, result_planted, written_paths
+from .calls import written_paths
 from .entries import (
     INPUT_TOKENS,
     block_text,
@@ -27,8 +28,9 @@ from .entries import (
     tool_calls,
     tool_results,
 )
+from .outcomes import outside_flag, refused, result_planted
 from .planted import INJECTION, read_said
-from .told import attachment, instruction_files, instructions_read
+from .told import INSTRUCTIONS, attachment, instruction_files, instructions_read
 
 
 def planted_reads(entries: list[dict]) -> int:
@@ -52,9 +54,28 @@ def planted_reads(entries: list[dict]) -> int:
     return results + len(files)
 
 
-def overview(entries: list[dict]) -> list[tuple[str, str]]:
+def planted_shown(events: Iterable[Event]) -> int:
+    """The same count as planted_reads, by the events of a transcript
+    that tell of the signs: what was looked through to make them is not
+    looked through again for the header of their trace."""
+    results = 0
+    files: set[object] = set()
+    for event in events:
+        fields = event.fields
+        if "tool" in fields:
+            results += bool(fields.get(INJECTION))
+        elif fields.get("kind") == INSTRUCTIONS:
+            files.update(
+                file.get("path") for file in fields["files"] if file.get(INJECTION)
+            )
+    return results + len(files)
+
+
+def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str, str]]:
     """The session at a glance, as labelled values: what ran it, when, at
-    what cost, how many calls and how many of them failed."""
+    what cost, how many calls and how many of them failed. With how many
+    of what it read show signs of being planted, counted here unless
+    given."""
     calls = tool_calls(entries)
     times = entry_times(entries)
     last = {str(e.get("type")): e for e in entries}
@@ -109,7 +130,7 @@ def overview(entries: list[dict]) -> list[tuple[str, str]]:
     not_run = sum(refused(entry) for entry, _ in results)
     if not_run:
         rows.append(("refused", f"{not_run} calls were not allowed to run"))
-    signs = planted_reads(entries)
+    signs = planted_reads(entries) if planted is None else planted
     if signs:
         rows.append((INJECTION, f"{read_said(signs)}, see --failed"))
     return rows
@@ -142,9 +163,11 @@ def pages_fetched(entries: list[dict]) -> list[str]:
     return lines + [f"  {flat(host)} x{count}" for host, count in sorted(hosts.items())]
 
 
-def summary(entries: list[dict], project_dir: str) -> list[str]:
-    """What to know before reading on."""
-    rows = [("project", flat(project_dir)), *overview(entries)]
+def summary(
+    entries: list[dict], project_dir: str, planted: int | None = None
+) -> list[str]:
+    """What to know before reading on. planted as for overview."""
+    rows = [("project", flat(project_dir)), *overview(entries, planted)]
     return [
         *(labelled(name, value) for name, value in rows),
         *instructions_read(entries),
