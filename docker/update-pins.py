@@ -15,6 +15,8 @@ with mixed pins. PyPI and npm packages are pinned by version only.
 Usage: update-pins.py [file]...   (defaults to all of the above)
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -36,8 +38,12 @@ PYPI_PIN = r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]*)==(\d[\w.]*)"
 
 
 def fetch(url: str, headers: dict | None = None, method: str = "GET"):
-    req = urllib.request.Request(url, headers=headers or {}, method=method)
-    return urllib.request.urlopen(req, timeout=60)
+    # Pins are only as good as where they are from: nothing but HTTPS,
+    # never a file or another scheme a built URL could turn out to be
+    if not url.startswith("https://"):
+        raise ValueError(f"not an HTTPS URL: {url}")
+    req = urllib.request.Request(url, headers=headers or {}, method=method)  # noqa: S310
+    return urllib.request.urlopen(req, timeout=60)  # noqa: S310
 
 
 def fetch_json(url: str, headers: dict | None = None):
