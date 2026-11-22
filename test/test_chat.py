@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -1295,6 +1296,29 @@ class PipeTest(unittest.TestCase):
 
         self.addCleanup(end)
         return agent
+
+    def test_what_waits_to_be_taken_in_is_bounded_by_its_size_too(self):
+        backlog = pipe.Backlog(most=3, most_bytes=100)
+        backlog.put("a", 60)
+        # Past the bytes, then past the count
+        with self.assertRaises(queue.Full):
+            backlog.put("b", 60, timeout=0.01)
+        backlog.put("b", 20)
+        backlog.put("c", 10)
+        with self.assertRaises(queue.Full):
+            backlog.put("d", 1, timeout=0.01)
+        self.assertEqual(backlog.get(timeout=0.01), "a")
+        backlog.put("d", 60)
+        self.assertEqual([backlog.get(timeout=0.01) for _ in range(3)], ["b", "c", "d"])
+        with self.assertRaises(queue.Empty):
+            backlog.get(timeout=0.01)
+        # One alone fits whatever its size, and what waits for room gets it
+        backlog.put("large", 1000)
+        waiting = threading.Thread(target=backlog.put, args=("next", 5))
+        waiting.start()
+        self.assertEqual(backlog.get(timeout=PATIENCE), "large")
+        waiting.join(PATIENCE)
+        self.assertEqual(backlog.get(timeout=PATIENCE), "next")
 
     def test_what_claude_is_told_is_a_line_each(self):
         agent = self.agent()

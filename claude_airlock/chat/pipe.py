@@ -12,6 +12,7 @@ what it should be in said.py."""
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import itertools
 import json
@@ -37,13 +38,60 @@ CHAT_ARGS = (
     "--include-partial-messages",
 )
 # A line longer than this is dropped, and no more than so many wait to be
-# taken in
+# taken in, nor more bytes of them than BACKLOG_BYTES: a line can be long,
+# a result with a picture in it is, but not a thousand of them at once
 LINE_LIMIT = 64 << 20
 BACKLOG = 1000
+BACKLOG_BYTES = 256 << 20
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
 # What is told the answer claude gives to a request of the chat's
 Answer = Callable[[dict], None]
+
+
+class Backlog:
+    """What claude said and waits to be taken in, bounded by how many and
+    by how large they are together: past either, what is to be added
+    waits, and claude with it on a pipe that is no longer read. What is
+    said is the session's to write, and to write a lot of."""
+
+    def __init__(self, most: int = BACKLOG, most_bytes: int = BACKLOG_BYTES) -> None:
+        self._most = most
+        self._most_bytes = most_bytes
+        self._held: collections.deque[tuple[dict | str | None, int]] = (
+            collections.deque()
+        )
+        self._bytes = 0
+        self._changed = threading.Condition()
+
+    def _full(self, size: int) -> bool:
+        # One alone always fits, however large: it is bounded as a line
+        if not self._held:
+            return False
+        return len(self._held) >= self._most or self._bytes + size > self._most_bytes
+
+    def put(
+        self, item: dict | str | None, size: int = 0, timeout: float | None = None
+    ) -> None:
+        """Add what was said, of so many bytes as it was read. Waits for
+        room, raises queue.Full when there is none within the timeout."""
+        with self._changed:
+            if not self._changed.wait_for(lambda: not self._full(size), timeout):
+                raise queue.Full
+            self._held.append((item, size))
+            self._bytes += size
+            self._changed.notify_all()
+
+    def get(self, timeout: float | None = None) -> dict | str | None:
+        """Take the oldest, raises queue.Empty when there is none within
+        the timeout."""
+        with self._changed:
+            if not self._changed.wait_for(lambda: bool(self._held), timeout):
+                raise queue.Empty
+            item, size = self._held.popleft()
+            self._bytes -= size
+            self._changed.notify_all()
+            return item
 
 
 class Agent:
@@ -79,7 +127,7 @@ class Agent:
         self._asking = threading.Lock()
         # What claude said, each an object, or the text of a line that is
         # none, then None when it has ended
-        self.messages: queue.Queue[dict | str | None] = queue.Queue(BACKLOG)
+        self.messages = Backlog()
         self.ended = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._errors = threading.Thread(target=self._read_errors, daemon=True)
@@ -100,7 +148,8 @@ class Agent:
                     # conversation, which is then shown as it is written
                     plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
                     found = json_object(line)
-                    self.messages.put(plain if found is None else found)
+                    said = plain if found is None else found
+                    self.messages.put(said, len(line))
                 # The rest of a line that was too long goes with its start
                 dropping = not complete
         finally:
@@ -125,7 +174,7 @@ class Agent:
                 continue
             if not self.ended.is_set():
                 with contextlib.suppress(queue.Full):
-                    self.messages.put(text, timeout=1.0)
+                    self.messages.put(text, len(line), timeout=1.0)
                     continue
             # Nobody listens any more, or not fast enough
             print(clean(text), file=sys.stderr)
