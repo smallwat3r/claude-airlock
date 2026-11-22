@@ -106,17 +106,21 @@ def env_arg(name: str, value: object = None) -> str:
     return f"--env={name}" if value is None else f"--env={name}={value}"
 
 
-def mount_arg(source: str, target: str, options: str = "") -> str:
+def mount_arg(
+    source: str, target: str, options: str = "", *, daemons: bool = False
+) -> str:
     """A bind mount or named volume. The z option relabels a bind mount so
     containers can read it on SELinux hosts. The three are told apart by
     colons, so a path that has one cannot be mounted: refused here, docker
     would take a part of it for something else. A source that is a path
     and is not there is refused too: docker would make a directory of it,
-    owned by root, in the place of the file that was meant."""
+    owned by root, in the place of the file that was meant. Not a path
+    said to be the daemon's: one of the machine docker runs in, which is
+    not this one under Docker Desktop, and cannot be looked for here."""
     for path in (source, target):
         if ":" in path:
             raise Fatal(f"cannot mount {path}: docker takes no path with a colon")
-    if source.startswith("/") and not os.path.lexists(source):
+    if source.startswith("/") and not daemons and not os.path.lexists(source):
         raise Fatal(
             f"cannot mount {source}: it does not exist, docker would make a"
             " directory of it, owned by root"

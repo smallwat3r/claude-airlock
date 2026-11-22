@@ -203,6 +203,12 @@ class MountArgTest(unittest.TestCase):
             dangling = Path(directory, "link")
             dangling.symlink_to(Path(directory, "nowhere"))
             mount_arg(str(dangling), "/link")
+        # Nor is a path of the machine docker runs in looked for on this one
+        inside = "/run/host-services/ssh-auth.sock"
+        self.assertEqual(
+            mount_arg(inside, "/tmp/agent.sock", daemons=True),
+            f"--volume={inside}:/tmp/agent.sock",
+        )
         # A named volume has no path to be missing
         self.assertEqual(mount_arg("a-volume", "/data"), "--volume=a-volume:/data")
 

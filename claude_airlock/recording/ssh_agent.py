@@ -366,7 +366,9 @@ def ssh_agent_door(
     mount = (
         mount_arg(door.path, AGENT_TARGET, "z")
         if door
-        else mount_arg(agent, AGENT_TARGET, "z" if can_listen else "")
+        else mount_arg(
+            agent, AGENT_TARGET, "z" if can_listen else "", daemons=not can_listen
+        )
     )
     try:
         yield [
