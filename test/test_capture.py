@@ -27,6 +27,10 @@ from harness import (
     capture as capture_module,
 )
 
+from claude_airlock.reader import NotThis
+from claude_airlock.recording import payloads
+from claude_airlock.recording.pcap_file import PcapReader
+
 
 def unnamed_port() -> int:
     """A port this host has no name for: which ones have is the host's
@@ -244,7 +248,7 @@ class CaptureFileTest(unittest.TestCase):
             self.assertEqual(
                 found.names, {"198.51.100.7": "good.test", "203.0.113.9": "sni.test"}
             )
-            looked_up = pcap.Lookup(1001.0, "good.test", "A", ("198.51.100.7",), "")
+            looked_up = payloads.Lookup(1001.0, "good.test", "A", ("198.51.100.7",), "")
             self.assertEqual(found.lookups, [looked_up])
             self.assertEqual(found.packets, 11)
 
@@ -371,7 +375,7 @@ class CaptureFileTest(unittest.TestCase):
         found = self.read(pcap_file([(1.0, dns_failure("nope.test", 28), False)]))
         self.assertEqual(
             found.lookups,
-            [pcap.Lookup(1.0, "nope.test", "AAAA", (), "no such name")],
+            [payloads.Lookup(1.0, "nope.test", "AAAA", (), "no such name")],
         )
         self.assertEqual(found.names, {})
 
@@ -382,8 +386,8 @@ class CaptureFileTest(unittest.TestCase):
 
     def test_a_dns_name_that_points_at_itself_ends(self):
         loop = struct.pack("!HHHHHH", 7, 0x8180, 1, 0, 0, 0) + b"\xc0\x0c"
-        with self.assertRaises(pcap.NotThis):
-            pcap.dns_answer(0.0, loop)
+        with self.assertRaises(NotThis):
+            payloads.dns_answer(0.0, loop)
 
 
 def dns_over(
@@ -487,19 +491,19 @@ class DnsTrustTest(unittest.TestCase):
         capture = pcap.Capture()
         pcap.take_frames(
             capture,
-            pcap.PcapReader().feed(
+            PcapReader().feed(
                 pcap_file([(1.0, dns_query("slow.test"), True)], asked=False)
             ),
         )
         self.assertEqual(capture.lookups, [])
         later = pcap_file([(20.0, dns_query("other.test"), True)], asked=False)
-        pcap.take_frames(capture, pcap.PcapReader().feed(later))
+        pcap.take_frames(capture, PcapReader().feed(later))
         self.assertEqual([lookup.name for lookup in capture.lookups], ["slow.test"])
         # The answer when it does come is still the answer
         late = pcap_file(
             [(21.0, dns_response("slow.test", "198.51.100.7"), False)], asked=False
         )
-        pcap.take_frames(capture, pcap.PcapReader().feed(late))
+        pcap.take_frames(capture, PcapReader().feed(late))
         self.assertEqual(capture.name_of("198.51.100.7", 22.0), "slow.test")
 
     def test_an_answer_cut_short_by_the_capture_keeps_what_came_before(self):
@@ -539,7 +543,7 @@ class DnsTrustTest(unittest.TestCase):
 
     def test_each_part_of_a_capture_counts_its_own_packets(self):
         capture = pcap.Capture()
-        frames = list(pcap.PcapReader().feed(sample_capture(1000.0)))
+        frames = list(PcapReader().feed(sample_capture(1000.0)))
         pcap.take_frames(capture, frames, "tcp")
         pcap.take_frames(capture, frames[:2], "dns")
         self.assertEqual(capture.part_packets, {"tcp": len(frames), "dns": 2})

@@ -51,7 +51,8 @@ from ..recording.capture import (
 from ..recording.egress_log import logged_since
 from ..recording.health import Ended, Sample
 from ..recording.host_health import running_health, said_in
-from ..recording.pcap import Capture, PcapReader, take_frames
+from ..recording.pcap import Capture, take_frames
+from ..recording.pcap_file import PcapReader
 from ..recording.processes import Watcher, said_since
 from ..recording.records import recorded_sessions
 from ..settings import Host

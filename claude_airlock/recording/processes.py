@@ -44,7 +44,7 @@ from ..docker import container_running, docker, docker_output, mount_arg
 from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
-from .pcap import is_loopback
+from .packets import is_loopback
 from .procwatch import Note
 from .records import TracedSession
 from .sidecar import Sidecar

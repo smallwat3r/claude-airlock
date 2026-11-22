@@ -34,7 +34,9 @@ from ..docker import container_running, docker, docker_bytes, docker_ok
 from ..errors import Fatal
 from ..sandbox.network import namespace_args
 from ..settings import Host, Settings
-from .pcap import HTTP_METHODS, Capture, read_capture
+from .packets import RESOLVER
+from .payloads import HTTP_METHODS
+from .pcap import Capture, read_capture
 from .records import TracedSession
 from .sidecar import Sidecar
 
@@ -48,8 +50,6 @@ PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
 # Captures are a few kB each as a rule, the oldest go once there are more
 KEPT_CAPTURES = 100
-# The embedded resolver of docker, in every container
-RESOLVER_ADDRESS = "127.0.0.11"
 # Where the TCP of the capture is told apart from the rest, for the filter.
 # The filter's tcp[] is of IPv4 alone, over IPv6 the same is spelled by
 # where things are in a packet without headers between the two. One with
@@ -83,7 +83,7 @@ def _http_methods(load: str) -> str:
 # No packet is in two parts: what is DNS by its port or by the resolver's
 # address is the DNS part's alone, its TCP too. The reader would take a
 # packet it is given twice for one sent twice.
-_NOT_DNS = f"not port 53 and not host {RESOLVER_ADDRESS}"
+_NOT_DNS = f"not port 53 and not host {RESOLVER}"
 TCP_FILTER = (
     f"{_NOT_DNS} and ("
     # What starts, answers or ends a connection, but for the session's
@@ -103,7 +103,7 @@ TCP_FILTER = (
 # namespace, so its packets do not show port 53: all there is to and from
 # its address is taken, and the reader tells what is DNS. Not the rest of
 # loopback, which a session can fill with whatever it likes.
-DNS_FILTER = f"port 53 or host {RESOLVER_ADDRESS}"
+DNS_FILTER = f"port 53 or host {RESOLVER}"
 # Whatever the session sends that is not TCP: UDP, a ping, anything else
 # over IP. There a connection has no start to pick out.
 FLOWS_FILTER = (

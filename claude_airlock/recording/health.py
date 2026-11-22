@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..events import Event, Kind, Who, flat
+from ..events import Event, Kind, Who, Wrong, flat
 from . import procwatch
 
 # The percent of the time a session waited for memory from which it is
@@ -239,7 +239,10 @@ class Sample:
         wrong = self.wrong()
         if wrong:
             fields["flagged"] = wrong
-        return Event(self.when, Who.SANDBOX, Kind.HEALTH, [self.detail()], fields)
+        how = Wrong.THROUGHOUT if wrong else Wrong.NO
+        return Event(
+            self.when, Who.SANDBOX, Kind.HEALTH, [self.detail()], fields, wrong=how
+        )
 
 
 @dataclass(frozen=True)
@@ -270,7 +273,14 @@ class Ended:
             "gone": [process.fields for process in self.gone],
             "flagged": "out of memory",
         }
-        return Event(self.when, Who.SANDBOX, Kind.HEALTH, [detail], fields)
+        return Event(
+            self.when,
+            Who.SANDBOX,
+            Kind.HEALTH,
+            [detail],
+            fields,
+            wrong=Wrong.THROUGHOUT,
+        )
 
 
 def read_health(when: float, said: dict) -> Sample | Ended | None:

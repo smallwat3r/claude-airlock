@@ -21,6 +21,7 @@ from harness import LAUNCHER, LauncherTest, follow, pcap
 from test_capture import answer, dns_response, pcap_file, sample_capture, tcp
 
 from claude_airlock.events import Event, Kind, Stage, Who
+from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import stream
 from claude_airlock.report.transcript import WalkOptions
 from claude_airlock.settings import Host
@@ -647,14 +648,14 @@ class PcapReaderTest(unittest.TestCase):
     def test_a_capture_fed_in_pieces_reads_as_the_whole(self):
         whole = sample_capture(1000.0)
         for size in (1, 7, 4096):
-            reader, found = pcap.PcapReader(), pcap.Capture()
+            reader, found = PcapReader(), pcap.Capture()
             for start in range(0, len(whole), size):
                 pcap.take_frames(found, reader.feed(whole[start : start + size]))
             self.assertEqual(len(found.connections), 3)
             self.assertEqual(found.packets, 11)
 
     def test_nothing_is_read_past_what_is_not_a_capture(self):
-        reader = pcap.PcapReader()
+        reader = PcapReader()
         self.assertEqual(list(reader.feed(b"not a capture at all, really")), [])
         self.assertEqual(list(reader.feed(sample_capture(1000.0))), [])
 
