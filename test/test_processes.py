@@ -98,6 +98,59 @@ class WatcherTest:
         assert len(out.getvalue()) <= procwatch.MOST_BYTES + 100
         assert json.loads(out.getvalue().splitlines()[-1])["note"] == "full"
 
+    def test_a_record_filled_by_what_is_reserved_says_so_as_its_last_line(self):
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        big = "x" * (procwatch.MOST_BYTES // 4)
+        # Nothing but connections: the part of the processes never fills
+        for port in range(6):
+            watch.note(reserved=True, port=port, to=big, to_port=443, pids=[7])
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line.get("note") for line in said[-2:]] == [None, "full"]
+        assert noted(*said).full
+        # And nothing after it, a word of the watcher's own neither
+        watch.note(reserved=True, note=procwatch.Note.ALIVE)
+        watch.note(pid=2, argv=["late"])
+        assert len(out.getvalue().splitlines()) == len(said)
+        assert len(out.getvalue()) <= procwatch.MOST_BYTES
+
+    def test_sockets_on_its_own_loopback_leave_room_for_what_others_reach(self):
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        # As many as fill the record, opened and closed between two looks
+        ports = range(20000, 22000)
+        line = len(procwatch.stamped(listen=20000, on="127.0.0.1", pids=[]))
+        with mock.patch.object(
+            procwatch, "MOST_BYTES", procwatch.RESERVED + 50 * len(ports) * line
+        ):
+            for _ in range(60):
+                watch._look_at_listeners(
+                    {(p, "127.0.0.1", 0): str(p) for p in ports}, []
+                )
+                watch._look_at_listeners({}, [])
+            watch._look_at_listeners({(8080, "0.0.0.0", 0): "1"}, [])
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "2"}, [])
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "2"}, [])
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "2"}, [])
+            watch.note(reserved=True, note=procwatch.Note.ALIVE)
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert sum(line.get("note") == "full" for line in said) == 1
+        # All that came after the part of the processes was full is there
+        after = said[[line.get("note") for line in said].index("full") + 1 :]
+        assert [line["listen"] for line in after if "listen" in line] == [8080]
+        assert [line["to"] for line in after if "to" in line] == ["203.0.113.9"]
+        assert after[-1]["note"] == "alive"
+        assert noted(*said).full
+
+    def test_a_connection_on_its_own_loopback_is_not_noted(self):
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        local = {(40000, "127.0.0.1", 5432): "1", (40001, "::1", 5432): "2"}
+        for _ in range(procwatch.MOST_TRIES + 1):
+            watch._look_at_connections({**local, (40002, "203.0.113.9", 443): "3"}, [])
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line["to"] for line in said if "to" in line] == ["203.0.113.9"]
+
     def test_a_process_cannot_fill_the_record_with_its_command_line(self):
         long = b"\0".join([b"x" * 5000] * 200) + b"\0"
         kept = procwatch.command_line(long)

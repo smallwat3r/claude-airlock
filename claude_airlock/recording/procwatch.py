@@ -71,6 +71,9 @@ MOST_BYTES = 20 * 1024 * 1024
 # connection is what the record is for, and a session that starts
 # processes without end must not be rid of it that way
 RESERVED = 4 * 1024 * 1024
+# Of that again, what is kept for the record to say that it is full: its
+# last line, whichever part filled first
+LAST_WORD = 256
 TCP_LISTEN = "0A"
 # Seconds between two looks at what the session's limits say
 LIMITS_EVERY = 1.0
@@ -287,6 +290,12 @@ def session_tmpfs(mounts: str) -> list[str]:
         if not kernels and "\\" not in place:
             found.append(place)
     return found[:MOST_TMPFS]
+
+
+def is_loopback(address: str) -> bool:
+    """Whether an address is the session's own loopback, which nothing
+    else reaches and no capture has: the same as in packets.py."""
+    return address.startswith("127.") or address == "::1"
 
 
 def stamped(**said: object) -> str:
@@ -576,8 +585,10 @@ class Watch:
     def __init__(self, out) -> None:
         self._out = out
         self._written = 0
-        # Whether the processes have used up their part of the record
+        # Whether the processes have used up their part of the record,
+        # and whether all of it is: nothing more is written then
         self._full = False
+        self._ended = False
         # Not itself, nor what started it
         self._own = {os.getpid(), os.getppid()}
         # Each process seen: what it was, when it was first seen and when
@@ -606,19 +617,23 @@ class Watch:
 
     def note(self, reserved: bool = False, aloud: bool = False, **said: object) -> None:
         """Add a line to the record, while there is room for it: what is
-        not reserved (a process, how the session is doing) leaves RESERVED
-        for what is (a connection, a socket that waits, a word of the
-        watcher's own), a session must not be rid of those by what it
-        makes the others fill. The record says once that it is full, when
-        that part is. A line said aloud goes to the watcher's output too,
-        no more of them than to the record."""
-        if self._written >= MOST_BYTES or (self._full and not reserved):
+        not reserved (a process, how the session is doing, what is on the
+        session's own loopback) leaves RESERVED for what is (a connection,
+        a socket others can reach, a word of the watcher's own), a session
+        must not be rid of those by what it makes the others fill. The
+        record says that it is full when the first part is, and again as
+        its last line when the reserved part is too, which a session can
+        fill as well: one that ends without a word reads as a session
+        with nothing more to note. A line said aloud goes to the
+        watcher's output too, no more of them than to the record."""
+        if self._ended or (self._full and not reserved):
             return
         line = stamped(**said)
-        if reserved and self._written + len(line) > MOST_BYTES:
-            self._written = MOST_BYTES
-            return
-        if not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
+        if reserved and self._written + len(line) > MOST_BYTES - LAST_WORD:
+            self._ended = True
+            aloud = False
+            line = stamped(note=Note.FULL)
+        elif not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
             self._full = True
             aloud = False
             line = stamped(note=Note.FULL)
@@ -684,7 +699,12 @@ class Watch:
         time. After MOST_TRIES it is noted without one: it is there all
         the same, held by a process that cannot be looked into, which a
         process can make itself, and a connection must not go without a
-        word for that."""
+        word for that. Not one on the session's own loopback: no capture
+        has it, so nothing asks who made it, and a session can make as
+        many as it likes without the network."""
+        current = {
+            key: inode for key, inode in current.items() if not is_loopback(key[1])
+        }
         self._connections &= current.keys()
         self._tries = {key: n for key, n in self._tries.items() if key in current}
         new = {
@@ -724,7 +744,9 @@ class Watch:
         """Note each socket that started to wait for connections, with
         the processes that hold it, none when those were not found: it is
         there all the same, for whatever else is on the session's network
-        to connect to."""
+        to connect to. One on the session's own loopback is nothing else's
+        to connect to, and has no part of what is kept for those that
+        are: a session opens and closes them as fast as it likes."""
         self._listening &= current.keys()
         new = {
             key: inode
@@ -738,7 +760,7 @@ class Watch:
             self._listening.add(key)
             port, on, _ = key
             held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
-            self.note(reserved=True, listen=port, on=on, pids=held_by)
+            self.note(reserved=not is_loopback(on), listen=port, on=on, pids=held_by)
 
 
 def main(args: list[str]) -> int:
