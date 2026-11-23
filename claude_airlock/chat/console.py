@@ -183,6 +183,9 @@ class Console:
         # and the one asked for, to go back to
         self._asked: str | None = None
         self._usual = ""
+        # When the question asked came before the user, as the prompt of
+        # a line being read: none while it has not, nothing reads then
+        self._asked_at: float | None = None
         # The prompt of a line readline is about to read, and whether it
         # says when it has written it
         self._entering: str | None = None
@@ -356,6 +359,7 @@ class Console:
         with self._lock:
             self._headed = headed
             self._usual = prompt
+            self._comes_before_the_user()
             shown = prompt if self._asked is None else self._asked
             above = self._above()
             if self._redrawn and self._hooked:
@@ -515,6 +519,9 @@ class Console:
                     return
                 self._reading, self._entering = self._entering, None
                 prompt = self._reading if self._asked is None else self._asked
+                if self._asked is not None and self._asked_at is None:
+                    # Put in the moment before, and written just below
+                    self._asked_at = time.monotonic()
                 if self._filled:
                     readline.insert_text(self._filled)
                     self._filled = ""
@@ -567,12 +574,41 @@ class Console:
         over without a line: the line being read is not its answer."""
         with self._lock:
             was, self._asked = self._asked, prompt
+            if prompt != was:
+                self._asked_at = None
             if self._reading is None or prompt == was:
                 return
             shown = self._usual if prompt is None else prompt
             self._put("", shown)
             # Also where the prompt is held back and nothing was written
             self._reading = shown
+            if prompt is not None:
+                self._asked_at = time.monotonic()
+
+    def asked_for(self) -> float | None:
+        """The seconds the question asked has been before the user, see
+        ask. None while it is not: no line was read since it was put, and
+        one entered before that is no answer to it."""
+        with self._lock:
+            if self._asked is None or self._asked_at is None:
+                return None
+            return time.monotonic() - self._asked_at
+
+    def _comes_before_the_user(self) -> None:
+        """The question asked is about to be the prompt of a line, if one
+        is and it was not yet. What was typed while nothing read is
+        dropped first: a command of the user's ran, or a list they chose
+        from was up, and a line entered then was typed before the
+        question could be read. Left where it is, it would answer the
+        question in the moment it is put, a yes would allow a call
+        unseen. Called with the lock held."""
+        if self._asked is None or self._asked_at is not None:
+            return
+        if self.interactive:
+            # No terminal after all, or one that is gone
+            with contextlib.suppress(termios.error, OSError, ValueError):
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        self._asked_at = time.monotonic()
 
     def hold(self, held: bool) -> None:
         """Hold the prompt back where nothing is erased, while a turn

@@ -98,6 +98,12 @@ A line can be typed at any time, claude takes it up when it can.
 
 When claude asks whether it may use a tool, `y` allows that one call, `a`
 allows calls like it until the session ends, and anything else refuses it.
+The question names the call by its first line. A call of more than that,
+a command of several lines or the arguments of a tool, is shown whole
+above the question first. A line you entered before the question was on
+the screen is not its answer: what you were typing is not taken for one,
+and what you typed while a command of yours ran is dropped when the
+question comes.
 
 With `CLAUDE_AIRLOCK_NET_ASK=1`, the egress filter asks whether the
 session may reach a host that is not on its list, and holds the request

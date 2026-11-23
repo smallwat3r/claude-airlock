@@ -64,9 +64,9 @@ RULE_WIDTH = 500
 # Seconds between two looks at whether there is still someone to ask
 LOOK_EVERY = 0.2
 # Where what is being typed cannot be seen (see sees_typing of Console), a
-# line entered sooner than this after a question was put was typed before
-# it could be read: it is not the answer, a yes among them would allow a
-# tool unseen
+# line entered sooner than this after a question came before the user was
+# typed before it could be read: it is not the answer, a yes among them
+# would allow a tool unseen
 TOO_SOON = 1.0
 # The least room the text of a question or an option is wrapped to,
 # however far in it starts
@@ -191,8 +191,13 @@ class Asker:
         if question.stale:
             question.stale = False
             return False
+        # Counted from when the question came before the user, not from
+        # when it was put: a command of theirs can run in between, and
+        # nothing is read then. A line entered before it came is none
+        # for it wherever it was typed.
+        shown = self._console.asked_for()
         unseen = self._console.interactive and not self._console.sees_typing
-        if unseen and time.monotonic() - question.put < TOO_SOON:
+        if shown is None or (unseen and shown < TOO_SOON):
             early = "that line came before the question could be read"
             self._page.say(
                 [labelled("chat", f"{early}, it is not taken for the answer")]
@@ -283,24 +288,40 @@ class Asker:
             return self._questions(tool_input)
         return self._permission(tool, tool_input, suggested_rule(request))
 
-    def _reviewed(self, tool: str, tool_input: dict, brief: list[str]) -> None:
-        """Show a call whole when the line that told of it was cut: the
-        plan claude wants to act on, the diff of an edit, a long
-        command."""
+    def _acted(self, tool: str, tool_input: dict) -> list[str]:
+        """The lines of a call as it would be made, whole. Not the reason
+        claude gives for a command, which is no part of what runs."""
+        acted = tool_input
+        if tool == "Bash":
+            acted = {
+                key: said for key, said in tool_input.items() if key != "description"
+            }
+        return call_details(tool, acted, None, self._project_dir, True)
+
+    def _reviewed(self, tool: str, tool_input: dict) -> str:
+        """Show the call that is asked about, and give what the question
+        names it by: its first line. Shown whole, from what claude asks
+        here, unless that line is all of it: a command of several lines,
+        the diff of an edit, the arguments of a tool, the plan claude
+        wants to act on. What the transcript told of the call is not
+        relied on for it, a line of a subagent's can come after the
+        question."""
+        acted = self._acted(tool, tool_input)
+        named = flat(acted[0]) if acted else ""
         plan = tool_input.get("plan")
         if tool == "ExitPlanMode" and isinstance(plan, str):
             lines = reply_lines(plan, self._page.width, self._page.layout.colour)
             self._page.note("plan", "what claude asks to go ahead with:")
             self._page.put([*lines, ""])
-            return
-        whole = call_details(tool, tool_input, None, self._project_dir, True)
-        if whole != brief:
+        elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
+            whole = call_details(tool, tool_input, None, self._project_dir, True)
             name = tool.lower()[:WHAT_WIDTH]
             self._page.say([f"{name:<{WHAT_WIDTH}}  the call whole:"])
             lines = prefixed("  ", whole)
             if self._page.layout.colour:
                 lines = [painted(DIFF_STYLES.get(line[:9], ""), line) for line in lines]
             self._page.put(lines)
+        return named[:ABOUT_WIDTH]
 
     def _permission(
         self, tool: str, tool_input: dict, rule: tuple[str, dict] | None
@@ -312,13 +333,11 @@ class Asker:
         allowed = {"behavior": "allow", "updatedInput": tool_input}
         if tool in self._allowed:
             return allowed
-        details = call_details(tool, tool_input, None, self._project_dir, False)
-        self._reviewed(tool, tool_input, details)
+        call = self._reviewed(tool, tool_input)
         # On one line and no longer than a name: it is claude's to give
         name = flat(tool).lower()[:NAME_WIDTH]
         scope = rule[0] if rule else f"every call of {name}"
         self._page.note("chat", f"a: not asked again in this session for {scope}")
-        call = flat(details[0])[:ABOUT_WIDTH] if details else ""
         typed = self.ask(f"allow {name} {call}? [y/a/N] ")
         answer = typed.strip().lower() if typed is not None else ""
         if answer in ALWAYS and rule:
