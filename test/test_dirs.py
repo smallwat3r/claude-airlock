@@ -164,6 +164,14 @@ class ExtraDirsTest(LauncherTest):
         (self.project / ".env.a:b\nc").touch()
         self.assert_refused(self.launch(), "cannot hide")
 
+    def test_a_path_protected_in_two_mounted_directories_is_mounted_once(self):
+        kit = self.project / "sub" / "kit"
+        kit.mkdir(parents=True)
+        flags = self.launch(
+            "--add-dir", "./sub", CLAUDE_AIRLOCK_PROTECT="sub/kit"
+        ).flags
+        assert flags.count(f"--volume={kit}:{kit}:ro,z") == 1
+
     def test_filesystem_root_is_refused(self):
         result = self.launch("--add-dir", "/")
         self.assert_refused(result, "it would defeat the sandbox")

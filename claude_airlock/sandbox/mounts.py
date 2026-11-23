@@ -172,7 +172,12 @@ def protected_dirs(
         for at, extra in enumerate(dirs):
             if extra.path in found:
                 dirs[at] = ExtraDir(extra.path, read_only=True)
-        inside += [m for m in found if m not in roots and m not in inside]
+        # Each once: a path is found in every mounted directory it is
+        # in, the same when one of those is inside another, and docker
+        # refuses to mount twice at one place
+        for mounted in found:
+            if mounted not in roots and mounted not in inside:
+                inside.append(mounted)
     return dirs, inside
 
 
