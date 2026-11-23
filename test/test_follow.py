@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from harness import LAUNCHER, LauncherTest, follow, pcap
 from test_capture import answer, dns_response, pcap_file, sample_capture, tcp
 
@@ -85,7 +85,7 @@ class Following:
         )
         self._timer = threading.Timer(PATIENCE, self.process.kill)
         self._timer.start()
-        test.addCleanup(self.stop)
+        test.cleanup.callback(self.stop)
 
     def until(self, text: str) -> str:
         """What is written up to and with the first line that has text."""
@@ -113,25 +113,23 @@ class Following:
 class FollowTest(LauncherTest):
     SESSION = "3fa9c0de-0000-4000-8000-000000000000"
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def transcript(self, sandbox: None) -> None:
         self.file = self.write_transcript(self.SESSION, [prompt("fix the build")])
 
     def test_a_call_shows_when_issued_and_its_result_when_it_comes(self):
         following = Following(self)
         shown = following.until("fix the build")
-        self.assertIn("# session     3fa9c0de-0000-4000-8000-000000000000", shown)
+        assert "# session     3fa9c0de-0000-4000-8000-000000000000" in shown
         add(self.file, call("t1", "Bash", command="make", description="Build"))
         shown = following.until("why: Build")
-        self.assertIn("claude   bash        [1] $ make", shown)
-        self.assertNotIn("result:", shown)
+        assert "claude   bash        [1] $ make" in shown
+        assert "result:" not in shown
         add(self.file, result("t1", "no rule", failed=True))
         shown = following.until("out: no rule")
-        self.assertIn(
-            "claude   bash        [1] result: FAILED, 2.0s, 1 line out", shown
-        )
-        self.assertNotIn("of: ", shown)
-        self.assertEqual(following.stop(), 0)
+        assert "claude   bash        [1] result: FAILED, 2.0s, 1 line out" in shown
+        assert "of: " not in shown
+        assert following.stop() == 0
 
     def test_a_result_names_its_call_when_another_came_between(self):
         following = Following(self)
@@ -144,10 +142,10 @@ class FollowTest(LauncherTest):
             prompt(DONE, 4),
         )
         shown = following.until(DONE)
-        self.assertIn("claude   read        [2] file: go.mod\n", shown)
-        self.assertIn("claude   bash        [1] of: $ make\n", shown)
-        self.assertIn("claude   bash        result: ok, 2.0s, 1 line out\n", shown)
-        self.assertEqual(shown.count("result:"), 1)
+        assert "claude   read        [2] file: go.mod\n" in shown
+        assert "claude   bash        [1] of: $ make\n" in shown
+        assert "claude   bash        result: ok, 2.0s, 1 line out\n" in shown
+        assert shown.count("result:") == 1
 
     def test_failed_shows_what_went_wrong_and_names_its_call(self):
         following = Following(self, "--failed")
@@ -160,11 +158,11 @@ class FollowTest(LauncherTest):
             call("t3", "Write", 4, file_path="/etc/motd", content="hi"),
         )
         shown = following.until("OUTSIDE PROJECT")
-        self.assertIn("# shown       only what went wrong\n", shown)
-        self.assertIn("claude   bash        [1] of: $ make\n", shown)
-        self.assertIn("claude   bash        result: FAILED, 2.0s, 1 line out\n", shown)
-        self.assertNotIn("$ ls", shown)
-        self.assertNotIn("prompt      fix the build", shown)
+        assert "# shown       only what went wrong\n" in shown
+        assert "claude   bash        [1] of: $ make\n" in shown
+        assert "claude   bash        result: FAILED, 2.0s, 1 line out\n" in shown
+        assert "$ ls" not in shown
+        assert "prompt      fix the build" not in shown
 
     def test_only_shows_the_kinds_named(self):
         following = Following(self, "--only=read", "--json")
@@ -175,16 +173,17 @@ class FollowTest(LauncherTest):
             result("t2", "module x"),
         )
         shown = following.until('"stage": "result"')
-        self.assertEqual(
-            [json.loads(line)["what"] for line in shown.splitlines()], ["read", "read"]
-        )
+        assert [json.loads(line)["what"] for line in shown.splitlines()] == [
+            "read",
+            "read",
+        ]
 
     def test_only_the_latest_of_what_came_before_is_shown(self):
         add(self.file, *(prompt(f"number {n}", n) for n in range(1, 21)))
         shown = Following(self).until("number 20")
-        self.assertIn("# 11 earlier events, see claude-airlock --trace", shown)
-        self.assertNotIn("number 10\n", shown)
-        self.assertIn("number 11\n", shown)
+        assert "# 11 earlier events, see claude-airlock --trace" in shown
+        assert "number 10\n" not in shown
+        assert "number 11\n" in shown
 
     def test_a_session_that_starts_later_is_picked_up(self):
         old = self.write_transcript("0a", [prompt("long ago")])
@@ -194,9 +193,9 @@ class FollowTest(LauncherTest):
         self.write_transcript("0b", [prompt("a new session")])
         add(old, prompt("resumed", 5))
         shown = following.until("resumed")
-        self.assertIn("# session     0b  a new session", shown)
-        self.assertIn("# session     0a  long ago", shown)
-        self.assertNotIn("prompt      long ago", shown)
+        assert "# session     0b  a new session" in shown
+        assert "# session     0a  long ago" in shown
+        assert "prompt      long ago" not in shown
 
     def test_what_a_subagent_did_before_is_not_shown_as_done_now(self):
         earlier = self.write_transcript("0e" + self.SESSION[2:], [prompt("earlier")])
@@ -214,9 +213,9 @@ class FollowTest(LauncherTest):
             shown = []
             for _ in range(follow.LOOK_EVERY + 1):
                 shown += [event.details[0] for _, event in follower.poll().events]
-        self.assertIn("go on", shown)
-        self.assertIn("$ echo during the follow", shown)
-        self.assertNotIn("$ echo before the follow", shown)
+        assert "go on" in shown
+        assert "$ echo during the follow" in shown
+        assert "$ echo before the follow" not in shown
 
     def test_the_calls_remembered_are_bounded_without_a_capture(self):
         timeline = stream.Timeline()
@@ -234,57 +233,57 @@ class FollowTest(LauncherTest):
                     timeline.take(said(number, Stage.RESULT, when + 1))
             # Those that ended long ago are let go of, and of those that
             # never did, the oldest
-            self.assertLessEqual(len(timeline._calls), 5)
-            self.assertIn("c48", timeline._calls)
+            assert len(timeline._calls) <= 5
+            assert "c48" in timeline._calls
         # One dated ahead does not make what is read after it too long ago
         timeline.take(said(60, Stage.CALL, now + 10**6))
         late = Event(now, Who.SANDBOX, Kind.NET, ["tcp"], {})
         timeline.take(late)
-        self.assertIn("during", late.fields)
+        assert "during" in late.fields
 
     def test_a_named_session_is_followed_alone(self):
         other = self.write_transcript("0a", [prompt("the other one")])
         following = Following(self, "3fa9")
         add(other, prompt("more of the other"))
         add(self.file, prompt(DONE, 4))
-        self.assertNotIn("other", following.until(DONE))
+        assert "other" not in following.until(DONE)
 
     def test_json_tells_a_call_from_its_result(self):
         following = Following(self, "--json")
         add(self.file, call("t1", "Bash", command="make"), result("t1", "done"))
         add(self.file, prompt(DONE, 4))
         asked, issued, ended, _ = map(json.loads, following.until(DONE).splitlines())
-        self.assertEqual((asked["what"], asked["session"]), ("prompt", self.SESSION))
-        self.assertEqual((issued["stage"], issued["id"]), ("call", "t1"))
-        self.assertEqual(issued["input"], {"command": "make"})
-        self.assertNotIn("failed", issued)
-        self.assertEqual((ended["stage"], ended["id"]), ("result", "t1"))
-        self.assertEqual((ended["tool"], ended["what"]), ("Bash", "bash"))
-        self.assertEqual((ended["failed"], ended["output"]), (False, "done"))
+        assert (asked["what"], asked["session"]) == ("prompt", self.SESSION)
+        assert (issued["stage"], issued["id"]) == ("call", "t1")
+        assert issued["input"] == {"command": "make"}
+        assert "failed" not in issued
+        assert (ended["stage"], ended["id"]) == ("result", "t1")
+        assert (ended["tool"], ended["what"]) == ("Bash", "bash")
+        assert (ended["failed"], ended["output"]) == (False, "done")
 
     def test_what_a_session_writes_cannot_drive_the_terminal(self):
         following = Following(self)
         add(self.file, call("t1", "Bash", command="make \x1b]0;owned\x07all"))
         add(self.file, call("t2", "Bash", command="a\nforged line"), prompt(DONE, 4))
         shown = following.until(DONE)
-        self.assertIn("$ make ]0;ownedall", shown)
-        self.assertNotRegex(shown, r"[\x00-\x08\x0b-\x1f\x7f]")
-        self.assertIn("claude   bash        $   forged line", shown)
+        assert "$ make ]0;ownedall" in shown
+        assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", shown)
+        assert "claude   bash        $   forged line" in shown
 
     def test_of_what_is_said_only_the_first_line_is_shown(self):
         for form in ((), ("--verbose",)):
             following = Following(self, *form)
             add(self.file, prompt("\n  \none\n\nand more\nlines", 4), prompt(DONE, 5))
             shown = following.until(DONE)
-            self.assertIn("prompt      one\n", shown)
-            self.assertNotIn("and more", shown)
+            assert "prompt      one\n" in shown
+            assert "and more" not in shown
             following.stop()
 
     def test_json_has_all_of_what_is_said(self):
         following = Following(self, "--json")
         add(self.file, prompt("one\n\ntwo", 4), prompt(DONE, 5))
         said = [json.loads(line) for line in following.until(DONE).splitlines()]
-        self.assertEqual(said[1]["text"], "one\n\ntwo")
+        assert said[1]["text"] == "one\n\ntwo"
 
     def test_a_step_of_the_model_says_what_it_used_once_with_verbose(self):
         following = Following(self, "--verbose")
@@ -294,37 +293,33 @@ class FollowTest(LauncherTest):
             entry["message"].update(id="msg_1", usage=usage)
         add(self.file, *entries, prompt(DONE, 4))
         shown = following.until(DONE)
-        self.assertEqual(
-            shown.count("claude   step        90 tokens out, 501 in (500 new)"), 1
-        )
-        self.assertLess(shown.index("step        90"), shown.index("$ make"))
+        assert shown.count("claude   step        90 tokens out, 501 in (500 new)") == 1
+        assert shown.index("step        90") < shown.index("$ make")
         entries[0]["message"]["id"] = entries[1]["message"]["id"] = "msg_2"
         add(self.file, *entries, prompt("once more", 5))
-        self.assertNotIn("step", Following(self).until("once more"))
+        assert "step" not in Following(self).until("once more")
 
     def test_colour_marks_what_a_line_is(self):
         following = Following(self, FORCE_COLOR="1")
         fetch = call("t2", "WebFetch", url="https://good.test")
         add(self.file, call("t1", "Bash", command="make"), fetch, prompt(DONE, 4))
         shown = following.until(DONE)
-        self.assertIn(
-            "\x1b[34mclaude   webfetch    [2] url: https://good.test\x1b[0m", shown
-        )
-        self.assertIn("\x1b[2m# session", shown)
-        self.assertIn("\x1b[33mclaude   bash        [1] $ make\x1b[0m", shown)
-        self.assertIn("\x1b[2muser     prompt      fix the build\x1b[0m", shown)
+        assert "\x1b[34mclaude   webfetch    [2] url: https://good.test\x1b[0m" in shown
+        assert "\x1b[2m# session" in shown
+        assert "\x1b[33mclaude   bash        [1] $ make\x1b[0m" in shown
+        assert "\x1b[2muser     prompt      fix the build\x1b[0m" in shown
 
     def test_without_a_session_it_waits_for_one(self):
         self.file.unlink()
         following = Following(self)
         following.until("# no session of this project yet")
         self.write_transcript("0b", [prompt("the first")])
-        self.assertIn("# session     0b  the first", following.until("the first"))
+        assert "# session     0b  the first" in following.until("the first")
 
     def test_a_list_cannot_be_followed(self):
         result = self.launch("--trace", "--follow", "list")
-        self.assertEqual(result.status, 1)
-        self.assertIn("usage: claude-airlock --trace", result.stderr)
+        assert result.status == 1
+        assert "usage: claude-airlock --trace" in result.stderr
 
     def test_nothing_is_asked_of_docker_about_another_project(self):
         about = {"project": "/elsewhere", "start": 5, "pid": 1}
@@ -332,17 +327,17 @@ class FollowTest(LauncherTest):
         following = Following(self, FAKE_PS=ps)
         shown = following.until("fix the build")
         following.stop()
-        self.assertIn("# network     no session of this project is recorded", shown)
-        self.assertEqual([c for c in self.calls() if c[0] != "ps"], [])
+        assert "# network     no session of this project is recorded" in shown
+        assert [c for c in self.calls() if c[0] != "ps"] == []
 
 
 class FollowNetworkTest(LauncherTest):
     SIDECAR = "claude-proj.capture"
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def watched_session(self, sandbox: None) -> None:
         self.now = time.time()
-        stamp = datetime.fromtimestamp(self.now + 20, timezone.utc).isoformat()
+        stamp = datetime.fromtimestamp(self.now + 20, UTC).isoformat()
         self.last = {"type": "user", "timestamp": stamp, "message": {"content": DONE}}
         self.file = self.write_transcript("0a", [prompt("long ago")])
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
@@ -360,7 +355,7 @@ class FollowNetworkTest(LauncherTest):
             FAKE_CAPTURE_DNS=str(dns),
         )
         shown = following.until("198.51.100.7")
-        self.assertIn("tcp/https good.test (198.51.100.7):443", shown)
+        assert "tcp/https good.test (198.51.100.7):443" in shown
 
     def test_a_tcpdump_that_died_is_said_while_following(self):
         captured = self.work / "capture.pcap"
@@ -372,14 +367,13 @@ class FollowNetworkTest(LauncherTest):
             FAKE_CAPTURE_DIED="dns:137",
         )
         shown = following.until("INCOMPLETE")
-        self.assertIn(
+        assert (
             "# network     the capture of claude-proj is INCOMPLETE, a recorder"
-            " ended before the session did: dns (status 137)",
-            shown,
+            " ended before the session did: dns (status 137)" in shown
         )
         # Once, not at every look
         add(self.file, self.last)
-        self.assertNotIn("INCOMPLETE", following.until(DONE))
+        assert "INCOMPLETE" not in following.until(DONE)
 
     def test_a_tcpdump_at_its_packet_limit_is_not_said_to_have_died(self):
         captured = self.work / "capture.pcap"
@@ -388,36 +382,30 @@ class FollowNetworkTest(LauncherTest):
             self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured), FAKE_CAPTURE_DIED="dns:0"
         )
         add(self.file, self.last)
-        self.assertNotIn("INCOMPLETE", following.until(DONE))
+        assert "INCOMPLETE" not in following.until(DONE)
 
     def test_connections_show_as_the_capture_grows(self):
         captured = self.work / "capture.pcap"
         captured.write_bytes(sample_capture(self.now))
         following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
         shown = following.until("203.0.113.9")
-        self.assertIn("# network     following the capture of claude-proj", shown)
-        self.assertIn(
-            "sandbox  net         tcp/https good.test (198.51.100.7):443", shown
-        )
-        self.assertNotIn("lookup", shown)
+        assert "# network     following the capture of claude-proj" in shown
+        assert "sandbox  net         tcp/https good.test (198.51.100.7):443" in shown
+        assert "lookup" not in shown
         more = pcap_file([(self.now + 9, tcp("192.0.2.44", 6379), True)])
         with open(captured, "ab") as growing:
             # Without the header of the file, and the packet in two parts
             growing.write(more[24:-10])
         add(self.file, prompt("in between"))
-        self.assertNotIn("192.0.2.44", following.until("in between"))
+        assert "192.0.2.44" not in following.until("in between")
         with open(captured, "ab") as growing:
             growing.write(more[-10:])
         add(self.file, self.last)
         shown = following.until(DONE)
-        self.assertEqual(
-            shown.count("sandbox  net         tcp/redis 192.0.2.44:6379"), 1
-        )
-        self.assertNotIn("198.51.100.7", shown)
+        assert shown.count("sandbox  net         tcp/redis 192.0.2.44:6379") == 1
+        assert "198.51.100.7" not in shown
         tails = [c for c in self.calls() if c[:1] == ["exec"]]
-        self.assertEqual(
-            tails[0], ["exec", self.SIDECAR, "tail", "-c", "+1", "/capture.pcap"]
-        )
+        assert tails[0] == ["exec", self.SIDECAR, "tail", "-c", "+1", "/capture.pcap"]
 
     def test_how_a_session_is_doing_shows_as_its_watcher_says_it(self):
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
@@ -437,14 +425,14 @@ class FollowNetworkTest(LauncherTest):
             FAKE_PROXY_LOG=str(said),
         )
         shown = following.until("OUT OF MEMORY")
-        self.assertEqual(shown.count("sandbox  health"), 2)
-        self.assertIn("sandbox  health      mem 2g of 16g (12%)  cpu 12%", shown)
-        self.assertIn("gone since: [812] node 8g", shown)
+        assert shown.count("sandbox  health") == 2
+        assert "sandbox  health      mem 2g of 16g (12%)  cpu 12%" in shown
+        assert "gone since: [812] node 8g" in shown
         # Asked of the watcher from outside, nothing is run next to the session
         asked = [c for c in self.calls() if c[:1] == ["logs"]]
-        self.assertEqual(asked[0][2], "claude-proj.procs")
-        self.assertRegex(asked[0][1], r"^--since=\d+\.\d{3}$")
-        self.assertEqual([c for c in self.calls() if c[:1] == ["exec"]], [])
+        assert asked[0][2] == "claude-proj.procs"
+        assert re.search(r"^--since=\d+\.\d{3}$", asked[0][1])
+        assert [c for c in self.calls() if c[:1] == ["exec"]] == []
 
     def test_what_becomes_of_a_connection_shows_when_it_does(self):
         captured = self.work / "capture.pcap"
@@ -459,23 +447,21 @@ class FollowNetworkTest(LauncherTest):
         )
         shown = map(json.loads, following.until(there).splitlines())
         (start,) = (event for event in shown if event["what"] == "net")
-        self.assertEqual((start["stage"], start.get("outcome")), ("open", None))
+        assert (start["stage"], start.get("outcome")) == ("open", None)
         closing = tcp(there, 443, 0x11, sequence=1101, acknowledged=5201)
         with open(captured, "ab") as growing:
             growing.write(pcap_file([(self.now + 4, closing, True)])[24:])
         end = json.loads(following.until(there).splitlines()[-1])
-        self.assertEqual((end["stage"], end["outcome"]), ("outcome", "closed"))
-        self.assertEqual(
-            (end["seconds"], end["bytes_out"], end["bytes_in"]), (3.0, 100, 200)
-        )
-        self.assertEqual(end["source_port"], start["source_port"])
+        assert (end["stage"], end["outcome"]) == ("outcome", "closed")
+        assert (end["seconds"], end["bytes_out"], end["bytes_in"]) == (3.0, 100, 200)
+        assert end["source_port"] == start["source_port"]
 
     def test_a_connection_is_put_with_the_call_running_then(self):
         captured = self.work / "capture.pcap"
         captured.write_bytes(pcap_file([]))
         following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
         following.until("long ago")
-        now = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
+        now = datetime.fromtimestamp(time.time(), UTC).isoformat()
         running = call("t1", "Bash", command="curl good.test")
         add(self.file, {**running, "timestamp": now})
         following.until("$ curl good.test")
@@ -484,7 +470,7 @@ class FollowNetworkTest(LauncherTest):
                 pcap_file([(time.time(), tcp("198.51.100.7", 443), True)])[24:]
             )
         shown = following.until("198.51.100.7")
-        self.assertIn("198.51.100.7:443  during: [1] $ curl good.test\n", shown)
+        assert "198.51.100.7:443  during: [1] $ curl good.test\n" in shown
 
     def test_verbose_adds_the_lookups(self):
         captured = self.work / "capture.pcap"
@@ -493,7 +479,7 @@ class FollowNetworkTest(LauncherTest):
             self, "--verbose", FAKE_PS=self.ps, FAKE_CAPTURE=str(captured)
         )
         shown = following.until("203.0.113.9")
-        self.assertIn("sandbox  dns         lookup good.test", shown)
+        assert "sandbox  dns         lookup good.test" in shown
 
     def test_the_requests_of_a_filtered_session_show_as_they_are_logged(self):
         mine, other = "172.20.0.5", "172.20.0.9"
@@ -523,9 +509,9 @@ class FollowNetworkTest(LauncherTest):
             )
         add(self.file, self.last)
         shown = following.until(DONE)
-        self.assertIn("net         proxy CONNECT [31mevil.test:443 DENIED 300 B", shown)
+        assert "net         proxy CONNECT [31mevil.test:443 DENIED 300 B" in shown
         for absent in ("before.test", "theirs.test", "half", "\x1b"):
-            self.assertNotIn(absent, shown)
+            assert absent not in shown
 
     def test_sessions_followed_together_are_told_apart_by_container(self):
         mine, other = "172.20.0.5", "172.20.0.9"
@@ -554,19 +540,16 @@ class FollowNetworkTest(LauncherTest):
             )
         add(self.file, self.last)
         shown = following.until(DONE)
-        self.assertIn(
-            "net         [claude-proj] proxy/https CONNECT mine.test:443", shown
-        )
-        self.assertIn(
-            "net         [claude-proj-2] proxy/https CONNECT theirs.test:443", shown
+        assert "net         [claude-proj] proxy/https CONNECT mine.test:443" in shown
+        assert (
+            "net         [claude-proj-2] proxy/https CONNECT theirs.test:443" in shown
         )
 
 
-class TranscriptTailTest(unittest.TestCase):
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.file = Path(temp.name, "0a.jsonl")
+class TranscriptTailTest:
+    @pytest.fixture(autouse=True)
+    def transcript(self, tmp_path: Path) -> None:
+        self.file = tmp_path / "0a.jsonl"
         self.file.touch()
 
     def said(self, tail) -> list[str]:
@@ -576,19 +559,16 @@ class TranscriptTailTest(unittest.TestCase):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         whole = json.dumps(prompt("hello")) + "\n"
         self.file.write_text(whole[:20])
-        self.assertEqual(self.said(tail), [])
+        assert self.said(tail) == []
         self.file.write_text(whole + "{not json}\n[1]\n" + whole)
         # A whole line that holds no entry is not Claude Code's doing
-        self.assertEqual(
-            self.said(tail),
-            [
-                "hello",
-                "UNREADABLE line of the transcript: {not json}",
-                "UNREADABLE line of the transcript: [1]",
-                "hello",
-            ],
-        )
-        self.assertEqual(self.said(tail), [])
+        assert self.said(tail) == [
+            "hello",
+            "UNREADABLE line of the transcript: {not json}",
+            "UNREADABLE line of the transcript: [1]",
+            "hello",
+        ]
+        assert self.said(tail) == []
 
     def test_a_line_too_long_to_hold_is_dropped_and_said_to_be(self):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
@@ -598,11 +578,11 @@ class TranscriptTailTest(unittest.TestCase):
             with open(self.file, "a") as transcript:
                 transcript.write(json.dumps(prompt("y" * 500))[:400])
             too_long = "UNREADABLE line of the transcript: (a line too long to read)"
-            self.assertEqual(self.said(tail), ["x" * 200 + "...", too_long])
+            assert self.said(tail) == ["x" * 200 + "...", too_long]
             with open(self.file, "a") as transcript:
                 transcript.write("the rest of it\n")
             add(self.file, prompt("after"))
-            self.assertEqual(self.said(tail), ["after"])
+            assert self.said(tail) == ["after"]
 
     def test_a_line_many_times_too_long_is_said_once(self):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
@@ -614,23 +594,23 @@ class TranscriptTailTest(unittest.TestCase):
             # Read in pieces, and found again without its end every time
             with open(self.file, "a") as transcript:
                 transcript.write(json.dumps(prompt("x" * 2000))[:1000])
-            self.assertEqual(self.said(tail), [too_long])
+            assert self.said(tail) == [too_long]
             with open(self.file, "a") as transcript:
                 transcript.write("y" * 1000)
-            self.assertEqual(self.said(tail), [])
+            assert self.said(tail) == []
             with open(self.file, "a") as transcript:
                 transcript.write("its end\n")
             add(self.file, prompt("after"))
-            self.assertEqual(self.said(tail), ["after"])
+            assert self.said(tail) == ["after"]
 
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         add(self.file, prompt("one"), prompt("two"))
-        self.assertEqual(self.said(tail), ["one", "two"])
+        assert self.said(tail) == ["one", "two"]
         self.file.write_text(json.dumps(prompt("anew")) + "\n")
-        self.assertEqual(self.said(tail), [])
+        assert self.said(tail) == []
         add(self.file, prompt("three"))
-        self.assertEqual(self.said(tail), ["three"])
+        assert self.said(tail) == ["three"]
 
     def test_a_link_or_a_pipe_in_its_place_is_not_read(self):
         secret = self.file.with_name("secret")
@@ -638,27 +618,23 @@ class TranscriptTailTest(unittest.TestCase):
         self.file.unlink()
         self.file.symlink_to(secret)
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
-        self.assertEqual(self.said(tail), [])
+        assert self.said(tail) == []
         self.file.unlink()
         os.mkfifo(self.file)
-        self.assertEqual(self.said(tail), [])
+        assert self.said(tail) == []
 
 
-class PcapReaderTest(unittest.TestCase):
+class PcapReaderTest:
     def test_a_capture_fed_in_pieces_reads_as_the_whole(self):
         whole = sample_capture(1000.0)
         for size in (1, 7, 4096):
             reader, found = PcapReader(), pcap.Capture()
             for start in range(0, len(whole), size):
                 pcap.take_frames(found, reader.feed(whole[start : start + size]))
-            self.assertEqual(len(found.connections), 3)
-            self.assertEqual(found.packets, 11)
+            assert len(found.connections) == 3
+            assert found.packets == 11
 
     def test_nothing_is_read_past_what_is_not_a_capture(self):
         reader = PcapReader()
-        self.assertEqual(list(reader.feed(b"not a capture at all, really")), [])
-        self.assertEqual(list(reader.feed(sample_capture(1000.0))), [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert list(reader.feed(b"not a capture at all, really")) == []
+        assert list(reader.feed(sample_capture(1000.0))) == []

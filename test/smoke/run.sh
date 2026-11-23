@@ -95,15 +95,15 @@ preflight() {
     echo "This runs on the host, not inside the sandbox." >&2
     exit 1
   fi
-  check "python3 is 3.9 or later" \
-    python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'
+  check "python3 is 3.13 or later" \
+    python3 -c 'import sys; sys.exit(sys.version_info < (3, 13))'
   check "docker daemon is reachable" docker info
   [ "${FAILED}" = 0 ] || exit 1
 }
 
 unit_tests() {
   section "Unit tests"
-  if "${ROOT}/test/launcher_test.py" 2>&1 | tail -3; then
+  if (cd "${ROOT}" && uv run --locked pytest -q 2>&1 | tail -3); then
     ok "launcher tests pass"
   else
     fail "launcher tests"

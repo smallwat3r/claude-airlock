@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import json
 import time
-import unittest
 
+import pytest
 from harness import LauncherTest, prompts_at
 from test_capture import answer, dns_failure, dns_response, ipv4, pcap_file, tcp, udp
 
@@ -24,8 +24,8 @@ def uploaded(address: str, port: int, megabytes: int) -> list[bytes]:
 
 
 class DigestTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def capture_file(self, sandbox: None) -> None:
         self.capture_file = self.work / "capture.pcap"
 
     def session(
@@ -51,39 +51,37 @@ class DigestTest(LauncherTest):
         ]
 
     def test_the_first_session_of_a_project_has_nothing_to_compare_with(self):
-        self.assertNotIn(HEADING, self.session(*self.known()))
+        assert HEADING not in self.session(*self.known())
 
     def test_a_destination_reached_for_the_first_time_is_said(self):
         self.session(*self.known())
         again = self.session(*self.known())
-        self.assertNotIn(HEADING, again)
+        assert HEADING not in again
         # The same name at another address is the same destination
         moved = [
             (dns_response("known.test", "198.51.100.99"), False),
             (tcp("198.51.100.99", 443), True),
         ]
-        self.assertNotIn(HEADING, self.session(*moved))
+        assert HEADING not in self.session(*moved)
         new = self.session(
             *self.known(),
             (tcp("203.0.113.9", 443), True),
             (ipv4(17, "172.20.0.5", "203.0.113.9", udp(53)), True),
         )
-        self.assertIn(HEADING, new)
-        self.assertIn("  reached for the first time from this project:", new)
-        self.assertIn("    tcp/https 203.0.113.9:443", new)
-        self.assertIn("    udp/dns 203.0.113.9:53", new)
-        self.assertNotIn("known.test", new)
+        assert HEADING in new
+        assert "  reached for the first time from this project:" in new
+        assert "    tcp/https 203.0.113.9:443" in new
+        assert "    udp/dns 203.0.113.9:53" in new
+        assert "known.test" not in new
         # And is known from then on
-        self.assertNotIn(HEADING, self.session((tcp("203.0.113.9", 443), True)))
+        assert HEADING not in self.session((tcp("203.0.113.9", 443), True))
 
     def test_what_is_known_is_kept_per_project(self):
         self.session(*self.known())
         known = json.loads((self.state / "destinations.json").read_text())
-        self.assertEqual(list(known), [str(self.project)])
-        self.assertEqual(list(known[str(self.project)]), ["tcp known.test 443"])
-        self.assertEqual(
-            (self.state / "destinations.json").stat().st_mode & 0o777, 0o600
-        )
+        assert list(known) == [str(self.project)]
+        assert list(known[str(self.project)]) == ["tcp known.test 443"]
+        assert (self.state / "destinations.json").stat().st_mode & 511 == 384
 
     def test_a_large_upload_is_said_but_not_one_to_the_model(self):
         self.session(*self.known())
@@ -92,12 +90,12 @@ class DigestTest(LauncherTest):
             *((p, i != 1) for i, p in enumerate(uploaded("198.51.100.7", 443, 14))),
         ]
         said = self.session(*packets)
-        self.assertIn("  sent 14 MB to tcp/https known.test (198.51.100.7):443", said)
+        assert "  sent 14 MB to tcp/https known.test (198.51.100.7):443" in said
         small = [(p, i != 1) for i, p in enumerate(uploaded("198.51.100.7", 443, 2))]
-        self.assertNotIn("sent", self.session(*self.known(), *small))
+        assert "sent" not in self.session(*self.known(), *small)
         model = [(p, i != 1) for i, p in enumerate(uploaded("160.79.104.10", 443, 90))]
         self.session(*model)
-        self.assertNotIn("sent", self.session(*model))
+        assert "sent" not in self.session(*model)
 
     def test_a_name_does_not_make_an_address_the_models(self):
         posing = [
@@ -105,15 +103,13 @@ class DigestTest(LauncherTest):
             *((p, i != 1) for i, p in enumerate(uploaded("203.0.113.9", 443, 20))),
         ]
         self.session(*posing)
-        self.assertIn(
-            "sent 20 MB to tcp/https api.anthropic.com", self.session(*posing)
-        )
+        assert "sent 20 MB to tcp/https api.anthropic.com" in self.session(*posing)
 
     def test_lookups_that_stand_out_are_said(self):
         name = "a" * 60 + ".t.test"
         said = self.session((dns_failure(name), False))
-        self.assertIn("  lookups that stand out:", said)
-        self.assertIn(f"    {name}: an unusually long name", said)
+        assert "  lookups that stand out:" in said
+        assert f"    {name}: an unusually long name" in said
 
     def test_a_write_outside_the_project_is_said(self):
         stamp = prompts_at(time.time())[0]["timestamp"]
@@ -125,7 +121,7 @@ class DigestTest(LauncherTest):
         entry["message"] = {"content": [write, inside]}
         transcript = self.write_transcript("0a", [])
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
-        self.assertIn("  written outside the project:\n    /home/me/.bashrc\n", said)
+        assert "  written outside the project:\n    /home/me/.bashrc\n" in said
 
     def test_something_read_that_may_instruct_the_session_is_said(self):
         stamp = prompts_at(time.time())[0]["timestamp"]
@@ -141,10 +137,9 @@ class DigestTest(LauncherTest):
             f"echo '{json.dumps(entry)}' >> '{transcript}'\n" for entry in (asked, read)
         )
         said = self.session(session=lines)
-        self.assertIn(
+        assert (
             "  POSSIBLE INJECTION in the transcript of 0a: 1 of what it read may"
-            " be written to instruct it, see --trace --failed\n",
-            said,
+            " be written to instruct it, see --trace --failed\n" in said
         )
 
     def test_a_write_of_a_subagent_outside_the_project_is_said(self):
@@ -158,8 +153,8 @@ class DigestTest(LauncherTest):
         subagents.mkdir(parents=True)
         theirs = subagents / "agent-a1.jsonl"
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{theirs}'")
-        self.assertIn("  written outside the project:\n    /home/me/.profile\n", said)
-        self.assertNotIn("a.txt", said)
+        assert "  written outside the project:\n    /home/me/.profile\n" in said
+        assert "a.txt" not in said
 
     def test_a_transcript_changed_during_the_session_is_said(self):
         entries = prompts_at(time.time(), time.time() + 1, time.time() + 2)
@@ -175,14 +170,10 @@ class DigestTest(LauncherTest):
         wait = f"n=0; until {copied} || [ $n -ge 300 ]; do sleep 0.1; n=$((n+1)); done"
         cut = f"cat '{added}' >> '{transcript}'; {wait}; echo '{kept}' > '{transcript}'"
         said = self.session(session=cut)
-        self.assertIn(
-            "  the transcript of 0abcdef0 was changed: 2 lines the launcher copied",
-            said,
+        assert (
+            "  the transcript of 0abcdef0 was changed: 2 lines the launcher copied"
+            in said
         )
 
     def test_nothing_is_said_without_a_record(self):
-        self.assertNotIn(HEADING, self.launch().stderr)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert HEADING not in self.launch().stderr

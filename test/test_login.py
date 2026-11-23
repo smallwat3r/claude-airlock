@@ -9,10 +9,10 @@ import json
 import os
 import subprocess
 import sys
-import unittest
 import unittest.mock
 from pathlib import Path
 
+import pytest
 from harness import LauncherTest, settings
 
 login = importlib.import_module("claude_airlock.sandbox.login")
@@ -79,65 +79,65 @@ def renewed(login: Path) -> str:
 class LoginSessionTest(LauncherTest):
     """With the launcher run as a command, a session played by a shell."""
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def logins(self, sandbox: None) -> None:
         self.ours = self.home / ".claude" / LOGIN
         self.theirs = self.base / LOGIN
 
     def test_a_session_starts_with_the_hosts_login(self):
         self.ours.write_text("host")
         result = self.launch(session=f"cat '{self.theirs}' > '{self.work}/seen'")
-        self.assertEqual(result.status, 0, result.stderr)
-        self.assertEqual((self.work / "seen").read_text(), "host")
-        self.assertEqual(self.theirs.stat().st_mode & 0o777, 0o600)
+        assert result.status == 0, result.stderr
+        assert (self.work / "seen").read_text() == "host"
+        assert self.theirs.stat().st_mode & 511 == 384
         # Carried, not mounted: a mount of the one file would not follow
         # the host's next renewal, which replaces the file
-        self.assertFalse([flag for flag in result.flags if LOGIN in flag])
+        assert not [flag for flag in result.flags if LOGIN in flag]
 
     def test_what_a_session_logs_in_with_is_the_hosts_while_it_runs(self):
         self.ours.write_text("before")
         renew = renewed(self.theirs)
         seen = f"sleep 1; cat '{self.ours}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
-        self.assertEqual((self.work / "seen").read_text(), RENEWED)
-        self.assertEqual(self.ours.stat().st_mode & 0o777, 0o600)
+        assert (self.work / "seen").read_text() == RENEWED
+        assert self.ours.stat().st_mode & 511 == 384
 
     def test_what_the_host_renews_reaches_a_running_session(self):
         self.ours.write_text("before")
         renew = renewed(self.ours)
         seen = f"sleep 1; cat '{self.theirs}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
-        self.assertEqual((self.work / "seen").read_text(), RENEWED)
+        assert (self.work / "seen").read_text() == RENEWED
 
     def test_what_a_session_writes_as_it_ends_is_not_lost(self):
         self.ours.write_text("before")
         self.launch(session=f"printf %s '{RENEWED}' > '{self.theirs}'")
-        self.assertEqual(self.ours.read_text(), RENEWED)
+        assert self.ours.read_text() == RENEWED
 
     def test_what_a_session_leaves_that_is_no_login_is_not_the_hosts(self):
         self.ours.write_text("before")
         self.launch(session=f"printf %s 'not a login' > '{self.theirs}'")
-        self.assertEqual(self.ours.read_text(), "before")
+        assert self.ours.read_text() == "before"
         # The host's is put back, the next session starts logged in
-        self.assertEqual(self.theirs.read_text(), "before")
+        assert self.theirs.read_text() == "before"
 
     def test_a_logout_in_a_session_is_the_hosts_too(self):
         self.ours.write_text("login")
         self.launch(session=f"rm '{self.theirs}'")
-        self.assertFalse(self.ours.exists())
+        assert not self.ours.exists()
 
     def test_a_login_kept_in_the_sandbox_alone_is_carried_to_the_host(self):
         self.launch(session=f"printf %s '{RENEWED}' > '{self.theirs}'")
-        self.assertEqual(self.ours.read_text(), RENEWED)
+        assert self.ours.read_text() == RENEWED
         self.launch(session="true")
-        self.assertEqual(self.theirs.read_text(), RENEWED)
+        assert self.theirs.read_text() == RENEWED
 
 
 class LoginPairTest(LauncherTest):
     """Called directly, for what happens between two sessions."""
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def login_pair(self, sandbox: None) -> None:
         self.host = settings.detect_host({"HOME": str(self.home)})
         self.ours = self.home / ".claude" / LOGIN
         self.theirs = self.base / LOGIN
@@ -147,7 +147,7 @@ class LoginPairTest(LauncherTest):
     def settled(self, ours: str | None, theirs: str | None) -> None:
         self.pair.settle()
         for file, content in ((self.ours, ours), (self.theirs, theirs)):
-            self.assertEqual(file.read_text() if file.exists() else None, content)
+            assert (file.read_text() if file.exists() else None) == content
 
     def test_the_side_that_changed_is_the_one_kept(self):
         self.ours.write_text("one")
@@ -165,8 +165,8 @@ class LoginPairTest(LauncherTest):
         self.settled("one", "one")
         self.ours.unlink()
         login.LoginPair(self.host).settle()
-        self.assertFalse(self.theirs.exists())
-        self.assertFalse(self.ours.exists())
+        assert not self.theirs.exists()
+        assert not self.ours.exists()
 
     def test_when_both_changed_the_one_written_last_is_kept(self):
         self.ours.write_text("one")
@@ -176,7 +176,9 @@ class LoginPairTest(LauncherTest):
         os.utime(self.ours, (1, 1))
         self.settled(RENEWED, RENEWED)
 
-    def test_only_what_reads_as_a_login_is_carried_to_the_host(self):
+    def test_only_what_reads_as_a_login_is_carried_to_the_host(
+        self, subtests: pytest.Subtests
+    ):
         self.ours.write_text("host")
         self.settled("host", "host")
         account = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}
@@ -189,7 +191,7 @@ class LoginPairTest(LauncherTest):
             "[" * 100_000,
         )
         for content in unfit:
-            with self.subTest(content=content[:40]):
+            with subtests.test(content=content[:40]):
                 self.theirs.write_text(content)
                 # Whichever was written last
                 os.utime(self.ours, (1, 1))
@@ -201,15 +203,15 @@ class LoginPairTest(LauncherTest):
     def test_what_is_no_login_in_the_sandbox_alone_is_dropped(self):
         self.theirs.write_text("not a login")
         self.pair.settle()
-        self.assertFalse(self.ours.exists())
-        self.assertFalse(self.theirs.exists())
+        assert not self.ours.exists()
+        assert not self.theirs.exists()
 
     def test_what_is_noted_is_not_the_login(self):
         self.ours.write_text("secret")
         self.settled("secret", "secret")
         noted = self.state / "login-synced"
-        self.assertNotIn("secret", noted.read_text())
-        self.assertEqual(noted.stat().st_mode & 0o777, 0o600)
+        assert "secret" not in noted.read_text()
+        assert noted.stat().st_mode & 511 == 384
 
     def test_a_link_left_in_the_sandbox_is_not_followed(self):
         elsewhere = self.home / "elsewhere"
@@ -218,23 +220,23 @@ class LoginPairTest(LauncherTest):
         self.ours.write_text("login")
         self.pair.settle()
         # Neither read as the sandbox's login, nor written through
-        self.assertEqual(self.ours.read_text(), "login")
-        self.assertEqual(elsewhere.read_text(), "not a login")
+        assert self.ours.read_text() == "login"
+        assert elsewhere.read_text() == "not a login"
 
     def test_a_look_that_fails_does_not_end_the_session(self):
         self.ours.write_text("login")
         self.base.chmod(0o500)
-        self.addCleanup(self.base.chmod, 0o700)
+        self.cleanup.callback(self.base.chmod, 0o700)
         self.pair.settle_quietly()
-        self.assertFalse(self.theirs.exists())
+        assert not self.theirs.exists()
 
 
 class KeychainTest(LauncherTest):
     """On macOS the host's login is in the Keychain, here that of a
     security of our own (see FAKE_SECURITY)."""
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def keychain(self, sandbox: None) -> None:
         self.keychain = self.home / "Library" / "Keychains" / "login.keychain-db"
         self.keychain.parent.mkdir(parents=True)
         self.keychain.touch()
@@ -243,9 +245,7 @@ class KeychainTest(LauncherTest):
         self.security.chmod(0o755)
         self.asked = self.work / "security-log"
         self.env = {"USER": "me", "FAKE_SECURITY_LOG": str(self.asked)}
-        environment = unittest.mock.patch.dict(os.environ, self.env)
-        environment.start()
-        self.addCleanup(environment.stop)
+        self.cleanup.enter_context(unittest.mock.patch.dict(os.environ, self.env))
         self.host = settings.detect_host({"HOME": str(self.home)})
         self.ours = self.home / ".claude" / LOGIN
         self.theirs = self.base / LOGIN
@@ -278,9 +278,9 @@ class KeychainTest(LauncherTest):
     def test_a_session_starts_with_the_login_of_the_keychain(self):
         self.keep('{"token":"host"}')
         self.launch(session=f"cat '{self.theirs}' > '{self.work}/seen'")
-        self.assertEqual((self.work / "seen").read_text(), '{"token":"host"}')
+        assert (self.work / "seen").read_text() == '{"token":"host"}'
         # The Keychain stays where the host's login is
-        self.assertFalse(self.ours.exists())
+        assert not self.ours.exists()
 
     def test_what_a_session_logs_in_with_is_in_the_keychain_while_it_runs(self):
         self.keep('{"token":"before"}')
@@ -289,13 +289,13 @@ class KeychainTest(LauncherTest):
         renew = f"printf '{{\\n \"token\": \"renewed\"\\n}}\\n' > '{self.theirs}'"
         seen = f"sleep 1; cat '{self.keychain}' > '{self.work}/seen'"
         self.launch(session=f"{renew}; {seen}")
-        self.assertEqual(self.kept(), '{"token":"renewed"}')
+        assert self.kept() == '{"token":"renewed"}'
         held = json.loads((self.work / "seen").read_text())[f"me {ITEM}"][0]
-        self.assertEqual(bytes.fromhex(held), b'{"token":"renewed"}')
+        assert bytes.fromhex(held) == b'{"token":"renewed"}'
         # What says the same is the same: not carried back over the
         # session's own
-        self.assertIn("\n", self.theirs.read_text())
-        self.assertFalse(self.ours.exists())
+        assert "\n" in self.theirs.read_text()
+        assert not self.ours.exists()
 
     def test_what_the_host_renews_in_the_keychain_reaches_a_running_session(self):
         self.keep('{"token":"before"}')
@@ -303,32 +303,32 @@ class KeychainTest(LauncherTest):
         add = f"security add-generic-password -U -a me -s '{ITEM}' -X {hexed}"
         seen = f"sleep 1; cat '{self.theirs}' > '{self.work}/seen'"
         self.launch(session=f"{add} '{self.keychain}'; {seen}")
-        self.assertEqual((self.work / "seen").read_text(), '{"token":"renewed"}')
+        assert (self.work / "seen").read_text() == '{"token":"renewed"}'
 
     def test_a_login_security_prints_as_hex_digits_is_read_all_the_same(self):
         self.keep('{\n "token": "host"\n}\n')
         self.pair.settle()
-        self.assertEqual(self.theirs.read_text(), '{\n "token": "host"\n}\n')
+        assert self.theirs.read_text() == '{\n "token": "host"\n}\n'
 
     def test_a_logout_in_a_session_is_of_the_keychain_too(self):
         self.keep('{"token":"host"}')
         self.launch(session=f"rm '{self.theirs}'")
-        self.assertIsNone(self.kept())
+        assert self.kept() is None
 
     def test_a_logout_on_the_host_is_the_sessions_too(self):
         self.keep('{"token":"host"}')
         self.pair.settle()
-        self.assertTrue(self.theirs.exists())
+        assert self.theirs.exists()
         delete = ["security", "delete-generic-password", *self.item()]
         subprocess.run([*delete, str(self.keychain)], check=True)
         self.pair.settle()
-        self.assertFalse(self.theirs.exists())
+        assert not self.theirs.exists()
 
     def test_a_first_login_in_the_sandbox_goes_to_the_keychain(self):
         self.theirs.write_text('{"token":"mine"}')
         self.pair.settle()
-        self.assertEqual(self.kept(), '{"token":"mine"}')
-        self.assertFalse(self.ours.exists())
+        assert self.kept() == '{"token":"mine"}'
+        assert not self.ours.exists()
 
     def test_a_locked_keychain_is_not_a_logout(self):
         self.keep('{"token":"host"}')
@@ -337,11 +337,11 @@ class KeychainTest(LauncherTest):
             # Another item was written, so the Keychain is asked again
             os.utime(self.keychain, (1, 1))
             self.pair.settle_quietly()
-            self.assertEqual(self.theirs.read_text(), '{"token":"host"}')
+            assert self.theirs.read_text() == '{"token":"host"}'
             # Nor asked again at once: each time could ask the user
             asked = self.times_asked()
             self.pair.settle_quietly()
-            self.assertEqual(self.times_asked(), asked)
+            assert self.times_asked() == asked
 
     def test_a_login_the_keychain_did_not_take_is_not_lost(self):
         self.keep('{"token":"old"}')
@@ -352,8 +352,8 @@ class KeychainTest(LauncherTest):
         # Not taken for carried: the old one would then be the host's
         # own change, and replace the session's
         login.LoginPair(self.host).settle()
-        self.assertEqual(self.theirs.read_text(), '{"token":"renewed"}')
-        self.assertEqual(self.kept(), '{"token":"renewed"}')
+        assert self.theirs.read_text() == '{"token":"renewed"}'
+        assert self.kept() == '{"token":"renewed"}'
 
     def test_the_keychain_is_asked_once_for_as_long_as_it_is_the_same(self):
         self.keep('{"token":"host"}')
@@ -361,20 +361,20 @@ class KeychainTest(LauncherTest):
         asked = self.times_asked()
         self.pair.settle()
         self.pair.settle()
-        self.assertEqual(self.times_asked(), asked)
+        assert self.times_asked() == asked
 
     def test_a_login_too_long_to_type_is_written_all_the_same(self):
         long = json.dumps({"token": "t" * 4000}, separators=(",", ":"))
         self.theirs.write_text(long)
         self.pair.settle()
-        self.assertEqual(self.kept(), long)
+        assert self.kept() == long
 
     def test_the_login_is_typed_to_security_where_it_can_be(self):
         # Not among its arguments, which every process of the host reads
         self.theirs.write_text('{"token":"mine"}')
         self.pair.settle()
         calls = [json.loads(line) for line in self.asked.read_text().splitlines()]
-        self.assertIn(["-i", "add-generic-password"], calls)
+        assert ["-i", "add-generic-password"] in calls
 
     def test_a_keychain_at_a_path_not_in_ascii_is_written_all_the_same(self):
         # security is typed to in ASCII, such a path is among its arguments
@@ -382,35 +382,31 @@ class KeychainTest(LauncherTest):
         elsewhere.parent.mkdir()
         elsewhere.touch()
         kept = login.Keychain(str(elsewhere), "me")
-        self.assertTrue(kept.write(b'{"token":"mine"}'))
-        self.assertEqual(kept.read().content, b'{"token":"mine"}')
+        assert kept.write(b'{"token":"mine"}')
+        assert kept.read().content == b'{"token":"mine"}'
         calls = [json.loads(line) for line in self.asked.read_text().splitlines()]
-        self.assertNotIn(["-i", "add-generic-password"], calls)
+        assert ["-i", "add-generic-password"] not in calls
 
     def test_a_login_in_the_hosts_file_is_the_hosts_when_the_keychain_has_none(self):
         # Where Claude Code keeps it when the Keychain refused it
         self.ours.write_text('{"token":"file"}')
         self.pair.settle()
-        self.assertEqual(self.theirs.read_text(), '{"token":"file"}')
+        assert self.theirs.read_text() == '{"token":"file"}'
         self.theirs.write_text('{"token":"renewed"}')
         self.pair.settle()
-        self.assertEqual(self.ours.read_text(), '{"token":"renewed"}')
-        self.assertIsNone(self.kept())
+        assert self.ours.read_text() == '{"token":"renewed"}'
+        assert self.kept() is None
 
     def test_when_both_changed_the_one_written_last_is_kept(self):
         self.keep('{"token":"host"}')
         self.theirs.write_text('{"token":"sandbox"}')
         os.utime(self.theirs, (1, 1))
         self.pair.settle()
-        self.assertEqual(self.theirs.read_text(), '{"token":"host"}')
+        assert self.theirs.read_text() == '{"token":"host"}'
 
     def test_a_home_without_a_keychain_keeps_its_login_in_the_file(self):
         self.keychain.unlink()
         self.theirs.write_text('{"token":"mine"}')
         login.LoginPair(self.host).settle()
-        self.assertEqual(self.ours.read_text(), '{"token":"mine"}')
-        self.assertFalse(self.asked.exists())
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert self.ours.read_text() == '{"token":"mine"}'
+        assert not self.asked.exists()

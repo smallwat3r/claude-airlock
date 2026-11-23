@@ -6,12 +6,10 @@ from __future__ import annotations
 
 import os
 import re
-import socket
-import tempfile
-import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from harness import (
     LauncherTest,
     settings,
@@ -21,39 +19,39 @@ from claude_airlock.sandbox import socket_proxy
 
 
 class DefaultSessionTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def launched(self, sandbox: None) -> None:
         self.result = self.launch(SSH_AUTH_SOCK="/tmp/agent.sock")
         self.flags = self.result.flags
 
     def test_project_is_mounted_read_write(self):
-        self.assertIn(f"--volume={self.project}:{self.project}:z", self.flags)
+        assert f"--volume={self.project}:{self.project}:z" in self.flags
 
     def test_secret_files_are_shadowed(self):
         for name in (".env", ".netrc"):
-            self.assertIn(f"--volume=/dev/null:{self.project / name}:ro", self.flags)
+            assert f"--volume=/dev/null:{self.project / name}:ro" in self.flags
 
     def test_templates_and_other_files_stay_readable(self):
         shadowed = [
             flag for flag in self.flags if flag.startswith("--volume=/dev/null:")
         ]
-        self.assertEqual(len(shadowed), 2)
+        assert len(shadowed) == 2
 
     def test_shared_config_is_read_only(self):
         claude = self.home / ".claude"
         for item in ("settings.json", "hooks", "CLAUDE.md", "skills", "agents"):
-            self.assertIn(
-                f"--volume={claude / item}:/home/sandbox/.claude/{item}:ro,z",
-                self.flags,
+            assert (
+                f"--volume={claude / item}:/home/sandbox/.claude/{item}:ro,z"
+                in self.flags
             )
 
     def test_what_claude_keeps_for_one_session_is_the_sessions_own(self):
         # Sourced by every command of the session it is of, on the host too
         for name in ("shell-snapshots", "session-env"):
             options = f"exec,size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
-            self.assertIn(f"--tmpfs=/home/sandbox/.claude/{name}:{options}", self.flags)
+            assert f"--tmpfs=/home/sandbox/.claude/{name}:{options}" in self.flags
             # What it goes over is there, docker would make it as root
-            self.assertTrue((self.base / name).is_dir())
+            assert (self.base / name).is_dir()
 
     def test_no_credentials_come_with_the_git_config(self):
         git = self.home / ".config" / "git"
@@ -66,12 +64,10 @@ class DefaultSessionTest(LauncherTest):
         flags = [call for call in calls if call[0] == "run"][-1]
         for name in ("config", "ignore", "templates"):
             mount = f"--volume={git / name}:/home/sandbox/.config/git/{name}:ro,z"
-            self.assertIn(mount, flags)
-        self.assertIn(f"--volume={git / 'work'}:{git / 'work'}:ro,z", flags)
-        self.assertFalse([flag for flag in flags if "credentials" in flag])
-        self.assertFalse(
-            [flag for flag in flags if flag.startswith(f"--volume={git}:")]
-        )
+            assert mount in flags
+        assert f"--volume={git / 'work'}:{git / 'work'}:ro,z" in flags
+        assert not [flag for flag in flags if "credentials" in flag]
+        assert not [flag for flag in flags if flag.startswith(f"--volume={git}:")]
 
     def test_container_is_hardened(self):
         for flag in (
@@ -80,7 +76,7 @@ class DefaultSessionTest(LauncherTest):
             "--security-opt=no-new-privileges",
             "--ulimit=core=0",
         ):
-            self.assertIn(flag, self.flags)
+            assert flag in self.flags
 
     def command(self, *args: str, **env: str) -> list[str]:
         """What claude is run with by a launch of its own, after the
@@ -91,13 +87,13 @@ class DefaultSessionTest(LauncherTest):
 
     def test_claude_does_not_ask_before_it_uses_a_tool_unless_told_to(self):
         unasked = "--dangerously-skip-permissions"
-        self.assertEqual(self.command(), [unasked])
-        self.assertEqual(self.command("-p", "hi"), [unasked, "-p", "hi"])
+        assert self.command() == [unasked]
+        assert self.command("-p", "hi") == [unasked, "-p", "hi"]
         # Asked for, in the environment or the config file
-        self.assertEqual(self.command(CLAUDE_AIRLOCK_ASK="1"), [])
+        assert self.command(CLAUDE_AIRLOCK_ASK="1") == []
         self.write_config("CLAUDE_AIRLOCK_ASK=1")
-        self.assertEqual(self.command("-p", "hi"), ["-p", "hi"])
-        self.assertEqual(self.command(CLAUDE_AIRLOCK_ASK="0"), [unasked])
+        assert self.command("-p", "hi") == ["-p", "hi"]
+        assert self.command(CLAUDE_AIRLOCK_ASK="0") == [unasked]
 
     def test_how_to_go_about_permissions_is_the_users_to_say(self):
         for args in (
@@ -109,8 +105,8 @@ class DefaultSessionTest(LauncherTest):
             ["mcp", "list"],
             ["update"],
         ):
-            self.assertEqual(self.command(*args), args)
-        self.assertNotIn("--dangerously-skip-permissions", self.command("--shell"))
+            assert self.command(*args) == args
+        assert "--dangerously-skip-permissions" not in self.command("--shell")
 
     def test_the_session_is_told_its_settings(self):
         for flag in (
@@ -121,7 +117,7 @@ class DefaultSessionTest(LauncherTest):
             "--env=CLAUDE_AIRLOCK_MEMORY=16g",
             "--env=CLAUDE_AIRLOCK_PIDS=512",
         ):
-            self.assertIn(flag, self.flags)
+            assert flag in self.flags
 
     def test_claude_code_reports_nothing_unless_allowed_to(self):
         off = [
@@ -130,31 +126,31 @@ class DefaultSessionTest(LauncherTest):
             "--env=DO_NOT_TRACK=1",
         ]
         for flag in off:
-            self.assertIn(flag, self.flags)
+            assert flag in self.flags
         # The second session of this test, after the one of setUp
         calls = self.launch(CLAUDE_AIRLOCK_TELEMETRY="1").calls
         allowed = [call for call in calls if call[0] == "run"][-1]
         for flag in off:
-            self.assertNotIn(flag, allowed)
+            assert flag not in allowed
 
     def test_the_connectors_of_the_account_are_not_loaded_unless_asked_for(self):
         off = "--env=ENABLE_CLAUDEAI_MCP_SERVERS=false"
-        self.assertIn(off, self.flags)
+        assert off in self.flags
         calls = self.launch(CLAUDE_AIRLOCK_CONNECTORS="1").calls
         allowed = [call for call in calls if call[0] == "run"][-1]
-        self.assertNotIn(off, allowed)
+        assert off not in allowed
 
     def test_default_limits(self):
         for flag in ("--memory=16g", "--memory-swap=16g", "--pids-limit=512"):
-            self.assertIn(flag, self.flags)
+            assert flag in self.flags
 
     def test_every_cpu_unless_a_limit_is_set(self):
-        self.assertNotIn("cpus", "\n".join(self.flags).lower())
+        assert "cpus" not in "\n".join(self.flags).lower()
         # The second session of this test, after the one of setUp
         calls = self.launch(CLAUDE_AIRLOCK_CPUS="1.5").calls
         limited = [call for call in calls if call[0] == "run"][-1]
-        self.assertIn("--cpus=1.5", limited)
-        self.assertIn("--env=CLAUDE_AIRLOCK_CPUS=1.5", limited)
+        assert "--cpus=1.5" in limited
+        assert "--env=CLAUDE_AIRLOCK_CPUS=1.5" in limited
 
     def test_opt_in_doors_are_closed(self):
         text = "\n".join(self.flags)
@@ -165,22 +161,22 @@ class DefaultSessionTest(LauncherTest):
             "--runtime",
             "--dns",
         ):
-            self.assertNotIn(marker, text)
-        self.assertIsNone(self.result.sidecar("claude-airlock-ps-proxy"))
-        self.assertIsNone(self.result.sidecar("claude-egress-proxy"))
+            assert marker not in text
+        assert self.result.sidecar("claude-airlock-ps-proxy") is None
+        assert self.result.sidecar("claude-egress-proxy") is None
 
     def test_egress_is_open(self):
-        self.assertIn("--network=claude-airlock-open-net", self.flags)
+        assert "--network=claude-airlock-open-net" in self.flags
 
     def test_cache_is_a_per_project_volume(self):
         pattern = r"^--volume=claude-cache-proj-[0-9a-f]{8}:/home/sandbox/\.cache$"
-        self.assertTrue(any(re.match(pattern, flag) for flag in self.flags))
+        assert any(re.match(pattern, flag) for flag in self.flags)
 
     def test_no_tty_without_a_terminal(self):
-        self.assertNotIn("--tty", self.flags)
+        assert "--tty" not in self.flags
 
     def test_image_tag_is_a_content_hash(self):
-        self.assertRegex(self.result.image, r"^claude-airlock:[0-9a-f]{12}$")
+        assert re.search(r"^claude-airlock:[0-9a-f]{12}$", self.result.image)
 
 
 class HomeTest(LauncherTest):
@@ -198,11 +194,10 @@ class HomeTest(LauncherTest):
 
     def test_the_hosts_claude_directory_is_not_mounted(self):
         flags = self.launch().flags
-        self.assertEqual(
-            self.mounted_at(flags, self.CLAUDE),
-            [f"--volume={self.base}:{self.CLAUDE}:z"],
-        )
-        self.assertEqual(self.base.stat().st_mode & 0o777, 0o700)
+        assert self.mounted_at(flags, self.CLAUDE) == [
+            f"--volume={self.base}:{self.CLAUDE}:z"
+        ]
+        assert self.base.stat().st_mode & 511 == 448
 
     def test_only_what_is_named_comes_from_the_host(self):
         claude = self.home / ".claude"
@@ -215,15 +210,12 @@ class HomeTest(LauncherTest):
             for flag in flags
             if flag.startswith(f"--volume={claude}/")
         )
-        self.assertEqual(
-            from_host,
-            sorted(
-                ("settings.json", "CLAUDE.md", "hooks", "commands", "skills")
-                + ("agents", "rules", "plugins", "projects")
-            ),
+        assert from_host == sorted(
+            ("settings.json", "CLAUDE.md", "hooks", "commands", "skills")
+            + ("agents", "rules", "plugins", "projects")
         )
         for name in ("plugins", "projects"):
-            self.assertIn(f"--volume={claude / name}:{self.CLAUDE}/{name}:z", flags)
+            assert f"--volume={claude / name}:{self.CLAUDE}/{name}:z" in flags
 
     def test_every_mount_in_it_has_something_to_go_over(self):
         for extra in ({}, {"CLAUDE_AIRLOCK_SHARED_HISTORY": "1"}):
@@ -237,98 +229,81 @@ class HomeTest(LauncherTest):
                 .removeprefix("--tmpfs=")
                 .startswith(self.CLAUDE + "/")
             ]
-            self.assertGreater(len(inside), 12)
+            assert len(inside) > 12
             for parts in inside:
                 if parts[0].startswith("--tmpfs="):
                     over = self.base / Path(parts[0].removeprefix("--tmpfs=")).name
-                    self.assertTrue(over.is_dir(), over)
+                    assert over.is_dir(), over
                     continue
                 source = Path(parts[0].removeprefix("--volume="))
                 over = self.base / Path(parts[1]).relative_to(self.CLAUDE)
-                self.assertTrue(source.exists(), source)
+                assert source.exists(), source
                 # A file where a file goes, docker would make a directory
-                self.assertEqual(over.is_dir(), source.is_dir(), over)
+                assert over.is_dir() == source.is_dir(), over
 
 
 class SocketProxyTest(LauncherTest):
     """Called directly, the socket path is a constant of the socket_proxy module."""
 
-    def setUp(self):
-        super().setUp()
-        # The checks need a socket file to exist, any will do. A short path,
-        # socket paths are limited to about 100 bytes.
-        socket_dir = tempfile.TemporaryDirectory(dir="/tmp")
-        self.addCleanup(socket_dir.cleanup)
-        socket_path = os.path.join(socket_dir.name, "docker.sock")
-        server = socket.socket(socket.AF_UNIX)
-        self.addCleanup(server.close)
-        server.bind(socket_path)
-        for patch in (
-            mock.patch.object(socket_proxy, "DOCKER_SOCK", socket_path),
-            mock.patch.dict(os.environ, self.fake_docker_env()),
-        ):
-            patch.start()
-            self.addCleanup(patch.stop)
+    @pytest.fixture(autouse=True)
+    def docker_socket(self, sandbox: None, unix_socket: str) -> None:
+        # The checks need a socket file to exist, any will do
+        self.cleanup.enter_context(
+            mock.patch.object(socket_proxy, "DOCKER_SOCK", unix_socket)
+        )
 
     def sidecar_for(self, mode: settings.SocketAccess) -> tuple[list[str], list[str]]:
         asked = settings.Settings(docker_socket=mode)
         socket_proxy.start_socket_proxy(asked)
         args = socket_proxy.socket_proxy_args(asked)
         sidecars = [call for call in self.calls() if call[0] == "run"]
-        self.assertEqual(len(sidecars), 1)
+        assert len(sidecars) == 1
         return args, sidecars[0]
 
     def test_mode_1_uses_the_limited_sidecar(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
-        self.assertIn("--name=claude-airlock-ps-proxy", sidecar)
-        self.assertTrue(any("docker-socket-proxy.cfg" in arg for arg in sidecar))
+        assert "--name=claude-airlock-ps-proxy" in sidecar
+        assert any("docker-socket-proxy.cfg" in arg for arg in sidecar)
         # No allow switches, the stock rules deny containers
-        self.assertNotIn("--env=CONTAINERS=1", sidecar)
-        self.assertIn("--env=DOCKER_HOST=tcp://claude-airlock-ps-proxy:2375", args)
+        assert "--env=CONTAINERS=1" not in sidecar
+        assert "--env=DOCKER_HOST=tcp://claude-airlock-ps-proxy:2375" in args
 
     def test_mode_full_uses_its_own_sidecar_and_blocks_writes(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
-        self.assertIn("--name=claude-airlock-proxy", sidecar)
+        assert "--name=claude-airlock-proxy" in sidecar
         for switch in ("CONTAINERS=1", "POST=0", "EXEC=0"):
-            self.assertIn(f"--env={switch}", sidecar)
-        self.assertIn("--env=DOCKER_HOST=tcp://claude-airlock-proxy:2375", args)
+            assert f"--env={switch}" in sidecar
+        assert "--env=DOCKER_HOST=tcp://claude-airlock-proxy:2375" in args
 
     def test_the_socket_is_mounted_read_only(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
-        self.assertIn(
-            f"--volume={socket_proxy.DOCKER_SOCK}:/var/run/docker.sock:ro", sidecar
-        )
+        assert f"--volume={socket_proxy.DOCKER_SOCK}:/var/run/docker.sock:ro" in sidecar
 
     def test_off_by_default(self):
-        self.assertEqual(socket_proxy.socket_proxy_args(settings.Settings()), [])
-        self.assertEqual(self.calls(), [])
+        assert socket_proxy.socket_proxy_args(settings.Settings()) == []
+        assert self.calls() == []
 
     def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
         names = {
             mode: socket_proxy.network_name(settings.Settings(docker_socket=mode))
             for mode in settings.SocketAccess
         }
-        self.assertEqual(
-            names,
-            {
-                settings.SocketAccess.OFF: "claude-airlock-open-net",
-                settings.SocketAccess.LIMITED: "claude-airlock-open-net-ps",
-                settings.SocketAccess.FULL: "claude-airlock-open-net-full",
-            },
-        )
+        assert names == {
+            settings.SocketAccess.OFF: "claude-airlock-open-net",
+            settings.SocketAccess.LIMITED: "claude-airlock-open-net-ps",
+            settings.SocketAccess.FULL: "claude-airlock-open-net-full",
+        }
         _, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
-        self.assertIn("--network=claude-airlock-open-net-full", sidecar)
-        self.assertNotIn(
-            ["network", "connect", "claude-airlock-open-net", "claude-airlock-proxy"],
-            self.calls(),
-        )
+        assert "--network=claude-airlock-open-net-full" in sidecar
+        assert [
+            "network",
+            "connect",
+            "claude-airlock-open-net",
+            "claude-airlock-proxy",
+        ] not in self.calls()
 
     def test_a_proxy_is_labelled_with_what_it_was_started_from(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
-        self.assertTrue(
-            [arg for arg in sidecar if arg.startswith("--label=claude-airlock.config=")]
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert [
+            arg for arg in sidecar if arg.startswith("--label=claude-airlock.config=")
+        ]

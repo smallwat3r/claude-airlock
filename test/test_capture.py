@@ -10,10 +10,10 @@ import socket
 import struct
 import tempfile
 import time
-import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from harness import (
     LauncherTest,
     Result,
@@ -227,7 +227,7 @@ def sample_capture(now: float, link_type: int = 276) -> bytes:
     )
 
 
-class CaptureFileTest(unittest.TestCase):
+class CaptureFileTest:
     def read(self, data: bytes):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory, "capture.pcap")
@@ -237,20 +237,18 @@ class CaptureFileTest(unittest.TestCase):
     def test_connections_names_and_lookups_are_read(self):
         for link_type in (276, 113):
             found = self.read(sample_capture(1000.0, link_type))
-            self.assertEqual(
-                [(c.when, c.address, c.port) for c in found.connections],
-                [
-                    (1002.0, "198.51.100.7", 443),
-                    (1004.0, "10.0.0.7", 5432),
-                    (1005.0, "203.0.113.9", UNNAMED),
-                ],
-            )
-            self.assertEqual(
-                found.names, {"198.51.100.7": "good.test", "203.0.113.9": "sni.test"}
-            )
+            assert [(c.when, c.address, c.port) for c in found.connections] == [
+                (1002.0, "198.51.100.7", 443),
+                (1004.0, "10.0.0.7", 5432),
+                (1005.0, "203.0.113.9", UNNAMED),
+            ]
+            assert found.names == {
+                "198.51.100.7": "good.test",
+                "203.0.113.9": "sni.test",
+            }
             looked_up = payloads.Lookup(1001.0, "good.test", "A", ("198.51.100.7",), "")
-            self.assertEqual(found.lookups, [looked_up])
-            self.assertEqual(found.packets, 11)
+            assert found.lookups == [looked_up]
+            assert found.packets == 11
 
     def test_an_answer_the_session_sent_out_names_nothing(self):
         forged = ipv4(
@@ -259,8 +257,8 @@ class CaptureFileTest(unittest.TestCase):
         found = self.read(
             pcap_file([(1.0, forged, True), (2.0, tcp("6.6.6.6", 443), True)])
         )
-        self.assertEqual(found.names, {})
-        self.assertEqual([c.address for c in found.connections], ["6.6.6.6"])
+        assert found.names == {}
+        assert [c.address for c in found.connections] == ["6.6.6.6"]
 
     def test_a_connection_says_how_it_went(self):
         ok, shut, slow = "198.51.100.7", "198.51.100.8", "198.51.100.9"
@@ -286,15 +284,16 @@ class CaptureFileTest(unittest.TestCase):
             )
         )
         closed, refused, unanswered, left = found.connections
-        self.assertEqual((closed.outcome, closed.seconds), ("closed", 2.0))
-        self.assertEqual((closed.sent, closed.received), (1504, 20000))
-        self.assertEqual((refused.outcome, refused.failed), ("refused", True))
-        self.assertEqual((unanswered.outcome, unanswered.failed), ("no answer", True))
-        self.assertEqual((left.outcome, left.sent), ("open", None))
-        self.assertEqual(
-            [(what, c.address) for _, what, c in found.endings],
-            [("closed", ok), ("refused", shut), ("no answer", slow)],
-        )
+        assert (closed.outcome, closed.seconds) == ("closed", 2.0)
+        assert (closed.sent, closed.received) == (1504, 20000)
+        assert (refused.outcome, refused.failed) == ("refused", True)
+        assert (unanswered.outcome, unanswered.failed) == ("no answer", True)
+        assert (left.outcome, left.sent) == ("open", None)
+        assert [(what, c.address) for _, what, c in found.endings] == [
+            ("closed", ok),
+            ("refused", shut),
+            ("no answer", slow),
+        ]
 
     def test_a_connection_that_is_reset_still_says_how_much_went(self):
         there = "198.51.100.7"
@@ -318,10 +317,8 @@ class CaptureFileTest(unittest.TestCase):
             )
         )
         mine, theirs = found.connections
-        self.assertEqual(
-            (mine.outcome, mine.sent, mine.received), ("closed", 1500, 20000)
-        )
-        self.assertEqual((theirs.sent, theirs.received), (None, 100))
+        assert (mine.outcome, mine.sent, mine.received) == ("closed", 1500, 20000)
+        assert (theirs.sent, theirs.received) == (None, 100)
 
     def test_the_other_end_closing_first_says_as_much(self):
         there = "198.51.100.7"
@@ -340,7 +337,7 @@ class CaptureFileTest(unittest.TestCase):
         )
         (closed,) = found.connections
         # 100 in, and 50 out across the wrap of the sequence numbers
-        self.assertEqual((closed.sent, closed.received), (50, 100))
+        assert (closed.sent, closed.received) == (50, 100)
 
     def test_a_plain_http_request_is_read(self):
         asked = b"GET /a?b=1 HTTP/1.1\r\nUser-Agent: x\r\nhOst: plain.test\r\n\r\n"
@@ -368,25 +365,24 @@ class CaptureFileTest(unittest.TestCase):
             )
         )
         (request,) = found.requests
-        self.assertEqual(request.url, "http://plain.test/a?b=1")
-        self.assertEqual((request.method, request.address), ("GET", "198.51.100.7"))
+        assert request.url == "http://plain.test/a?b=1"
+        assert (request.method, request.address) == ("GET", "198.51.100.7")
 
     def test_a_lookup_says_what_was_asked_and_what_came_back(self):
         found = self.read(pcap_file([(1.0, dns_failure("nope.test", 28), False)]))
-        self.assertEqual(
-            found.lookups,
-            [payloads.Lookup(1.0, "nope.test", "AAAA", (), "no such name")],
-        )
-        self.assertEqual(found.names, {})
+        assert found.lookups == [
+            payloads.Lookup(1.0, "nope.test", "AAAA", (), "no such name")
+        ]
+        assert found.names == {}
 
     def test_a_damaged_file_is_read_as_far_as_it_goes(self):
         whole = sample_capture(1000.0)
-        self.assertEqual(len(self.read(whole[:-30]).connections), 3)
-        self.assertEqual(self.read(b"not a capture at all, really").packets, 0)
+        assert len(self.read(whole[:-30]).connections) == 3
+        assert self.read(b"not a capture at all, really").packets == 0
 
     def test_a_dns_name_that_points_at_itself_ends(self):
         loop = struct.pack("!HHHHHH", 7, 0x8180, 1, 0, 0, 0) + b"\xc0\x0c"
-        with self.assertRaises(NotThis):
+        with pytest.raises(NotThis):
             payloads.dns_answer(0.0, loop)
 
 
@@ -409,7 +405,7 @@ def dns_message_of(packet: bytes) -> bytes:
     return packet[28:]
 
 
-class DnsTrustTest(unittest.TestCase):
+class DnsTrustTest:
     """What is taken for a name of an address: only what the resolver said
     of what the session asked it."""
 
@@ -419,13 +415,15 @@ class DnsTrustTest(unittest.TestCase):
             file.write_bytes(pcap_file(packets, asked=asked))
             return pcap.read_capture(file)
 
-    def test_an_answer_from_somewhere_else_on_loopback_names_nothing(self):
+    def test_an_answer_from_somewhere_else_on_loopback_names_nothing(
+        self, subtests: pytest.Subtests
+    ):
         for source in ("127.0.0.1", "127.0.0.2"):
             forged = ipv4(
                 17, source, "127.0.0.1", dns_response("a.test", "6.6.6.6")[20:]
             )
             for sent in (True, False):
-                with self.subTest(source=source, sent=sent):
+                with subtests.test(source=source, sent=sent):
                     found = self.read(
                         [
                             (0.5, dns_query("a.test"), True),
@@ -434,22 +432,22 @@ class DnsTrustTest(unittest.TestCase):
                         ],
                         asked=False,
                     )
-                    self.assertEqual(found.names, {})
-                    self.assertEqual(found.lookups[0].error, "no answer")
+                    assert found.names == {}
+                    assert found.lookups[0].error == "no answer"
 
     def test_an_answer_nobody_asked_for_names_nothing(self):
         found = self.read(
             [(1.0, dns_response("a.test", "6.6.6.6"), False)], asked=False
         )
-        self.assertEqual(found.names, {})
-        self.assertEqual(found.lookups, [])
+        assert found.names == {}
+        assert found.lookups == []
         # Nor one for another name, or with another id
         for query in (dns_query("b.test"), dns_query("a.test", ident=9)):
             found = self.read(
                 [(0.5, query, True), (1.0, dns_response("a.test", "6.6.6.6"), False)],
                 asked=False,
             )
-            self.assertEqual(found.names, {})
+            assert found.names == {}
 
     def test_what_is_looked_up_later_does_not_rename_what_was_reached(self):
         found = self.read(
@@ -460,32 +458,31 @@ class DnsTrustTest(unittest.TestCase):
             ]
         )
         address = "198.51.100.7"
-        self.assertIsNone(found.name_of(address, 0.5))
-        self.assertEqual(found.name_of(address, 2.0), "good.test")
-        self.assertEqual(found.name_of(address, 3.5), "github.com")
-        self.assertEqual(found.name_of(address), "github.com")
+        assert found.name_of(address, 0.5) is None
+        assert found.name_of(address, 2.0) == "good.test"
+        assert found.name_of(address, 3.5) == "github.com"
+        assert found.name_of(address) == "github.com"
         # What the hello says is only for what has no answer before it
-        self.assertEqual(
+        assert (
             self.read(
                 [
-                    (
-                        1.0,
-                        tcp("203.0.113.9", 443, 0x18, client_hello("sni.test")),
-                        True,
-                    ),
+                    (1.0, tcp("203.0.113.9", 443, 24, client_hello("sni.test")), True),
                     (2.0, dns_response("later.test", "203.0.113.9"), False),
                 ]
-            ).name_of("203.0.113.9", 1.0),
-            "sni.test",
+            ).name_of("203.0.113.9", 1.0)
+            == "sni.test"
         )
 
     def test_a_query_that_was_never_answered_is_a_lookup_without_one(self):
         found = self.read([(1.0, dns_query("lost.test", 28), True)], asked=False)
         (lookup,) = found.lookups
-        self.assertEqual(
-            (lookup.when, lookup.name, lookup.kind, lookup.addresses, lookup.error),
-            (1.0, "lost.test", "AAAA", (), "no answer"),
-        )
+        assert (
+            lookup.when,
+            lookup.name,
+            lookup.kind,
+            lookup.addresses,
+            lookup.error,
+        ) == (1.0, "lost.test", "AAAA", (), "no answer")
 
     def test_a_query_is_given_up_on_as_the_capture_goes_on(self):
         capture = pcap.Capture()
@@ -495,16 +492,16 @@ class DnsTrustTest(unittest.TestCase):
                 pcap_file([(1.0, dns_query("slow.test"), True)], asked=False)
             ),
         )
-        self.assertEqual(capture.lookups, [])
+        assert capture.lookups == []
         later = pcap_file([(20.0, dns_query("other.test"), True)], asked=False)
         pcap.take_frames(capture, PcapReader().feed(later))
-        self.assertEqual([lookup.name for lookup in capture.lookups], ["slow.test"])
+        assert [lookup.name for lookup in capture.lookups] == ["slow.test"]
         # The answer when it does come is still the answer
         late = pcap_file(
             [(21.0, dns_response("slow.test", "198.51.100.7"), False)], asked=False
         )
         pcap.take_frames(capture, PcapReader().feed(late))
-        self.assertEqual(capture.name_of("198.51.100.7", 22.0), "slow.test")
+        assert capture.name_of("198.51.100.7", 22.0) == "slow.test"
 
     def test_an_answer_cut_short_by_the_capture_keeps_what_came_before(self):
         name = "big.test"
@@ -521,8 +518,8 @@ class DnsTrustTest(unittest.TestCase):
         datagram = struct.pack("!HHHH", 41234, 50000, 8 + len(cut), 0) + cut
         found = self.read([(1.0, ipv4(17, "127.0.0.11", "127.0.0.1", datagram), False)])
         (lookup,) = found.lookups
-        self.assertEqual(lookup.addresses, tuple(addresses[:3]))
-        self.assertEqual(found.name_of(addresses[0]), name)
+        assert lookup.addresses == tuple(addresses[:3])
+        assert found.name_of(addresses[0]) == name
 
     def test_dns_over_tcp_is_read(self):
         query = dns_message_of(dns_query("tcp.test"))
@@ -532,29 +529,29 @@ class DnsTrustTest(unittest.TestCase):
             (1.1, dns_over("127.0.0.11", "127.0.0.1", response, (53, 40000)), False),
         ]
         found = self.read(packets, asked=False)
-        self.assertEqual(found.name_of("198.51.100.7"), "tcp.test")
-        self.assertEqual([lookup.name for lookup in found.lookups], ["tcp.test"])
+        assert found.name_of("198.51.100.7") == "tcp.test"
+        assert [lookup.name for lookup in found.lookups] == ["tcp.test"]
         # The same from somewhere that is not a resolver, by no port of one
         elsewhere = [
             (1.0, dns_over("127.0.0.1", "127.0.0.1", query, (40000, 5353)), True),
             (1.1, dns_over("127.0.0.1", "127.0.0.1", response, (5353, 40000)), True),
         ]
-        self.assertEqual(self.read(elsewhere, asked=False).lookups, [])
+        assert self.read(elsewhere, asked=False).lookups == []
 
     def test_each_part_of_a_capture_counts_its_own_packets(self):
         capture = pcap.Capture()
         frames = list(PcapReader().feed(sample_capture(1000.0)))
         pcap.take_frames(capture, frames, "tcp")
         pcap.take_frames(capture, frames[:2], "dns")
-        self.assertEqual(capture.part_packets, {"tcp": len(frames), "dns": 2})
-        self.assertEqual(capture.packets, len(frames) + 2)
+        assert capture.part_packets == {"tcp": len(frames), "dns": 2}
+        assert capture.packets == len(frames) + 2
         limit = capture_module.PACKET_LIMIT
-        self.assertFalse(capture_module.cut_short(capture))
+        assert not capture_module.cut_short(capture)
         capture.part_packets["dns"] = limit
-        self.assertTrue(capture_module.cut_short(capture))
+        assert capture_module.cut_short(capture)
         # Many packets in all, none of the parts at its limit
         capture.part_packets = {"tcp": limit - 1, "dns": limit - 1, "flows": limit - 1}
-        self.assertFalse(capture_module.cut_short(capture))
+        assert not capture_module.cut_short(capture)
 
     def test_the_parts_are_read_together_and_one_that_is_missing_is_passed_over(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -564,22 +561,20 @@ class DnsTrustTest(unittest.TestCase):
                 pcap_file([(1.0, dns_response("good.test", "198.51.100.7"), False)])
             )
             found = pcap.read_capture(main, [dns, Path(directory, "a.pcap.flows")])
-        self.assertEqual(found.name_of("198.51.100.7", 2.0), "good.test")
-        self.assertEqual(found.part_packets, {"tcp": 1, "dns": 2})
+        assert found.name_of("198.51.100.7", 2.0) == "good.test"
+        assert found.part_packets == {"tcp": 1, "dns": 2}
 
     def test_loopback_is_not_what_the_filter_takes_of_udp(self):
         filters = {part.name: part.filter for part in capture_module.PARTS}
-        self.assertNotIn("udp and net 127", filters["dns"])
-        self.assertIn("host 127.0.0.11", filters["dns"])
+        assert "udp and net 127" not in filters["dns"]
+        assert "host 127.0.0.11" in filters["dns"]
         for name in ("tcp", "flows"):
-            self.assertNotIn("(udp and net 127.0.0.0/8)", filters[name])
+            assert "(udp and net 127.0.0.0/8)" not in filters[name]
         # No packet is in two parts, the reader would take it for two
-        self.assertNotIn("outbound", filters["tcp"])
+        assert "outbound" not in filters["tcp"]
         for name in ("tcp", "flows"):
-            self.assertTrue(
-                filters[name].startswith("not port 53 and not host 127.0.0.11 and (")
-            )
-            self.assertTrue(filters[name].endswith(")"))
+            assert filters[name].startswith("not port 53 and not host 127.0.0.11 and (")
+            assert filters[name].endswith(")")
 
     def test_queries_never_answered_do_not_keep_later_answers_out(self):
         most = pcap.DNS_MOST_PENDING
@@ -590,13 +585,13 @@ class DnsTrustTest(unittest.TestCase):
         found = self.read(
             [*lost, (2.0, dns_response("good.test", "198.51.100.7"), False)]
         )
-        self.assertEqual(found.name_of("198.51.100.7"), "good.test")
+        assert found.name_of("198.51.100.7") == "good.test"
         # Each of them is still said to have had no answer, once
         unanswered = [lookup for lookup in found.lookups if lookup.error]
-        self.assertEqual(len(unanswered), most + 5)
+        assert len(unanswered) == most + 5
 
 
-class OtherTrafficTest(unittest.TestCase):
+class OtherTrafficTest:
     """What is not TCP over IPv4: IPv6, and what a session sends by UDP or
     as a ping."""
 
@@ -620,18 +615,18 @@ class OtherTrafficTest(unittest.TestCase):
             ]
         )
         (connection,) = found.connections
-        self.assertEqual((connection.address, connection.port), (self.THEM, 443))
-        self.assertEqual(connection.outcome, "open")
-        self.assertEqual(found.names, {self.THEM: "six.test"})
+        assert (connection.address, connection.port) == (self.THEM, 443)
+        assert connection.outcome == "open"
+        assert found.names == {self.THEM: "six.test"}
 
     def test_headers_ahead_of_the_transport_do_not_hide_it(self):
         options = bytes([6, 0, 1, 4, 0, 0, 0, 0])
         behind = ipv6(60, self.ME, self.THEM, options + tcp_header(443, 0x02))
         (connection,) = self.read([(1.0, behind, True)]).connections
-        self.assertEqual((connection.address, connection.port), (self.THEM, 443))
+        assert (connection.address, connection.port) == (self.THEM, 443)
         # A chain of them without an end is not followed for ever
         looped = ipv6(0, self.ME, self.THEM, bytes([0, 0, 1, 4, 0, 0, 0, 0]) * 20)
-        self.assertEqual(self.read([(1.0, looped, True)]).flows, [])
+        assert self.read([(1.0, looped, True)]).flows == []
 
     def test_what_is_sent_by_udp_is_one_flow_per_destination(self):
         quic = ipv4(17, "172.20.0.5", "198.51.100.7", udp(443))
@@ -645,17 +640,14 @@ class OtherTrafficTest(unittest.TestCase):
                 (3.0, ipv4(17, "127.0.0.1", "127.0.0.1", udp(9999)), True),
             ]
         )
-        self.assertEqual(
-            [
-                (f.when, f.transport, f.address, f.port, f.packets, f.sent)
-                for f in found.flows
-            ],
-            [
-                (1.0, "udp", "198.51.100.7", 443, 2, 216),
-                (2.5, "udp", self.THEM, 443, 1, 108),
-            ],
-        )
-        self.assertEqual(found.connections, [])
+        assert [
+            (f.when, f.transport, f.address, f.port, f.packets, f.sent)
+            for f in found.flows
+        ] == [
+            (1.0, "udp", "198.51.100.7", 443, 2, 216),
+            (2.5, "udp", self.THEM, 443, 1, 108),
+        ]
+        assert found.connections == []
 
     def test_a_ping_is_a_flow_and_the_kernels_own_icmp_is_not(self):
         echo = ipv4(1, "172.20.0.5", "198.51.100.7", b"\x08\x00" + bytes(62))
@@ -664,33 +656,32 @@ class OtherTrafficTest(unittest.TestCase):
         (flow,) = self.read(
             [(1.0, echo, True), (2.0, unreachable, True), (3.0, neighbour, True)]
         ).flows
-        self.assertEqual((flow.transport, flow.port, flow.sent), ("icmp", 0, 64))
+        assert (flow.transport, flow.port, flow.sent) == ("icmp", 0, 64)
 
     def test_a_later_fragment_is_counted_without_ports(self):
         later = bytearray(ipv4(17, "172.20.0.5", "198.51.100.7", b"y" * 40))
         later[6:8] = struct.pack("!H", 185)
         (flow,) = self.read([(1.0, bytes(later), True)]).flows
-        self.assertEqual((flow.port, flow.sent), (0, 40))
+        assert (flow.port, flow.sent) == (0, 40)
 
     def test_another_protocol_is_named_by_its_number(self):
         (flow,) = self.read(
             [(1.0, ipv4(99, "172.20.0.5", "198.51.100.7", b"z" * 10), True)]
         ).flows
-        self.assertEqual((flow.transport, flow.port), ("ip-99", 0))
+        assert (flow.transport, flow.port) == ("ip-99", 0)
 
     def test_a_long_name_is_flagged_once(self):
         name = "a" * 50 + ".t.test"
         packets = [(float(at), dns_failure(name), False) for at in range(3)]
         found = self.read([*packets, (5.0, dns_failure("fine.t.test"), False)])
-        self.assertEqual(
-            [(why, lookup.name) for why, lookup in found.flagged],
-            [("an unusually long name", name)],
-        )
+        assert [(why, lookup.name) for why, lookup in found.flagged] == [
+            ("an unusually long name", name)
+        ]
 
     def test_many_names_under_one_parent_are_flagged(self):
         count = pcap.DNS_MANY_NAMES
         few = [(1.0, packet, False) for packet in lookups_under("cdn.test", count - 1)]
-        self.assertEqual(self.read(few).flagged, [])
+        assert self.read(few).flagged == []
         many = [(1.0, packet, False) for packet in lookups_under("t.test", count + 5)]
         # Not under a parent of one label, every name is under com
         many += [
@@ -698,15 +689,15 @@ class OtherTrafficTest(unittest.TestCase):
             for n in range(count + 5)
         ]
         ((why, lookup),) = self.read(many).flagged
-        self.assertEqual(why, f"{count} names looked up under t.test")
-        self.assertEqual(lookup.name, f"n{count - 1}.t.test")
+        assert why == f"{count} names looked up under t.test"
+        assert lookup.name == f"n{count - 1}.t.test"
 
 
 class CaptureSessionTest(LauncherTest):
     SIDECAR = "claude-proj.capture"
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def capture_file(self, sandbox: None) -> None:
         self.now = time.time()
         self.capture_file = self.work / "capture.pcap"
         self.capture_file.write_bytes(sample_capture(self.now))
@@ -721,7 +712,7 @@ class CaptureSessionTest(LauncherTest):
 
     def test_the_session_joins_a_sidecar_that_captures(self):
         result = self.captured()
-        self.assertIn(f"--network=container:{self.SIDECAR}", result.flags)
+        assert f"--network=container:{self.SIDECAR}" in result.flags
         sidecar = result.sidecar(self.SIDECAR)
         for flag in (
             "--network=claude-airlock-open-net",
@@ -729,54 +720,51 @@ class CaptureSessionTest(LauncherTest):
             "--cap-add=NET_RAW",
             "--entrypoint=sh",
         ):
-            self.assertIn(flag, sidecar)
+            assert flag in sidecar
         # It runs tcpdump and outlives it: the session's way out is the
         # sidecar's, and would go with one that ended at its packet limit
         script = sidecar[sidecar.index("-c") + 1]
-        self.assertEqual(script.count("tcpdump $common"), 3)
-        self.assertIn("while :", script)
+        assert script.count("tcpdump $common") == 3
+        assert "while :" in script
         # A tcpdump for each part, and the filter of each after the script
         filters = sidecar[sidecar.index("sh", sidecar.index("-c")) + 1 :]
-        self.assertEqual(filters, [part.filter for part in capture_module.PARTS])
-        self.assertLess(
-            result.calls.index(sidecar),
-            next(
-                i for i, c in enumerate(result.calls) if c[0] == "run" and c != sidecar
-            ),
+        assert filters == [part.filter for part in capture_module.PARTS]
+        assert result.calls.index(sidecar) < next(
+            i for i, c in enumerate(result.calls) if c[0] == "run" and c != sidecar
         )
 
     def test_a_filtered_session_is_captured_inside_the_filter(self):
         result = self.captured(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_IP="172.20.0.5")
         sidecar = result.sidecar(self.SIDECAR)
-        self.assertIn("--network=claude-airlock-net", sidecar)
-        self.assertIn("--dns=127.0.0.1", sidecar)
-        self.assertIn(f"--network=container:{self.SIDECAR}", result.flags)
-        self.assertNotIn("--dns=127.0.0.1", result.flags)
-        self.assertIn("--env=HTTPS_PROXY=http://claude-egress-proxy:3128", result.flags)
+        assert "--network=claude-airlock-net" in sidecar
+        assert "--dns=127.0.0.1" in sidecar
+        assert f"--network=container:{self.SIDECAR}" in result.flags
+        assert "--dns=127.0.0.1" not in result.flags
+        assert "--env=HTTPS_PROXY=http://claude-egress-proxy:3128" in result.flags
         sessions = (self.state / "net-sessions.jsonl").read_text()
-        self.assertIn('"ip": "172.20.0.5"', sessions)
+        assert '"ip": "172.20.0.5"' in sessions
 
     def test_capturing_is_the_default(self):
-        self.assertTrue(settings.load_settings({}, str(self.work / "none")).net_log)
+        assert settings.load_settings({}, str(self.work / "none")).net_log
 
     def test_switched_off_nothing_is_captured(self):
         result = self.launch()
-        self.assertIsNone(result.sidecar(self.SIDECAR))
-        self.assertIn("--network=claude-airlock-open-net", result.flags)
+        assert result.sidecar(self.SIDECAR) is None
+        assert "--network=claude-airlock-open-net" in result.flags
 
     def test_the_capture_is_copied_out_and_the_sidecar_removed(self):
         result = self.captured()
         (copied,) = (self.state / "captures").glob("*.pcap")
-        self.assertEqual(copied.read_bytes(), self.capture_file.read_bytes())
+        assert copied.read_bytes() == self.capture_file.read_bytes()
         (session,) = map(
             json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
         )
-        self.assertEqual(session["capture"], copied.name)
-        self.assertEqual(session["project"], str(self.project))
+        assert session["capture"] == copied.name
+        assert session["project"] == str(self.project)
         ending = [c[0] for c in result.calls if self.SIDECAR in c[-1] or c[0] == "cp"]
         stopped = ending.index("stop")
-        self.assertEqual(ending[stopped + 1 : -1], ["cp"] * (len(ending) - stopped - 2))
-        self.assertEqual(ending[-1], "rm")
+        assert ending[stopped + 1 : -1] == ["cp"] * (len(ending) - stopped - 2)
+        assert ending[-1] == "rm"
 
     def test_the_other_parts_are_copied_out_beside_the_main_one(self):
         dns = self.work / "dns.pcap"
@@ -787,12 +775,10 @@ class CaptureSessionTest(LauncherTest):
         (main,) = (self.state / "captures").glob("*.pcap")
         beside = sorted(p.name for p in (self.state / "captures").iterdir())
         # No file of the flows part: it wrote none
-        self.assertEqual(beside, [main.name, main.name + ".dns"])
-        self.assertEqual(
-            (main.parent / (main.name + ".dns")).read_bytes(), dns.read_bytes()
-        )
+        assert beside == [main.name, main.name + ".dns"]
+        assert (main.parent / (main.name + ".dns")).read_bytes() == dns.read_bytes()
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
-        self.assertIn("lookup a.test", self.launch("--trace", "--verbose").stdout)
+        assert "lookup a.test" in self.launch("--trace", "--verbose").stdout
 
     def test_parts_whose_capture_was_let_go_of_are_let_go_of(self):
         captures = self.state / "captures"
@@ -801,31 +787,31 @@ class CaptureSessionTest(LauncherTest):
         (captures / "claude-kept-2.pcap").write_bytes(b"x")
         (captures / "claude-kept-2.pcap.dns").write_bytes(b"x")
         self.captured()
-        self.assertFalse((captures / "claude-gone-1.pcap.dns").exists())
-        self.assertTrue((captures / "claude-kept-2.pcap.dns").exists())
+        assert not (captures / "claude-gone-1.pcap.dns").exists()
+        assert (captures / "claude-kept-2.pcap.dns").exists()
 
     def test_a_tcpdump_that_died_is_said_in_the_record_and_the_trace(self):
         self.captured(FAKE_CAPTURE_DIED="dns:137")
         (session,) = map(
             json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
         )
-        self.assertEqual(session["stopped"], "dns (status 137)")
+        assert session["stopped"] == "dns (status 137)"
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         stdout = self.launch("--trace").stdout
-        self.assertIn("INCOMPLETE, a recorder ended before the session did", stdout)
-        self.assertIn("dns (status 137)", stdout)
+        assert "INCOMPLETE, a recorder ended before the session did" in stdout
+        assert "dns (status 137)" in stdout
 
     def test_a_tcpdump_that_ended_at_its_limit_is_not_a_death(self):
         self.captured(FAKE_CAPTURE_DIED="dns:0")
         (session,) = map(
             json.loads, (self.state / "net-sessions.jsonl").read_text().splitlines()
         )
-        self.assertNotIn("stopped", session)
+        assert "stopped" not in session
 
     def test_what_is_kept_is_for_the_user_alone(self):
         self.captured()
         for directory in (self.state, self.state / "captures"):
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            assert directory.stat().st_mode & 511 == 448
 
     def left_behind(self, **launcher) -> Result:
         """A launch that finds the sidecar of an earlier session, started
@@ -837,10 +823,8 @@ class CaptureSessionTest(LauncherTest):
         )
 
     def assert_collected(self, result: Result) -> None:
-        self.assertIn(["rm", "--force", "claude-old.capture"], result.calls)
-        self.assertTrue(
-            (self.state / "captures" / "claude-old.capture-5.pcap").exists()
-        )
+        assert ["rm", "--force", "claude-old.capture"] in result.calls
+        assert (self.state / "captures" / "claude-old.capture-5.pcap").exists()
 
     def test_a_capture_left_by_a_killed_session_is_collected(self):
         self.assert_collected(self.left_behind(pid=2**22 - 7))
@@ -852,12 +836,10 @@ class CaptureSessionTest(LauncherTest):
             {"pid": me, "launched": launcher.process_started(me)},
         ):
             result = self.left_behind(**mine)
-            self.assertEqual(
-                [c for c in result.calls if c[0] in ("stop", "cp", "rm")], []
-            )
+            assert [c for c in result.calls if c[0] in ("stop", "cp", "rm")] == []
 
     def test_another_process_with_the_id_of_a_launcher_is_not_taken_for_it(self):
-        self.assertTrue(launcher.process_started(os.getpid()))
+        assert launcher.process_started(os.getpid())
         self.assert_collected(self.left_behind(pid=os.getpid(), launched="earlier"))
 
     def test_only_the_latest_sessions_stay_in_the_record(self):
@@ -870,9 +852,9 @@ class CaptureSessionTest(LauncherTest):
             )
             records.record_traced_session(host, session)
         kept = records.read_traced_sessions(host)
-        self.assertEqual(len(kept), records.KEPT_SESSIONS)
-        self.assertEqual((kept[0].name, kept[-1].start), ("s5", kept[-1].start))
-        self.assertEqual(kept[-1].name, f"s{records.KEPT_SESSIONS + 4}")
+        assert len(kept) == records.KEPT_SESSIONS
+        assert (kept[0].name, kept[-1].start) == ("s5", kept[-1].start)
+        assert kept[-1].name == f"s{records.KEPT_SESSIONS + 4}"
 
     def test_a_line_of_the_record_that_does_not_hold_up_is_passed_over(self):
         for line in (
@@ -882,18 +864,18 @@ class CaptureSessionTest(LauncherTest):
             '{"name": "a", "project": "/p", "start": 5}',
             '{"name": 1, "project": "/p", "start": 5, "ip": "10.0.0.1"}',
         ):
-            self.assertIsNone(records.TracedSession.from_line(line), line[:40])
+            assert records.TracedSession.from_line(line) is None, line[:40]
         kept = records.TracedSession.from_line(
             '{"name": "a", "project": "/p", "start": 5, "end": 9,'
             ' "capture": "../../etc/passwd"}'
         )
-        self.assertEqual(kept.capture, "passwd")
+        assert kept.capture == "passwd"
 
     def trace(self, *args: str) -> str:
         self.captured()
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         result = self.launch("--trace", *args)
-        self.assertEqual(result.status, 0, result.stderr)
+        assert result.status == 0, result.stderr
         return result.stdout
 
     def test_the_trace_lists_what_was_reached(self):
@@ -906,10 +888,10 @@ class CaptureSessionTest(LauncherTest):
             "#   dns 1 names looked up",
             "sandbox  net         tcp/postgres 10.0.0.7:5432",
         ):
-            self.assertIn(expected, stdout)
-        self.assertNotIn(":8000", stdout)
-        self.assertNotIn(":9000", stdout)
-        self.assertNotIn("lookup", stdout)
+            assert expected in stdout
+        assert ":8000" not in stdout
+        assert ":9000" not in stdout
+        assert "lookup" not in stdout
 
     def test_the_trace_shows_what_was_sent_other_than_by_tcp(self):
         tunnel = "a" * 50 + ".t.test"
@@ -940,14 +922,14 @@ class CaptureSessionTest(LauncherTest):
             "sandbox  net         tcp/https [2001:db8::9]:443",
             f"sandbox  dns         lookup {tunnel} A FLAGGED: an unusually long name",
         ):
-            self.assertIn(expected, stdout)
+            assert expected in stdout
         failed = self.launch("--trace", "--failed").stdout
-        self.assertIn("FLAGGED", failed)
-        self.assertNotIn("quic.test", failed.split("# time")[1])
+        assert "FLAGGED" in failed
+        assert "quic.test" not in failed.split("# time")[1]
 
     def test_verbose_adds_the_lookups(self):
         looked_up = "sandbox  dns         lookup good.test A -> 198.51.100.7"
-        self.assertIn(looked_up, self.trace("--verbose"))
+        assert looked_up in self.trace("--verbose")
 
     def detailed(self, *args: str, **env: str) -> str:
         """The trace of a session that ran curl, with what the capture
@@ -971,13 +953,13 @@ class CaptureSessionTest(LauncherTest):
         ran = {"type": "tool_use", "id": "t1", "name": "Bash"}
         ran["input"] = {"command": "curl plain.test/a"}
         call = {"type": "assistant", "message": {"content": [ran]}}
-        call["timestamp"] = stamp(self.now + 1, timezone.utc).isoformat()
+        call["timestamp"] = stamp(self.now + 1, UTC).isoformat()
         done = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
         result = {"type": "user", "message": {"content": [done]}}
-        result["timestamp"] = stamp(self.now + 5, timezone.utc).isoformat()
+        result["timestamp"] = stamp(self.now + 5, UTC).isoformat()
         self.write_transcript("0a", [first, call, result, last])
         traced = self.launch("--trace", *args, **env)
-        self.assertEqual(traced.status, 0, traced.stderr)
+        assert traced.status == 0, traced.stderr
         return traced.stdout
 
     def test_a_connection_says_how_it_went_and_during_which_call(self):
@@ -992,45 +974,36 @@ class CaptureSessionTest(LauncherTest):
             "#   1 connections REFUSED or without an answer",
             "#   http 1 requests in the clear",
         ):
-            self.assertIn(expected, stdout)
+            assert expected in stdout
 
     def test_what_went_wrong_on_the_network_stands_out(self):
         coloured = self.detailed("--verbose", FORCE_COLOR="1")
         alert = "\x1b[1;31msandbox  "
-        self.assertIn(
-            alert + "net         tcp/https 198.51.100.8:443  REFUSED", coloured
-        )
-        self.assertIn(alert + "dns         lookup nope.test", coloured)
+        assert alert + "net         tcp/https 198.51.100.8:443  REFUSED" in coloured
+        assert alert + "dns         lookup nope.test" in coloured
 
     def test_json_has_how_a_connection_went(self):
         events = [json.loads(line) for line in self.detailed("--json").splitlines()]
         closed, asked, refused, left = (e for e in events if e["what"] == "net")
-        self.assertEqual((closed["outcome"], closed["seconds"]), ("closed", 1.0))
-        self.assertEqual((closed["bytes_out"], closed["bytes_in"]), (1500, 20000))
-        self.assertEqual((closed["during"], left["during"]), (["t1"], []))
-        self.assertEqual(
-            (asked["method"], asked["url"]), ("GET", "http://plain.test/a")
-        )
-        self.assertEqual((refused["outcome"], left.get("outcome")), ("refused", None))
+        assert (closed["outcome"], closed["seconds"]) == ("closed", 1.0)
+        assert (closed["bytes_out"], closed["bytes_in"]) == (1500, 20000)
+        assert (closed["during"], left["during"]) == (["t1"], [])
+        assert (asked["method"], asked["url"]) == ("GET", "http://plain.test/a")
+        assert (refused["outcome"], left.get("outcome")) == ("refused", None)
         (call,) = (e for e in events if e.get("tool") == "Bash")
-        self.assertEqual(call["id"], "t1")
+        assert call["id"] == "t1"
         (failed,) = (e for e in events if e["what"] == "dns")
-        self.assertEqual((failed["type"], failed["error"]), ("A", "no such name"))
+        assert (failed["type"], failed["error"]) == ("A", "no such name")
 
     def test_json_has_connections_and_lookups(self):
         events = [json.loads(line) for line in self.trace("--json").splitlines()]
         reached = [e for e in events if e["what"] == "net"]
-        self.assertEqual(
-            [(e["protocol"], e["name"], e["address"], e["port"]) for e in reached],
-            [
-                ("tcp/https", "good.test", "198.51.100.7", 443),
-                ("tcp/postgres", None, "10.0.0.7", 5432),
-                ("tcp", "sni.test", "203.0.113.9", UNNAMED),
-            ],
-        )
+        assert [
+            (e["protocol"], e["name"], e["address"], e["port"]) for e in reached
+        ] == [
+            ("tcp/https", "good.test", "198.51.100.7", 443),
+            ("tcp/postgres", None, "10.0.0.7", 5432),
+            ("tcp", "sni.test", "203.0.113.9", UNNAMED),
+        ]
         (lookup,) = (e for e in events if e["what"] == "dns")
-        self.assertEqual((lookup["who"], lookup["name"]), ("sandbox", "good.test"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert (lookup["who"], lookup["name"]) == ("sandbox", "good.test")

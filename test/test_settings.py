@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import unittest
 from pathlib import Path
 
+import pytest
 from harness import ROOT, LauncherTest, settings
 
 from claude_airlock import errors
@@ -21,17 +21,17 @@ TOLD_TO_A_SESSION = {"CLAUDE_AIRLOCK_SANDBOX", "CLAUDE_AIRLOCK_DIRS"}
 
 
 class SettingsListTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def variables_listed(self, sandbox: None) -> None:
         self.variables = {setting.variable for setting in settings.SETTINGS}
 
     def test_every_setting_has_its_field_and_no_field_is_without_one(self):
         fields = [field.name for field in dataclasses.fields(settings.Settings)]
-        self.assertEqual([s.field for s in settings.SETTINGS], fields)
+        assert [s.field for s in settings.SETTINGS] == fields
 
     def test_the_defaults_are_read_as_the_defaults(self):
         missing = str(self.work / "no-config")
-        self.assertEqual(settings.load_settings({}, missing), settings.Settings())
+        assert settings.load_settings({}, missing) == settings.Settings()
 
     def test_a_choice_is_read_as_what_it_names_and_no_other_is_taken(self):
         missing = str(self.work / "no-config")
@@ -43,26 +43,26 @@ class SettingsListTest(LauncherTest):
             read = settings.load_settings(
                 {"CLAUDE_AIRLOCK_DOCKER_SOCKET": said}, missing
             )
-            self.assertIs(read.docker_socket, access)
-        with self.assertRaises(errors.Fatal):
+            assert read.docker_socket is access
+        with pytest.raises(errors.Fatal):
             settings.load_settings({"CLAUDE_AIRLOCK_DOCKER_SOCKET": "all"}, missing)
 
     def test_the_config_file_takes_all_but_the_per_project_ones(self):
         left_out = {s.name for s in settings.SETTINGS} - settings.CONFIG_FILE_SETTINGS
-        self.assertEqual(left_out, {"EXTRA_DIRS", "EXTRA_DIRS_RO"})
+        assert left_out == {"EXTRA_DIRS", "EXTRA_DIRS_RO"}
 
     def test_help_names_every_setting(self):
         said = self.launch("--help").stdout
-        self.assertEqual(set(NAMED.findall(said)), self.variables)
+        assert set(NAMED.findall(said)) == self.variables
 
     def test_the_readme_names_every_setting_and_no_other(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertEqual(set(NAMED.findall(readme)), self.variables)
+        assert set(NAMED.findall(readme)) == self.variables
 
     def test_the_docs_name_no_setting_that_is_not_one(self):
         for page in sorted((ROOT / "docs").glob("*.md")):
             named = set(NAMED.findall(page.read_text(encoding="utf-8")))
-            self.assertLessEqual(named, self.variables, page.name)
+            assert named <= self.variables, page.name
 
     def test_every_link_between_the_docs_leads_somewhere(self):
         def anchors(page: Path) -> set[str]:
@@ -81,20 +81,16 @@ class SettingsListTest(LauncherTest):
                 r"\]\(([^)#\s]*)#([\w-]+)\)", page.read_text()
             ):
                 linked = (page.parent / target).resolve() if target else page
-                self.assertIn(
-                    anchor, anchors(linked), f"{page.name}: {target}#{anchor}"
-                )
+                assert anchor in anchors(linked), f"{page.name}: {target}#{anchor}"
             for target in re.findall(
                 r"\]\(((?:\.\./)?(?:docs/)?[\w.-]+\.(?:md|png))\)", page.read_text()
             ):
-                self.assertTrue(
-                    (page.parent / target).exists(), f"{page.name}: {target}"
-                )
+                assert (page.parent / target).exists(), f"{page.name}: {target}"
 
     def test_a_session_is_told_of_no_setting_that_is_not_one(self):
         told = (ROOT / "docker" / "CLAUDE-airlock.md").read_text(encoding="utf-8")
         named = set(NAMED.findall(told)) - TOLD_TO_A_SESSION
-        self.assertLessEqual(named, self.variables)
+        assert named <= self.variables
 
     def test_a_session_is_told_of_every_setting_it_is_given(self):
         told = (ROOT / "docker" / "CLAUDE-airlock.md").read_text(encoding="utf-8")
@@ -114,11 +110,5 @@ class SettingsListTest(LauncherTest):
             for flag in flags
             if flag.startswith("--env=CLAUDE_AIRLOCK_")
         }
-        self.assertLessEqual({"CLAUDE_AIRLOCK_PROTECT", "CLAUDE_AIRLOCK_DIRS"}, given)
-        self.assertLessEqual(
-            given - {"CLAUDE_AIRLOCK_SANDBOX"}, set(NAMED.findall(told))
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert {"CLAUDE_AIRLOCK_PROTECT", "CLAUDE_AIRLOCK_DIRS"} <= given
+        assert given - {"CLAUDE_AIRLOCK_SANDBOX"} <= set(NAMED.findall(told))

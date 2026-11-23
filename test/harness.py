@@ -16,10 +16,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import unittest
-import unittest.mock
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-airlock"
@@ -128,7 +128,7 @@ def prompts_at(*times: float) -> list[dict]:
     return [
         {
             "type": "user",
-            "timestamp": datetime.fromtimestamp(when, timezone.utc).isoformat(),
+            "timestamp": datetime.fromtimestamp(when, UTC).isoformat(),
             "message": {"content": "hello"},
         }
         for when in times
@@ -177,9 +177,9 @@ class Result:
 
 
 # What only Linux has, and what Docker Desktop on macOS does not do
-reads_proc = unittest.skipUnless(sys.platform == "linux", "reads /proc")
-mounts_host_sockets = unittest.skipIf(
-    sys.platform == "darwin", "no socket of the host mounts there"
+reads_proc = pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+mounts_host_sockets = pytest.mark.skipif(
+    sys.platform == "darwin", reason="no socket of the host mounts there"
 )
 
 
@@ -251,16 +251,33 @@ class Terminal:
         return True
 
 
-class LauncherTest(unittest.TestCase):
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        # Resolved, on macOS the temporary directory sits behind a symlink
-        self.work = Path(temp.name).resolve()
+class LauncherTest:
+    """A check that runs the launcher, in a home and a project of its own."""
+
+    @pytest.fixture(autouse=True)
+    def sandbox(
+        self, monkeypatch: pytest.MonkeyPatch, cleanup: contextlib.ExitStack
+    ) -> None:
+        # For what a check undoes when it is over, see conftest.py
+        self.cleanup = cleanup
+        # Not pytest's tmp_path: that is named after the check, and the
+        # words of a name are found in what the launcher says of a path,
+        # and it is too long for the path of a socket. Resolved, on macOS
+        # the temporary directory sits behind a symlink.
+        temp = cleanup.enter_context(tempfile.TemporaryDirectory())
+        self.work = Path(temp).resolve()
         self.home = self.work / "home"
         self.project = self.home / "proj"
         # Where the launcher keeps its own records
         self.state = self.home / ".local" / "state" / "claude-airlock"
+        # The same as the launcher finds it, for the checks that call the
+        # package directly
+        self.host = settings.Host(
+            str(self.home),
+            str(self.project),
+            str(self.home / ".config"),
+            str(self.home / ".local" / "state"),
+        )
         # The ~/.claude of the sandboxed sessions
         self.base = self.state / "home"
         # Where Claude Code keeps the transcripts of the project
@@ -287,9 +304,8 @@ class LauncherTest(unittest.TestCase):
         # The checks that call the package directly reach the fake too, never
         # the docker of the machine the tests run on
         self._path = os.environ["PATH"]
-        environment = unittest.mock.patch.dict(os.environ, self.fake_docker_env())
-        environment.start()
-        self.addCleanup(environment.stop)
+        for name, value in self.fake_docker_env().items():
+            monkeypatch.setenv(name, value)
 
     def fake_docker_env(self) -> dict[str, str]:
         return {
@@ -346,6 +362,6 @@ class LauncherTest(unittest.TestCase):
         (directory / "config").write_text("\n".join(lines) + "\n")
 
     def assert_refused(self, result: Result, message: str) -> None:
-        self.assertNotEqual(result.status, 0)
-        self.assertIn(message, result.stderr)
-        self.assertEqual([c for c in result.calls if c[0] == "run"], [])
+        assert result.status != 0
+        assert message in result.stderr
+        assert [c for c in result.calls if c[0] == "run"] == []

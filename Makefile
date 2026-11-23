@@ -1,14 +1,13 @@
 # Shortcuts for working on the sandbox itself. The checks are the ones CI
-# runs (.github/workflows/ci.yml), keep the two in step. What ruff and mypy
-# check, and by which rules, is in pyproject.toml.
+# runs (.github/workflows/ci.yml), keep the two in step. What ruff, mypy
+# and pytest check, and by which rules, is in pyproject.toml.
 
-# A Python tool from PATH, else run by uvx or pipx, as CI does
-python_tool = $(or $(shell command -v $(1) 2>/dev/null),$(if \
-	$(shell command -v uvx 2>/dev/null),uvx $(1),pipx run $(1)))
-
-PYTHON ?= python3
-RUFF ?= $(call python_tool,ruff)
-MYPY ?= $(call python_tool,mypy)
+# The tools and the Python they run on are uv's, at the versions of uv.lock
+UV_RUN ?= uv run --locked
+PYTHON ?= $(UV_RUN) python
+RUFF ?= $(UV_RUN) ruff
+MYPY ?= $(UV_RUN) mypy
+PYTEST ?= $(UV_RUN) pytest
 SHELLCHECK ?= shellcheck
 
 LAUNCHER := bin/claude-airlock
@@ -38,7 +37,7 @@ types: ## mypy
 
 .PHONY: test
 test: ## The unit tests and the Dockerfile's assembly, without Docker. One topic: make test K=trace
-	$(PYTHON) test/launcher_test.py $(if $(K),-k $(K))
+	$(PYTEST) $(if $(K),-k $(K))
 	$(PYTHON) $(LAUNCHER) --dockerfile | grep -q '^ENTRYPOINT'
 
 .PHONY: smoke
@@ -60,6 +59,7 @@ dockerfile: ## Print the generated Dockerfile
 .PHONY: pins
 pins: ## Refresh every pinned version, checksum and image digest
 	docker/update-pins.py
+	uv lock --upgrade
 
 .PHONY: upgrade
 upgrade: pins rebuild ## Refresh the pins, then rebuild the image

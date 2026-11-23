@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import tempfile
-import unittest
 from pathlib import Path
 
+import pytest
 from harness import LauncherTest
 
 from claude_airlock.docker import mount_arg
@@ -14,8 +14,8 @@ from claude_airlock.errors import Fatal
 
 
 class ExtraDirsTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def directories(self, sandbox: None) -> None:
         self.ref = self.home / "ref"
         self.shared = self.home / "claude-shared"
 
@@ -23,23 +23,21 @@ class ExtraDirsTest(LauncherTest):
         result = self.launch(
             "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_AIRLOCK_FEATURES=""
         )
-        self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", result.flags)
+        assert f"--volume={self.ref}:{self.ref}:ro,z" in result.flags
         unasked = "--dangerously-skip-permissions"
-        self.assertEqual(
-            result.command, [f"--add-dir={self.ref}", unasked, "-p", "hello"]
-        )
+        assert result.command == [f"--add-dir={self.ref}", unasked, "-p", "hello"]
 
     def test_a_prompt_is_not_taken_for_a_directory(self):
         # --add-dir is variadic, as two arguments it would take the prompt
         result = self.launch("--add-dir", "~/ref", "hello", CLAUDE_AIRLOCK_FEATURES="")
         unasked = "--dangerously-skip-permissions"
-        self.assertEqual(result.command, [f"--add-dir={self.ref}", unasked, "hello"])
+        assert result.command == [f"--add-dir={self.ref}", unasked, "hello"]
 
     def test_read_write_dir_and_its_secrets(self):
         (self.ref / ".env").touch()
         flags = self.launch(f"--add-dir={self.ref}").flags
-        self.assertIn(f"--volume={self.ref}:{self.ref}:z", flags)
-        self.assertIn(f"--volume=/dev/null:{self.ref / '.env'}:ro", flags)
+        assert f"--volume={self.ref}:{self.ref}:z" in flags
+        assert f"--volume=/dev/null:{self.ref / '.env'}:ro" in flags
 
     def test_a_protected_path_is_read_only_inside_what_is_mounted(self):
         kit = self.shared / "kit"
@@ -50,17 +48,15 @@ class ExtraDirsTest(LauncherTest):
             "--add-dir", "~/ref", CLAUDE_AIRLOCK_PROTECT="docs:~/not-mounted"
         ).flags
         # In the shared directory and in the project, on top of them
-        self.assertIn(f"--volume={self.shared}:{self.shared}:z", flags)
+        assert f"--volume={self.shared}:{self.shared}:z" in flags
         for inside in (kit, self.project / "docs"):
-            self.assertIn(f"--volume={inside}:{inside}:ro,z", flags)
+            assert f"--volume={inside}:{inside}:ro,z" in flags
         # A mounted directory itself is mounted read-only, once
-        self.assertIn(f"--volume={self.ref}:{self.ref}:ro,z", flags)
-        self.assertNotIn(f"--volume={self.ref}:{self.ref}:z", flags)
+        assert f"--volume={self.ref}:{self.ref}:ro,z" in flags
+        assert f"--volume={self.ref}:{self.ref}:z" not in flags
         # What is not mounted is not brought in
-        self.assertFalse([flag for flag in flags if "not-mounted" in flag])
-        self.assertIn(
-            f"--env=CLAUDE_AIRLOCK_PROTECT={kit}:{self.project / 'docs'}", flags
-        )
+        assert not [flag for flag in flags if "not-mounted" in flag]
+        assert f"--env=CLAUDE_AIRLOCK_PROTECT={kit}:{self.project / 'docs'}" in flags
 
     def test_the_directories_above_a_protected_path_are_held_in_place(self):
         deep = self.project / "a" / "b" / "kit"
@@ -76,13 +72,13 @@ class ExtraDirsTest(LauncherTest):
         ).flags
         # Mounted on themselves, writable: a mount cannot be renamed
         for above in (self.project / "a", self.project / "a" / "b"):
-            self.assertIn(f"--volume={above}:{above}:z", flags)
-        self.assertIn(f"--volume={deep}:{deep}:ro,z", flags)
+            assert f"--volume={above}:{above}:z" in flags
+        assert f"--volume={deep}:{deep}:ro,z" in flags
         # Nothing writable inside what is read-only, mounted or protected
         for read_only in (self.ref / "x", deep / "inner"):
-            self.assertNotIn(f"--volume={read_only}:{read_only}:z", flags)
+            assert f"--volume={read_only}:{read_only}:z" not in flags
         # Nor on the project itself
-        self.assertEqual(flags.count(f"--volume={self.project}:{self.project}:z"), 1)
+        assert flags.count(f"--volume={self.project}:{self.project}:z") == 1
 
     def test_a_protected_path_that_could_be_made_inside_is_refused(self):
         result = self.launch(CLAUDE_AIRLOCK_PROTECT="docs")
@@ -100,7 +96,9 @@ class ExtraDirsTest(LauncherTest):
         result = self.launch("--add-dir", str(link))
         self.assert_refused(result, "it would defeat the sandbox")
 
-    def test_what_is_kept_out_of_every_session_is_refused(self):
+    def test_what_is_kept_out_of_every_session_is_refused(
+        self, subtests: pytest.Subtests
+    ):
         (self.home / ".ssh").mkdir()
         self.write_config("")
         kept = self.home / ".ssh"
@@ -111,7 +109,7 @@ class ExtraDirsTest(LauncherTest):
             ("~/.config", self.home / ".config" / "claude-airlock"),
             (str(self.state), self.state),
         ):
-            with self.subTest(directory=directory):
+            with subtests.test(directory=directory):
                 Path(self.state).mkdir(parents=True, exist_ok=True)
                 result = self.launch("--add-dir-ro", directory)
                 self.assert_refused(result, f"{refused} is not a session's to have")
@@ -135,14 +133,14 @@ class ExtraDirsTest(LauncherTest):
         result = self.launch("--add-dir-ro", "~/claude-shared/notes")
         self.assert_refused(result, f"it is a link out of {self.shared}")
         # Named by where it is, and a link the session cannot have made
-        self.assertEqual(self.launch("--add-dir", str(outside)).status, 0)
+        assert self.launch("--add-dir", str(outside)).status == 0
         mine = self.home / "mine"
         mine.symlink_to(outside)
-        self.assertEqual(self.launch("--add-dir", str(mine)).status, 0)
+        assert self.launch("--add-dir", str(mine)).status == 0
         # In a directory it can only read
         (self.ref / "more").symlink_to(outside)
         result = self.launch("--add-dir-ro", "~/ref", "--add-dir", "~/ref/more")
-        self.assertEqual(result.status, 0, result.stderr)
+        assert result.status == 0, result.stderr
 
     def test_a_dir_inside_the_project_has_its_secrets_hidden_once(self):
         inside = self.project / "sub"
@@ -150,7 +148,7 @@ class ExtraDirsTest(LauncherTest):
         (inside / ".env").touch()
         flags = self.launch("--add-dir", "./sub").flags
         hidden = f"--volume=/dev/null:{inside / '.env'}:ro"
-        self.assertEqual(flags.count(hidden), 1)
+        assert flags.count(hidden) == 1
 
     def test_a_secret_that_cannot_be_hidden_is_not_left_visible(self):
         (self.project / ".env.a:b").touch()
@@ -163,41 +161,41 @@ class ExtraDirsTest(LauncherTest):
     def test_default_shared_dir_is_mounted(self):
         self.shared.mkdir()
         flags = self.launch().flags
-        self.assertIn(f"--volume={self.shared}:{self.shared}:z", flags)
+        assert f"--volume={self.shared}:{self.shared}:z" in flags
 
     def test_shared_dir_can_be_moved(self):
         self.shared.mkdir()
         flags = self.launch(CLAUDE_AIRLOCK_SHARED_DIR=str(self.ref)).flags
-        self.assertIn(f"--volume={self.ref}:{self.ref}:z", flags)
-        self.assertFalse([flag for flag in flags if "claude-shared" in flag])
+        assert f"--volume={self.ref}:{self.ref}:z" in flags
+        assert not [flag for flag in flags if "claude-shared" in flag]
 
     def test_empty_shared_dir_setting_mounts_none(self):
         self.shared.mkdir()
         flags = self.launch(CLAUDE_AIRLOCK_SHARED_DIR="").flags
-        self.assertFalse([flag for flag in flags if "claude-shared" in flag])
+        assert not [flag for flag in flags if "claude-shared" in flag]
 
     def test_a_missing_named_shared_dir_aborts(self):
         result = self.launch(CLAUDE_AIRLOCK_SHARED_DIR="/nonexistent")
         self.assert_refused(result, "not a directory: /nonexistent")
 
 
-class MountArgTest(unittest.TestCase):
+class MountArgTest:
     def test_a_bind_source_that_is_not_there_is_refused(self):
         # Docker would make a directory of it, owned by root
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory, "moved.py")
-            with self.assertRaises(Fatal) as refused:
+            with pytest.raises(Fatal) as refused:
                 mount_arg(str(missing), "/moved.py", "ro,z")
-            self.assertIn("does not exist", str(refused.exception))
-            self.assertFalse(missing.exists())
+            assert "does not exist" in str(refused.value)
+            assert not missing.exists()
 
     def test_a_source_that_is_there_and_a_volume_are_taken(self):
         with tempfile.TemporaryDirectory() as directory:
             there = Path(directory, "here.py")
             there.touch()
-            self.assertEqual(
-                mount_arg(str(there), "/here.py", "ro,z"),
-                f"--volume={there}:/here.py:ro,z",
+            assert (
+                mount_arg(str(there), "/here.py", "ro,z")
+                == f"--volume={there}:/here.py:ro,z"
             )
             # A link that leads nowhere is there as a link, docker follows it
             dangling = Path(directory, "link")
@@ -205,13 +203,9 @@ class MountArgTest(unittest.TestCase):
             mount_arg(str(dangling), "/link")
         # Nor is a path of the machine docker runs in looked for on this one
         inside = "/run/host-services/ssh-auth.sock"
-        self.assertEqual(
-            mount_arg(inside, "/tmp/agent.sock", daemons=True),
-            f"--volume={inside}:/tmp/agent.sock",
+        assert (
+            mount_arg(inside, "/tmp/agent.sock", daemons=True)
+            == f"--volume={inside}:/tmp/agent.sock"
         )
         # A named volume has no path to be missing
-        self.assertEqual(mount_arg("a-volume", "/data"), "--volume=a-volume:/data")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert mount_arg("a-volume", "/data") == "--volume=a-volume:/data"

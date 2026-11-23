@@ -88,9 +88,11 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 RUN groupmod --new-name sandbox node \
     && usermod --login sandbox --home /home/sandbox --move-home node
 
-# The home directory is read-only at runtime, so point uv's tool installs and
-# npm's cache at the writable ~/.cache, which also persists per project
+# The home directory is read-only at runtime, so point uv's tool installs,
+# the Pythons it downloads and npm's cache at the writable ~/.cache, which
+# also persists per project
 ENV UV_TOOL_DIR=/home/sandbox/.cache/uv-tools \
+    UV_PYTHON_INSTALL_DIR=/home/sandbox/.cache/uv-python \
     UV_TOOL_BIN_DIR=/home/sandbox/.cache/bin \
     NPM_CONFIG_CACHE=/home/sandbox/.cache/npm
 # After the image's own directories: ~/.cache outlives a session, and a

@@ -1,17 +1,36 @@
-# The configuration of the checks, which make lint and make types run and
-# CI with them. Nothing is built or installed from this: the launcher runs
-# from its checkout, on the standard library alone.
+# What the launcher needs of a Python, and the tools that check it. Nothing
+# is built or installed from this: the launcher runs from its checkout, on
+# the standard library alone. The dev group is what make and CI run, at the
+# versions and hashes of uv.lock.
+
+[project]
+name = "claude-airlock"
+version = "0"
+requires-python = ">=3.13"
+
+[dependency-groups]
+test = ["pytest", "pytest-timeout", "pytest-xdist"]
+lint = ["mypy", "ruff"]
+dev = [{ include-group = "test" }, { include-group = "lint" }]
+
+[tool.uv]
+package = false
 
 [tool.ruff]
-# The oldest Python the launcher promises to run on
-target-version = "py39"
 # The scripts that have no extension to be found by
 extend-include = ["bin/claude-airlock", "docker/features/excalidraw/excalidraw-export"]
 
+# What runs in the image runs on its Python, Debian's, not the host's. And
+# the launcher's first file is read by any Python, to say it is too old.
+[tool.ruff.per-file-target-version]
+"bin/claude-airlock" = "py39"
+"claude_airlock/recording/procwatch.py" = "py311"
+"docker/features/excalidraw/excalidraw-export" = "py311"
+
 [tool.ruff.lint]
-# On top of ruff's defaults: likely bugs, security, and how large and how
-# branched a function gets
-extend-select = ["B", "S", "C90", "PLR"]
+# On top of ruff's defaults: likely bugs, security, how large and how
+# branched a function gets, and what a newer Python says better
+extend-select = ["B", "S", "C90", "PLR", "UP", "FURB", "PT", "PYI"]
 ignore = [
     # The launcher is made of subprocess calls, each an argument list with
     # no shell, and it finds docker and git on PATH as the user does
@@ -19,6 +38,8 @@ ignore = [
     "S607",
     # Field counts and status codes, said by the comment next to each
     "PLR2004",
+    # A patch with a lambda can answer what changes, a return value cannot
+    "PT008",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -37,9 +58,25 @@ max-positional-args = 9
 max-branches = 14
 max-returns = 8
 
-# Checked as the Python mypy runs on: it no longer takes 3.9 as a target,
-# the tests of CI on 3.9 are what hold the launcher to it
 [tool.mypy]
+python_version = "3.13"
 files = ["claude_airlock", "bin/claude-airlock"]
 warn_unused_ignores = true
 warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# The checks are classes named for what they check, as BuildFilesTest
+python_classes = ["*Test"]
+# Each check on a core of its own: most of what one takes is waiting for
+# the launcher it started. One that hangs is ended and says where it was,
+# so that it fails the run instead of holding it.
+addopts = ["--numprocesses=auto", "--strict-markers", "--strict-config"]
+timeout = 300
+filterwarnings = [
+    # The checks of line mode give the launcher a terminal with forkpty,
+    # from a worker that has the threads pytest-xdist talks through
+    "ignore:.*use of forkpty\\(\\) may lead to deadlocks:DeprecationWarning",
+]
+# What the smoke test runs is not a check of these
+norecursedirs = ["smoke"]

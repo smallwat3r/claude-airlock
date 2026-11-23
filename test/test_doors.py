@@ -12,10 +12,10 @@ import sys
 import tempfile
 import threading
 import time
-import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from harness import (
     LauncherTest,
     follow,
@@ -100,29 +100,23 @@ class FakeAgent:
 
 
 class AgentDoorTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
-        self.host = settings.Host(
-            str(self.home),
-            str(self.project),
-            str(self.home / ".config"),
-            str(self.home / ".local" / "state"),
-        )
+    @pytest.fixture(autouse=True)
+    def agent_door(self, sandbox: None) -> None:
         # A short path, socket paths are limited to about 100 bytes
-        directory = tempfile.TemporaryDirectory(dir="/tmp")
-        self.addCleanup(directory.cleanup)
-        self.directory = directory.name
+        self.directory = self.cleanup.enter_context(
+            tempfile.TemporaryDirectory(dir="/tmp")
+        )
 
     def through_the_door(self, *requests: bytes, refuse: bool = False) -> list[bytes]:
         """What the agent answers to requests sent through a door, one
         connection for them all."""
         agent = self.agent = FakeAgent(self.directory, refuse)
-        self.addCleanup(agent.close)
+        self.cleanup.callback(agent.close)
         short = settings.Host(
             self.host.home, self.host.project_dir, self.host.config_home, self.directory
         )
         door = self.door = ssh_agent.AgentDoor(short, "claude-proj", agent.path)
-        self.addCleanup(door.close)
+        self.cleanup.callback(door.close)
         self.host = short
         answers = []
         with socket.socket(socket.AF_UNIX) as client:
@@ -137,12 +131,12 @@ class AgentDoorTest(LauncherTest):
 
     def test_a_session_cannot_hold_more_than_so_many_connections(self):
         answers = self.through_the_door(b"\x0b")
-        self.assertEqual(len(answers), 1)
+        assert len(answers) == 1
         path = self.door.path
         # /dev/fd is there on Linux and on macOS, /proc only on the first
         before = len(os.listdir("/dev/fd"))
         held = []
-        self.addCleanup(lambda: [each.close() for each in held])
+        self.cleanup.callback(lambda: [each.close() for each in held])
         for _ in range(ssh_agent.AGENT_CONNECTIONS * 4):
             client = socket.socket(socket.AF_UNIX)
             held.append(client)
@@ -159,16 +153,16 @@ class AgentDoorTest(LauncherTest):
         time.sleep(0.5)
         # Ours, and for each that was let in the door's two
         most = len(held) + 2 * ssh_agent.AGENT_CONNECTIONS
-        self.assertLessEqual(len(os.listdir("/dev/fd")) - before, most + 2)
+        assert len(os.listdir("/dev/fd")) - before <= most + 2
         # Those past the bound were closed at once, and the door still serves
-        self.assertEqual(held[-1].recv(1), b"")
+        assert held[-1].recv(1) == b""
         for each in held:
             each.close()
         time.sleep(0.5)
         with socket.socket(socket.AF_UNIX) as client:
             client.connect(path)
             client.sendall(string(b"\x0b"))
-            self.assertEqual(ssh_agent.read_message(client)[:1], b"\x0c")
+            assert ssh_agent.read_message(client)[:1] == b"\x0c"
 
     def test_a_connection_that_asks_nothing_is_let_go(self):
         self.through_the_door(b"\x0b")
@@ -177,39 +171,40 @@ class AgentDoorTest(LauncherTest):
         with idle, socket.socket(socket.AF_UNIX) as client:
             client.settimeout(5)
             client.connect(path)
-            self.assertEqual(client.recv(1), b"")
+            assert client.recv(1) == b""
 
     def test_requests_reach_the_agent_and_are_noted(self):
         answers = self.through_the_door(b"\x0b", sign_request(login("git")))
-        self.assertEqual(answers[1], b"\x0e" + string(b"a signature"))
+        assert answers[1] == b"\x0e" + string(b"a signature")
         listed, signed = self.uses()
-        self.assertEqual((listed["did"], listed["keys"]), ("list", 1))
-        self.assertEqual(signed["did"], "sign")
-        self.assertEqual(signed["key"], ssh_agent.fingerprint(KEY))
-        self.assertTrue(signed["key"].startswith("SHA256:"))
-        self.assertEqual(signed["comment"], "me@laptop")
-        self.assertEqual(signed["what"], "a login as git")
-        self.assertEqual(
-            (signed["project"], signed["session"]), (str(self.project), "claude-proj")
+        assert (listed["did"], listed["keys"]) == ("list", 1)
+        assert signed["did"] == "sign"
+        assert signed["key"] == ssh_agent.fingerprint(KEY)
+        assert signed["key"].startswith("SHA256:")
+        assert signed["comment"] == "me@laptop"
+        assert signed["what"] == "a login as git"
+        assert (signed["project"], signed["session"]) == (
+            str(self.project),
+            "claude-proj",
         )
 
     def test_a_signature_of_a_file_says_what_for(self):
         self.through_the_door(sign_request(b"SSHSIG" + string(b"git") + b"rest"))
-        self.assertEqual(self.uses()[0]["what"], "a signature for git")
+        assert self.uses()[0]["what"] == "a signature for git"
 
     def test_what_the_agent_refuses_is_noted_as_refused(self):
         answers = self.through_the_door(sign_request(b"anything"), refuse=True)
-        self.assertEqual(answers, [b"\x05"])
+        assert answers == [b"\x05"]
         (asked,) = self.uses()
-        self.assertEqual((asked["what"], asked["refused"]), ("a signature", True))
+        assert (asked["what"], asked["refused"]) == ("a signature", True)
         event = door_events.use_event(asked)
-        self.assertIn("REFUSED by the agent", event.details[0])
-        self.assertTrue(event.fields["error"])
+        assert "REFUSED by the agent" in event.details[0]
+        assert event.fields["error"]
 
     def test_a_request_that_is_not_what_it_says_is_noted_as_that(self):
         self.through_the_door(b"\x0d\x00\x00")
         (use,) = self.uses()
-        self.assertEqual(use["what"], "sent a request that could not be read")
+        assert use["what"] == "sent a request that could not be read"
 
     def test_what_would_change_the_agent_is_refused_and_never_reaches_it(self):
         bind = b"\x1b" + string(b"session-bind@openssh.com") + b"rest"
@@ -223,28 +218,25 @@ class AgentDoorTest(LauncherTest):
             b"\x0b",
         )
         # The agent of these tests answers a list alone with the keys
-        self.assertEqual([answer[:1] for answer in answers[:5]], [b"\x05"] * 5)
-        self.assertEqual(answers[6][:1], b"\x0c")
-        self.assertEqual(self.agent.asked, [b"\x1b", b"\x0b"])
+        assert [answer[:1] for answer in answers[:5]] == [b"\x05"] * 5
+        assert answers[6][:1] == b"\x0c"
+        assert self.agent.asked == [b"\x1b", b"\x0b"]
         uses = self.uses()
-        self.assertEqual(
-            [(use["what"], use["refused"], use["by"]) for use in uses[:5]],
-            [
-                (what, True, "launcher")
-                for what in (
-                    "asked to add a key",
-                    "asked to remove every key",
-                    "asked to lock the agent",
-                    "asked for an extension",
-                    "asked for an extension",
-                )
-            ],
-        )
+        assert [(use["what"], use["refused"], use["by"]) for use in uses[:5]] == [
+            (what, True, "launcher")
+            for what in (
+                "asked to add a key",
+                "asked to remove every key",
+                "asked to lock the agent",
+                "asked for an extension",
+                "asked for an extension",
+            )
+        ]
         # The extension ssh signs with is passed on and not noted
-        self.assertEqual([use["did"] for use in uses[5:]], ["list"])
+        assert [use["did"] for use in uses[5:]] == ["list"]
         event = door_events.use_event(uses[0])
-        self.assertIn("REFUSED by the launcher", event.details[0])
-        self.assertEqual(event.fields["error"], "refused by the launcher")
+        assert "REFUSED by the launcher" in event.details[0]
+        assert event.fields["error"] == "refused by the launcher"
 
     @mounts_host_sockets
     def test_the_door_is_the_users_alone_and_gone_with_the_session(self):
@@ -255,35 +247,36 @@ class AgentDoorTest(LauncherTest):
         ).flags
         (mount,) = (flag for flag in flags if flag.endswith(":/tmp/ssh-agent.sock:z"))
         door = mount[len("--volume=") : -len(":/tmp/ssh-agent.sock:z")]
-        self.assertFalse(os.path.exists(door))
-        self.assertEqual((self.state / "agents").stat().st_mode & 0o777, 0o700)
+        assert not os.path.exists(door)
+        assert (self.state / "agents").stat().st_mode & 511 == 448
 
     def test_on_macos_the_agent_is_the_one_inside_the_machine(self):
         # Whatever the host has: the path is the machine's, not the host's
         for env in ({}, {"SSH_AUTH_SOCK": "/private/tmp/agent.sock"}):
-            self.assertEqual(
-                ssh_agent.agent_socket(env, "darwin"),
-                ("/run/host-services/ssh-auth.sock", False),
+            assert ssh_agent.agent_socket(env, "darwin") == (
+                "/run/host-services/ssh-auth.sock",
+                False,
             )
 
     def test_elsewhere_the_agent_is_the_hosts_behind_the_launcher(self):
-        self.assertEqual(
-            ssh_agent.agent_socket({"SSH_AUTH_SOCK": "/tmp/agent.sock"}, "linux"),
-            ("/tmp/agent.sock", True),
-        )
-        self.assertIsNone(ssh_agent.agent_socket({}, "linux"))
+        assert ssh_agent.agent_socket(
+            {"SSH_AUTH_SOCK": "/tmp/agent.sock"}, "linux"
+        ) == ("/tmp/agent.sock", True)
+        assert ssh_agent.agent_socket({}, "linux") is None
 
-    @unittest.skipIf(sys.platform == "darwin", "the agent is the machine's there")
+    @pytest.mark.skipif(
+        sys.platform == "darwin", reason="the agent is the machine's there"
+    )
     def test_without_an_agent_nothing_is_forwarded(self):
         flags = self.launch(CLAUDE_AIRLOCK_SSH_AGENT="1").flags
-        self.assertFalse([flag for flag in flags if "ssh-agent" in flag])
+        assert not [flag for flag in flags if "ssh-agent" in flag]
 
     def test_only_the_latest_uses_stay_in_the_record(self):
         with mock.patch.object(doors, "KEPT_USES", 3):
             for number in range(5):
                 doors.note_use(self.host, "s", doors.Door.DOCKER, path=str(number))
         lines = Path(self.host.doors_file).read_text().splitlines()
-        self.assertEqual([json.loads(line)["path"] for line in lines], ["2", "3", "4"])
+        assert [json.loads(line)["path"] for line in lines] == ["2", "3", "4"]
 
     def test_a_session_cannot_fill_the_record_with_uses_that_cost_nothing(self):
         uses = doors.SessionUses(self.host, "s", doors.Door.SSH_AGENT)
@@ -297,33 +290,31 @@ class AgentDoorTest(LauncherTest):
         uses.close()
         noted = doors.read_uses(self.host, 0, time.time() + 1)
         # The first of them one by one, then that the rest is counted
-        self.assertEqual(
-            [use.get("did", "counted") for use in noted],
-            ["sign", "list", "list", "list", "counted", "sign", "counted"],
-        )
-        self.assertEqual(noted[-1]["unrecorded"], {"list": 47, "sign": 1})
+        assert [use.get("did", "counted") for use in noted] == [
+            "sign",
+            "list",
+            "list",
+            "list",
+            "counted",
+            "sign",
+            "counted",
+        ]
+        assert noted[-1]["unrecorded"] == {"list": 47, "sign": 1}
         rows, events = door_events.door_events(self.host, 0, time.time() + 1)
-        self.assertEqual(
-            rows,
-            [
-                (
-                    "ssh agent",
-                    "5 requests, 2 signatures, 48 more NOT RECORDED one by one",
-                )
-            ],
-        )
-        self.assertEqual(
-            events[-1].details,
-            ["48 more uses NOT RECORDED one by one: 47 list, 1 sign"],
-        )
-        self.assertIn("error", events[4].fields)
+        assert rows == [
+            ("ssh agent", "5 requests, 2 signatures, 48 more NOT RECORDED one by one")
+        ]
+        assert events[-1].details == [
+            "48 more uses NOT RECORDED one by one: 47 list, 1 sign"
+        ]
+        assert "error" in events[4].fields
 
     def test_the_uses_of_one_session_can_be_told_from_another(self):
         for session in ("claude-proj", "claude-proj-2"):
             doors.note_use(self.host, session, doors.Door.DOCKER)
         mine = doors.read_uses(self.host, 0, time.time() + 1, "claude-proj-2")
-        self.assertEqual([use["session"] for use in mine], ["claude-proj-2"])
-        self.assertEqual(len(doors.read_uses(self.host, 0, time.time() + 1)), 2)
+        assert [use["session"] for use in mine] == ["claude-proj-2"]
+        assert len(doors.read_uses(self.host, 0, time.time() + 1)) == 2
 
     def test_uses_noted_in_the_same_moment_are_all_followed(self):
         follower = follow.Follower(self.host, verbose=False)
@@ -341,34 +332,26 @@ class AgentDoorTest(LauncherTest):
 
         note(paths[0])
         note(paths[1])
-        self.assertEqual(followed(), paths[:2])
+        assert followed() == paths[:2]
         note(paths[2])
-        self.assertEqual(followed(), paths[2:])
-        self.assertEqual(followed(), [])
+        assert followed() == paths[2:]
+        assert followed() == []
 
 
 class SocketWatchTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
-        directory = tempfile.TemporaryDirectory(dir="/tmp")
-        self.addCleanup(directory.cleanup)
-        self.docker_sock = os.path.join(directory.name, "docker.sock")
-        server = socket.socket(socket.AF_UNIX)
-        self.addCleanup(server.close)
-        server.bind(self.docker_sock)
+    @pytest.fixture(autouse=True)
+    def docker_socket(self, sandbox: None, unix_socket: str) -> None:
+        self.docker_sock = unix_socket
         self.proxy_log = self.work / "proxy.log"
         self.proxy_log.write_text(PROXY_LOG)
 
     def test_a_line_of_the_proxys_log_is_read(self):
         calls = [socket_watch.parse_proxy_call(line) for line in PROXY_LOG.splitlines()]
-        self.assertEqual(
-            calls[:2],
-            [
-                ("172.20.0.5", "GET", "/v1.47/containers/json", 200),
-                ("172.20.0.5", "POST", "/v1.47/containers/create", 403),
-            ],
-        )
-        self.assertIsNone(calls[3])
+        assert calls[:2] == [
+            ("172.20.0.5", "GET", "/v1.47/containers/json", 200),
+            ("172.20.0.5", "POST", "/v1.47/containers/create", 403),
+        ]
+        assert calls[3] is None
 
     def test_an_ipv4_caller_logged_as_ipv6_is_read_as_ipv4(self):
         # What the proxy logs when one socket listens on IPv4 and IPv6
@@ -377,26 +360,23 @@ class SocketWatchTest(LauncherTest):
             "dockerfrontend/<NOSRV> 0/-1/-1/-1/0 403 0 - - PR-- 1/1/0/0/0 0/0 "
             '"GET /v1.56/volumes HTTP/1.1"'
         )
-        self.assertEqual(
-            socket_watch.parse_proxy_call(line),
-            ("172.21.0.5", "GET", "/v1.56/volumes", 403),
+        assert socket_watch.parse_proxy_call(line) == (
+            "172.21.0.5",
+            "GET",
+            "/v1.56/volumes",
+            403,
         )
-        self.assertEqual(
+        assert (
             socket_watch.parse_proxy_call(line.replace("::ffff:172.21.0.5", "fd00::5"))[
                 0
-            ],
-            "fd00::5",
+            ]
+            == "fd00::5"
         )
 
     def watched(self) -> list[dict]:
         """The uses noted of a session whose proxy logged PROXY_LOG. Called
         directly, the socket path is a constant of the socket_proxy module."""
-        host = settings.Host(
-            str(self.home),
-            str(self.project),
-            str(self.home / ".config"),
-            str(self.home / ".local" / "state"),
-        )
+        host = self.host
         environment = {
             **self.fake_docker_env(),
             "FAKE_IP": "172.20.0.5",
@@ -413,17 +393,12 @@ class SocketWatchTest(LauncherTest):
 
     def test_the_calls_of_the_session_are_noted_and_no_other(self):
         uses = self.watched()
-        self.assertEqual(
-            [(use["method"], use["path"], use["status"]) for use in uses],
-            [
-                ("GET", "/v1.47/containers/json", 200),
-                ("POST", "/v1.47/containers/create", 403),
-            ],
-        )
+        assert [(use["method"], use["path"], use["status"]) for use in uses] == [
+            ("GET", "/v1.47/containers/json", 200),
+            ("POST", "/v1.47/containers/create", 403),
+        ]
         (followed,) = (call for call in self.calls() if call[0] == "logs")
-        self.assertEqual(
-            (followed[1], followed[-1]), ("--follow", "claude-airlock-ps-proxy")
-        )
+        assert (followed[1], followed[-1]) == ("--follow", "claude-airlock-ps-proxy")
 
     def test_an_address_found_after_the_watch_closed_follows_no_log(self):
         """The proxy outlives the session: a log followed once nobody
@@ -448,16 +423,11 @@ class SocketWatchTest(LauncherTest):
 
     def test_without_the_socket_nothing_is_watched(self):
         self.launch()
-        self.assertFalse([call for call in self.calls() if call[0] == "logs"])
+        assert not [call for call in self.calls() if call[0] == "logs"]
 
     def test_the_trace_shows_the_use_of_both_doors(self):
         now = time.time()
-        host = settings.Host(
-            str(self.home),
-            str(self.project),
-            str(self.home / ".config"),
-            str(self.home / ".local" / "state"),
-        )
+        host = self.host
         doors.note_use(
             host,
             "claude-proj",
@@ -490,13 +460,9 @@ class SocketWatchTest(LauncherTest):
             "sandbox  docker      POST /x 403  DENIED",
             "sandbox  ssh-agent   signed a login as git with SHA256:abc (me@laptop[31m)",
         ):
-            self.assertIn(expected, stdout)
-        self.assertNotIn("/y", stdout)
-        self.assertNotIn("\x1b", stdout)
+            assert expected in stdout
+        assert "/y" not in stdout
+        assert "\x1b" not in stdout
         failed = self.launch("--trace", "--failed").stdout
-        self.assertIn("POST /x", failed)
-        self.assertNotIn("signed", failed)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert "POST /x" in failed
+        assert "signed" not in failed

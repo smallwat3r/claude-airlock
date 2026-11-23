@@ -7,7 +7,6 @@ import json
 import re
 import subprocess
 import sys
-import unittest
 from pathlib import Path
 
 from harness import (
@@ -28,13 +27,13 @@ class ImageTest(LauncherTest):
             FAKE_IMAGES=f"{old}\n{current}\n{used}",
             FAKE_RUNNING_IMAGES=used,
         )
-        self.assertEqual(result.status, 0, result.stderr)
+        assert result.status == 0, result.stderr
         removed = [call[1] for call in result.calls if call[0] == "rmi"]
         # Never the one the settings ask for now, never by force
-        self.assertEqual(removed, [old, used])
-        self.assertIn(f"removed  {old}", result.stdout)
-        self.assertIn(f"kept     {used}, a container uses it", result.stdout)
-        self.assertIn(f"1 images removed, kept as current: {current}", result.stdout)
+        assert removed == [old, used]
+        assert f"removed  {old}" in result.stdout
+        assert f"kept     {used}, a container uses it" in result.stdout
+        assert f"1 images removed, kept as current: {current}" in result.stdout
 
     def test_feature_names_cannot_escape_the_directory(self):
         result = self.launch(CLAUDE_AIRLOCK_FEATURES="../../etc/passwd")
@@ -43,14 +42,14 @@ class ImageTest(LauncherTest):
     def test_feature_selection_is_sorted_and_unique(self):
         host = settings.detect_host({"HOME": str(self.home)})
         selection = settings.Settings(features="typst,go go")
-        self.assertEqual(image.selected_features(selection, host), ["go", "typst"])
+        assert image.selected_features(selection, host) == ["go", "typst"]
 
     def test_claude_md_lists_what_was_built(self):
         self.launch(CLAUDE_AIRLOCK_FEATURES="go")
         claude_md = (self.work / "out" / "CLAUDE.md").read_text()
-        self.assertRegex(claude_md, r"(?m)^- Go ")
-        self.assertNotIn("KiCad", claude_md)
-        self.assertNotIn("Placeholder", claude_md)
+        assert re.search(r"(?m)^- Go ", claude_md)
+        assert "KiCad" not in claude_md
+        assert "Placeholder" not in claude_md
 
     def write_feature(self, name: str, *lines: str) -> Path:
         directory = self.home / ".config" / "claude-airlock" / "features"
@@ -64,8 +63,8 @@ class ImageTest(LauncherTest):
         )
         self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
         claude_md = (self.work / "out" / "CLAUDE.md").read_text()
-        self.assertRegex(claude_md, r"(?m)^- Go ")
-        self.assertRegex(claude_md, r"(?m)^- My tool$")
+        assert re.search(r"(?m)^- Go ", claude_md)
+        assert re.search(r"(?m)^- My tool$", claude_md)
 
     def test_an_unknown_required_feature_aborts(self):
         self.write_feature("mine", "# claude-feat-requires: nothere")
@@ -74,17 +73,17 @@ class ImageTest(LauncherTest):
 
     def test_claude_gets_the_language_servers_of_the_image(self):
         result = self.launch("-p", "hello", CLAUDE_AIRLOCK_FEATURES="go typst")
-        self.assertEqual(result.command[:2], ["--plugin-dir", image.PLUGIN_DIR])
+        assert result.command[:2] == ["--plugin-dir", image.PLUGIN_DIR]
         manifest = (
             self.work / "out" / "claude.plugin" / ".claude-plugin" / "plugin.json"
         )
         servers = json.loads(manifest.read_text())["lspServers"]
-        self.assertEqual(list(servers), ["gopls"])
-        self.assertEqual(servers["gopls"]["command"], "gopls")
+        assert list(servers) == ["gopls"]
+        assert servers["gopls"]["command"] == "gopls"
 
     def test_an_image_without_language_servers_gives_claude_no_plugin(self):
         result = self.launch(CLAUDE_AIRLOCK_FEATURES="typst")
-        self.assertNotIn("--plugin-dir", result.command)
+        assert "--plugin-dir" not in result.command
 
     def test_a_language_server_line_that_is_not_json_is_refused(self):
         self.write_feature("mine", "# claude-feat-lsp: {gopls}")
@@ -101,12 +100,12 @@ class ImageTest(LauncherTest):
         tool.mkdir()
         (tool / "tool").write_text("one\n")
         self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
-        self.assertEqual((self.work / "out" / "mine" / "tool").read_text(), "one\n")
+        assert (self.work / "out" / "mine" / "tool").read_text() == "one\n"
         # An edited file is another image, like an edited fragment
         (tool / "tool").write_text("two\n")
         self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
         built = {call[1] for call in self.calls() if call[0] == "build"}
-        self.assertEqual(len(built), 2)
+        assert len(built) == 2
 
     def test_what_is_left_in_a_features_directory_is_not_the_features(self):
         tool = self.write_feature("mine", "COPY mine/ /opt/mine/") / "mine"
@@ -120,28 +119,28 @@ class ImageTest(LauncherTest):
         (tool / "lib" / "__pycache__" / "tool.cpython-314.pyc").write_text("made")
         self.launch(CLAUDE_AIRLOCK_FEATURES="mine")
         out = self.work / "out" / "mine"
-        self.assertEqual(
-            sorted(str(path.relative_to(out)) for path in out.rglob("*")),
-            ["lib", "lib/tool"],
-        )
+        assert sorted(str(path.relative_to(out)) for path in out.rglob("*")) == [
+            "lib",
+            "lib/tool",
+        ]
         # The same image as without them
         built = {call[1] for call in self.calls() if call[0] == "build"}
-        self.assertEqual(len(built), 1)
+        assert len(built) == 1
 
     def test_every_feature_assembles(self):
         result = self.launch("--dockerfile")
-        self.assertEqual(result.status, 0)
-        self.assertRegex(result.stdout, r"(?m)^ENTRYPOINT")
+        assert result.status == 0
+        assert re.search(r"(?m)^ENTRYPOINT", result.stdout)
 
     def test_what_outlives_a_session_comes_last_in_the_path(self):
         # A command left in ~/.cache must not stand in for one of the image
         paths = re.findall(r'(?m)^ENV PATH="(.*)"$', self.launch("--dockerfile").stdout)
         kept = [path for path in paths if "/.cache/" in path]
-        self.assertTrue(kept)
+        assert kept
         for path in kept:
             before, _, after = path.partition("${PATH}")
-            self.assertNotIn("/.cache/", before)
-            self.assertIn("/.cache/", after)
+            assert "/.cache/" not in before
+            assert "/.cache/" in after
 
 
 class InstallTest(LauncherTest):
@@ -158,22 +157,22 @@ class InstallTest(LauncherTest):
             text=True,
             check=False,
         )
-        self.assertEqual(process.returncode, 0, process.stderr)
-        self.assertRegex(process.stdout, r"(?m)^ENTRYPOINT")
+        assert process.returncode == 0, process.stderr
+        assert re.search(r"(?m)^ENTRYPOINT", process.stdout)
 
     def test_help_is_the_launchers_own(self):
         # Also with a config file it would refuse, and without docker
         self.write_config("CLAUDE_AIRLOCK_NET_FILTR=1")
         for option in ("--help", "-h"):
             result = self.launch(option)
-            self.assertEqual(result.status, 0, result.stderr)
-            self.assertIn("claude-airlock --trace", result.stdout)
-            self.assertIn("CLAUDE_AIRLOCK_NET_FILTER", result.stdout)
-            self.assertEqual(result.calls, [])
+            assert result.status == 0, result.stderr
+            assert "claude-airlock --trace" in result.stdout
+            assert "CLAUDE_AIRLOCK_NET_FILTER" in result.stdout
+            assert result.calls == []
 
     def test_statusline_is_mounted_at_its_host_path(self):
-        self.assertIn(
-            f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z", self.launch().flags
+        assert (
+            f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z" in self.launch().flags
         )
 
     def test_statusline_is_also_mounted_where_settings_point(self):
@@ -182,15 +181,11 @@ class InstallTest(LauncherTest):
         settings_json = {"statusLine": {"type": "command", "command": "~/statusline"}}
         (self.home / ".claude" / "settings.json").write_text(json.dumps(settings_json))
         flags = self.launch().flags
-        self.assertIn(f"--volume={self.STATUSLINE}:{link}:ro,z", flags)
+        assert f"--volume={self.STATUSLINE}:{link}:ro,z" in flags
 
     def test_another_statusline_is_left_alone(self):
         other = self.home / "other-statusline"
         other.touch()
         settings_json = {"statusLine": {"type": "command", "command": str(other)}}
         (self.home / ".claude" / "settings.json").write_text(json.dumps(settings_json))
-        self.assertFalse([f for f in self.launch().flags if "other-statusline" in f])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert not [f for f in self.launch().flags if "other-statusline" in f]

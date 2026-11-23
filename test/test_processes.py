@@ -8,17 +8,18 @@ import dataclasses
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import types
-import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from harness import LauncherTest, prompts_at, reads_proc
 from test_capture import pcap_file, tcp
 
@@ -47,10 +48,10 @@ def ran(when: float, pid: int, parent: int, *argv: str) -> dict:
     }
 
 
-class WatcherTest(unittest.TestCase):
+class WatcherTest:
     def test_addresses_are_read_as_the_kernel_writes_them(self):
         if sys.byteorder != "little":
-            self.skipTest("written for a little-endian machine")
+            pytest.skip("written for a little-endian machine")
         for encoded, address in (
             ("0100007F", "127.0.0.1"),
             ("0A68A08E", "142.160.104.10"),
@@ -59,7 +60,7 @@ class WatcherTest(unittest.TestCase):
             # IPv4 inside IPv6, as it goes over the wire
             ("0000000000000000FFFF00000A68A08E", "142.160.104.10"),
         ):
-            self.assertEqual(procwatch.address(encoded), address)
+            assert procwatch.address(encoded) == address
 
     @reads_proc
     def test_a_process_and_the_holder_of_a_connection_are_seen(self):
@@ -72,18 +73,18 @@ class WatcherTest(unittest.TestCase):
                     port = client.getsockname()[1]
                     key = (port, "127.0.0.1", server.getsockname()[1])
                     found, _ = procwatch.sockets()
-                    self.assertIn(key, found)
+                    assert key in found
                     holders = procwatch.Holders().of({found[key]}, [os.getpid()])
-                    self.assertEqual(holders, {found[key]: [os.getpid()]})
+                    assert holders == {found[key]: [os.getpid()]}
                 out = io.StringIO()
                 procwatch.Watch(out).look()
                 seen = [json.loads(line) for line in out.getvalue().splitlines()]
                 (slept,) = (line for line in seen if line.get("pid") == sleeper.pid)
-                self.assertEqual(slept["argv"], ["sleep", "30"])
-                self.assertEqual(slept["ppid"], os.getpid())
-                self.assertTrue(slept["exe"].endswith("sleep"))
+                assert slept["argv"] == ["sleep", "30"]
+                assert slept["ppid"] == os.getpid()
+                assert slept["exe"].endswith("sleep")
                 # Not the watcher itself
-                self.assertFalse([l for l in seen if l.get("pid") == os.getpid()])
+                assert not [l for l in seen if l.get("pid") == os.getpid()]
             finally:
                 sleeper.kill()
                 sleeper.wait()
@@ -94,17 +95,17 @@ class WatcherTest(unittest.TestCase):
         big = "x" * (procwatch.MOST_BYTES // 4)
         for _ in range(6):
             watch.note(note=big)
-        self.assertLessEqual(len(out.getvalue()), procwatch.MOST_BYTES + 100)
-        self.assertEqual(json.loads(out.getvalue().splitlines()[-1])["note"], "full")
+        assert len(out.getvalue()) <= procwatch.MOST_BYTES + 100
+        assert json.loads(out.getvalue().splitlines()[-1])["note"] == "full"
 
     def test_a_process_cannot_fill_the_record_with_its_command_line(self):
         long = b"\0".join([b"x" * 5000] * 200) + b"\0"
         kept = procwatch.command_line(long)
-        self.assertEqual(kept[-1], procwatch.CUT)
-        self.assertLessEqual(sum(map(len, kept)), procwatch.MOST_COMMAND + 3)
+        assert kept[-1] == procwatch.CUT
+        assert sum(map(len, kept)) <= procwatch.MOST_COMMAND + 3
         # One that fits is left as it is, an empty argument too
-        self.assertEqual(procwatch.command_line(b"sh\0-c\0\0"), ["sh", "-c", ""])
-        self.assertEqual(procwatch.command_line(b""), [])
+        assert procwatch.command_line(b"sh\x00-c\x00\x00") == ["sh", "-c", ""]
+        assert procwatch.command_line(b"") == []
 
     def test_room_is_kept_for_the_connections_once_the_processes_filled_theirs(self):
         out = io.StringIO()
@@ -115,31 +116,31 @@ class WatcherTest(unittest.TestCase):
         watch.note(reserved=True, port=40212, to="203.0.113.9", to_port=443, pids=[7])
         watch.note(pid=2, argv=["late"])
         said = [json.loads(line) for line in out.getvalue().splitlines()]
-        self.assertEqual([line.get("note") for line in said[-2:]], ["full", None])
-        self.assertEqual(said[-1]["to"], "203.0.113.9")
-        self.assertEqual(sum("note" in line for line in said), 1)
+        assert [line.get("note") for line in said[-2:]] == ["full", None]
+        assert said[-1]["to"] == "203.0.113.9"
+        assert sum("note" in line for line in said) == 1
         # Until that room is used up too
         for _ in range(3):
             watch.note(reserved=True, note=big)
-        self.assertLessEqual(len(out.getvalue()), procwatch.MOST_BYTES)
+        assert len(out.getvalue()) <= procwatch.MOST_BYTES
 
     def test_running_into_the_limit_of_processes_is_noted_when_it_grows(self):
         with tempfile.TemporaryDirectory() as root:
             events = Path(root, "1", "root", "sys", "fs", "cgroup", "pids.events")
             events.parent.mkdir(parents=True)
-            self.assertIsNone(procwatch.limit_hits(1, root))
+            assert procwatch.limit_hits(1, root) is None
             events.write_text("max 3\n")
-            self.assertEqual(procwatch.limit_hits(1, root), 3)
+            assert procwatch.limit_hits(1, root) == 3
             events.write_text("nothing of the kind\n")
-            self.assertIsNone(procwatch.limit_hits(1, root))
+            assert procwatch.limit_hits(1, root) is None
         out = io.StringIO()
         watch = procwatch.Watch(out)
         for hits in (0, 2, 2, 5, None):
             with mock.patch.object(procwatch, "limit_hits", return_value=hits):
                 watch._look_at_limits([1, 7])
         said = [json.loads(line) for line in out.getvalue().splitlines()]
-        self.assertEqual([line["hits"] for line in said], [2, 5])
-        self.assertEqual(noted(*said).process_limit, 5)
+        assert [line["hits"] for line in said] == [2, 5]
+        assert noted(*said).process_limit == 5
 
     @reads_proc
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
@@ -148,19 +149,20 @@ class WatcherTest(unittest.TestCase):
             server.listen(1)
             port = server.getsockname()[1]
             connected, waiting = procwatch.sockets()
-            self.assertIn((port, "127.0.0.1", 0), waiting)
-            self.assertNotIn(port, [key[0] for key in connected])
+            assert (port, "127.0.0.1", 0) in waiting
+            assert port not in [key[0] for key in connected]
             out = io.StringIO()
             watch = procwatch.Watch(out)
             watch.look()
             watch.look()
         seen = [json.loads(line) for line in out.getvalue().splitlines()]
         ours = [line for line in seen if line.get("listen") == port]
-        self.assertEqual([line["on"] for line in ours], ["127.0.0.1"])
+        assert [line["on"] for line in ours] == ["127.0.0.1"]
 
 
-class RecordTest(unittest.TestCase):
-    def setUp(self):
+class RecordTest:
+    @pytest.fixture(autouse=True)
+    def noted_record(self) -> None:
         self.record = noted(
             ran(10.0, 7, 1, "claude"),
             ran(20.0, 640, 7, "bash", "-c", "curl https://a.test"),
@@ -185,26 +187,26 @@ class RecordTest(unittest.TestCase):
 
     def test_a_connection_is_tied_to_the_process_that_held_it(self):
         lineage = self.record.holder(40443, "198.51.100.7", 443, 20.25)
-        self.assertEqual([p.pid for p in lineage], [812, 640, 7])
-        self.assertEqual(
-            processes.shown_lineage(lineage),
-            "[812] curl https://a.test < bash < claude",
+        assert [p.pid for p in lineage] == [812, 640, 7]
+        assert (
+            processes.shown_lineage(lineage)
+            == "[812] curl https://a.test < bash < claude"
         )
 
     def test_of_several_that_hold_a_socket_it_is_the_one_started_last(self):
         (first, _) = self.record.holder(50000, "10.0.0.1", 80, 20.3)
-        self.assertEqual(first.pid, 640)
+        assert first.pid == 640
 
     def test_no_process_is_made_up_for_a_connection(self):
-        self.assertEqual(self.record.holder(40443, "198.51.100.7", 80, 20.3), [])
+        assert self.record.holder(40443, "198.51.100.7", 80, 20.3) == []
         # The same ports long after are another connection
-        self.assertEqual(self.record.holder(40443, "198.51.100.7", 443, 900.0), [])
+        assert self.record.holder(40443, "198.51.100.7", 443, 900.0) == []
 
     def test_a_process_is_named_by_its_program_not_by_what_it_says(self):
         record = noted(
             {"t": 1, "pid": 5, "ppid": 1, "exe": "/tmp/x", "argv": ["sshd", "-D"]}
         )
-        self.assertEqual(record.processes[0].command, "x -D")
+        assert record.processes[0].command == "x -D"
 
     def test_a_line_that_does_not_hold_up_is_passed_over(self):
         record = processes.ProcessRecord()
@@ -215,13 +217,13 @@ class RecordTest(unittest.TestCase):
             '{"t": 1, "port": 1}',
         ):
             record.take(line)
-        self.assertEqual((record.processes, record.holders), ([], {}))
+        assert (record.processes, record.holders) == ([], {})
         record.take('{"t": 1, "note": "full"}')
-        self.assertTrue(record.full)
+        assert record.full
 
     def test_a_parent_that_names_itself_ends_the_line(self):
         record = noted(ran(1.0, 5, 5, "loop"))
-        self.assertEqual(len(record.lineage(5, 2.0)), 1)
+        assert len(record.lineage(5, 2.0)) == 1
 
 
 GIB = 2**30
@@ -236,8 +238,9 @@ def command(when: float, seconds: float | None = 1.0, **fields: object) -> Event
     )
 
 
-class UnseenTest(unittest.TestCase):
-    def setUp(self):
+class UnseenTest:
+    @pytest.fixture(autouse=True)
+    def watched_record(self) -> None:
         self.record = noted({"t": 100.0, "note": "started"}, ran(110.0, 812, 7, "make"))
         self.session = TracedSession(
             "claude-proj", "/proj", 99.0, processes="p", end=200.0, until=200.0
@@ -251,17 +254,17 @@ class UnseenTest(unittest.TestCase):
 
     def test_a_command_no_process_was_seen_of_says_so(self):
         seen, missed = command(109.5), command(120.0, 0.01)
-        self.assertEqual(self.marked(seen, missed), (1, [False, True]))
-        self.assertEqual(missed.details[-1], unseen.SAID)
-        self.assertNotIn(unseen.SAID, seen.details)
+        assert self.marked(seen, missed) == (1, [False, True])
+        assert missed.details[-1] == unseen.SAID
+        assert unseen.SAID not in seen.details
         # Not something gone wrong: the line is not marked as that
-        self.assertEqual(missed.alerts, set())
+        assert missed.alerts == set()
 
     def test_a_process_noted_a_moment_after_the_result_is_still_its(self):
         within = unseen.NOTED_WITHIN
-        self.assertEqual(self.marked(command(109.0, 1 - within / 2))[0], 0)
-        self.assertEqual(self.marked(command(110.0 + within / 2, 0.1))[0], 0)
-        self.assertEqual(self.marked(command(108.0, 1.0))[0], 1)
+        assert self.marked(command(109.0, 1 - within / 2))[0] == 0
+        assert self.marked(command(110.0 + within / 2, 0.1))[0] == 0
+        assert self.marked(command(108.0, 1.0))[0] == 1
 
     def test_what_is_not_known_to_have_run_is_left_alone(self):
         for event in (
@@ -272,26 +275,26 @@ class UnseenTest(unittest.TestCase):
             command(120.0, tool="Read"),
             command(120.0, -5.0),
         ):
-            self.assertEqual(self.marked(event), (0, [False]))
+            assert self.marked(event) == (0, [False])
 
     def test_nothing_is_said_where_the_record_cannot_tell(self):
         # Before the watcher was up, and after the session was over
-        self.assertEqual(self.marked(command(99.5, 0.1))[0], 0)
-        self.assertEqual(self.marked(command(199.5))[0], 0)
+        assert self.marked(command(99.5, 0.1))[0] == 0
+        assert self.marked(command(199.5))[0] == 0
         # Once it had no room for processes, and up to then
         full = noted(
             {"t": 100.0, "note": "started"},
             ran(110.0, 812, 7, "make"),
             {"t": 150.0, "note": "full"},
         )
-        self.assertEqual(self.marked(command(160.0), record=full)[0], 0)
-        self.assertEqual(self.marked(command(120.0), record=full)[0], 1)
+        assert self.marked(command(160.0), record=full)[0] == 0
+        assert self.marked(command(120.0), record=full)[0] == 1
         # Written from outside the session, and by a watcher that never
         # got to watch
         outside = noted({"t": 100.0, "note": "started", "outside": "gVisor"})
-        self.assertEqual(self.marked(command(120.0), record=outside)[0], 0)
-        self.assertEqual(self.marked(command(120.0), record=noted())[0], 0)
-        self.assertEqual(unseen.mark_unseen([command(120.0)], []), 0)
+        assert self.marked(command(120.0), record=outside)[0] == 0
+        assert self.marked(command(120.0), record=noted())[0] == 0
+        assert unseen.mark_unseen([command(120.0)], []) == 0
 
     def test_a_watcher_that_stopped_before_the_command_cannot_tell(self):
         # It says every 10 seconds that it is there, and said so until 130
@@ -300,34 +303,34 @@ class UnseenTest(unittest.TestCase):
             {"t": 130.0, "note": "alive"},
             ran(110.0, 812, 7, "make"),
         )
-        self.assertEqual(self.marked(command(120.0), record=died)[0], 1)
-        self.assertEqual(self.marked(command(150.0), record=died)[0], 1)
+        assert self.marked(command(120.0), record=died)[0] == 1
+        assert self.marked(command(150.0), record=died)[0] == 1
         # Past what it would be silent for, nothing seen is not none ran
-        self.assertEqual(self.marked(command(190.0), record=died)[0], 0)
+        assert self.marked(command(190.0), record=died)[0] == 0
         # One that never said it would is taken as it always was
         silent = noted({"t": 100.0, "note": "started"}, ran(110.0, 812, 7, "make"))
-        self.assertEqual(self.marked(command(190.0), record=silent)[0], 1)
+        assert self.marked(command(190.0), record=silent)[0] == 1
         # Any line is a sign of life, not only the beat
         busy = noted(
             {"t": 100.0, "note": "started", "beat": 10.0}, ran(180.0, 812, 7, "make")
         )
-        self.assertEqual(self.marked(command(190.0), record=busy)[0], 1)
+        assert self.marked(command(190.0), record=busy)[0] == 1
 
     def test_a_process_of_any_session_that_ran_then_counts(self):
         other = dataclasses.replace(self.session, name="claude-proj-2", start=125.0)
         theirs = noted({"t": 125.0, "note": "started"}, ran(130.0, 9, 7, "true"))
         watched = [(self.session, self.record), (other, theirs)]
-        self.assertEqual(unseen.mark_unseen([command(130.0, 0.1)], watched), 0)
-        self.assertEqual(unseen.mark_unseen([command(140.0, 0.1)], watched), 1)
+        assert unseen.mark_unseen([command(130.0, 0.1)], watched) == 0
+        assert unseen.mark_unseen([command(140.0, 0.1)], watched) == 1
         # Before the other session ran it is not asked, and a command
         # that was running as it started may be its own
-        self.assertEqual(unseen.mark_unseen([command(120.0, 0.1)], watched), 1)
-        self.assertEqual(unseen.mark_unseen([command(124.5)], watched), 0)
+        assert unseen.mark_unseen([command(120.0, 0.1)], watched) == 1
+        assert unseen.mark_unseen([command(124.5)], watched) == 0
 
     def test_the_header_counts_them(self):
-        self.assertEqual(unseen.unseen_summary(0), [])
-        self.assertIn("1 command ran with no process", unseen.unseen_summary(1)[0])
-        self.assertIn("3 commands ran with no process", unseen.unseen_summary(3)[0])
+        assert unseen.unseen_summary(0) == []
+        assert "1 command ran with no process" in unseen.unseen_summary(1)[0]
+        assert "3 commands ran with no process" in unseen.unseen_summary(3)[0]
 
 
 class FakeSession:
@@ -387,25 +390,22 @@ class FakeSession:
         (directory / "statm").write_text(f"{pages * 2} {pages} 10 1 0 5 0\n")
 
 
-class HealthWatchTest(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.session = FakeSession(Path(directory.name))
+class HealthWatchTest:
+    @pytest.fixture(autouse=True)
+    def watch_of_a_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.session = FakeSession(tmp_path)
         self.out = io.StringIO()
         # What it says aloud is not for the output of the tests
-        quiet = mock.patch.object(sys, "stdout", io.StringIO())
-        quiet.start()
-        self.addCleanup(quiet.stop)
+        monkeypatch.setattr(sys, "stdout", io.StringIO())
         # Its tmpfs is a directory of this machine, whose disk is as full
         # as it is: a quarter of the 4 GiB the session's is said to have
         block = 4096
         tmpfs = types.SimpleNamespace(
             f_frsize=block, f_blocks=4 * GIB // block, f_bfree=3 * GIB // block
         )
-        measured = mock.patch.object(procwatch.os, "statvfs", lambda _place: tmpfs)
-        measured.start()
-        self.addCleanup(measured.stop)
+        monkeypatch.setattr(procwatch.os, "statvfs", lambda _place: tmpfs)
         self.watch = procwatch.Watch(self.out)
         self.watch._processes[812] = (
             ("9", "/usr/bin/node", ["node", "build.js"]),
@@ -428,27 +428,27 @@ class HealthWatchTest(unittest.TestCase):
     def test_how_the_session_is_doing_is_noted_every_so_often(self):
         self.health.look(self.pids, 100.0)
         # Nothing to compare with yet
-        self.assertEqual(self.said(), [])
+        assert self.said() == []
         self.session.use(memory=2.0, cpu_seconds=3.0, throttled_seconds=0.5)
         self.health.look(self.pids, 102.0)
         (line,) = self.said()
         health = line["health"]
         # Without what the kernel keeps of files and gives back when asked
-        self.assertEqual(health["mem"], [2 * GIB, 16 * GIB])
-        self.assertEqual(health["pids"], [20, 512])
-        self.assertEqual((health["cpu"], health["cpus"]), (150.0, 1.5))
-        self.assertEqual((health["throttled"], health["seconds"]), (0.5, 2.0))
-        self.assertEqual(health["stalled"], {"memory": 0.0, "cpu": 0.0})
+        assert health["mem"] == [2 * GIB, 16 * GIB]
+        assert health["pids"] == [20, 512]
+        assert (health["cpu"], health["cpus"]) == (150.0, 1.5)
+        assert (health["throttled"], health["seconds"]) == (0.5, 2.0)
+        assert health["stalled"] == {"memory": 0.0, "cpu": 0.0}
         # Of the tmpfs only the session's own, as large as it is
-        self.assertEqual(health["tmpfs"], {"/tmp": [GIB, 4 * GIB]})
-        self.assertEqual(health["top"][0], [812, 900 * 2**20, "node"])
-        self.assertNotIn("rose", health)
+        assert health["tmpfs"] == {"/tmp": [GIB, 4 * GIB]}
+        assert health["top"][0] == [812, 900 * 2**20, "node"]
+        assert "rose" not in health
         # Not again before its time, then with what was used since
         self.session.use(memory=2.0, cpu_seconds=18.0)
         self.health.look(self.pids, 102.0 + procwatch.HEALTH_EVERY - 1)
-        self.assertEqual(len(self.said()), 1)
+        assert len(self.said()) == 1
         self.health.look(self.pids, 102.0 + procwatch.HEALTH_EVERY)
-        self.assertEqual(self.said()[-1]["health"]["cpu"], 50.0)
+        assert self.said()[-1]["health"]["cpu"] == 50.0
 
     def test_coming_near_a_limit_is_noted_out_of_turn_and_not_over_and_over(self):
         self.health.look(self.pids, 100.0)
@@ -458,10 +458,10 @@ class HealthWatchTest(unittest.TestCase):
             self.health.look(self.pids, 110.0 + 6 * second)
         rose = [line["health"].get("rose") for line in self.said()]
         # Near at 12, at it at 15, and near again only once well below
-        self.assertEqual(rose, [None, ["memory"], ["memory"], ["memory"]])
+        assert rose == [None, ["memory"], ["memory"], ["memory"]]
         self.session.use(memory=12.0, processes=500)
         self.health.look(self.pids, 152.0)
-        self.assertEqual(self.said()[-1]["health"]["rose"], ["pids"])
+        assert self.said()[-1]["health"]["rose"] == ["pids"]
         # Found at a limit, which the first line says. Then to just under
         # the mark below it and up again: near once more is not news, at
         # it is
@@ -469,16 +469,17 @@ class HealthWatchTest(unittest.TestCase):
         for second, memory in enumerate((15.0, 10.6, 12.0, 15.0)):
             self.session.use(memory=memory)
             steady.look(self.pids, 300.0 + 40 * second)
-        self.assertEqual(
-            [line["health"].get("rose") for line in self.said()[-3:]],
-            [["memory"], None, ["memory"]],
-        )
+        assert [line["health"].get("rose") for line in self.said()[-3:]] == [
+            ["memory"],
+            None,
+            ["memory"],
+        ]
         # No more often than that, however the session goes up and down
         before = len(self.said())
         for second in range(4):
             self.session.use(memory=9.0 if second % 2 else 12.0)
             self.health.look(self.pids, 153.0 + second)
-        self.assertEqual(len(self.said()), before)
+        assert len(self.said()) == before
 
     def test_a_rise_that_came_too_soon_after_another_is_said_when_it_can_be(self):
         self.health.look(self.pids, 100.0)
@@ -487,26 +488,24 @@ class HealthWatchTest(unittest.TestCase):
         self.health.look(self.pids, 102.0)
         self.session.use(memory=15.0)
         self.health.look(self.pids, 103.0)
-        self.assertEqual(len(self.said()), 2)
+        assert len(self.said()) == 2
         self.health.look(self.pids, 102.0 + procwatch.OUT_OF_TURN_EVERY)
-        self.assertEqual(self.said()[-1]["health"]["rose"], ["memory"])
-        self.assertEqual(len(self.said()), 3)
+        assert self.said()[-1]["health"]["rose"] == ["memory"]
+        assert len(self.said()) == 3
 
     def test_the_watcher_and_the_trace_agree_on_what_is_near_a_limit(self):
         # The watcher stands alone in its sidecar, so each has its own
-        self.assertEqual(procwatch.NEAR_LIMIT, (health.NEAR_LIMIT, health.AT_LIMIT))
+        assert procwatch.NEAR_LIMIT == (health.NEAR_LIMIT, health.AT_LIMIT)
 
     def test_a_process_ended_for_want_of_memory_is_noted_with_what_is_gone(self):
         self.health.look(self.pids, 100.0)
         self.session.set("memory.events", "oom 1\noom_kill 1")
         self.health.look([1], 101.0)
         ended = [line for line in self.said() if "oom" in line]
-        self.assertEqual(
-            ended, [{**ended[0], "oom": 1, "gone": [[812, 900 * 2**20, "node"]]}]
-        )
+        assert ended == [{**ended[0], "oom": 1, "gone": [[812, 900 * 2**20, "node"]]}]
         # Once, and of one that was already counted nothing
         self.health.look([1], 102.0)
-        self.assertEqual(sum("oom" in line for line in self.said()), 1)
+        assert sum("oom" in line for line in self.said()) == 1
 
     def test_what_cannot_be_read_is_left_out_and_the_rest_still_told(self):
         for name in ("memory.current", "cpu.stat", "memory.pressure", "cpu.max"):
@@ -515,19 +514,19 @@ class HealthWatchTest(unittest.TestCase):
         self.health.look(self.pids, 100.0)
         self.health.look(self.pids, 101.0)
         (line,) = self.said()
-        self.assertEqual(
-            set(line["health"]), {"pids", "seconds", "stalled", "top"}, line["health"]
-        )
+        assert set(line["health"]) == {"pids", "seconds", "stalled", "top"}, line[
+            "health"
+        ]
 
     def test_it_is_said_aloud_too_for_who_follows_the_session(self):
         aloud = io.StringIO()
         with mock.patch.object(sys, "stdout", aloud):
             self.watch.note(aloud=True, health={"cpu": 1.0})
             self.watch.note(pid=5, argv=["quiet"])
-        self.assertEqual(aloud.getvalue(), self.out.getvalue().splitlines(True)[0])
+        assert aloud.getvalue() == self.out.getvalue().splitlines(True)[0]
 
 
-class HealthShownTest(unittest.TestCase):
+class HealthShownTest:
     def sample(self, **said) -> health.Sample:
         found = health.read_health(5.0, {"t": 5.0, "health": said})
         assert isinstance(found, health.Sample)
@@ -545,24 +544,22 @@ class HealthShownTest(unittest.TestCase):
             top=[[812, 2 * GIB, "node"], [7, GIB, "claude"]],
         )
         event = sample.event()
-        self.assertEqual(
-            event.details[0],
-            "mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512"
-            "  /home/sandbox/.npm 50%  waited for: io 3%  top: [812] node 2g",
+        assert (
+            event.details[0] == "mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512"
+            "  /home/sandbox/.npm 50%  waited for: io 3%  top: [812] node 2g"
         )
-        self.assertEqual(event.what, "health")
-        self.assertNotIn("flagged", event.fields)
-        self.assertEqual(
-            event.fields["memory"], {"used": 3 * GIB + GIB // 10, "limit": 16 * GIB}
-        )
-        self.assertEqual(
-            event.fields["top"][0], {"pid": 812, "rss": 2 * GIB, "name": "node"}
-        )
+        assert event.what == "health"
+        assert "flagged" not in event.fields
+        assert event.fields["memory"] == {
+            "used": 3 * GIB + GIB // 10,
+            "limit": 16 * GIB,
+        }
+        assert event.fields["top"][0] == {"pid": 812, "rss": 2 * GIB, "name": "node"}
 
     def test_a_limit_that_is_near_and_one_that_is_reached_are_said(self):
         near = self.sample(mem=[12 * GIB, 16 * GIB], rose=["memory"]).event()
-        self.assertEqual(near.details, ["running low on memory  mem 12g of 16g (75%)"])
-        self.assertNotIn("flagged", near.fields)
+        assert near.details == ["running low on memory  mem 12g of 16g (75%)"]
+        assert "flagged" not in near.fields
         reached = self.sample(
             mem=[15 * GIB, 16 * GIB],
             tmpfs={"/tmp": [39, 40]},
@@ -572,33 +569,32 @@ class HealthShownTest(unittest.TestCase):
             throttled=12.0,
             rose=["/tmp"],
         ).event()
-        self.assertEqual(
-            reached.details[0],
-            "ALMOST OUT OF memory, /tmp, STALLED for want of memory"
+        assert (
+            reached.details[0]
+            == "ALMOST OUT OF memory, /tmp, STALLED for want of memory"
             "  mem 15g of 16g (93%)  cpu 150% of 1.5 cpus, held back 12.0s"
-            "  /tmp 97%  waited for: memory 35%",
+            "  /tmp 97%  waited for: memory 35%"
         )
-        self.assertTrue(reached.fields["flagged"])
+        assert reached.fields["flagged"]
 
     def test_no_limit_is_no_share_and_a_name_is_the_sessions_to_choose(self):
         event = self.sample(
             mem=[GIB, None], pids=[5, None], top=[[9, GIB, "evil\x1b[31m\nname"]]
         ).event()
-        self.assertEqual(event.details, ["mem 1g  pids 5  top: [9] evil[31m\\nname 1g"])
+        assert event.details == ["mem 1g  pids 5  top: [9] evil[31m\\nname 1g"]
 
     def test_a_process_that_was_ended_is_said_with_the_likely_one(self):
         ended = health.read_health(
             7.0, {"t": 7.0, "oom": 2, "gone": [[812, 9 * GIB, "node"]]}
         )
         assert ended is not None
-        self.assertEqual(
-            ended.event().details,
-            ["OUT OF MEMORY, a process was ended for it  gone since: [812] node 9g"],
-        )
+        assert ended.event().details == [
+            "OUT OF MEMORY, a process was ended for it  gone since: [812] node 9g"
+        ]
         unseen = health.read_health(7.0, {"t": 7.0, "oom": 3, "gone": []})
         assert unseen is not None
-        self.assertIn("which one was not seen", unseen.event().details[0])
-        self.assertIsNone(health.read_health(7.0, {"t": 7.0, "pid": 5}))
+        assert "which one was not seen" in unseen.event().details[0]
+        assert health.read_health(7.0, {"t": 7.0, "pid": 5}) is None
 
     def test_a_line_that_does_not_hold_up_is_passed_over(self):
         record = noted(
@@ -608,8 +604,8 @@ class HealthShownTest(unittest.TestCase):
             {"t": 1, "health": {"top": [[1, 2]]}},
             {"t": 2, "health": {"mem": [1, 2]}},
         )
-        self.assertEqual([found.when for found in record.samples], [2.0])
-        self.assertEqual(record.ended, [])
+        assert [found.when for found in record.samples] == [2.0]
+        assert record.ended == []
 
     def test_the_header_sums_it_up(self):
         samples = [
@@ -628,22 +624,19 @@ class HealthShownTest(unittest.TestCase):
             ),
         ]
         ended = [health.Ended(8.0, 2)]
-        self.assertEqual(
-            health.health_summary(samples, ended),
-            [
-                "  memory 9g of 16g (56%) at most",
-                "  cpu 175% on average, 400% at most of 4 cpus, held back 6s in all",
-                "  pids 78% of its limit at most",
-                "  STALLED for want of memory, up to 22% of the time",
-                "  OUT OF MEMORY, a process was ended for it 2 times",
-            ],
-        )
-        self.assertEqual(health.health_summary([], []), [])
+        assert health.health_summary(samples, ended) == [
+            "  memory 9g of 16g (56%) at most",
+            "  cpu 175% on average, 400% at most of 4 cpus, held back 6s in all",
+            "  pids 78% of its limit at most",
+            "  STALLED for want of memory, up to 22% of the time",
+            "  OUT OF MEMORY, a process was ended for it 2 times",
+        ]
+        assert health.health_summary([], []) == []
 
 
 class SidecarTest(LauncherTest):
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def record_file(self, sandbox: None) -> None:
         self.now = time.time()
         self.record_file = self.work / "processes.jsonl"
         lines = [
@@ -685,31 +678,29 @@ class SidecarTest(LauncherTest):
             "--security-opt=no-new-privileges",
             "--entrypoint=python3",
         ):
-            self.assertIn(flag, sidecar)
-        self.assertEqual(
-            [flag for flag in sidecar if flag.startswith("--cap-add=")],
-            ["--cap-add=SETUID", "--cap-add=SETGID"],
-        )
-        self.assertEqual(sidecar[-2:], [str(os.getuid()), str(os.getgid())])
+            assert flag in sidecar
+        assert [flag for flag in sidecar if flag.startswith("--cap-add=")] == [
+            "--cap-add=SETUID",
+            "--cap-add=SETGID",
+        ]
+        assert sidecar[-2:] == [str(os.getuid()), str(os.getgid())]
         # The session is not made to wait for it, nor to depend on it
-        self.assertNotIn(SIDECAR, " ".join(result.flags))
+        assert SIDECAR not in " ".join(result.flags)
 
     def test_it_joins_the_network_of_the_capture(self):
         result = self.watched(
             CLAUDE_AIRLOCK_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file)
         )
-        self.assertIn(
-            "--network=container:claude-proj.capture", result.sidecar(SIDECAR)
-        )
+        assert "--network=container:claude-proj.capture" in result.sidecar(SIDECAR)
 
     def test_the_record_is_copied_out_and_the_sidecar_removed(self):
         result = self.watched()
         (copied,) = (self.state / "processes").glob("*.jsonl")
-        self.assertEqual(copied.read_text(), self.record_file.read_text())
-        self.assertIn(["rm", "--force", SIDECAR], result.calls)
-        self.assertIn(
-            f'"processes": "{copied.name}"',
-            (self.state / "net-sessions.jsonl").read_text(),
+        assert copied.read_text() == self.record_file.read_text()
+        assert ["rm", "--force", SIDECAR] in result.calls
+        assert (
+            f'"processes": "{copied.name}"'
+            in (self.state / "net-sessions.jsonl").read_text()
         )
 
     def test_a_watcher_that_did_not_get_to_watch_is_said(self):
@@ -718,14 +709,14 @@ class SidecarTest(LauncherTest):
         said = self.work / "said"
         said.write_text("OSError: could not take the identity\n")
         result = self.watched(session="sleep 6", FAKE_PROXY_LOG=str(said))
-        self.assertIn("the processes of this session were not recorded", result.stderr)
-        self.assertIn("could not take the identity", result.stderr)
-        self.assertEqual(list((self.state / "processes").glob("*.jsonl")), [])
-        self.assertFalse((self.state / "net-sessions.jsonl").exists())
+        assert "the processes of this session were not recorded" in result.stderr
+        assert "could not take the identity" in result.stderr
+        assert list((self.state / "processes").glob("*.jsonl")) == []
+        assert not (self.state / "net-sessions.jsonl").exists()
 
     def test_switched_off_nothing_is_recorded(self):
         result = self.launch(session="sleep 0.5", FAKE_RUNNING="claude-proj")
-        self.assertIsNone(result.sidecar(SIDECAR))
+        assert result.sidecar(SIDECAR) is None
 
     def test_a_record_left_by_a_killed_session_is_collected(self):
         about = {"project": "/elsewhere", "start": 5, "pid": 2**22 - 7}
@@ -733,16 +724,14 @@ class SidecarTest(LauncherTest):
             FAKE_PS=f"claude-old.procs\t{json.dumps(about)}",
             FAKE_PROCESSES=str(self.record_file),
         )
-        self.assertIn(["rm", "--force", "claude-old.procs"], result.calls)
-        self.assertTrue(
-            (self.state / "processes" / "claude-old.procs-5.jsonl").exists()
-        )
+        assert ["rm", "--force", "claude-old.procs"] in result.calls
+        assert (self.state / "processes" / "claude-old.procs-5.jsonl").exists()
 
     def trace(self, *args: str) -> str:
         self.watched(CLAUDE_AIRLOCK_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file))
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         result = self.launch("--trace", *args)
-        self.assertEqual(result.status, 0, result.stderr)
+        assert result.status == 0, result.stderr
         return result.stdout
 
     def test_a_session_that_ran_into_its_limits_is_said_to(self):
@@ -750,18 +739,18 @@ class SidecarTest(LauncherTest):
             record.write(json.dumps({"t": self.now + 3, "limit": "pids", "hits": 4}))
             record.write("\n")
         ended = self.watched(FAKE_EVENTS="oom\noom", CLAUDE_AIRLOCK_MEMORY="2g")
-        self.assertIn("ran into its limit of processes 4 times", ended.stderr)
-        self.assertIn("ran into its memory limit of 2g 2 times", ended.stderr)
-        self.assertIn(
-            ["events", "--filter=container=claude-proj", "--filter=event=oom"],
-            [call[:3] for call in ended.calls],
-        )
+        assert "ran into its limit of processes 4 times" in ended.stderr
+        assert "ran into its memory limit of 2g 2 times" in ended.stderr
+        assert ["events", "--filter=container=claude-proj", "--filter=event=oom"] in [
+            call[:3] for call in ended.calls
+        ]
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
-        self.assertIn(
-            "its limit of processes was RUN INTO 4 times", self.launch("--trace").stdout
+        assert (
+            "its limit of processes was RUN INTO 4 times"
+            in self.launch("--trace").stdout
         )
         # Nothing of either from a session that kept within them
-        self.assertNotIn("memory limit", self.launch().stderr)
+        assert "memory limit" not in self.launch().stderr
 
     def test_a_socket_that_waits_for_connections_is_said(self):
         waits = [
@@ -773,18 +762,18 @@ class SidecarTest(LauncherTest):
             record.write("".join(json.dumps(line) + "\n" for line in waits))
         ended = self.watched()
         # Only what the other sessions on its network can reach, and once
-        self.assertIn("waited for connections, open to the other", ended.stderr)
-        self.assertEqual(ended.stderr.count("tcp 0.0.0.0:8080"), 1)
-        self.assertNotIn("9229", ended.stderr)
+        assert "waited for connections, open to the other" in ended.stderr
+        assert ended.stderr.count("tcp 0.0.0.0:8080") == 1
+        assert "9229" not in ended.stderr
         self.write_transcript("0a", prompts_at(self.now, self.now + 10))
         shown = self.launch("--trace").stdout
-        self.assertRegex(
-            shown,
+        assert re.search(
             r"sandbox  listen      tcp 0\.0\.0\.0:8080  OPEN to its network"
             r"  by: \[812\] curl -sS https://good.test < claude",
+            shown,
         )
-        self.assertRegex(shown, r"listen      tcp 127\.0\.0\.1:9229  by: \[7\] claude")
-        self.assertIn("2 sockets waited for connections, OPEN", shown)
+        assert re.search(r"listen      tcp 127\.0\.0\.1:9229  by: \[7\] claude", shown)
+        assert "2 sockets waited for connections, OPEN" in shown
 
     def test_the_trace_says_how_the_session_was_doing(self):
         lines = [
@@ -807,34 +796,33 @@ class SidecarTest(LauncherTest):
         with open(self.record_file, "a") as record:
             record.write("".join(json.dumps(line) + "\n" for line in lines))
         shown = self.trace()
-        self.assertIn(
+        assert (
             "sandbox  health      mem 2g of 16g (12%)  cpu 80%  pids 30 of 512"
-            "  top: [812] curl 1g",
-            shown,
+            "  top: [812] curl 1g" in shown
         )
-        self.assertIn("health      ALMOST OUT OF memory  mem 15g of 16g (93%)", shown)
-        self.assertIn("gone since: [812] curl 14g", shown)
-        self.assertIn("#   memory 15g of 16g (93%) at most", shown)
-        self.assertIn("#   cpu 80% on average, 80% at most", shown)
-        self.assertIn("#   OUT OF MEMORY, a process was ended for it 1 times", shown)
+        assert "health      ALMOST OUT OF memory  mem 15g of 16g (93%)" in shown
+        assert "gone since: [812] curl 14g" in shown
+        assert "#   memory 15g of 16g (93%) at most" in shown
+        assert "#   cpu 80% on average, 80% at most" in shown
+        assert "#   OUT OF MEMORY, a process was ended for it 1 times" in shown
         # What went wrong of it is what --failed keeps, and --only picks it
         failed = self.launch("--trace", "--failed").stdout
-        self.assertEqual(failed.count("sandbox  health"), 2)
-        self.assertEqual(
-            self.launch("--trace", "--only", "health").stdout.count("  health  "), 3
+        assert failed.count("sandbox  health") == 2
+        assert (
+            self.launch("--trace", "--only", "health").stdout.count("  health  ") == 3
         )
         events = map(json.loads, self.launch("--trace", "--json").stdout.splitlines())
         (first, *_) = (e for e in events if e.get("what") == "health")
-        self.assertEqual(first["memory"], {"used": 2 * GIB, "limit": 16 * GIB})
+        assert first["memory"] == {"used": 2 * GIB, "limit": 16 * GIB}
 
     def test_the_trace_says_which_process_made_a_connection(self):
         stdout = self.trace()
-        self.assertIn(
-            "tcp/https 198.51.100.7:443  by: [812] curl -sS https://good.test < claude",
-            stdout,
+        assert (
+            "tcp/https 198.51.100.7:443  by: [812] curl -sS https://good.test < claude"
+            in stdout
         )
-        self.assertIn("#   processes 2 seen to run", stdout)
-        self.assertNotIn("sandbox  exec", stdout)
+        assert "#   processes 2 seen to run" in stdout
+        assert "sandbox  exec" not in stdout
 
     def test_the_trace_says_which_command_no_process_was_seen_of(self):
         self.watched(session="sleep 1")
@@ -847,7 +835,7 @@ class SidecarTest(LauncherTest):
         copied.write_text("".join(json.dumps(line) + "\n" for line in lines))
 
         def at(when: float) -> str:
-            return datetime.fromtimestamp(when, timezone.utc).isoformat()
+            return datetime.fromtimestamp(when, UTC).isoformat()
 
         def called(tool_id: str, text: str, began: float) -> list[dict]:
             block = {"type": "tool_use", "id": tool_id, "name": "Bash"}
@@ -871,28 +859,23 @@ class SidecarTest(LauncherTest):
         )
         self.write_transcript("0a", entries)
         shown = self.launch("--trace").stdout
-        self.assertEqual(shown.count("processes: none seen while it ran"), 1)
-        self.assertRegex(
-            shown,
-            r"\$ true\n.*result: ok.*\n.*bash +processes: none seen while it ran",
+        assert shown.count("processes: none seen while it ran") == 1
+        assert re.search(
+            r"\$ true\n.*result: ok.*\n.*bash +processes: none seen while it ran", shown
         )
-        self.assertIn("#   1 command ran with no process seen", shown)
+        assert "#   1 command ran with no process seen" in shown
         # Not what --failed keeps, and a value of its own with --json
-        self.assertNotIn("none seen", self.launch("--trace", "--failed").stdout)
+        assert "none seen" not in self.launch("--trace", "--failed").stdout
         events = map(json.loads, self.launch("--trace", "--json").stdout.splitlines())
         missed = [e["input"]["command"] for e in events if e.get("unseen")]
-        self.assertEqual(missed, ["true"])
+        assert missed == ["true"]
 
     def test_verbose_adds_the_processes(self):
         stdout = self.trace("--verbose")
-        self.assertIn("sandbox  exec        [812] curl -sS https://good.test", stdout)
-        self.assertIn("sandbox  exec        parent: [7] claude", stdout)
+        assert "sandbox  exec        [812] curl -sS https://good.test" in stdout
+        assert "sandbox  exec        parent: [7] claude" in stdout
 
     def test_json_names_the_process(self):
         events = map(json.loads, self.trace("--json").splitlines())
         (made,) = (e["process"] for e in events if e.get("port") == 443)
-        self.assertEqual((made["pid"], made["parents"]), (812, ["claude"]))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert (made["pid"], made["parents"]) == (812, ["claude"])

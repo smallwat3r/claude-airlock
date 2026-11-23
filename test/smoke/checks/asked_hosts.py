@@ -33,7 +33,8 @@ helper = subprocess.Popen(
     text=True,
 )
 try:
-    assert helper.stdin and helper.stdout
+    assert helper.stdin
+    assert helper.stdout
     asked.answer("allowed.test", True)
     helper.stdin.write(
         f"0 {ADDRESS} allowed.test -\n"
