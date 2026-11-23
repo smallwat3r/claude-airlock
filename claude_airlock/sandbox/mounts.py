@@ -9,7 +9,7 @@ import os
 import stat
 from dataclasses import dataclass
 
-from ..docker import env_arg, mount_arg
+from ..docker import env_arg, hidden_arg, mount_arg
 from ..errors import Fatal
 from ..files import expand_home
 from ..settings import Host, Settings
@@ -261,11 +261,4 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
                     continue
                 if plain:
                     hidden[path] = None
-    for path in hidden:
-        if ":" in path:
-            # Not left visible, and not for docker to trip over
-            raise Fatal(
-                f"cannot hide {path}: docker takes no path with a colon,"
-                " rename or remove the file"
-            )
-    return [mount_arg("/dev/null", path, "ro") for path in hidden]
+    return [hidden_arg(path) for path in hidden]

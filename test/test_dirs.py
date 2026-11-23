@@ -150,8 +150,18 @@ class ExtraDirsTest(LauncherTest):
         hidden = f"--volume=/dev/null:{inside / '.env'}:ro"
         assert flags.count(hidden) == 1
 
+    def test_a_secret_with_a_colon_in_its_name_is_hidden_the_long_way(self):
+        # A session can make one: refused, every later launch would be
+        for name in (".env.a:b", '.env.a:b,"c"'):
+            (self.project / name).touch()
+        flags = self.launch().flags
+        hidden = "--mount=type=bind,source=/dev/null,"
+        assert f"{hidden}target={self.project}/.env.a:b,readonly" in flags
+        quoted = f'"target={self.project}/.env.a:b,""c"""'
+        assert f"{hidden}{quoted},readonly" in flags
+
     def test_a_secret_that_cannot_be_hidden_is_not_left_visible(self):
-        (self.project / ".env.a:b").touch()
+        (self.project / ".env.a:b\nc").touch()
         self.assert_refused(self.launch(), "cannot hide")
 
     def test_filesystem_root_is_refused(self):
