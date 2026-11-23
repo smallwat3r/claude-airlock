@@ -8,7 +8,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TypeVar
 
 from ..events import Event, Kind, Stage, labelled
 from .calls import call_label
@@ -25,7 +24,6 @@ MOST_CALLS = 10_000
 
 # What an event comes with, where it is not alone: the transcript it is
 # from, for what follows several sessions
-Found = TypeVar("Found")
 
 
 @dataclass(frozen=True)
@@ -149,7 +147,7 @@ class Timeline:
         event.notes.append(f"during: {latest.label}{more}")
 
 
-def ordered(
+def ordered[Found](
     found: Iterable[Found],
     event: Callable[[Found], Event],
     timeline: Timeline,

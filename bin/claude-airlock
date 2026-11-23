@@ -60,13 +60,24 @@ selected features/*.Dockerfile, then tail.Dockerfile.
 # listed once, in claude_airlock/settings.py. The code is the claude_airlock
 # package next to this directory, each module says what it is for in its
 # first lines: cli.py is where a session starts and ends. Standard library
-# only, and no syntax newer than Python 3.9, the version macOS ships.
+# only, on Python 3.13 or later. This file alone keeps to what an older
+# Python reads, so that one says what is missing instead of a syntax error.
 
 import os
 import sys
 
+# The oldest Python the package runs on, as pyproject.toml has it
+OLDEST_PYTHON = (3, 13)
+
 
 def main() -> int:
+    if sys.version_info < OLDEST_PYTHON:
+        wanted = ".".join(map(str, OLDEST_PYTHON))
+        found = ".".join(map(str, sys.version_info[:3]))
+        sys.stderr.write(
+            f"claude-airlock: python3 is Python {found}, it takes {wanted} or later\n"
+        )
+        return 1
     # The package sits next to bin/ in the checkout, it is not installed.
     # realpath, so this script can be symlinked into a directory on PATH.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))

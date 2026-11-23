@@ -18,7 +18,7 @@ from ..settings import Host
 from .door_events import door_events, use_event
 
 # Summary rows, each what it is about and what is said of it, and events
-Noted = tuple[list[tuple[str, str]], list[Event]]
+type Noted = tuple[list[tuple[str, str]], list[Event]]
 
 
 @dataclass(frozen=True)

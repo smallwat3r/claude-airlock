@@ -54,19 +54,19 @@ class Notices:
 
     def system(self, message: dict) -> None:
         """Take in what claude says of the session while a turn runs."""
-        subtype = message.get("subtype")
-        if subtype == "status" and message.get("status") == "compacting":
-            self._page.note("chat", "compacting the conversation")
-        elif subtype == "compact_boundary":
-            self._compacted(message.get("compact_metadata"))
-        elif subtype == "api_retry":
-            why = flat(message.get("error") or "")[:ABOUT_WIDTH]
-            line = labelled("chat", f"the API did not answer, trying again  {why}")
-            self._page.say([line.rstrip()])
-        elif subtype == "task_started":
-            self._task_started(message)
-        elif subtype == "task_notification":
-            self._task_ended(message)
+        match message.get("subtype"):
+            case "status" if message.get("status") == "compacting":
+                self._page.note("chat", "compacting the conversation")
+            case "compact_boundary":
+                self._compacted(message.get("compact_metadata"))
+            case "api_retry":
+                why = flat(message.get("error") or "")[:ABOUT_WIDTH]
+                line = labelled("chat", f"the API did not answer, trying again  {why}")
+                self._page.say([line.rstrip()])
+            case "task_started":
+                self._task_started(message)
+            case "task_notification":
+                self._task_ended(message)
 
     def servers(self, servers: list[tuple[str, str]]) -> None:
         """Say which MCP servers the session has, when that is another

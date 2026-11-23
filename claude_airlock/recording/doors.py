@@ -33,7 +33,7 @@ UNRECORDED = "unrecorded"
 BY_LAUNCHER = "launcher"
 
 
-class Door(str, enum.Enum):
+class Door(enum.StrEnum):
     """A way out of the sandbox a session can be given, as a use of it
     is noted."""
 
@@ -41,7 +41,7 @@ class Door(str, enum.Enum):
     DOCKER = "docker"
 
 
-class AgentUse(str, enum.Enum):
+class AgentUse(enum.StrEnum):
     """What the agent was asked: to sign, to list its keys, or something
     that is not a session's to ask."""
 

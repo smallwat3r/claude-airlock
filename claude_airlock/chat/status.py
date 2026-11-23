@@ -53,7 +53,7 @@ PLAN = "plan"
 _MODEL = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?")
 
 # A part of the status: its style, and its text
-Part = tuple[str, str]
+type Part = tuple[str, str]
 # What of that which is open to a session the status shows, each with its
 # colour: yellow what widens what a session reaches, red what shows every
 # container on the host with its secrets

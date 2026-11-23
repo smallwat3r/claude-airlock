@@ -46,7 +46,7 @@ BACKLOG_BYTES = 256 << 20
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
 # What is told the answer claude gives to a request of the chat's
-Answer = Callable[[dict], None]
+type Answer = Callable[[dict], None]
 
 
 class Backlog:

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import TypeVar
 
 from ..events import flat
 
@@ -31,8 +30,6 @@ MOST_SAID = 20
 # How much is kept as missed of one message, and by a reader nobody asks
 # what it missed
 MOST_MISSED = 50
-
-Kind = TypeVar("Kind")
 
 
 def shape(value: object, depth: int = SHAPE_DEPTH) -> str:
@@ -74,7 +71,7 @@ class Drift:
         self._said: set[str] = set()
         self._missed: list[str] = []
 
-    def field(self, holder: object, name: str, kind: type[Kind]) -> Kind | None:
+    def field[Kind](self, holder: object, name: str, kind: type[Kind]) -> Kind | None:
         """A field a chat goes by: what it holds when it is there and of
         its kind, none when not, which is then kept as missed."""
         held = holder.get(name) if isinstance(holder, dict) else None

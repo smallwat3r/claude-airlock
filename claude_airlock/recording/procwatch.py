@@ -104,7 +104,7 @@ PAGE = os.sysconf("SC_PAGE_SIZE")
 _CAPABILITY_VERSION_3 = 0x20080522
 
 
-class Note(str, enum.Enum):
+class Note(enum.StrEnum):
     """The notes a record can hold about itself, as the value of "note"
     in a line."""
 

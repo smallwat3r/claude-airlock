@@ -93,5 +93,5 @@ def plugin_server(tool: str) -> str:
     other tool."""
     if not tool.startswith(PLUGIN_SERVER_PREFIX):
         return ""
-    server, found, _ = tool[len(PLUGIN_SERVER_PREFIX) :].partition("__")
+    server, found, _ = tool.removeprefix(PLUGIN_SERVER_PREFIX).partition("__")
     return server if found else ""

@@ -146,8 +146,7 @@ def local_time(entry: dict) -> datetime | None:
     if not isinstance(stamp, str):
         return None
     try:
-        # fromisoformat only takes a trailing Z from Python 3.11
-        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        when = datetime.fromisoformat(stamp)
         # Both can fail on a date too far from now for the platform
         if not EARLIEST <= when.timestamp() <= LATEST:
             return None

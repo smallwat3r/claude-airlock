@@ -5,9 +5,6 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TypeVar
-
-Found = TypeVar("Found")
 
 # How often wait_for asks again
 ASK_EVERY = 0.2
@@ -28,7 +25,7 @@ def in_background(work: Callable[..., None], *args: object) -> Iterator[None]:
         thread.join()
 
 
-def wait_for(ask: Callable[[], Found], stop: threading.Event) -> Found | None:
+def wait_for[Found](ask: Callable[[], Found], stop: threading.Event) -> Found | None:
     """Ask until the answer is something, every ASK_EVERY seconds, and
     return it. None when stop is set first."""
     while not (answer := ask()):

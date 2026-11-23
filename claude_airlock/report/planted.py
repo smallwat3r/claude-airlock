@@ -101,7 +101,7 @@ _NO_WIDTH_RUN = re.compile(f"[{_NO_WIDTH}]{{8,}}")
 # no width
 _FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6\u00ad{_NO_WIDTH}]+")
 
-Finder = Callable[[str], "str | None"]
+type Finder = Callable[[str], str | None]
 
 
 @dataclass(frozen=True)

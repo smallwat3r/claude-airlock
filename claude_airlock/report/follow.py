@@ -199,9 +199,8 @@ class CaptureTail:
         return True
 
 
-# A function that returns a session's health readings later than a time. The
-# union is quoted, Python 3.9 cannot evaluate it when the module is loaded
-SaidSince = Callable[[float], "list[Sample | Ended]"]
+# A function that returns a session's health readings later than a time
+type SaidSince = Callable[[float], list[Sample | Ended]]
 
 
 class HealthTail:

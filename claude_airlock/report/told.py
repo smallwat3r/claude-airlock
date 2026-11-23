@@ -35,7 +35,7 @@ OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
 # The kind of the event that tells of the files read as instructions
 INSTRUCTIONS = "instructions"
 
-Reader = Callable[[dict, float, Who], list[Event]]
+type Reader = Callable[[dict, float, Who], list[Event]]
 
 
 def names(value: object) -> list[str]:

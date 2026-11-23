@@ -137,20 +137,21 @@ def ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
     carries something else. An Ethernet frame does not say who sent it, it
     counts as sent."""
     reader = Cursor(frame)
-    if link_type == LinkType.COOKED_2:
-        ethertype = reader.number(2)
-        reader.skip(8)  # reserved, interface, hardware type
-        sent = reader.number(1) == COOKED_SENT
-        reader.skip(9)  # address length and address
-    elif link_type == LinkType.COOKED:
-        sent = reader.number(2) == COOKED_SENT
-        reader.skip(12)  # hardware type, address length and address
-        ethertype = reader.number(2)
-    elif link_type == LinkType.ETHERNET:
-        reader.skip(12)  # the two addresses
-        ethertype, sent = reader.number(2), True
-    else:
-        raise NotThis
+    match link_type:
+        case LinkType.COOKED_2:
+            ethertype = reader.number(2)
+            reader.skip(8)  # reserved, interface, hardware type
+            sent = reader.number(1) == COOKED_SENT
+            reader.skip(9)  # address length and address
+        case LinkType.COOKED:
+            sent = reader.number(2) == COOKED_SENT
+            reader.skip(12)  # hardware type, address length and address
+            ethertype = reader.number(2)
+        case LinkType.ETHERNET:
+            reader.skip(12)  # the two addresses
+            ethertype, sent = reader.number(2), True
+        case _:
+            raise NotThis
     if ethertype == EtherType.IPV4:
         return reader.rest(), sent, 4
     if ethertype == EtherType.IPV6:

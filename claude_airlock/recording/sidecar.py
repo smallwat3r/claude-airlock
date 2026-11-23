@@ -12,7 +12,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, TypeVar
+from typing import ClassVar, Self
 
 from ..docker import (
     DROP_CAPABILITIES,
@@ -26,8 +26,6 @@ from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..settings import Host
 from .records import TracedSession, record_traced_session
-
-SidecarKind = TypeVar("SidecarKind", bound="Sidecar")
 
 # The processes a sidecar can have at once, it runs one program
 SIDECAR_PIDS = 16
@@ -74,9 +72,7 @@ class Sidecar:
         return name[: -len(cls.SUFFIX)]
 
     @classmethod
-    def for_session(  # noqa: PYI019, Self takes Python 3.11
-        cls: type[SidecarKind], session: str, project: str
-    ) -> SidecarKind:
+    def for_session(cls, session: str, project: str) -> Self:
         """The sidecar this launcher is about to start for a session."""
         return cls(cls.name_for(session), project, time.time(), Launcher.current())
 
@@ -118,9 +114,7 @@ class Sidecar:
         return said.stdout.strip()
 
     @classmethod
-    def from_label(  # noqa: PYI019
-        cls: type[SidecarKind], name: str, label: str
-    ) -> SidecarKind | None:
+    def from_label(cls, name: str, label: str) -> Self | None:
         """The sidecar of a name and a label, none for a container that
         is not one."""
         try:
@@ -134,9 +128,7 @@ class Sidecar:
         return cls(name, project, start, launcher)
 
     @classmethod
-    def listed(  # noqa: PYI019
-        cls: type[SidecarKind], ended_too: bool = False
-    ) -> list[SidecarKind]:
+    def listed(cls, ended_too: bool = False) -> list[Self]:
         """The sidecars of this kind that are running, of every project,
         with those that have stopped when asked for."""
         listed = docker_output(
@@ -164,9 +156,7 @@ class Sidecar:
         ]
 
     @classmethod
-    def left_behind(  # noqa: PYI019
-        cls: type[SidecarKind],
-    ) -> list[SidecarKind]:
+    def left_behind(cls) -> list[Self]:
         """The sidecars of sessions that ended without their launcher (a
         killed Emacs buffer, a closed terminal): still there, with what
         they recorded."""

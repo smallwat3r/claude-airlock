@@ -66,7 +66,11 @@ def text_lines(text: str) -> list[str]:
 
 def marked(text: str, marker: str) -> list[str]:
     """What follows the marker on each line of a part that starts with it."""
-    return [line[len(marker) :] for line in text_lines(text) if line.startswith(marker)]
+    return [
+        line.removeprefix(marker)
+        for line in text_lines(text)
+        if line.startswith(marker)
+    ]
 
 
 def available_features(host: Host) -> list[str]:
@@ -128,7 +132,7 @@ def with_required(names: list[str], host: Host) -> list[str]:
 def language_servers(parts: list[Path], texts: list[str]) -> dict:
     """The language servers the parts declare, by name."""
     servers: dict = {}
-    for part, text in zip(parts, texts):
+    for part, text in zip(parts, texts, strict=True):
         for line in marked(text, LSP_MARKER):
             try:
                 declared = json.loads(line)
@@ -160,7 +164,7 @@ def sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
     be seen when the template is read on its own. The list is made of the
     "# claude-feat-md: " lines of the parts, so it always matches what is
     built."""
-    for part, text in zip(parts, texts):
+    for part, text in zip(parts, texts, strict=True):
         if marked(text, FORMER_CLAUDE_MD_MARKER):
             raise Fatal(
                 f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'

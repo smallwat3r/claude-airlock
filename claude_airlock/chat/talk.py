@@ -62,7 +62,7 @@ from .status import Sandbox, StatusLine
 from .turn import Heartbeat, Turns, Usage, ended_badly, turn_line
 
 # What reaches claude for a chat, given what to tell once claude has ended
-Connect = Callable[[Callable[[], None]], Agent]
+type Connect = Callable[[Callable[[], None]], Agent]
 
 # The messages of claude a chat knows and has no use for
 PASSED_OVER = frozenset(
