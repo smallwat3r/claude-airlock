@@ -156,7 +156,8 @@ have to stay writable for git and claude to work, so they are checked
 rather than locked: the launcher warns when a session changed one.
 
 - In the project and every extra directory: `.git/config` and the git
-  hooks, `.claude/settings.json`, `settings.local.json` and `.mcp.json`
+  hooks, also of the directory a `.git/commondir` has git read them from
+  in place of its own, `.claude/settings.json`, `settings.local.json` and `.mcp.json`
   with the scripts they name, `CLAUDE.md`, and the `hooks`, `commands`,
   `skills`, `agents` and `rules` of `.claude`.
 - In `~/.claude`: the plugins, and what `CLAUDE_AIRLOCK_RW_CONFIG=1` made

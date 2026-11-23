@@ -84,6 +84,64 @@ class TamperingTest(LauncherTest):
         result = self.launch(session="echo x > .husky/pre-commit")
         assert f"  {self.project}/.husky/pre-commit\n" in result.stderr
 
+    def test_a_git_directory_told_to_read_another_is_reported(self):
+        # With a commondir, git takes its config and hooks from where
+        # that says, whatever the name: the fsmonitor of that config is
+        # run by git status, on the host
+        result = self.launch(
+            session="mkdir -p docs/assets/hooks"
+            r' && printf "[core]\n\tfsmonitor = evil\n" > docs/assets/config'
+            " && echo x > docs/assets/hooks/pre-commit"
+            " && echo ../docs/assets > .git/commondir"
+        )
+        assert self.REPORT in result.stderr
+        for changed in (
+            ".git/commondir",
+            "docs/assets/config",
+            "docs/assets/hooks/pre-commit",
+        ):
+            assert f"  {self.project}/{changed}\n" in result.stderr
+
+    def test_what_a_git_directory_already_read_elsewhere_is_watched(self):
+        common = self.project / "kept" / "common"
+        (common / "hooks").mkdir(parents=True)
+        (common / "config").write_text("[core]\n\thooksPath = .husky\n")
+        (self.project / ".husky").mkdir()
+        (self.project / ".git" / "commondir").write_text("../kept/common\n")
+        result = self.launch(
+            session="echo x > kept/common/hooks/pre-push"
+            " && echo x > .husky/pre-commit"
+            r' && printf "[alias]\n\tst = !evil\n" >> kept/common/config'
+        )
+        for changed in ("hooks/pre-push", "config"):
+            assert f"  {common}/{changed}\n" in result.stderr
+        assert f"  {self.project}/.husky/pre-commit\n" in result.stderr
+        assert f"  {self.project}/.git/commondir\n" not in result.stderr
+
+    def test_a_commondir_that_names_nothing_to_read_holds_no_check(self):
+        git_dir = self.project / ".git"
+        for said in (b"", b"\n", b"a\0b\n", b"x" * 2 * tamper.COMMON_DIR_BYTES):
+            (git_dir / "commondir").write_bytes(said)
+            assert tamper.common_dir(str(git_dir)) is None
+            assert tamper.git_sources(str(git_dir)) == [str(git_dir)]
+        (git_dir / "commondir").unlink()
+        os.mkfifo(git_dir / "commondir")
+        assert tamper.common_dir(str(git_dir)) is None
+        (git_dir / "commondir").unlink()
+        (git_dir / "commondir").write_text(".\n")
+        assert tamper.git_sources(str(git_dir)) == [str(git_dir)]
+
+    def test_a_submodule_told_to_read_another_directory_is_reported(self):
+        module = self.project / ".git" / "modules" / "one"
+        (module / "hooks").mkdir(parents=True)
+        (module / "HEAD").write_text("ref: refs/heads/main\n")
+        result = self.launch(
+            session="mkdir -p elsewhere/hooks && echo x > elsewhere/hooks/post-merge"
+            " && echo ../../../elsewhere > .git/modules/one/commondir"
+        )
+        assert f"  {module}/commondir\n" in result.stderr
+        assert f"  {self.project}/elsewhere/hooks/post-merge\n" in result.stderr
+
     def test_a_submodule_hook_is_reported(self):
         module = self.project / ".git" / "modules" / "libs" / "one"
         (module / "hooks").mkdir(parents=True)

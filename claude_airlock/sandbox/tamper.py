@@ -140,6 +140,11 @@ MOST_MODULES = 1000
 # The seconds git is given to read a config, it takes a moment: a file a
 # session swapped for a pipe must not have the check wait on it
 GIT_SECONDS = 10
+# The file of a git directory that names another one, which git then takes
+# the config and the hooks from in place of its own. No more of it is read
+# than this, it is a session's to write.
+COMMON_DIR = "commondir"
+COMMON_DIR_BYTES = 4096
 # The servers of the config the sandboxed sessions share, by this name
 # wherever in it they are: those of every project, and those of each
 SERVERS = "mcpServers"
@@ -372,12 +377,55 @@ def git_configs(git_dir: str) -> list[str]:
     return [config for config in configs if os.path.isfile(config)]
 
 
-def moved_hooks_dir(directory: str) -> str | None:
+def common_dir(git_dir: str) -> str | None:
+    """The directory a git directory has git take its config and hooks
+    from in place of its own, none when it names none: what its commondir
+    file says, from the git directory. A linked worktree has one, and a
+    session can write one into any git directory, to have git read a
+    config and hooks the check would not look at."""
+    file = open_plain(os.path.join(git_dir, COMMON_DIR), links=True)
+    if file is None:
+        return None
+    with file:
+        try:
+            named = file.read(COMMON_DIR_BYTES + 1)
+        except OSError:
+            return None
+    named = named.rstrip(b"\r\n")
+    if not named or len(named) > COMMON_DIR_BYTES or b"\0" in named:
+        # What git cannot follow either. The file is hashed as it is.
+        return None
+    return os.path.normpath(os.path.join(git_dir, os.fsdecode(named)))
+
+
+def git_sources(git_dir: str) -> list[str]:
+    """The directories git reads the config and the hooks of a git
+    directory from: itself, and the one its commondir names. Both, git
+    keeps to the second, but what is left in the first is read again the
+    moment the file is gone."""
+    common = common_dir(git_dir)
+    return [git_dir] if common in (None, git_dir) else [git_dir, common]
+
+
+def git_files(git_dir: str, fingerprint: dict[str, str]) -> list[str]:
+    """What is watched of one git directory: the files to hash, its
+    configs hashed as those are. The file that has git read another
+    directory, and the config and hooks of both."""
+    watched = [os.path.join(git_dir, COMMON_DIR)]
+    for source in git_sources(git_dir):
+        for config in git_configs(source):
+            fingerprint[config] = git_config_hash(config)
+        watched += tree_files(os.path.join(source, "hooks"), fingerprint)
+    return watched
+
+
+def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
     """The directory core.hooksPath has git take its hooks from in place of
     .git/hooks (husky and the like), when it is inside the project. One
     outside is out of a session's reach, unless it is mounted too and then
-    it is the session's choice of what gets read here."""
-    config = os.path.join(directory, ".git", "config")
+    it is the session's choice of what gets read here. By the config of
+    the project's git directory, or of the one given."""
+    config = os.path.join(git_dir or os.path.join(directory, ".git"), "config")
     if not os.path.isfile(config):
         # None, or a pipe a session left for git to wait on
         return None
@@ -487,12 +535,11 @@ def host_exec_fingerprint(
         watched.append(git_dir)
         modules = module_git_dirs(os.path.join(git_dir, "modules"), fingerprint)
         for each in (git_dir, *modules):
-            for config in git_configs(each):
-                fingerprint[config] = git_config_hash(config)
-            watched += tree_files(os.path.join(each, "hooks"), fingerprint)
-        moved = moved_hooks_dir(directory)
-        if moved:
-            watched += tree_files(moved, fingerprint)
+            watched += git_files(each, fingerprint)
+        for source in git_sources(git_dir):
+            moved = moved_hooks_dir(directory, source)
+            if moved:
+                watched += tree_files(moved, fingerprint)
         watched += claude_files(
             directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
         )
@@ -577,9 +624,7 @@ def below_the_top(
         git_dir = os.path.join(directory, ".git")
         # A file, in a working tree or a submodule: where its directory is
         watched.append(git_dir)
-        for config in git_configs(git_dir):
-            fingerprint[config] = git_config_hash(config)
-        watched += tree_files(os.path.join(git_dir, "hooks"), fingerprint)
+        watched += git_files(git_dir, fingerprint)
     return watched
 
 
