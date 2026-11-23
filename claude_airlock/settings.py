@@ -46,7 +46,7 @@ class SocketAccess(enum.Enum):
     OFF = "0"
     # docker ps and docker logs
     LIMITED = "1"
-    # Every read of a container, which adds inspect, stats and top
+    # Adds the real inspect, stats and top of a container
     FULL = "full"
 
 

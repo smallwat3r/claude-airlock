@@ -260,19 +260,26 @@ class SocketProxyTest(LauncherTest):
         assert len(sidecars) == 1
         return args, sidecars[0]
 
+    @staticmethod
+    def assert_no_allow_switch(sidecar: list[str]) -> None:
+        """The rules are ours in both modes. The image's own CONTAINERS
+        allows every GET under /containers, attach/ws among them, which
+        writes to a container."""
+        assert not [arg for arg in sidecar if arg.startswith("--env=")][1:]
+        assert "--env=EVENTS=0" in sidecar
+
     def test_mode_1_uses_the_limited_sidecar(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         assert "--name=claude-airlock-ps-proxy" in sidecar
-        assert any("docker-socket-proxy.cfg" in arg for arg in sidecar)
-        # No allow switches, the stock rules deny containers
-        assert "--env=CONTAINERS=1" not in sidecar
+        assert any("/docker-socket-proxy.cfg:" in arg for arg in sidecar)
+        self.assert_no_allow_switch(sidecar)
         assert "--env=DOCKER_HOST=tcp://claude-airlock-ps-proxy:2375" in args
 
-    def test_mode_full_uses_its_own_sidecar_and_blocks_writes(self):
+    def test_mode_full_uses_its_own_sidecar_and_rules(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
         assert "--name=claude-airlock-proxy" in sidecar
-        for switch in ("CONTAINERS=1", "POST=0", "EXEC=0"):
-            assert f"--env={switch}" in sidecar
+        assert any("/docker-socket-proxy-full.cfg:" in arg for arg in sidecar)
+        self.assert_no_allow_switch(sidecar)
         assert "--env=DOCKER_HOST=tcp://claude-airlock-proxy:2375" in args
 
     def test_the_socket_is_mounted_read_only(self):

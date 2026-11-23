@@ -225,10 +225,14 @@ feature for the CLI), through
 | Value | Allowed | Hidden |
 | --- | --- | --- |
 | `1` | `docker ps` and `docker logs` | Everything else, container environments included |
-| `full` | Every read under `/containers`, which adds real `inspect`, `stats` and `top` | Nothing of the containers: the environment of every one on the host shows, secrets included |
+| `full` | The same, and the real `docker inspect`, `docker stats` and `docker top`, with the daemon's `info` and `events` | Nothing of the containers: the environment of every one on the host shows, secrets included |
 
 Writes are blocked in both modes, a write to the root daemon would let the
-container escape. Command lines and logs can still carry secrets.
+container escape. Each mode has rules of its own (`docker/docker-socket-proxy.cfg`
+and `docker/docker-socket-proxy-full.cfg`) that name the reads it allows,
+whatever they do not name is refused: `docker attach`, `cp`, `export` and
+`diff` among them, in `full` too. Command lines and logs can still carry
+secrets.
 
 **The egress filter**, with `CLAUDE_AIRLOCK_NET_FILTER=1`:
 

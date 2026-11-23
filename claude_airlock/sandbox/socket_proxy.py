@@ -22,6 +22,12 @@ from .shared_proxy import config_hash, proxy_current, start_shared_proxy
 # pinned by digest (the tag is informative only), refreshed by
 # docker/update-pins.py.
 PROXY_IMAGE = "tecnativa/docker-socket-proxy:latest@sha256:fd989c12c74edb8424f53f31a2054459f286967c93e113e91ea95432f066493b"
+# The rules of each mode, in the directory of the Dockerfile parts: what
+# of the Docker API a session of that mode is let through to
+PROXY_RULES = {
+    SocketAccess.LIMITED: "docker-socket-proxy.cfg",
+    SocketAccess.FULL: "docker-socket-proxy-full.cfg",
+}
 # Where the host has its Docker socket
 DOCKER_SOCK = "/var/run/docker.sock"
 
@@ -56,39 +62,39 @@ def has_socket_proxy(settings: Settings) -> bool:
     return settings.docker_socket in SOCKET_PROXIES and is_socket(DOCKER_SOCK)
 
 
+def rules_path(settings: Settings) -> str:
+    """The HAProxy rules of the session's mode, for a session that has a
+    socket proxy."""
+    return f"{DOCKERFILE_DIR}/{PROXY_RULES[settings.docker_socket]}"
+
+
 def socket_proxy_options(settings: Settings) -> list[str]:
     """What the socket proxy of the session's mode is started with, for a
-    session that has one, see has_socket_proxy. A write call to the host daemon (which runs as root) would let
-    the session spawn a sibling that mounts the host filesystem, escaping
-    the sandbox entirely, so writes are blocked in both modes:
+    session that has one, see has_socket_proxy. A write call to the host
+    daemon (which runs as root) would let the session spawn a sibling that
+    mounts the host filesystem, escaping the sandbox entirely, so writes
+    are blocked in both modes, each by HAProxy rules of our own:
       CLAUDE_AIRLOCK_DOCKER_SOCKET=1
-          docker ps and docker logs only, through our own HAProxy rules
-          (docker-socket-proxy.cfg)
+          docker ps and docker logs only (docker-socket-proxy.cfg)
       CLAUDE_AIRLOCK_DOCKER_SOCKET=full
-          every read under /containers, which adds inspect, stats and top.
+          adds the real inspect, stats and top (docker-socket-proxy-full.cfg).
           inspect shows the environment of every container on the host,
-          secrets included."""
-    if settings.docker_socket is SocketAccess.LIMITED:
-        # The image renders this template into its HAProxy config. No allow
-        # switches are passed, so if a future image ignored the template, its
-        # stock rules would deny containers rather than open them up.
-        mode_options = [
-            mount_arg(
-                f"{DOCKERFILE_DIR}/docker-socket-proxy.cfg",
-                "/usr/local/etc/haproxy/haproxy.cfg.template",
-                "ro,z",
-            ),
-            env_arg("EVENTS", 0),
-        ]
-    else:
-        allowed = ("CONTAINERS", "LOG", "INFO")
-        blocked = (
-            *("EXEC", "POST", "IMAGES", "NETWORKS", "VOLUMES"),
-            *("SERVICES", "TASKS", "BUILD", "COMMIT", "SWARM"),
-        )
-        mode_options = [env_arg(name, 1) for name in allowed]
-        mode_options += [env_arg(name, 0) for name in blocked]
-    return [mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"), *mode_options]
+          secrets included.
+    The image renders the rules, a template to it, into its HAProxy
+    config. None of its allow switches is passed, in either mode: its
+    CONTAINERS allows every GET under /containers, where attach/ws writes
+    to a container and archive and export read its files. And should a
+    future image ignore the template, its stock rules would deny
+    containers rather than open them up."""
+    return [
+        mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"),
+        mount_arg(
+            rules_path(settings), "/usr/local/etc/haproxy/haproxy.cfg.template", "ro,z"
+        ),
+        # Among what the stock rules allow unless told: should they be
+        # used after all, they do not
+        env_arg("EVENTS", 0),
+    ]
 
 
 def start_socket_proxy(settings: Settings) -> None:
@@ -101,7 +107,7 @@ def start_socket_proxy(settings: Settings) -> None:
     options = socket_proxy_options(settings)
     name = socket_proxy_name(settings)
     network = network_name(settings)
-    rules = Path(DOCKERFILE_DIR, "docker-socket-proxy.cfg").read_bytes()
+    rules = Path(rules_path(settings)).read_bytes()
     config = config_hash(PROXY_IMAGE.encode(), rules, *map(str.encode, options))
     if not proxy_current(name, config):
         start_shared_proxy(name, network, config, options, PROXY_IMAGE)
