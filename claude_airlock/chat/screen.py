@@ -17,13 +17,22 @@ def uncounted(prompt: str) -> str:
     return SGR.sub(lambda escape: f"\x01{escape.group()}\x02", prompt)
 
 
+# The categories of the characters that take no column: the marks put on
+# the character before them, and those that only say how to format
+NO_COLUMN = ("Mn", "Me", "Cf")
+
+
 def columns_of(text: str) -> int:
-    """How many columns of a terminal a text takes: two for the wide
-    characters of East Asia, none for what is put on the one before."""
+    """How many columns of a terminal a text takes, as wcwidth counts
+    them for readline and a terminal for itself: two for the wide
+    characters of East Asia, none for what is put on the one before or
+    shows nothing. Counted too wide, a text would have more rows erased
+    than it takes, those above it: what is counted is in part the
+    session's choice."""
     return sum(
         (
             0
-            if unicodedata.combining(c)
+            if unicodedata.combining(c) or unicodedata.category(c) in NO_COLUMN
             else 2
             if unicodedata.east_asian_width(c) in "WF"
             else 1

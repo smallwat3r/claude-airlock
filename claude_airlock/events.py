@@ -2,8 +2,8 @@
 
 Most of what an event says was chosen by the session it tells of, the
 transcript is the session's to write and so is what it asks the network
-for. Nothing of it is trusted: control characters are dropped before
-anything is printed."""
+for. Nothing of it is trusted: control characters, and those that show
+nothing, are dropped before anything is printed."""
 
 from __future__ import annotations
 
@@ -16,7 +16,22 @@ from dataclasses import dataclass, field
 # transcript could otherwise drive the terminal or reorder what is shown.
 # Half a surrogate pair too, which JSON can hold and no output can write.
 _BIDI = "".join(map(chr, [*range(0x202A, 0x202F), *range(0x2066, 0x206A)]))
-_UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff" + _BIDI + "]")
+# What takes no column and shows nothing, as Unicode lists what a display
+# may ignore: the soft hyphen, the joiners and the spaces of no width, the
+# marks of direction, the byte order mark, the tags and the selectors
+# after them. A text can be padded with any number of them, which a
+# terminal and what counts its columns need not agree on (see
+# chat/screen.py), and can carry in them what the user is not shown. Not
+# the selectors an emoji takes its colour from (U+FE00 to U+FE0F), which
+# are counted as the nothing they take.
+_UNSEEN = (
+    "\u00ad\u034f\u061c\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2060-\u206f"
+    "\ufeff\ufff0-\ufffb\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    "\U000e0000-\U000e0fff"
+)
+_UNSAFE = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\ud800-\udfff" + _BIDI + _UNSEEN + "]"
+)
 # Of the label a header line starts with: session, network, day, chat...
 LABEL_WIDTH = 12
 
