@@ -65,8 +65,16 @@ from .sandbox.session import (
     session_args,
 )
 from .sandbox.socket_proxy import socket_proxy_args
-from .sandbox.tamper import PendingCheck
-from .settings import Host, Settings, detect_host, load_settings, settings_help
+from .sandbox.tamper import PendingCheck, reaches_launcher
+from .settings import (
+    CHECKOUT_DIR,
+    NAME,
+    Host,
+    Settings,
+    detect_host,
+    load_settings,
+    settings_help,
+)
 
 
 class ParsedArgs(NamedTuple):
@@ -372,6 +380,13 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
     run_args = session_run_args(plan, name, runtime, capture)
     watched = [host.project_dir] + [extra.path for extra in plan.dirs]
+    written = [host.project_dir] + [d.path for d in plan.dirs if not d.read_only]
+    if reaches_launcher(written):
+        warn(
+            f"this session can write {NAME} itself ({CHECKOUT_DIR}): what"
+            " it changes there starts and sandboxes the next session, and is"
+            " named when this one ends"
+        )
     collect_all_left_behind(host)
     # Kept on disk from here: nothing that Ctrl-C can end comes between
     # this and interrupts_held, a check left for a session that never ran

@@ -187,6 +187,20 @@ Said apart too, as something to read before the next session here:
   started by the next session of another project too, in that project's
   sandbox. Only the servers are compared, every session rewrites the rest
   of that file.
+- A directory of `~/.claude/projects` that is not the project's own and
+  was not there when the session started. A session is kept out of those
+  of the other projects that are there, but can make one for a project
+  that has none yet, and what it puts there as that project's memory is
+  told to its next session, to `claude` on the host too. A project first
+  used while the session ran has one made for it as well, so the line
+  says by whose doing it may be.
+- The launcher itself, when the session could write its checkout: the
+  project is the checkout, or holds it, or it is mounted next to it. What
+  changed in its `bin`, `claude_airlock` and `docker` starts and sandboxes
+  the next session, the allowlist of the egress filter and the rules of
+  the socket proxy among it. The launch says so too. Not watched there:
+  what Python compiled of the modules (`__pycache__`), which changes
+  without a session's doing.
 
 All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:
@@ -196,7 +210,9 @@ whole project again.
 The check is bounded, a session can write any number of files of any
 size: 5000 files of each watched directory, 5000 build files, the
 submodules of 1000 git directories, and 1 GB read in all. What is past a
-count is said as `the rest`, unwatched, when a session made it so. A file
+count is said as `the rest`, unwatched, when a session made it so, and
+so is a watched directory with more entries or more directories below it
+than that. A file
 past the size is not read, and still told from one written since by when
 it changed.
 

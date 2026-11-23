@@ -5,6 +5,7 @@ without it."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -35,6 +36,25 @@ class TamperingTest(LauncherTest):
             session=r'printf "[core]\n\tfsmonitor = evil\n" >> .git/config'
         )
         assert f"  {self.project}/.git/config\n" in result.stderr
+
+    def test_a_branch_pushed_to_an_address_of_the_sessions_is_reported(self):
+        config = self.project / ".git" / "config"
+        config.write_text('[remote "origin"]\n\turl = https://example.com/r.git\n')
+        # What every checkout and push -u writes says nothing new
+        tracked = (
+            "git config --file .git/config branch.main.remote origin"
+            " && git config --file .git/config branch.main.merge refs/heads/main"
+            " && git config --file .git/config branch.local.remote ."
+            " && git config --file .git/config branch.main.rebase true"
+        )
+        assert self.REPORT not in self.launch(session=tracked).stderr
+        for key in ("remote", "pushRemote"):
+            moved = f"git config --file .git/config branch.main.{key} https://example.org/theirs.git"
+            result = self.launch(session=moved)
+            assert f"  {config}\n" in result.stderr, key
+        # Nor by a branch named to pass for another entry
+        named = "git config --file .git/config 'branch.a=b.pushRemote' https://example.org/theirs.git"
+        assert f"  {config}\n" in self.launch(session=named).stderr
 
     def test_a_pipe_in_the_place_of_a_watched_file_does_not_hold_the_check(
         self, subtests: pytest.Subtests
@@ -189,6 +209,47 @@ class TamperingTest(LauncherTest):
         assert "kept.md" not in result.stderr
         assert self.REPORT not in result.stderr
 
+    PLANTED = "Claude Code has a directory for other projects that had none"
+
+    def test_a_directory_made_for_another_project_is_reported(self):
+        # For a project that has none yet: what is there as its memory is
+        # told to its next session, on the host too
+        projects = self.transcripts.parent
+        other = projects / "-home-me-other"
+        result = self.launch(
+            session=f'mkdir -p "{other}/memory"; echo x > "{other}/memory/MEMORY.md"'
+        )
+        assert self.PLANTED in result.stderr
+        assert f"  {other}\n" in result.stderr
+        # Once: it is there when the next session starts
+        assert self.PLANTED not in self.launch().stderr
+
+    def test_the_directories_of_the_project_itself_are_not_reported(self):
+        projects = self.transcripts.parent
+        worktree = f"{self.transcripts.name}--claude-worktrees-fix"
+        made = f'mkdir -p "{self.transcripts}/memory" "{projects / worktree}"'
+        subprocess.run(["rm", "-rf", str(self.transcripts)], check=True)
+        assert self.PLANTED not in self.launch(session=made).stderr
+
+    def test_a_check_saved_without_the_projects_says_nothing_of_them(self):
+        fields = tamper.HostCheck.take(
+            [], str(self.home / ".claude"), [], ""
+        ).as_fields()
+        del fields["projects"], fields["own_projects"]
+        saved = tamper.HostCheck.from_fields(fields)
+        (self.transcripts.parent / "-home-me-other").mkdir(parents=True)
+        assert tamper.planted_projects([], (), str(self.home / ".claude"))
+        with unittest.mock.patch.object(tamper, "report_projects") as reported:
+            saved.report()
+        reported.assert_not_called()
+
+    def test_more_projects_than_are_told_apart_is_said(self):
+        claude = str(self.home / ".claude")
+        (self.transcripts.parent / "-home-me-other").mkdir(parents=True)
+        with unittest.mock.patch.object(tamper, "MOST_PROJECTS", 0):
+            assert tamper.project_names(claude) is None
+            assert tamper.planted_projects([], (), claude) is None
+
     def test_a_memory_as_it_was_is_not_reported(self):
         memory = self.transcripts / "memory"
         memory.mkdir(parents=True)
@@ -306,6 +367,8 @@ class TamperingTest(LauncherTest):
         assert f"  {self.project}/.claude/settings.json\n" in result.stderr
 
     def test_branch_tracking_is_not_reported(self):
+        config = self.project / ".git" / "config"
+        config.write_text('[remote "origin"]\n\turl = https://example.com/r.git\n')
         result = self.launch(
             session=r'printf "[branch \"main\"]\n\tremote = origin\n" >> .git/config'
         )
@@ -398,6 +461,83 @@ class BuildFilesTest(LauncherTest):
         assert "Traceback" not in result.stderr
 
 
+class LauncherItselfTest:
+    """A session that can write the launcher's own checkout has what it
+    changed there named: it starts and sandboxes the next session."""
+
+    @pytest.fixture(autouse=True)
+    def checkout(self, tmp_path: Path, cleanup: contextlib.ExitStack) -> None:
+        self.checkout = tmp_path / "code" / "claude-airlock"
+        for name in (
+            "bin/claude-airlock",
+            "claude_airlock/cli.py",
+            "claude_airlock/__pycache__/cli.cpython-313.pyc",
+            "docker/allowed-domains.txt",
+            "README.md",
+        ):
+            file = self.checkout / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(name)
+        cleanup.enter_context(
+            unittest.mock.patch.object(tamper, "CHECKOUT_DIR", str(self.checkout))
+        )
+
+    def changed(self, directories: list[str]) -> list[str]:
+        before = tamper.build_fingerprint(directories)
+        with open(self.checkout / "docker" / "allowed-domains.txt", "a") as allowed:
+            allowed.write(".example.org\n")
+        with open(self.checkout / "claude_airlock" / "cli.py", "a") as module:
+            module.write("import os\n")
+        (self.checkout / "claude_airlock" / "__pycache__" / "new.pyc").touch()
+        (self.checkout / "README.md").write_text("more\n")
+        return tamper.differing(before, tamper.build_fingerprint(directories))
+
+    def test_what_a_session_changed_of_the_launcher_is_named(
+        self, subtests: pytest.Subtests, capsys: pytest.CaptureFixture[str]
+    ):
+        own = [
+            str(self.checkout / "claude_airlock" / "cli.py"),
+            str(self.checkout / "docker" / "allowed-domains.txt"),
+        ]
+        # The checkout as the project, in it, and a part of it
+        for mounted in (self.checkout, self.checkout.parent, self.checkout / "docker"):
+            with subtests.test(mounted=mounted.name):
+                assert tamper.reaches_launcher([str(mounted)])
+                assert self.changed([str(mounted)]) == own
+        before = tamper.build_fingerprint([str(self.checkout)])
+        (self.checkout / "bin" / "claude-airlock").write_text("#!/bin/sh\n")
+        (self.checkout / "Makefile").write_text("all:\n")
+        tamper.report_build_changes(
+            before, tamper.build_fingerprint([str(self.checkout)])
+        )
+        said = capsys.readouterr().err
+        itself, _, tools = said.partition("these files that your tools run")
+        assert "files of claude-airlock itself have changed" in itself
+        assert f"  {self.checkout}/bin/claude-airlock\n" in itself
+        assert f"  {self.checkout}/Makefile\n" in tools
+        assert "bin/claude-airlock" not in tools
+
+    def test_a_session_that_cannot_write_the_launcher_has_nothing_of_it_watched(
+        self, tmp_path: Path
+    ):
+        project = tmp_path / "code" / "other"
+        project.mkdir()
+        assert not tamper.reaches_launcher([str(project)])
+        assert self.changed([str(project)]) == []
+        # By where a directory leads
+        (project / "link").symlink_to(self.checkout)
+        assert tamper.reaches_launcher([str(project / "link")])
+
+    def test_a_name_made_to_drive_the_terminal_does_not(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        hook = "/p/.claude/hooks/\x1b[1A\x1b[2Kx\nclaude-airlock: all is well"
+        tamper.report_tampering({}, {hook: "1"})
+        said = capsys.readouterr().err
+        assert "\x1b" not in said
+        assert "  /p/.claude/hooks/[1A[2Kx\\nclaude-airlock: all is well\n" in said
+
+
 class BoundedCheckTest:
     """What a session can make any amount of is watched up to a bound."""
 
@@ -413,6 +553,22 @@ class BoundedCheckTest:
         found = tamper.tree_files(str(self.root), {})
         names = [os.path.relpath(path, self.root) for path in found]
         assert names == ["a.md", "b/1.md", "b/2.md", "c/deep/3.md"]
+
+    def test_a_file_lost_among_too_many_directories_says_the_rest_is_unwatched(self):
+        # As many directories as it takes for one file to be past what is
+        # listed, or past what is looked into: neither is a count of files
+        skills = self.root.parent / "skills"
+        for number in range(6):
+            (skills / f"s{number}").mkdir(parents=True)
+        before: dict[str, str] = {}
+        assert tamper.tree_files(str(skills), before, most=4) == []
+        assert before == {f"{skills}: more than 4 files, the rest": "unwatched"}
+        deep = self.root.parent / "deep"
+        (deep / "a" / "b" / "c" / "d").mkdir(parents=True)
+        (deep / "a" / "b" / "c" / "d" / "SKILL.md").touch()
+        looked: dict[str, str] = {}
+        assert tamper.tree_files(str(deep), looked, most=2) == []
+        assert looked == {f"{deep}: more than 2 files, the rest": "unwatched"}
 
     def test_a_tree_with_too_many_files_says_the_rest_is_unwatched(self):
         fingerprint: dict[str, str] = {}

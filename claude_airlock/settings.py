@@ -16,9 +16,9 @@ from .errors import Fatal
 
 # The checkout's bin and docker directories, found from where this package
 # really is, so bin/claude-airlock can be symlinked from anywhere
-_REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-BIN_DIR = os.path.join(_REPO_DIR, "bin")
-DOCKERFILE_DIR = os.path.join(_REPO_DIR, "docker")
+CHECKOUT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+BIN_DIR = os.path.join(CHECKOUT_DIR, "bin")
+DOCKERFILE_DIR = os.path.join(CHECKOUT_DIR, "docker")
 
 # What more than one module has to agree on: the home of the image's user,
 # where a session finds its ~/.claude, and the port the egress proxy

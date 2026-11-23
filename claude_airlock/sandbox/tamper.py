@@ -25,7 +25,8 @@ from ..files import (
 from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..projects import memory_dirs
-from ..settings import CONFIG_FILES, CONFIG_TREES, Host
+from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES, NAME, Host
+from .history import is_own, own_names
 from .home import CONFIG
 from .plugins import INSTALLED
 
@@ -140,6 +141,20 @@ MOST_MODULES = 1000
 # The seconds git is given to read a config, it takes a moment: a file a
 # session swapped for a pipe must not have the check wait on it
 GIT_SECONDS = 10
+# What of its checkout the launcher runs and starts its sidecars from: its
+# programs, its modules, and the parts of the image with the rules of the
+# two proxies. Watched when a session can write them, see launcher_files.
+LAUNCHER_TREES = ("bin", "claude_airlock", "docker")
+# Where Python keeps what it compiled of the modules, written again
+# whenever one changed or another Python runs them
+COMPILED = "__pycache__"
+# Where Claude Code keeps the transcripts and the memory of each project,
+# in its directory, and how many of them are told apart at most
+PROJECTS = "projects"
+MOST_PROJECTS = 100_000
+# The entries of a branch that say where it is pushed to and pulled
+# from, as git lists them
+BRANCH_TARGETS = (b"remote", b"pushremote")
 # The file of a git directory that names another one, which git then takes
 # the config and the hooks from in place of its own. No more of it is read
 # than this, it is a session's to write.
@@ -161,7 +176,8 @@ def sha256_hex(data: bytes) -> str:
 
 def git_config_hash(file: str) -> str:
     """Hash of a git config without its branch tracking entries, they change
-    on every push -u or checkout and cannot run anything. One that cannot
+    on every push -u or checkout and cannot run anything, see
+    lasting_entries for those that are kept. One that cannot
     be read says so: the file is the session's, which can take the right
     to read it away, and the check must not be made to fail. Nor to wait:
     git is not given what is no plain file, a pipe a session of this
@@ -173,7 +189,7 @@ def git_config_hash(file: str) -> str:
     probe.close()
     try:
         listing = subprocess.run(
-            ["git", "config", "--file", file, "--list"],
+            ["git", "config", "--file", file, "--list", "-z"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -184,8 +200,32 @@ def git_config_hash(file: str) -> str:
         # Unparseable, no git, or one that did not end: fall back to the
         # file as it is
         return file_hash(file)
-    kept = [line for line in listing.split(b"\n") if not line.startswith(b"branch.")]
-    return sha256_hex(b"\n".join(kept))
+    return sha256_hex(b"\0".join(lasting_entries(listing)))
+
+
+def lasting_entries(listing: bytes) -> list[bytes]:
+    """The entries of a git config, as git lists them with -z (a name,
+    a line break, the value), without those of branch tracking. Still
+    with where a branch is pushed to and pulled from when that is no
+    remote the config names: git takes an address there as well as a
+    name, and the next push would go to it. A remote it names has its
+    address among the entries that are kept."""
+    entries = [entry.partition(b"\n") for entry in listing.split(b"\0")]
+    remotes = {
+        name[len(b"remote.") : -len(b".url")]
+        for name, _, _ in entries
+        if name.startswith(b"remote.") and name.endswith(b".url")
+    }
+    # The repository itself, as a branch made from a local one has it
+    remotes.add(b".")
+    kept = []
+    for name, line_break, value in entries:
+        if name.startswith(b"branch."):
+            key = name.rpartition(b".")[2]
+            if key not in BRANCH_TARGETS or value in remotes:
+                continue
+        kept.append(name + line_break + value)
+    return kept
 
 
 def file_hash(path: str) -> str:
@@ -300,34 +340,46 @@ def tree_files(
     their names, the files of a directory ahead of what is below it: the
     same ones at the start and the end of a session, where there are more
     than are watched. Without recursion, as module_git_dirs and for the
-    same reason."""
+    same reason. No more directories are looked into than files are
+    watched, and one that holds more than that is not listed whole: both
+    leave files unseen that are no part of the count, a session can
+    make any number of directories for one file to be lost among, so
+    both say the rest is unwatched as well."""
     if os.path.islink(root):
         return [root]
     found: list[str] = []
     pending = [root]
-    while pending and len(found) <= most:
+    looked = 0
+    cut = False
+    while pending and len(found) <= most and looked <= most:
+        looked += 1
+        entries, more = listed(pending.pop(), most)
+        cut |= more
         below = []
-        for entry in listed(pending.pop(), most):
+        for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 below.append(entry.path)
             else:
                 found.append(entry.path)
         # The first by its name is the next looked into
         pending += reversed(below)
-    if len(found) > most:
+    if cut or pending or len(found) > most:
         fingerprint[f"{root}: more than {most} files, the rest"] = UNWATCHED
     return found[:most]
 
 
-def listed(directory: str, most: int) -> list[os.DirEntry[str]]:
+def listed(directory: str, most: int) -> tuple[list[os.DirEntry[str]], bool]:
     """What a directory holds, in the order of the names, nothing for
-    one that cannot be read. No more than could be watched, and one more
-    to tell that there is more: a session can put any number there."""
+    one that cannot be read, and whether it holds more than that. No
+    more than could be watched and one: a session can put any number there, and
+    which of them are left out is then the directory's own order, not
+    that of the names. So whoever lists says when it was cut."""
     try:
         with os.scandir(directory) as entries:
-            return sorted(islice(entries, most + 1), key=attrgetter("name"))
+            taken = list(islice(entries, most + 1))
     except OSError:
-        return []
+        return [], False
+    return sorted(taken, key=attrgetter("name")), len(taken) > most
 
 
 def is_plugin_use_marker(path: str, cache: str) -> bool:
@@ -353,9 +405,12 @@ def module_git_dirs(directory: str, fingerprint: dict[str, str]) -> list[str]:
     found: list[str] = []
     pending = [directory]
     looked = 0
+    cut = False
     while pending and looked <= MOST_MODULES:
         looked += 1
-        for entry in listed(pending.pop(), MOST_MODULES):
+        entries, more = listed(pending.pop(), MOST_MODULES)
+        cut |= more
+        for entry in entries:
             if not entry.is_dir(follow_symlinks=False):
                 continue
             if os.path.isfile(os.path.join(entry.path, "HEAD")):
@@ -363,7 +418,7 @@ def module_git_dirs(directory: str, fingerprint: dict[str, str]) -> list[str]:
                 pending.append(os.path.join(entry.path, "modules"))
             else:
                 pending.append(entry.path)
-    if pending or len(found) > MOST_MODULES:
+    if cut or pending or len(found) > MOST_MODULES:
         said = f"{directory}: more than {MOST_MODULES} submodules, the rest"
         fingerprint[said] = UNWATCHED
     return found[:MOST_MODULES]
@@ -587,6 +642,48 @@ def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
     return watched
 
 
+def reaches_launcher(directories: Sequence[str], checkout: str = "") -> bool:
+    """Whether one of the directories a session is given holds the
+    launcher's own checkout, or a part of it: by where each leads, a
+    link to the checkout is the checkout."""
+    launcher = os.path.realpath(checkout or CHECKOUT_DIR) + os.sep
+    for directory in directories:
+        mounted = os.path.realpath(directory) + os.sep
+        if launcher.startswith(mounted) or mounted.startswith(launcher):
+            return True
+    return False
+
+
+def launcher_files(
+    directories: Sequence[str], fingerprint: dict[str, str], checkout: str = ""
+) -> list[str]:
+    """The files of the launcher itself, when a session can write them:
+    its checkout is the project, or in it, or mounted next to it. They
+    decide how the next session is sandboxed, its mounts, what its
+    filter lets through, the rules of the socket proxy, and run on the
+    host with the next launch. Not what Python compiled of them, which
+    changes without a session's doing."""
+    checkout = checkout or CHECKOUT_DIR
+    if not reaches_launcher(directories, checkout):
+        return []
+    compiled = os.sep + COMPILED + os.sep
+    return [
+        path
+        for tree in LAUNCHER_TREES
+        for path in tree_files(os.path.join(checkout, tree), fingerprint)
+        if compiled not in path
+    ]
+
+
+def is_launcher_file(path: str, checkout: str = "") -> bool:
+    """Whether a path of a fingerprint is of the launcher itself, see
+    launcher_files."""
+    checkout = checkout or CHECKOUT_DIR
+    return path.startswith(
+        tuple(os.path.join(checkout, tree) + os.sep for tree in LAUNCHER_TREES)
+    )
+
+
 def build_fingerprint(directories: list[str]) -> dict[str, str]:
     """Hashes, by path, of what a session can write that the tools of a
     project run on the host, see BUILD_FILES, anywhere in the mounted
@@ -597,6 +694,8 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     fingerprint: dict[str, str] = {}
     watched: list[str] = []
     try:
+        # First, should there be more files than are hashed
+        watched += launcher_files(directories, fingerprint)
         for root in directories:
             watched += build_files(root, fingerprint)
     except RecursionError:
@@ -651,10 +750,20 @@ def report_build_changes(
 ) -> None:
     """Name the files of build_fingerprint that differ, the first
     MOST_NAMED of them. unchecked as for report_tampering."""
-    changed = differing(before, after)
+    differ = differing(before, after)
+    whose = f"the session {unchecked} started" if unchecked else "this session started"
+    own = [path for path in differ if is_launcher_file(path)]
+    if own:
+        warn(
+            f"since {whose}, files of {NAME} itself have changed,"
+            " which the next session is started and sandboxed by:",
+            *first_named(own),
+            f"Review them (git diff in {CHECKOUT_DIR}) before you start"
+            " another session.",
+        )
+    changed = [path for path in differ if path not in own]
     if not changed:
         return
-    whose = f"the session {unchecked} started" if unchecked else "this session started"
     warn(
         f"since {whose}, these files that your tools run on the"
         " host (make, a package manager, a test runner, a hook manager, an"
@@ -761,6 +870,65 @@ def report_tampering(
     )
 
 
+def project_names(claude_dir: str) -> list[str] | None:
+    """The names of what is where Claude Code keeps the transcripts and
+    the memory of each project, whatever each is. None when they cannot
+    be told apart, more of them than MOST_PROJECTS: a session can make
+    any number."""
+    try:
+        with os.scandir(os.path.join(claude_dir, PROJECTS)) as entries:
+            names = [entry.name for entry in islice(entries, MOST_PROJECTS + 1)]
+    except OSError:
+        return []
+    return sorted(names) if len(names) <= MOST_PROJECTS else None
+
+
+def planted_projects(
+    before: list[str] | None, own: Sequence[str], claude_dir: str
+) -> list[str] | None:
+    """The directories of other projects that came to be since a session
+    started, by their paths: not those of the project itself, which its
+    own sessions make. None when that cannot be told, see project_names.
+    A session is kept out of the directories of the other projects that
+    are there (see history.py), but can make one for a project that has
+    none yet, under the name Claude Code would give it: what it puts
+    there as that project's memory is told to its next session as the
+    user's own notes, to claude on the host as well."""
+    after = project_names(claude_dir)
+    if before is None or after is None:
+        return None
+    mine, known = set(own), set(before)
+    return [
+        os.path.join(claude_dir, PROJECTS, name)
+        for name in after
+        if name not in known and not is_own(name, mine)
+    ]
+
+
+def report_projects(planted: list[str] | None, unchecked: str = "") -> None:
+    """Name the directories of other projects that came to be while a
+    session ran, see planted_projects. Said apart from the rest: nothing
+    of it is the project's own, and it is not always the session's
+    doing, a project first used meanwhile has one made for it."""
+    whose = f"the session {unchecked}" if unchecked else "this session"
+    if planted is None:
+        warn(
+            f"more than {MOST_PROJECTS} directories are where Claude Code"
+            f" keeps what it remembers of each project: whether {whose} made"
+            " one for another project cannot be told"
+        )
+    elif planted:
+        warn(
+            f"since {whose} started, Claude Code has a directory for"
+            " other projects that had none, by its doing or that of a project"
+            " first used meanwhile:",
+            *first_named(planted),
+            "A session can make one for a project that has none yet. What is"
+            " there is told to the next session of that project, on the host too:"
+            " look into them, and remove what is not yours.",
+        )
+
+
 def texts(value: object) -> list[str]:
     """A list of a pending check as the texts it holds. Raises TypeError
     for what is no list."""
@@ -792,15 +960,36 @@ class HostCheck:
     # The config the sandboxed sessions share, empty in a check saved by
     # a version that did not watch it
     shared_config: str = ""
+    # The names of what Claude Code kept for each project as the session
+    # started (see project_names) and those that are the project's own.
+    # Not looked at in a check saved by a version that did not take them.
+    projects: list[str] | None = None
+    own_projects: tuple[str, ...] = ()
+    projects_taken: bool = False
 
     @classmethod
     def take(
-        cls, watched: list[str], claude_dir: str, memory: list[str], shared_config: str
+        cls,
+        watched: list[str],
+        claude_dir: str,
+        memory: list[str],
+        shared_config: str,
+        own_projects: Sequence[str] = (),
     ) -> HostCheck:
         """The check of a session about to start."""
         before = host_exec_fingerprint(watched, claude_dir, memory, shared_config)
         build = build_fingerprint(watched)
-        return cls(watched, claude_dir, memory, before, build, shared_config)
+        return cls(
+            watched,
+            claude_dir,
+            memory,
+            before,
+            build,
+            shared_config,
+            project_names(claude_dir),
+            tuple(sorted(own_projects)),
+            projects_taken=True,
+        )
 
     def as_fields(self) -> dict[str, object]:
         return {
@@ -810,6 +999,11 @@ class HostCheck:
             "build": self.build or {},
             "memory": self.memory,
             "shared_config": self.shared_config,
+            **(
+                {"projects": self.projects, "own_projects": list(self.own_projects)}
+                if self.projects_taken
+                else {}
+            ),
         }
 
     @classmethod
@@ -824,6 +1018,9 @@ class HostCheck:
             fingerprint_of(pending["before"]),
             fingerprint_of(pending["build"]) if "build" in pending else None,
             str(pending.get("shared_config", "")),
+            None if pending.get("projects") is None else texts(pending["projects"]),
+            tuple(texts(pending.get("own_projects", []))),
+            projects_taken="projects" in pending,
         )
 
     def report(self, unchecked: str = "") -> None:
@@ -843,6 +1040,11 @@ class HostCheck:
         )
         if self.build is not None:
             report_build_changes(self.build, build_fingerprint(self.watched), unchecked)
+        if self.projects_taken:
+            planted = planted_projects(
+                self.projects, self.own_projects, self.claude_dir
+            )
+            report_projects(planted, unchecked)
 
 
 class PendingCheck:
@@ -866,7 +1068,11 @@ class PendingCheck:
         report_unchecked_sessions(file.parent)
         shared_config = os.path.join(host.sandbox_claude_dir, CONFIG)
         check = HostCheck.take(
-            watched, host.claude_dir, memory_dirs(host), shared_config
+            watched,
+            host.claude_dir,
+            memory_dirs(host),
+            shared_config,
+            sorted(own_names(host)),
         )
         private_dir(str(file.parent))
         pending = {**Launcher.current().as_fields(), **check.as_fields()}
