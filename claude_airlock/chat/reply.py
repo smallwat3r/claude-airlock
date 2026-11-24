@@ -26,7 +26,7 @@ from collections.abc import Callable
 
 from ..events import Event, Kind, Who, clean
 from ..report.entries import content_blocks
-from ..report.layout import BOLD, GREEN, painted
+from ..report.layout import BLANK, BOLD, GREEN, Shown, Styled, painted
 from .console import Page
 
 CODE = GREEN
@@ -159,7 +159,7 @@ def _bold_marked(text: str) -> str:
     return "".join([*parts, text[rest:]])
 
 
-def _styled(lines: list[str]) -> list[str]:
+def _styled(lines: list[str]) -> list[Styled]:
     """The lines one marked line was wrapped to, in the styles of their
     spans. A span that is open at the end of a line goes on in the next."""
     styled = []
@@ -174,7 +174,7 @@ def _styled(lines: list[str]) -> list[str]:
                 styles.remove(style)
             else:
                 styles.append(style)
-        styled.append("".join(parts))
+        styled.append(Styled("".join(parts)))
     return styled
 
 
@@ -205,7 +205,7 @@ class ReplyWriter:
         self._started = False
         self._empty = 0
 
-    def feed(self, text: str) -> list[str]:
+    def feed(self, text: str) -> list[Styled]:
         """The lines that a piece of the reply completes."""
         if "\n" not in text:
             self._partial.append(text)
@@ -214,12 +214,14 @@ class ReplyWriter:
         self._partial = [rest]
         return [shown for line in whole for shown in self._taken(line)]
 
-    def end(self) -> list[str]:
+    def end(self) -> list[Styled]:
         """The line that was left without its end, if any."""
         last, self._partial = "".join(self._partial), []
         return self._taken(last.rstrip())
 
-    def _taken(self, line: str) -> list[str]:
+    def _taken(self, line: str) -> list[Styled]:
+        """The lines a line of the reply is given back as. Cleaned here,
+        ahead of any style: what comes out has no escape but those."""
         line = clean(line.rstrip("\r"))
         if not line.strip():
             # Shown once something follows it
@@ -227,34 +229,34 @@ class ReplyWriter:
             return []
         if not self._started:
             line = line.lstrip()
-        between, self._empty, self._started = [""] * self._empty, 0, True
+        between, self._empty, self._started = [Styled("")] * self._empty, 0, True
         return between + self._shown(line)
 
-    def _shown(self, line: str) -> list[str]:
+    def _shown(self, line: str) -> list[Styled]:
         if self._fence:
             closing = _closes(line, self._fence)
             if closing:
                 self._fence = ""
             if not self._colour:
-                return [line]
-            return [] if closing else [painted(CODE, line)]
+                return [Styled(line)]
+            return [] if closing else [Styled(painted(CODE, line))]
         opening = _FENCE.match(line)
         if opening:
             self._fence = opening[1]
-            return [] if self._colour else [line]
+            return [] if self._colour else [Styled(line)]
         if self._colour:
             line = _marked(line)
         parts = wrapped(line, self._width) if self._width else [line]
-        return _styled(parts) if self._colour else parts
+        return _styled(parts) if self._colour else [Styled(part) for part in parts]
 
 
-def reply_lines(text: str, width: int | None, colour: bool) -> list[str]:
+def reply_lines(text: str, width: int | None, colour: bool) -> list[Styled]:
     """A reply that is all there as its lines, see ReplyWriter."""
     writer = ReplyWriter(width, colour)
     return writer.feed(text) + writer.end()
 
 
-def said_whole(page: Page, said: Event) -> list[str]:
+def said_whole(page: Page, said: Event) -> list[Shown]:
     """What was said with all of its lines, where a trace has a few: a
     chat is where it is read. At a terminal a line says when and who, and
     the text is under it, each line behind the mark of what the session
@@ -263,10 +265,10 @@ def said_whole(page: Page, said: Event) -> list[str]:
     text = said.fields.get("text", "")
     lines = reply_lines(text, page.said_width, page.layout.colour)
     if not page.layout.compact:
-        whole = dataclasses.replace(said, details=lines or said.details)
+        whole = dataclasses.replace(said, details=[*lines] or said.details)
         return page.layout.event(whole)
     head = page.layout.event(dataclasses.replace(said, details=[""]))
-    return [*head, *page.said(lines), ""]
+    return [*head, *page.replied(lines), BLANK]
 
 
 class ReplyStream:
@@ -292,7 +294,7 @@ class ReplyStream:
         self._writer: ReplyWriter | None = None
         self._started = 0.0
         # Its lines, where it is written once it is whole
-        self._lines: list[str] = []
+        self._lines: list[Styled] = []
         # Whether its first line is out, and whether its whole was told
         self._headed = False
         self._met = False
@@ -351,10 +353,10 @@ class ReplyStream:
             return
         self._take(self._writer.end())
         if self._headed:
-            self._page.put([""])
+            self._page.put([BLANK])
         elif self._lines:
             self._before()
-            said = Event(self._started, Who.CLAUDE, Kind.REPLY, self._lines, {})
+            said = Event(self._started, Who.CLAUDE, Kind.REPLY, [*self._lines], {})
             self._page.put(self._page.layout.event(said))
         self._owed += not self._met
         self._writer = None
@@ -366,7 +368,7 @@ class ReplyStream:
         self.finish()
         self._owed = 0
 
-    def _take(self, lines: list[str]) -> None:
+    def _take(self, lines: list[Styled]) -> None:
         """Write lines of the reply, at a terminal: behind the mark of
         what the session wrote, no line of it says who. In a file they
         are kept for its end."""
@@ -375,10 +377,10 @@ class ReplyStream:
         if not self._page.layout.compact:
             self._lines += lines
             return
-        lines = self._page.said(lines)
+        shown = self._page.replied(lines)
         if not self._headed:
             self._before()
             self._headed = True
             head = Event(self._started, Who.CLAUDE, Kind.REPLY, [""], {})
-            lines = self._page.layout.event(head) + lines
-        self._page.put(lines)
+            shown = self._page.layout.event(head) + shown
+        self._page.put(shown)

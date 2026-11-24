@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 from ..events import Event, Kind, Stage, Who
 from ..report.follow import Follower
+from ..report.layout import Shown
 from ..settings import Host
 from .console import Page
 from .reply import said_whole
@@ -96,7 +97,7 @@ class Followed:
         found = self._follower.poll()
         self._looked = time.monotonic()
         self._page.say(found.notes)
-        lines: list[str] = []
+        lines: list[Shown] = []
         # The events since the last one that is shown whole
         together: list[Event] = []
         for _, event in found.events:

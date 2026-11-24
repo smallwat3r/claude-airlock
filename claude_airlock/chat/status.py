@@ -29,9 +29,9 @@ from ..report.layout import (
     BOLD,
     DIM,
     GREEN,
-    HEADER_START,
     RED,
     YELLOW,
+    header_with,
     painted,
     together,
 )
@@ -252,7 +252,4 @@ class StatusLine:
         """Say the status, as /status asks."""
         line = self.refresh()
         head = labelled("status", "")
-        if self._page.layout.colour:
-            self._page.put([painted(DIM, HEADER_START + head) + line])
-        else:
-            self._page.put([HEADER_START + head + line])
+        self._page.put([header_with(head, line, self._page.layout.colour)])

@@ -1513,11 +1513,14 @@ class ReplyTest:
                 said = Event(1.0, Who.CLAUDE, "command", [], {"text": forged})
                 where.put(replying.said_whole(where, said))
                 where.put_said([forged])
+                # Cleaned where it is written, whatever was done before
+                where.put_said(["es\x1b[2Jcape\rd"])
             session = [line for line in lines if "ready" in line or "allow" in line]
             assert len(session) == 4 * 3
             # None at the left edge, where the lines of the chat start
             assert all(line.startswith(mark + " ") for line in session)
             assert lines.count(mark) == 4
+            assert lines[-1] == f"{mark} es[2Jcaped"
             own = [line for line in lines if not line.startswith(mark)]
             assert all(not line or "claude " in line or "day" in line for line in own)
 
@@ -2694,11 +2697,13 @@ class StatusTest(LauncherTest):
 
 class ConsoleTest(LauncherTest):
     def test_the_end_of_a_turn_is_said_in_bright_green_in_colour(self):
-        assert talk.ready_line(False) == f"# {talk.READY}"
-        assert talk.ready_line(True) == f"\x1b[1;92m# {talk.READY}\x1b[0m"
+        assert talk.ready_line(Layout()) == f"# {talk.READY}"
+        assert (
+            talk.ready_line(Layout(colour=True)) == f"\x1b[1;92m# {talk.READY}\x1b[0m"
+        )
 
     def test_a_turn_that_ends_with_tasks_still_running_says_so(self):
-        one, two = talk.ready_line(False, 1), talk.ready_line(False, 2)
+        one, two = talk.ready_line(Layout(), 1), talk.ready_line(Layout(), 2)
         assert "claude has paused, 1 task still runs" in one
         assert "claude has paused, 2 tasks still run" in two
         assert "has finished" not in one

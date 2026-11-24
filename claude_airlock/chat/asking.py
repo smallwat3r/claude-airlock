@@ -25,6 +25,7 @@ from typing import Protocol
 from ..events import clean, flat, labelled
 from ..report.calls import call_details
 from ..report.layout import (
+    BLANK,
     BOLD,
     CYAN,
     GREEN,
@@ -324,15 +325,16 @@ class Asker:
         if tool == "ExitPlanMode" and isinstance(plan, str):
             width, colour = self._page.said_width, self._page.layout.colour
             self._page.note("plan", "what claude asks to go ahead with:")
-            self._page.put([*self._page.said(reply_lines(plan, width, colour)), ""])
+            self._page.put(
+                [*self._page.replied(reply_lines(plan, width, colour)), BLANK]
+            )
         elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
             whole = call_details(tool, tool_input, None, self._project_dir, True)
             name = tool.lower()[:WHAT_WIDTH]
             self._page.say([f"{name:<{WHAT_WIDTH}}  the call whole:"])
-            lines = prefixed("  ", whole)
-            if self._page.layout.colour:
-                lines = [painted(DIFF_STYLES.get(line[:9], ""), line) for line in lines]
-            self._page.put_said(lines)
+            self._page.put_said(
+                prefixed("  ", whole), lambda line: DIFF_STYLES.get(line[:9], "")
+            )
         return named[:ABOUT_WIDTH]
 
     def _permission(

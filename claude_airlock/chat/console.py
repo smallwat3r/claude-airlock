@@ -62,7 +62,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from ..events import Event, clean, labelled
-from ..report.layout import DIM, Layout, painted, prefixed
+from ..report.layout import DIM, Layout, Shown, Styled, painted, prefixed
 from .screen import SGR, cursor_back, erased, uncounted
 
 try:
@@ -644,8 +644,9 @@ class Console:
                 return ""
             return self._buffer()
 
-    def write(self, lines: list[str]) -> None:
-        """Write lines, above the line being typed when one is."""
+    def write(self, lines: list[Shown]) -> None:
+        """Write lines, above the line being typed when one is. Lines
+        that were laid out, see Shown: a text is not written as it is."""
         if not lines:
             return
         with self._lock:
@@ -732,7 +733,10 @@ class Console:
 
 class Page:
     """What a chat writes, laid out as a trace is (see Layout), and when
-    it last wrote."""
+    it last wrote. The one place a chat writes through: it takes lines
+    that were laid out (see Shown of layout.py), which are the launcher's
+    own as a header line or an event, or the session's word behind its
+    mark, as said and replied make them."""
 
     def __init__(self, console: Console, layout: Layout):
         self._console = console
@@ -756,23 +760,41 @@ class Page:
         width = self.width
         return width and max(NARROWEST, width - len(SAID))
 
-    def said(self, lines: list[str]) -> list[str]:
-        """Lines of the session's own word as they are written, each
-        behind SAID, and so each line of one that holds a line break. In
-        colour the mark is dimmed, as what a chat says of itself is: the
-        text after it keeps its own."""
+    def said(
+        self, texts: list[str], style: Callable[[str], str] | None = None
+    ) -> list[Shown]:
+        """Texts of the session's own word as the lines they are written
+        as: cleaned here, whatever was done to them before, each behind
+        SAID, and so each line of one that holds a line break. With
+        style, each line in the style that gives for it, in colour."""
+        lines = prefixed("", [clean(text) for text in texts])
+        if style and self.layout.colour:
+            lines = [painted(style(line), line) for line in lines]
+        return self._marked(lines)
+
+    def replied(self, lines: list[Styled]) -> list[Shown]:
+        """Lines of a reply of claude's as they are written, each behind
+        SAID: cleaned and styled by what made them, see ReplyWriter."""
+        return self._marked(prefixed("", list(lines)))
+
+    def _marked(self, lines: list[str]) -> list[Shown]:
+        """Lines behind the mark of what the session wrote. In colour the
+        mark is dimmed, as what a chat says of itself is: the text after
+        it keeps its own."""
         mark = painted(DIM, SAID.rstrip()) if self.layout.colour else SAID.rstrip()
         gap = SAID[len(SAID.rstrip()) :]
-        return [f"{mark}{gap}{line}" if line else mark for line in prefixed("", lines)]
+        return [Shown(f"{mark}{gap}{line}" if line else mark) for line in lines]
 
-    def put(self, lines: list[str]) -> None:
+    def put(self, lines: list[Shown]) -> None:
         if lines:
             self._console.write(lines)
             self.touched()
 
-    def put_said(self, lines: list[str]) -> None:
-        """Write lines of the session's own word, see said."""
-        self.put(self.said(lines))
+    def put_said(
+        self, texts: list[str], style: Callable[[str], str] | None = None
+    ) -> None:
+        """Write texts of the session's own word, see said."""
+        self.put(self.said(texts, style))
 
     def touched(self) -> None:
         """Something was written, or read, that is no line of the page:
@@ -802,5 +824,5 @@ class Page:
         """A line about the chat itself under a label, see labelled."""
         self.say([labelled(label, text)])
 
-    def events(self, events: list[Event]) -> list[str]:
+    def events(self, events: list[Event]) -> list[Shown]:
         return self.layout.events(events)

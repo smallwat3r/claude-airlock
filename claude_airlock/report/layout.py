@@ -4,7 +4,14 @@ show them alike.
 
 Nothing an event holds is trusted here: its text has been through clean
 of events.py, and prefixed keeps a line break within it from passing for
-the start of another event."""
+the start of another event.
+
+A line that is ready to be written is of a kind of its own, Shown, which
+only what lays lines out makes: a header line, the lines of an event, and
+in a chat what the session said behind its mark (see Page of
+chat/console.py). What writes to a terminal takes no other, so a text of
+the session's cannot be written as it is, as a line of the launcher's
+own, without the type check saying so."""
 
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NewType
 
 from ..events import Event, Kind, Wrong, labelled
 
@@ -38,6 +45,14 @@ BRIGHT_MAGENTA = "95"
 BRIGHT_CYAN = "96"
 # What a header line starts with, which is no event
 HEADER_START = "# "
+# A line laid out to be written, see what the module says of itself
+Shown = NewType("Shown", str)
+# One with nothing on it
+BLANK = Shown("")
+# Text that has been through clean and is in styles of the launcher's
+# choosing, not laid out yet: what a reply of claude's is once its
+# Markdown is taken for what it means (see chat/reply.py)
+Styled = NewType("Styled", str)
 
 
 def together(*styles: str) -> str:
@@ -139,6 +154,20 @@ def prefixed(start: str, texts: list[str]) -> list[str]:
     ]
 
 
+def header_lines(texts: list[str], style: str = "") -> list[Shown]:
+    """Texts of the launcher's own as header lines, in a style when
+    given one."""
+    return [Shown(painted(style, line)) for line in prefixed(HEADER_START, texts)]
+
+
+def header_with(start: str, rest: str, colour: bool) -> Shown:
+    """A header line that starts with a text of the launcher's own, on
+    one line and dimmed in colour, and goes on with one that keeps the
+    styles it has: a status in its colours."""
+    line = HEADER_START + start
+    return Shown((painted(DIM, line) if colour else line) + rest)
+
+
 def use_colour(env: Mapping[str, str]) -> bool:
     """Whether the lines are coloured: on a terminal, unless NO_COLOR says
     not to (no-color.org), and anywhere when FORCE_COLOR asks for it, as a
@@ -197,18 +226,19 @@ class Layout:
         when = "time    " if self.compact else "time               "
         return f"{when}  {'who':<7}  {'what':<{WHAT_WIDTH}}  details"
 
-    def header(self, header: list[str]) -> list[str]:
-        lines = prefixed(HEADER_START, header)
-        return [painted(DIM, line) for line in lines] if self.colour else lines
+    def header(self, header: list[str], style: str = DIM) -> list[Shown]:
+        """Lines about what is shown itself, dimmed in colour unless
+        they are to stand out in a style of their own."""
+        return header_lines(header, style if self.colour else "")
 
-    def events(self, events: Iterable[Event]) -> list[str]:
+    def events(self, events: Iterable[Event]) -> list[Shown]:
         """The lines of events that follow each other, see folded."""
         return [line for event in folded(events) for line in self.event(event)]
 
-    def event(self, event: Event) -> list[str]:
+    def event(self, event: Event) -> list[Shown]:
         """An event as its lines, a call that has a number named by it."""
         clock = f"{datetime.fromtimestamp(event.when):%Y-%m-%d %H:%M:%S}"
-        lines: list[str] = []
+        lines: list[Shown] = []
         if self.compact:
             day, clock = clock.split()
             if day != self._day:
@@ -231,14 +261,14 @@ class Layout:
                 clock, about = " " * len(clock), " " * len(about)
             rest = (about + text).rstrip()
             if not self.colour:
-                lines.append(f"{clock}  {rest}".rstrip())
+                lines.append(Shown(f"{clock}  {rest}".rstrip()))
                 continue
             if alerting(event, index):
                 rest = painted(ALERT, rest)
             else:
                 rest = self._painted(style, head if about.strip() else "", rest, about)
             when = painted(DIM, clock) if clock.strip() else clock
-            lines.append(f"{when}  {rest}")
+            lines.append(Shown(f"{when}  {rest}"))
         return lines
 
     def _painted(self, style: str, head: str, rest: str, about: str) -> str:

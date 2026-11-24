@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from ..docker import docker_ok, docker_popen, exec_args
-from ..events import clean, flat
+from ..events import flat
 from .console import Page
 
 # Of a line a command of the user's writes, what is shown as one line
@@ -65,7 +65,7 @@ class Shell:
                         group = line.strip()
                     else:
                         text = line.decode("utf-8", "replace").rstrip("\r\n")
-                        self._page.put_said([clean(text)])
+                        self._page.put_said([text])
                     first = False
         except OSError:
             self._page.note("shell", "docker could not be run")

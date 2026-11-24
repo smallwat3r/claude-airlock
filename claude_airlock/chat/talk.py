@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable
 
 from ..docker import docker_ok, project_slug
-from ..events import Event, Kind, clean, flat, labelled
+from ..events import Event, Kind, flat, labelled
 from ..files import private_dir
 from ..projects import sandboxed_root
 from ..recording.changes import note_change
@@ -37,11 +37,10 @@ from ..report.layout import (
     BRIGHT_CYAN,
     BRIGHT_GREEN,
     BRIGHT_MAGENTA,
-    HEADER_START,
     ITALIC,
     STYLES,
     Layout,
-    painted,
+    Shown,
     together,
 )
 from ..report.planted import Planted
@@ -404,7 +403,7 @@ class Chat:
                 if isinstance(message, str):
                     # Not what claude says in a conversation, see Agent:
                     # the session's word all the same, and marked as such
-                    self._page.put_said([clean(message).rstrip()])
+                    self._page.put_said([message.rstrip()])
                     continue
                 if self._interrupt:
                     self._interrupt = False
@@ -540,7 +539,7 @@ class Chat:
         if not turn.guarded:
             # Not of a turn that was stopped for what claude read: it has
             # not finished, and what comes next is said where it stopped
-            ready = ready_line(self._page.layout.colour, self._notices.running)
+            ready = ready_line(self._page.layout, self._notices.running)
             self._page.put([ready])
         if not turn.interrupted and time.monotonic() - turn.started >= LONG_TURN:
             self._console.bell()
@@ -586,9 +585,7 @@ class Chat:
             self._asker.give_up()
         self._followed.settle(ASK_SETTLE)
         said = stop_said(found, stopped, asks)
-        lines = [HEADER_START + line for line in said]
-        colour = self._page.layout.colour
-        self._page.put([painted(ALERT, line) if colour else line for line in lines])
+        self._page.put(self._page.layout.header(said, ALERT))
         self._console.bell()
         if asks and first:
             self._asked.then(functools.partial(self._ask_to_go_on, guard))
@@ -625,7 +622,7 @@ class Chat:
         layout = self._page.layout
         # Written together: the prompt that comes back is under both
         said = layout.header([labelled("chat", kept)])
-        self._page.put([*said, waiting_line(layout.colour)])
+        self._page.put([*said, waiting_line(layout)])
 
     def _said_yes(self, question: str) -> bool | None:
         """Put a question of a turn that was stopped, where it is not
@@ -706,24 +703,23 @@ class Chat:
         self._asked.put(asked, request)
 
 
-def waiting_line(colour: bool) -> str:
+def waiting_line(layout: Layout) -> Shown:
     """The line that says a turn that was stopped is not gone on with
     until the user types, as a turn that is over is said."""
-    line = HEADER_START + labelled("chat", WAITING)
-    return painted(READY_STYLE, line) if colour else line
+    return layout.header([labelled("chat", WAITING)], READY_STYLE)[0]
 
 
-def ready_line(colour: bool, running: int = 0) -> str:
+def ready_line(layout: Layout, running: int = 0) -> Shown:
     """What is said once a turn is over, for the eye to find where claude
     stopped and the prompt is the user's again: bright green in colour.
     With tasks of claude's that still run, it says so: the turn is over
     and the work is not, claude takes up again when one of them ends."""
-    line = HEADER_START + READY
+    said = READY
     if running:
         tasks = "1 task still runs" if running == 1 else f"{running} tasks still run"
-        said = f"claude has paused, {tasks}, it goes on when one ends"
-        line = HEADER_START + labelled("ready", said)
-    return painted(READY_STYLE, line) if colour else line
+        paused = f"claude has paused, {tasks}, it goes on when one ends"
+        said = labelled("ready", paused)
+    return layout.header([said], READY_STYLE)[0]
 
 
 def chat(

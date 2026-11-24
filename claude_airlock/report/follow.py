@@ -31,7 +31,7 @@ import dataclasses
 import os
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -672,7 +672,7 @@ class Output:
 
     def _shown(self, events: list[Event]) -> list[str]:
         if self._layout:
-            return self._layout.events(events)
+            return [*self._layout.events(events)]
         # An event of the network is put with the session that wrote
         # last, as good a guess as the trace makes
         session = self._session.stem if self._session else ""
@@ -685,7 +685,7 @@ class Output:
             self._put(self._layout.header(notes))
 
     @staticmethod
-    def _put(lines: list[str]) -> None:
+    def _put(lines: Sequence[str]) -> None:
         if lines:
             sys.stdout.write("\n".join(lines) + "\n")
             sys.stdout.flush()
