@@ -77,6 +77,16 @@ HEALTH_EVERY = 10.0
 # Seconds between two looks at whether a tcpdump of a capture has died
 DIED_EVERY = 5.0
 READ_SIZE = 1 << 20
+# How much of a transcript one look takes in, once what it held when the
+# following began is read: a session can write to it as fast as it is
+# read, and whoever looks has more to do than that (a chat listens to
+# claude and to Ctrl-C between two looks). What is left is read by the
+# next look. A megabyte of the shortest entries is a quarter of a second
+# to take in
+MOST_POLLED = 1 << 20
+# The looks in a row that leave some of a transcript unread before it is
+# said to be late: a result with a picture in it takes a few
+LATE_AFTER = 10
 
 
 class TranscriptTail:
@@ -95,6 +105,10 @@ class TranscriptTail:
         self._dropping = False
         self._walk = Walk(project_dir, options)
         self._title: str | None = None
+        # The looks in a row that left some of it unread, and whether
+        # that was said, see newly_behind
+        self._behind = 0
+        self._said_behind = False
 
     @property
     def title(self) -> str:
@@ -102,19 +116,34 @@ class TranscriptTail:
             self._title = title(read_entries(self.path))
         return self._title
 
-    def poll(self) -> list[Event]:
-        """The events of what was written since the last time."""
+    def poll(self, most: int | None = MOST_POLLED) -> list[Event]:
+        """The events of what was written since the last time, of no
+        more of it than most bytes: the rest is for the next time. With
+        none, of all there was when the look began, for what a
+        transcript held before it was followed."""
         events: list[Event] = []
-        for line in self._new_lines():
+        for line in self._new_lines(most):
             entry = line_entry(line)
             if entry:
                 events += self._events(entry)
         return events
 
-    def _new_lines(self) -> Iterator[bytes | None]:
+    def newly_behind(self) -> bool:
+        """Whether LATE_AFTER looks in a row left some of it unread,
+        said once until one reads it to its end again: it is written
+        faster than it is read, and what is shown of it is late."""
+        if self._behind < LATE_AFTER:
+            self._said_behind = self._said_behind and bool(self._behind)
+            return False
+        said, self._said_behind = self._said_behind, True
+        return not said
+
+    def _new_lines(self, most: int | None) -> Iterator[bytes | None]:
         """The lines completed since the last time, none while it is not
         a plain file that can be read (see open_plain). None in the place
-        of a line that was too long to hold."""
+        of a line that was too long to hold. No further than the file
+        went when it was opened, and than most bytes when there is a
+        most: what is written meanwhile does not keep the look going."""
         file = open_plain(self.path)
         if file is None:
             return
@@ -123,9 +152,11 @@ class TranscriptTail:
             if size < self._offset:
                 # Written anew and shorter: from where it ends now
                 self._offset, self._partial, self._dropping = size, b"", False
+            end = size if most is None else min(size, self._offset + most)
+            self._behind = self._behind + 1 if end < size else 0
             file.seek(self._offset)
-            while True:
-                data = file.read(READ_SIZE)
+            while self._offset < end:
+                data = file.read(min(READ_SIZE, end - self._offset))
                 if not data:
                     return
                 self._offset += len(data)
@@ -333,10 +364,15 @@ class Follower:
             self._look_for_transcripts(found)
             self._look_for_subagents()
             self._look_for_sessions(found)
+        # At first all that the latest transcript holds, for the events
+        # before now: later no more of any than a look is to take
+        most = None if self._rounds == 0 else MOST_POLLED
         for tail in self._tails.values():
-            found.events += [(tail.path, event) for event in tail.poll()]
+            found.events += [(tail.path, event) for event in tail.poll(most)]
+            self._note_behind(tail, found)
         for session, tail in self._subagents.values():
-            found.events += [(session, event) for event in tail.poll()]
+            found.events += [(session, event) for event in tail.poll(most)]
+            self._note_behind(tail, found)
         self._poll_network(found)
         self._poll_notes(found)
         found.events = ordered(
@@ -346,6 +382,17 @@ class Follower:
             self._keep_latest(found)
         self._rounds += 1
         return found
+
+    @staticmethod
+    def _note_behind(tail: TranscriptTail, found: Round) -> None:
+        """Say that a transcript is written faster than it is read, when
+        a look first leaves some of it unread."""
+        if tail.newly_behind():
+            late = (
+                f"{flat(tail.path.name)} is written faster than it is read,"
+                " what is shown of it is LATE"
+            )
+            found.notes.append(labelled("transcript", late))
 
     def _tail(self, path: Path, offset: int = 0) -> None:
         project_dir = project_root(path, self._host)

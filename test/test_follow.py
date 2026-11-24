@@ -603,6 +603,58 @@ class TranscriptTailTest:
             add(self.file, prompt("after"))
             assert self.said(tail) == ["after"]
 
+    def test_a_look_takes_in_no_more_than_it_is_to(self):
+        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        texts = [f"line {number}" for number in range(100)]
+        add(self.file, *map(prompt, texts))
+        count = follow.LATE_AFTER + 2
+        most = self.file.stat().st_size // (2 * count)
+        looks = []
+        late = []
+        while len(looks) < count:
+            looks.append([event.details[0] for event in tail.poll(most)])
+            late.append(tail.newly_behind())
+            # Written to meanwhile, as fast as it is read
+            add(self.file, prompt("more"))
+        # Some of it each time, the rest left for the next
+        assert all(0 < len(look) < 10 for look in looks)
+        seen = [text for look in looks for text in look]
+        assert seen == texts[: len(seen)]
+        # Said once to be late, when it stays behind
+        assert late.index(True) == follow.LATE_AFTER - 1
+        assert late.count(True) == 1
+        # All there is when there is no most, and no further than that
+        rest = [event.details[0] for event in tail.poll(None)]
+        assert seen + rest == texts + ["more"] * count
+        assert not tail.newly_behind()
+        assert tail.poll() == []
+
+    def test_a_follower_says_when_a_transcript_is_written_faster_than_read(self):
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, False, only=self.file)
+        follower._docker = False
+        add(self.file, *(prompt(f"before {number}") for number in range(30)))
+        with (
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=[]),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+            mock.patch.object(follow, "MOST_POLLED", 200),
+        ):
+            # What it held before it was followed is read whole
+            first = follower.poll()
+            assert any("earlier events" in note for note in first.notes)
+            assert first.events[-1][1].details == ["before 29"]
+            add(self.file, *(prompt(f"flood {number}") for number in range(60)))
+            rounds = [follower.poll() for _ in range(follow.LATE_AFTER + 2)]
+        assert all(0 < len(found.events) < 5 for found in rounds)
+        notes = [note for found in rounds for note in found.notes]
+        assert notes == [
+            (
+                "transcript  0a.jsonl is written faster than it is read,"
+                " what is shown of it is LATE"
+            )
+        ]
+
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         add(self.file, prompt("one"), prompt("two"))
