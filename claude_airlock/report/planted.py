@@ -86,20 +86,34 @@ _CLAUDE_CODE_TAGS = (
     r"|task[-_]notification|fork[-_]boilerplate"
     r"|teammate[-_]message|cross[-_]session[-_]message)"
 )
-# Characters that are not shown: the tags of Unicode, which spell ASCII
-# unseen (each is the ASCII character of its place, TAG_BASE on, those
-# from TAG_SHOWN on the ones that print), and those of no width. A flag
-# of a region takes a few tags and a script a joiner here and there, a
-# run of them is something written.
+# Characters that are not shown, of whatever kind: the tags of Unicode,
+# which spell ASCII unseen (each is the ASCII character of its place,
+# TAG_BASE on, those from TAG_SHOWN to TAG_LAST the ones that print), the
+# selectors of a variation, which spell bytes the same way (the first
+# sixteen from SELECTOR_BASE on, the rest from MORE_SELECTORS_BASE), the
+# soft hyphen, the joiners and the spaces of no width, the marks of
+# direction, the fillers that stand for a letter and show none. One
+# class for all of them: told apart, a text that takes one of each in
+# turn would have no run of any. A flag of a region takes a few tags, an
+# emoji a selector and a script a joiner here and there, a run of
+# UNSHOWN_RUN of them is something written.
 TAG_BASE = 0xE0000
 TAG_SHOWN = TAG_BASE + 0x20
-_NO_WIDTH = "\u200b-\u200f\u2060-\u2064\ufeff"
-_TAG_RUN = re.compile("[\U000e0000-\U000e007f]{10,}")
-_NO_WIDTH_RUN = re.compile(f"[{_NO_WIDTH}]{{8,}}")
+TAG_LAST = TAG_BASE + 0x7E
+SELECTOR_BASE = 0xFE00
+SELECTORS = 16
+MORE_SELECTORS_BASE = 0xE0100
+MORE_SELECTORS = 240
+UNSHOWN_RUN = 8
+_UNSHOWN = (
+    "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff"
+)
+_UNSHOWN_RUN = re.compile(f"[{_UNSHOWN}]{{{UNSHOWN_RUN},}}")
 # What splits a word or sets it off without a model reading it any
-# other way: the marks of emphasis, a soft hyphen, and the characters of
-# no width
-_FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6\u00ad{_NO_WIDTH}]+")
+# other way: the marks of emphasis, and the characters that are not shown
+_FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}]+")
 
 type Finder = Callable[[str], str | None]
 
@@ -190,19 +204,34 @@ def _written(*patterns: str) -> Finder:
     return find
 
 
+def _spelled(unshown: str) -> str:
+    """What characters that are not shown spell, empty when nothing that
+    reads: each tag the ASCII character of its place, each selector of a
+    variation the byte of its place, the bytes read as UTF-8. No more of
+    it than an excerpt."""
+    spelled = bytearray()
+    for character in unshown[: 4 * EXCERPT_WIDTH]:
+        place = ord(character)
+        if TAG_SHOWN <= place <= TAG_LAST:
+            spelled.append(place - TAG_BASE)
+        elif 0 <= place - SELECTOR_BASE < SELECTORS:
+            spelled.append(place - SELECTOR_BASE)
+        elif 0 <= place - MORE_SELECTORS_BASE < MORE_SELECTORS:
+            spelled.append(place - MORE_SELECTORS_BASE + SELECTORS)
+    read = flat(spelled.decode("utf-8", "ignore")).strip()
+    return read[:EXCERPT_WIDTH] if any(map(str.isalnum, read)) else ""
+
+
 def _hidden(text: str) -> str | None:
-    """What a text holds that is not shown, none when it holds none."""
-    tags = _TAG_RUN.search(text)
-    if tags:
-        spelled = "".join(
-            chr(ord(tag) - TAG_BASE) for tag in tags.group() if ord(tag) >= TAG_SHOWN
-        )
-        said = flat(spelled)[:EXCERPT_WIDTH]
-        return f'{len(tags.group())} tag characters that spell "{said}"'
-    run = _NO_WIDTH_RUN.search(text)
-    if run:
-        return f"{len(run.group())} characters of no width in a row"
-    return None
+    """What a text holds that is not shown, none when it holds none: the
+    first run of such characters, of whatever kinds they are, and what
+    they spell when they spell something."""
+    run = _UNSHOWN_RUN.search(text)
+    if not run:
+        return None
+    said = f"{len(run.group())} characters that are not shown in a row"
+    spelled = _spelled(run.group())
+    return f'{said}, which spell "{spelled}"' if spelled else said
 
 
 # Text that only speaks to the model that reads it is no sign: a file
