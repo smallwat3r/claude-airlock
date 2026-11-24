@@ -7,13 +7,17 @@ is cut off. A sidecar owns the session's network namespace instead and runs
 tcpdump in it, on the few packets that say where a connection goes and how
 it went: the start, the answer and the end of each TCP connection, the DNS
 answers, the TLS hello with the server's name and the request of plain
-HTTP. Of TCP never what is sent beyond those. Of anything else the session
-sends (UDP, a ping) every packet, there is no telling the first of a
-conversation from the rest: the start of each is in the file, and only
-where it went and how long it was is read. Each of the three kinds, the
-TCP, the DNS and what is not TCP, is captured by a tcpdump of its own,
-with its own file and its own packet limit: a session that floods one
-cannot use up what the others have. The session joins that namespace,
+HTTP. Of TCP never what is sent beyond those, but for a packet of every
+gigabyte a connection carries, for how much went over it to be counted
+(see SAMPLED). Of anything else the session sends (UDP, a ping) every
+packet, there is no telling the first of a conversation from the rest:
+the start of each is in the file, and only where it went and how long it
+was is read. Each of the kinds, the TCP, what docker's resolver is asked
+and says, what goes to port 53 anywhere else and what is not TCP, is
+captured by a tcpdump of its own, with its own file and its own packet
+limit: a session that floods one cannot use up what the others have,
+whatever it sends to port 53 leaves the lookups it has the resolver make
+recorded. The session joins that namespace,
 so the capture is running before its first packet. It holds no capabilities
 and is in another process namespace, so it can neither capture itself nor
 see, stop or edit the capture, which stays in the sidecar until the
@@ -57,6 +61,28 @@ KEPT_CAPTURES = 100
 _PAYLOAD = "((tcp[12:1] & 0xf0) >> 2)"
 _PAYLOAD6 = "(40 + ((ip6[52:1] & 0xf0) >> 2))"
 _TCP6 = "ip6[6:1] = 6"
+# What starts, answers or ends a connection, over IPv4 and over IPv6
+_ENDS = "tcp[tcpflags] & (tcp-syn|tcp-fin|tcp-rst) != 0"
+_ENDS6 = f"({_TCP6} and ip6[53:1] & 0x07 != 0)"
+# How much a connection carried is counted from its sequence numbers,
+# which start over every four gigabytes (see Stream of pcap.py): the first
+# and the last alone would have a long upload read as a short one. So a
+# packet that carries something is taken when its number is in the first
+# 64 kB of a gigabyte, the two top bits aside: at least one each time a
+# connection gets there, a packet holds no more than that, and of most
+# connections none. By the two bytes of the number that say so, then by
+# what is left of the packet's length once its headers are taken off. Not
+# of the session's own within itself, as of what starts a connection.
+SAMPLED_BITS = 0x3FFF
+_SAMPLED = (
+    f"(tcp[4:2] & {SAMPLED_BITS:#x} = 0"
+    f" and ip[2:2] - ((ip[0:1] & 0x0f) << 2) - {_PAYLOAD} != 0"
+    " and not dst net 127.0.0.0/8)"
+)
+_SAMPLED6 = (
+    f"({_TCP6} and ip6[44:2] & {SAMPLED_BITS:#x} = 0"
+    " and ip6[4:2] - ((ip6[52:1] & 0xf0) >> 2) != 0 and not dst host ::1)"
+)
 
 
 @dataclass(frozen=True)
@@ -80,30 +106,44 @@ def _http_methods(load: str) -> str:
     )
 
 
-# No packet is in two parts: what is DNS by its port or by the resolver's
-# address is the DNS part's alone, its TCP too. The reader would take a
-# packet it is given twice for one sent twice.
-_NOT_DNS = f"not port 53 and not host {RESOLVER}"
+# No packet is in two parts: what goes to and from the resolver's address
+# is the resolver part's alone. Of port 53 anywhere else, what starts and
+# ends a connection is the TCP part's, as of any port, and the rest the
+# part's of what is asked there directly. The reader would take a packet
+# it is given twice for one sent twice.
+_NOT_RESOLVER = f"not host {RESOLVER}"
+_NOT_DNS = f"not port 53 and {_NOT_RESOLVER}"
 TCP_FILTER = (
-    f"{_NOT_DNS} and ("
+    f"{_NOT_RESOLVER} and ("
     # What starts, answers or ends a connection, but for the session's
     # own within itself
-    "(tcp[tcpflags] & (tcp-syn|tcp-fin|tcp-rst) != 0"
-    " and not dst net 127.0.0.0/8)"
-    f" or ({_TCP6} and ip6[53:1] & 0x07 != 0 and not dst host ::1)"
+    f"({_ENDS} and not dst net 127.0.0.0/8)"
+    f" or ({_ENDS6} and not dst host ::1)"
+    " or (not port 53 and ("
+    # A packet of every gigabyte, see SAMPLED_BITS
+    f"{_SAMPLED} or {_SAMPLED6}"
     # A TLS handshake record holding a client hello
     f" or (tcp[{_PAYLOAD}:1] = 0x16 and tcp[{_PAYLOAD} + 5:1] = 0x01)"
     # Last, a packet without that much payload ends the filter there
     + _http_methods(f"tcp[{_PAYLOAD}:4]")
     + f" or ({_TCP6} and ip6[{_PAYLOAD6}:1] = 0x16 and ip6[{_PAYLOAD6} + 5:1] = 0x01)"
     + f" or ({_TCP6} and ({_http_methods(f'ip6[{_PAYLOAD6}:4]')[4:]}))"
-    + ")"
+    + ")))"
 )
 # The resolver at 127.0.0.11 is reached through a port rewrite inside the
 # namespace, so its packets do not show port 53: all there is to and from
 # its address is taken, and the reader tells what is DNS. Not the rest of
-# loopback, which a session can fill with whatever it likes.
-DNS_FILTER = f"port 53 or host {RESOLVER}"
+# loopback, which a session can fill with whatever it likes. Nor port 53
+# anywhere else, see DIRECT_FILTER: what a session sends there is its own
+# to make a lot of, and is not to use up what the lookups it has the
+# resolver make are recorded with.
+DNS_FILTER = f"host {RESOLVER}"
+# What goes to and from port 53 anywhere but at the resolver: a server
+# asked directly, over UDP or over TCP, or whatever else a session sends
+# there. All of it but what starts and ends a connection, which the TCP
+# part has: when this one is at its limit, the connections to port 53 are
+# still recorded.
+DIRECT_FILTER = f"port 53 and {_NOT_RESOLVER} and not ({_ENDS}) and not {_ENDS6}"
 # Whatever the session sends that is not TCP: UDP, a ping, anything else
 # over IP. There a connection has no start to pick out.
 FLOWS_FILTER = (
@@ -115,6 +155,7 @@ FLOWS_FILTER = (
 PARTS = (
     Part("tcp", CAPTURE_FILE, "", TCP_FILTER),
     Part("dns", "/dns.pcap", ".dns", DNS_FILTER),
+    Part("direct", "/direct.pcap", ".direct", DIRECT_FILTER),
     Part("flows", "/flows.pcap", ".flows", FLOWS_FILTER),
 )
 # What is added to the file of a part for the one it leaves its exit status
@@ -130,14 +171,18 @@ STATUS_SUFFIX = ".status"
 # the record of the session says (see CaptureSidecar.noted). One that
 # never got to write its file failed to start, which is said by ending
 # with its status (see start_capture).
-CAPTURE_SCRIPT = f"""common="-i any -p -n -U -Z root --immediate-mode -s {SNAP_LENGTH} -c {PACKET_LIMIT}"
-tcpdump $common -w {PARTS[0].file} "$1" &
-tcp=$!
-tcpdump $common -w {PARTS[1].file} "$2" &
-dns=$!
-tcpdump $common -w {PARTS[2].file} "$3" &
-flows=$!
-trap 'kill "$tcp" "$dns" "$flows" 2>/dev/null; wait; exit 0' TERM INT
+_COMMON = f"-i any -p -n -U -Z root --immediate-mode -s {SNAP_LENGTH} -c {PACKET_LIMIT}"
+_STARTED = "\n".join(
+    f'tcpdump $common -w {part.file} "${number}" &\n{part.name}=$!'
+    for number, part in enumerate(PARTS, 1)
+)
+_STOPPED = " ".join(f'"${part.name}"' for part in PARTS)
+_CHECKED = "\n".join(
+    f'  check {part.name} {part.file} "${part.name}"' for part in PARTS
+)
+CAPTURE_SCRIPT = f"""common="{_COMMON}"
+{_STARTED}
+trap 'kill {_STOPPED} 2>/dev/null; wait; exit 0' TERM INT
 check() {{
   [ -e "$2{STATUS_SUFFIX}" ] && return
   # A process that ended stays in the table, as a zombie, until waited for
@@ -150,9 +195,7 @@ check() {{
   [ -e "$2" ] || exit "$status"
 }}
 while :; do
-  check tcp {PARTS[0].file} "$tcp"
-  check dns {PARTS[1].file} "$dns"
-  check flows {PARTS[2].file} "$flows"
+{_CHECKED}
   sleep 1 &
   wait $!
 done"""
@@ -307,10 +350,20 @@ def session_captured(
         sidecar.collect(host)
 
 
+def parts_cut_short(capture: Capture) -> list[str]:
+    """The parts of a capture that ran into their packet limit, by their
+    names: what came later of that kind is missing, of the others not."""
+    return [
+        part.name
+        for part in PARTS
+        if capture.part_packets.get(part.name, 0) >= PACKET_LIMIT
+    ]
+
+
 def cut_short(capture: Capture) -> bool:
     """Whether a capture ran into the packet limit of one of its parts,
     what came later of that kind is then missing."""
-    return any(count >= PACKET_LIMIT for count in capture.part_packets.values())
+    return bool(parts_cut_short(capture))
 
 
 def session_capture(host: Host, session: TracedSession) -> Capture | None:

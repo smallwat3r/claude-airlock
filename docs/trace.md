@@ -274,7 +274,7 @@ sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually lo
 | `during:` | The tool call that was running when the connection was made. By the clock, not proof |
 | `(no call running)` | Claude Code itself (the API), or something a command left running |
 | `by:` | The process that made the connection, see [What ran](#what-ran) |
-| `FLAGGED` | A lookup that stands out: a very long name, or many different names under one parent. Data can be carried out that way, it is a prompt to look |
+| `FLAGGED` | A lookup that stands out: a very long name, or many different names under one parent (30) or under one domain whatever is between (100). Data can be carried out that way, it is a prompt to look |
 
 The name of a destination is what the session looked up or asked for, the
 address is what was reached. Trust the address where the two matter.
@@ -287,14 +287,22 @@ address is what was reached. Trust the address where the two matter.
   session: the address is the fact.
 - A name asked for and never answered is a lookup of its own, `no answer`.
   An answer too long for the capture keeps the addresses that fit, and DNS
-  over TCP is read as DNS over UDP is, when a message starts in a packet.
-- The capture has three parts, each with a limit of 100,000 packets of its
-  own: TCP (the start, answer and end of connections, the TLS hello, plain
-  HTTP), DNS, and what is not TCP. A session that floods one cannot fill
-  what the others have. A part that reaches its limit is said as
-  `STOPPED at its packet limit`, and one whose tcpdump ended before the
-  session did as `INCOMPLETE`, what came after is not in it. `--follow`
-  says so too, within a few seconds of it.
+  over TCP is read as DNS over UDP is, however a message is cut into
+  packets.
+- The bytes of a connection are counted from its sequence numbers, to the
+  end of both sides: what is sent after the other side closed counts too.
+  The numbers start over every 4 GB, so the capture takes one packet of
+  every gigabyte a connection carries, and a longer one is counted right.
+- The capture has four parts, each with a limit of 100,000 packets of its
+  own: `tcp` (the start, answer and end of connections, the TLS hello,
+  plain HTTP), `dns` (what Docker's resolver is asked and says), `direct`
+  (what goes to port 53 anywhere else) and `flows` (what is not TCP). A
+  session that floods one cannot fill what the others have: whatever it
+  sends to port 53, the lookups the resolver makes for it and its
+  connections to that port are still recorded. A part that reaches its
+  limit is said as `STOPPED at its packet limit` with its name, and one
+  whose tcpdump ended before the session did as `INCOMPLETE`, what came
+  after is not in it. `--follow` says so too, within a few seconds of it.
 - Not told: a name for QUIC that no lookup gave (its hello is encrypted),
   and the process that sent UDP or a ping, which is known for TCP
   connections alone.
@@ -313,6 +321,7 @@ compares the two. The header says what came of it:
 # transcript  REMOVED, it is no longer there: the 212 lines the launcher copied are shown as REMOVED
 # transcript  NOT ALL COPIED: the launcher stops at 512 MB, what came later cannot be compared
 # transcript  NOT COMPARED: more than 1000000 lines, what was taken out of it is not known
+# transcript  NOT ALL KEPT: rewritten 9 times, of what the launcher had copied 1048576 bytes had no room left, what was taken out of it with them is not known
 # transcript  1 lines CANNOT BE READ, shown as UNREADABLE: what was done there is not told
 ```
 
@@ -321,7 +330,6 @@ compares the two. The header says what came of it:
   what a command changed are the transcript's word too.
 - A session that removed its transcript is still listed and traced, from
   the launcher's copy, for as long as that is kept.
-# transcript  NOT ALL KEPT: rewritten 9 times, of what the launcher had copied 1048576 bytes had no room left, what was taken out of it with them is not known
 - A line that holds no entry is not Claude Code's doing: half a line
   written ahead of an entry makes that entry unreadable. It is shown as
   `UNREADABLE`, with `--failed` too.
@@ -331,6 +339,10 @@ compares the two. The header says what came of it:
   the lines found gone 64 MB are shown, the others counted.
 - The copy is made half a second or so after a line is written. One a
   session takes back within that moment is out of reach.
+- A transcript rewritten shorter has its copy put aside and a new one
+  started, however often: past the fifth time what a copy held is added
+  to the last one put aside, up to 512 MB, and what has no room there is
+  said as `NOT ALL KEPT`.
 - The transcripts of subagents are copied and compared the same way.
 
 ## What ran
@@ -339,14 +351,6 @@ The transcript says what a tool call was, not what the command it ran went
 on to do. Unless `CLAUDE_AIRLOCK_PROC_LOG=0`, a second sidecar notes each
 process it sees in the session and which one holds each connection:
 
-- A transcript rewritten shorter has its copy put aside and a new one
-  started, however often: past the fifth time what a copy held is added
-  to the last one put aside, up to 512 MB, and what has no room there is
-  said as `NOT ALL KEPT`.
-- A transcript rewritten shorter has its copy put aside and a new one
-  started, however often: past the fifth time what a copy held is added
-  to the last one put aside, up to 512 MB, and what has no room there is
-  said as `NOT ALL KEPT`.
 ```
 sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
 ```
@@ -366,7 +370,11 @@ the others of its user, its connection is noted all the same.
 
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
-missed. The session can neither stop it nor reach its record.
+missed. The session can neither stop it nor reach its record. A sidecar
+that ended or hung before its session did is said in the header, with
+when it was last heard, as `INCOMPLETE`: what ran later is missing.
+`--follow` and line mode say so too, once it has been silent for more
+than a minute.
 
 A command in whose time no process at all was seen says so, and the
 header counts them:

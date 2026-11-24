@@ -11,6 +11,7 @@ read of that message, nothing more."""
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,10 +40,22 @@ from .pcap_file import pcap_frames
 # What a lookup is flagged for: a name or one label of it longer than
 # names are, or this many different names under one parent. Data can be
 # carried out in the names asked for, a resolver passes them on, and it
-# takes long names or many of them.
+# takes long names or many of them. The names are counted under the
+# domain they are of too, whatever is between: a.1.evil.test and
+# a.2.evil.test have no parent in common and are both evil.test's. More
+# of them there before it is said, a provider has many hosts under its
+# own (s3.eu-west-1.amazonaws.com).
 DNS_LONG_NAME = 100
 DNS_LONG_LABEL = 40
 DNS_MANY_NAMES = 30
+DNS_MANY_UNDER_DOMAIN = 100
+# What stands under a country in the place of com, org and the like
+# (co.uk, com.au): a domain there has a label more. Not all of them, a
+# list of those is long and changes: the common ones, by their first label
+DNS_SECOND_LEVEL = frozenset(
+    {"ac", "co", "com", "edu", "gov", "mil", "ne", "net", "nom", "or", "org"}
+)
+COUNTRY_LENGTH = 2
 # The port of DNS
 DNS_PORT = 53
 # A query that has no answer after this many seconds of the capture is
@@ -50,6 +63,17 @@ DNS_PORT = 53
 DNS_WAIT = 10.0
 # No more queries are kept to be matched with an answer than this
 DNS_MOST_PENDING = 2000
+# Over TCP a message comes after its length, in as many packets as its
+# sender likes: of no more streams than this is the start of one kept
+# until the rest comes, and no more of it than so many bytes
+DNS_MOST_HELD = 1000
+DNS_HELD_BYTES = 4096
+DNS_LENGTH = 2
+# A connection that one side has ended is followed until the other has
+# too, for what went over it meanwhile: no more of them than this, a
+# session can leave any number half open
+MOST_CLOSING = 10_000
+SEQUENCE_SPACE = 1 << 32
 
 
 class Went:
@@ -68,6 +92,38 @@ class Went:
 
 
 @dataclass
+class Stream:
+    """What one end of a connection sent, counted from the sequence
+    numbers of its packets and from what the other end acknowledged. A
+    number says where in the stream a packet is, and starts over every
+    four gigabytes: it is taken as so much further than the last one
+    seen, which holds as long as two that are seen are less than half
+    of that apart. The capture takes a packet of every gigabyte for it,
+    see capture.py."""
+
+    # The number it started from
+    start: int
+    # How far past that it got, the start itself counted in
+    reached: int = 0
+    # Whether anything told how far, and whether it said it was done
+    known: bool = False
+    closed: bool = False
+
+    def reach(self, sequence: int) -> None:
+        """Take a sequence number that it got to. One that is behind is
+        a packet sent again, or out of its turn."""
+        ahead = (sequence - self.start - self.reached) % SEQUENCE_SPACE
+        if ahead < SEQUENCE_SPACE // 2:
+            self.reached += ahead
+        self.known = True
+
+    @property
+    def count(self) -> int | None:
+        """The bytes it sent as far as was seen, none when nothing told."""
+        return max(0, self.reached - 1) if self.known else None
+
+
+@dataclass
 class Connection:
     """A TCP connection the session opened, and how it went as far as the
     capture tells."""
@@ -83,9 +139,52 @@ class Connection:
     retried: bool = False
     refused: bool = False
     ended: float | None = None
-    # Bytes each way, as far as the packet that ended it tells
+    # Bytes each way, as far as the packets that ended it tell: none
+    # while it has not ended
     sent: int | None = None
     received: int | None = None
+    # What each end sent, the other end's once it answered
+    outgoing: Stream | None = field(default=None, repr=False)
+    incoming: Stream | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self.outgoing = Stream(self.sequence)
+
+    def answer(self, sequence: int) -> None:
+        """The other end answered, starting from a sequence number."""
+        if self.answer_sequence is None:
+            self.answer_sequence = sequence
+            self.incoming = Stream(sequence)
+
+    def count(self, packet: Packet) -> None:
+        """Take in how far a packet of it says each end got: its sender
+        by where the packet ends, the other end by what the packet
+        acknowledges. Neither past the end of what it sent, once it said
+        it was done: the end takes a number of its own, which what comes
+        after it and what acknowledges it count in."""
+        if self.outgoing is None or self.incoming is None:
+            return
+        flags = packet.tcp_flags
+        sender, other = self.outgoing, self.incoming
+        if not packet.sent:
+            sender, other = other, sender
+        if not sender.closed:
+            sender.reach(packet.sequence + packet.length)
+            sender.closed = TcpFlag.FIN in flags
+        if TcpFlag.ACK in flags and not other.closed:
+            other.reach(packet.acknowledgement)
+        if self.ended is not None:
+            self.sent, self.received = self.outgoing.count, self.incoming.count
+
+    @property
+    def done(self) -> bool:
+        """Whether both ends said they had sent all they would."""
+        return bool(
+            self.outgoing
+            and self.incoming
+            and self.outgoing.closed
+            and self.incoming.closed
+        )
 
     @property
     def answered(self) -> bool:
@@ -153,12 +252,38 @@ class Request:
         return f"http://{self.host or self.address}{self.target}"
 
 
-def tcp_span(end: int, start: int) -> int | None:
-    """The bytes sent between two sequence numbers of one direction, the
-    first being where it started. None for a count that cannot be right,
-    numbers that do not belong together."""
-    count = (end - start - 1) & 0xFFFFFFFF
-    return count if count < 1 << 31 else None
+def domain_of(labels: list[str]) -> str:
+    """The domain a name is of, by its labels: its last two, or three
+    under a country that has com, co and the like of its own (see
+    DNS_SECOND_LEVEL)."""
+    under_country = (
+        len(labels) > 2
+        and len(labels[-1]) == COUNTRY_LENGTH
+        and labels[-2] in DNS_SECOND_LEVEL
+    )
+    return ".".join(labels[-3:] if under_country else labels[-2:])
+
+
+@dataclass
+class Answers:
+    """The names an address was looked up under, by when each answer
+    came, the earliest first: found by the time without going through
+    them all, a session can have any number of answers give one address."""
+
+    times: list[float] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)
+
+    def add(self, when: float, name: str) -> None:
+        # After those of the same time. At the end as a rule, the answers
+        # of a capture come in the order of their times
+        at = bisect.bisect_right(self.times, when)
+        self.times.insert(at, when)
+        self.names.insert(at, name)
+
+    def as_of(self, when: float) -> str | None:
+        """The name of the last answer that came by a time."""
+        at = bisect.bisect_right(self.times, when)
+        return self.names[at - 1] if at else None
 
 
 @dataclass
@@ -186,6 +311,15 @@ class Capture:
     _open: dict[tuple[int, str, int], Connection] = field(
         default_factory=dict, repr=False
     )
+    # Those one side has ended and the other may not have, see MOST_CLOSING
+    _closing: dict[tuple[int, str, int], Connection] = field(
+        default_factory=dict, repr=False
+    )
+    # The start of a DNS message over TCP whose rest has not come, by
+    # where it is from and where it goes, see DNS_MOST_HELD
+    _dns_held: dict[tuple[str, int, str, int], bytes] = field(
+        default_factory=dict, repr=False
+    )
     _flows: dict[tuple[int, str, int], Flow] = field(default_factory=dict, repr=False)
     # The names that were looked up, and how many under each parent
     _looked_up: set[str] = field(default_factory=set, repr=False)
@@ -194,9 +328,7 @@ class Capture:
     # the server name the first TLS hello to it asked for. Both are the
     # session's doing: the address is what it reached, the name what it
     # says it was after.
-    _answered: dict[str, list[tuple[float, str]]] = field(
-        default_factory=dict, repr=False
-    )
+    _answered: dict[str, Answers] = field(default_factory=dict, repr=False)
     _hello: dict[str, str] = field(default_factory=dict, repr=False)
     # The queries the session sent to a resolver that have not been
     # answered, by the key of their answer, with when each was sent, and
@@ -227,9 +359,12 @@ class Capture:
             self._add_to_flow(packet)
             return
         if packet.payload and self._is_dns(packet):
-            # Over TCP a message comes after its length
-            length = int.from_bytes(packet.payload[:2], "big")
-            self._add_dns(packet, packet.payload[2 : 2 + length])
+            for message in self._dns_over_tcp(packet):
+                self._add_dns(packet, message)
+        self._add_tcp(packet)
+
+    def _add_tcp(self, packet: Packet) -> None:
+        """Take in what a packet tells of the TCP connection it is of."""
         # A connection is known by the session's port and the other end
         if packet.sent:
             key = (packet.source_port, packet.destination, packet.port)
@@ -246,15 +381,45 @@ class Capture:
             if packet.sent and TcpFlag.ACK not in flags:
                 self._add_connection(packet, key)
             elif not packet.sent and TcpFlag.ACK in flags and key in self._open:
-                answered = self._open[key]
-                if not answered.answered:
-                    answered.answer_sequence = packet.sequence
+                self._open[key].answer(packet.sequence)
         elif flags & (TcpFlag.FIN | TcpFlag.RST):
             if key in self._open:
-                self._end_connection(packet, self._open.pop(key))
-        elif packet.sent:
-            self._add_server_name(packet)
-            self._add_request(packet)
+                self._end_connection(packet, key, self._open.pop(key))
+            elif key in self._closing:
+                self._end_other_side(packet, key)
+        else:
+            # A packet of what it carries, taken for how far it got
+            known = self._open.get(key) or self._closing.get(key)
+            if known:
+                known.count(packet)
+            if packet.sent:
+                self._add_server_name(packet)
+                self._add_request(packet)
+
+    def _dns_over_tcp(self, packet: Packet) -> list[bytes]:
+        """The DNS messages a packet of TCP completes. Over TCP a message
+        comes after its length, and the two need not come together: the
+        length in a packet of its own, a message in several. What is
+        left without its end is kept for the next packet of the same
+        stream. A packet that was not captured whole gives what there is
+        of its last message, and nothing is kept: where the next one
+        starts is not known."""
+        stream = (packet.source, packet.source_port, packet.destination, packet.port)
+        data = self._dns_held.pop(stream, b"") + packet.payload
+        messages = []
+        while len(data) >= DNS_LENGTH:
+            end = DNS_LENGTH + int.from_bytes(data[:DNS_LENGTH], "big")
+            if len(data) < end:
+                break
+            messages.append(data[DNS_LENGTH:end])
+            data = data[end:]
+        if len(packet.payload) < packet.length:
+            return [*messages, data[DNS_LENGTH:]] if data[DNS_LENGTH:] else messages
+        if data and len(data) <= DNS_HELD_BYTES:
+            while len(self._dns_held) >= DNS_MOST_HELD:
+                del self._dns_held[next(iter(self._dns_held))]
+            self._dns_held[stream] = data
+        return messages
 
     @staticmethod
     def _is_dns(packet: Packet) -> bool:
@@ -315,8 +480,8 @@ class Capture:
         self._flag(lookup)
         if lookup.kind in ("A", "AAAA"):
             for address in lookup.addresses:
-                self._answered.setdefault(address, []).append(
-                    (lookup.when, lookup.name)
+                self._answered.setdefault(address, Answers()).add(
+                    lookup.when, lookup.name
                 )
 
     def _expire(self, now: float) -> None:
@@ -343,7 +508,7 @@ class Capture:
     def names(self) -> dict[str, str]:
         """The name each address is known by as of the end of the capture,
         see name_of."""
-        known = {address: said[-1][1] for address, said in self._answered.items()}
+        known = {address: said.names[-1] for address, said in self._answered.items()}
         return {**self._hello, **known}
 
     def name_of(self, address: str, when: float | None = None) -> str | None:
@@ -351,16 +516,18 @@ class Capture:
         answer that came before it, so that what the session had looked up
         later does not rename what it reached earlier. Else the name the
         first TLS hello to it asked for. None when there is neither."""
-        said = self._answered.get(address, [])
-        if when is None and said:
-            return said[-1][1]
-        earlier = [name for at, name in said if when is not None and at <= when]
-        return earlier[-1] if earlier else self._hello.get(address)
+        said = self._answered.get(address)
+        if said and when is None:
+            return said.names[-1]
+        earlier = said.as_of(when) if said and when is not None else None
+        return earlier or self._hello.get(address)
 
     def _flag(self, lookup: Lookup) -> None:
         """Note a lookup that stands out, a name once however often it is
-        asked for: one longer than names are, and the one that makes it
-        DNS_MANY_NAMES under the same parent."""
+        asked for: one longer than names are, the one that makes it
+        DNS_MANY_NAMES under the same parent, and the one that makes it
+        DNS_MANY_UNDER_DOMAIN under the same domain, whatever labels are
+        between the two."""
         name = lookup.name.lower().rstrip(".")
         if name in self._looked_up:
             return
@@ -371,10 +538,17 @@ class Capture:
         # Under a parent of two labels or more, not under com
         if len(labels) < 3:
             return
-        parent = ".".join(labels[1:])
+        parent, domain = ".".join(labels[1:]), domain_of(labels)
         count = self._under[parent] = self._under.get(parent, 0) + 1
         if count == DNS_MANY_NAMES:
             self.flagged.append((f"{count} names looked up under {parent}", lookup))
+        if domain in (parent, name):
+            return
+        # By a key no name is: a parent is counted by its own
+        within = f"{domain}."
+        count = self._under[within] = self._under.get(within, 0) + 1
+        if count == DNS_MANY_UNDER_DOMAIN:
+            self.flagged.append((f"{count} names looked up under {domain}", lookup))
 
     def _add_to_flow(self, packet: Packet) -> None:
         """Count a packet that is not TCP towards where the session sent
@@ -413,34 +587,42 @@ class Capture:
         )
         self.connections.append(connection)
         self._open[key] = connection
+        # The one before it from the same port, if it was half ended
+        self._closing.pop(key, None)
 
-    def _end_connection(self, packet: Packet, connection: Connection) -> None:
+    def _end_connection(
+        self, packet: Packet, key: tuple[int, str, int], connection: Connection
+    ) -> None:
         """A connection ends with the first FIN or RST of either side. A
         RST from the other end in place of an answer is a refusal. Either
         says how much its sender had sent by then, and when it also
         acknowledges, how much it had got: of a connection that is reset
-        the count is known too, as far as the packet tells."""
+        the count is known too, as far as the packet tells. One side that
+        ends it with a FIN leaves the other free to send on, a server that
+        has nothing to say does so before an upload: it is followed until
+        that side has ended it too, see _end_other_side."""
         connection.ended = packet.when
         closing = TcpFlag.FIN in packet.tcp_flags
         if not connection.answered and not closing and not packet.sent:
             connection.refused = True
             self.endings.append((packet.when, Went.REFUSED, connection))
             return
-        if connection.answer_sequence is not None:
-            # Where the sender of the packet started from, then the other
-            starts = [connection.sequence, connection.answer_sequence]
-            if not packet.sent:
-                starts.reverse()
-            said = tcp_span(packet.sequence + packet.length, starts[0])
-            got = (
-                tcp_span(packet.acknowledgement, starts[1])
-                if TcpFlag.ACK in packet.tcp_flags
-                else None
-            )
-            connection.sent, connection.received = (
-                (said, got) if packet.sent else (got, said)
-            )
+        connection.count(packet)
         self.endings.append((packet.when, Went.CLOSED, connection))
+        if closing and connection.answered:
+            while len(self._closing) >= MOST_CLOSING:
+                del self._closing[next(iter(self._closing))]
+            self._closing[key] = connection
+
+    def _end_other_side(self, packet: Packet, key: tuple[int, str, int]) -> None:
+        """A FIN or RST of a connection one side had ended: how much went
+        each way is as this one tells, and it ended now. With a RST, or
+        once both sides have sent their FIN, nothing more comes of it."""
+        connection = self._closing[key]
+        connection.ended = packet.when
+        connection.count(packet)
+        if TcpFlag.RST in packet.tcp_flags or connection.done:
+            del self._closing[key]
 
     def _add_server_name(self, packet: Packet) -> None:
         name = tls_server_name(packet.payload)

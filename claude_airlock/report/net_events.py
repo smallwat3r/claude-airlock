@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import datetime
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat, labelled
-from ..recording.capture import cut_short
+from ..recording.capture import parts_cut_short
 from ..recording.egress_log import ProxyRequest
 from ..recording.health import health_summary
 from ..recording.payloads import Lookup
@@ -250,8 +250,11 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         lines.append(f"  dns {len(names)} names looked up{hint}")
     if capture.flagged:
         lines.append(f"  dns {len(capture.flagged)} lookups FLAGGED, see --failed")
-    if cut_short(capture):
-        lines.append("  STOPPED at its packet limit, what came later is missing")
+    cut = ", ".join(parts_cut_short(capture))
+    if cut:
+        lines.append(
+            f"  STOPPED at its packet limit ({cut}), what came later is missing"
+        )
     return lines
 
 
@@ -379,12 +382,12 @@ def watched_summary(
         )
     if record.full:
         lines.append("  the record of them STOPPED at its size limit")
-    if record.unreadable:
-        lines.append("  which process made a connection could not be seen")
-    return lines + health_summary(record.samples, record.ended)
     silent = record.silent_from(until)
     if silent is not None:
         lines.append(f"  {SILENT.format(datetime.fromtimestamp(silent))}")
+    if record.unreadable:
+        lines.append("  which process made a connection could not be seen")
+    return lines + health_summary(record.samples, record.ended)
 
 
 def captured_connections(

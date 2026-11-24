@@ -28,7 +28,7 @@ from ..events import flat
 from ..files import json_object, open_locked, private_dir
 from ..notice import warn
 from ..projects import project_root, session_transcripts, subagent_session
-from ..recording.capture import cut_short
+from ..recording.capture import parts_cut_short
 from ..recording.pcap import Capture
 from ..recording.recorder import copied_at, removed_transcripts
 from ..recording.records import recorded_sessions
@@ -186,8 +186,9 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
             "lookups that stand out:",
             [flat(f"{lookup.name}: {why}") for why, lookup in capture.flagged],
         )
-        if cut_short(capture):
-            lines.append("its capture stopped at its packet limit")
+        cut = ", ".join(parts_cut_short(capture))
+        if cut:
+            lines.append(f"its capture stopped at its packet limit ({cut})")
         if kept.session.stopped:
             lines.append(STOPPED.format(flat(kept.session.stopped)))
     new = newly_reached(host, found) if recorded.captured else []
@@ -258,16 +259,16 @@ def transcript_lines(host: Host, start: float) -> list[str]:
             lines.append(f"{named} was not all copied, it is past the launcher's limit")
         if compared.uncompared:
             lines.append(f"{named} has too many lines to compare with its copy")
-    for path in removed_transcripts(host):
-        if copied_at(host, path) >= start:
-            lines.append(
-                f"the transcript of {short_id(path)} was removed, --trace"
-                " shows the launcher's copy of it"
         if compared.dropped:
             lines.append(
                 f"{named} was rewritten {compared.rewritten} times, more often"
                 " than the launcher keeps all it had copied"
             )
+    for path in removed_transcripts(host):
+        if copied_at(host, path) >= start:
+            lines.append(
+                f"the transcript of {short_id(path)} was removed, --trace"
+                " shows the launcher's copy of it"
             )
     return [
         *headed("written outside the project:", list(dict.fromkeys(written))),

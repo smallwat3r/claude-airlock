@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import struct
+import subprocess
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -260,6 +262,112 @@ class CaptureFileTest:
         assert found.names == {}
         assert [c.address for c in found.connections] == ["6.6.6.6"]
 
+    def test_what_is_sent_after_the_other_side_closed_is_counted(self):
+        there, port = "198.51.100.7", 443
+        giga = 1 << 30
+        sent = 5 * giga + 12345
+
+        def number(count: int) -> int:
+            """The sequence number after so many bytes from 1000."""
+            return (1001 + count) % (1 << 32)
+
+        packets = [
+            (10.0, tcp(there, port, sequence=1000), True),
+            (10.1, answer(there, port, sequence=5000, acknowledged=1001), False),
+            # The server has nothing to say, and says so before the upload
+            (10.2, answer(there, port, 0x11, sequence=5001, acknowledged=1001), False),
+            # A packet of every gigabyte, as the capture takes them
+            *(
+                (
+                    20.0 + at,
+                    tcp(there, port, 0x10, b"x" * 1000, number(at * giga)),
+                    True,
+                )
+                for at in range(1, 6)
+            ),
+            (90.0, tcp(there, port, 0x11, b"", number(sent), 5002), True),
+        ]
+        (upload,) = self.read(pcap_file(packets)).connections
+        assert (upload.outcome, upload.seconds) == ("closed", 80.0)
+        assert (upload.sent, upload.received) == (sent, 0)
+        # As far as the first FIN told, while it is all there is
+        (so_far,) = self.read(pcap_file(packets[:3])).connections
+        assert (so_far.outcome, so_far.sent, so_far.received) == ("closed", 0, 0)
+        # The acknowledgement of a FIN is no byte, and a reset ends it
+        packets[-1] = (90.0, answer(there, port, 0x14, sequence=5002), False)
+        (reset,) = self.read(pcap_file(packets)).connections
+        assert (reset.sent, reset.received) == (5 * giga + 1000, 0)
+        # The next connection from the same port is another
+        again = [*packets[:3], (95.0, tcp(there, port, sequence=77), True)]
+        first, following = self.read(pcap_file(again)).connections
+        assert (first.sent, following.outcome) == (0, "")
+
+    def test_the_filters_take_what_they_say(self):
+        if not shutil.which("tcpdump"):
+            pytest.skip("no tcpdump here")
+        there, window = "198.51.100.7", 3 << 30
+        direct = ipv4(17, "172.20.0.5", "9.9.9.9", udp(53))
+        packets = {
+            "tcp": [
+                tcp(there, 443),
+                tcp(there, 443, 0x11),
+                tcp("9.9.9.9", 53),
+                tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65535),
+                tcp(there, 443, 0x18, client_hello("sni.test")),
+                tcp(there, 80, 0x18, b"GET / HTTP/1.1\r\n\r\n"),
+            ],
+            "dns": [dns_query("a.test"), dns_response("a.test", there)],
+            "direct": [direct, tcp("9.9.9.9", 53, 0x18, b"\x00\x01x")],
+            "flows": [ipv4(17, "172.20.0.5", there, udp(4433))],
+            # A packet with nothing in it, one outside what is sampled,
+            # and the session's own within itself
+            "": [
+                tcp(there, 443, 0x10, b"", sequence=window),
+                tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65536),
+                tcp("127.0.0.1", 8000, 0x10, b"x", sequence=window),
+                tcp("127.0.0.1", 8000),
+            ],
+        }
+        every = [packet for some in packets.values() for packet in some]
+        frames = [(1.0 + at, packet, True) for at, packet in enumerate(every)]
+        with tempfile.TemporaryDirectory() as directory:
+            whole = Path(directory, "all.pcap")
+            whole.write_bytes(pcap_file(frames, link_type=113, asked=False))
+            taken: dict[str, list[bytes]] = {}
+            for part in capture_module.PARTS:
+                kept = Path(directory, part.name)
+                subprocess.run(
+                    ["tcpdump", "-r", str(whole), "-w", str(kept), part.filter],
+                    check=True,
+                    capture_output=True,
+                )
+                taken[part.name] = [
+                    frame[16:] for _, _, frame in PcapReader().feed(kept.read_bytes())
+                ]
+        # Each packet in the part that is to have it, and in no other
+        assert taken == {part: some for part, some in packets.items() if part}
+
+    def test_the_name_of_an_address_is_found_among_any_number_of_answers(self):
+        capture = pcap.Capture()
+        count = 50_000
+        for at in range(count):
+            lookup = payloads.Lookup(
+                float(at), f"n{at}.test", "A", ("198.51.100.7",), ""
+            )
+            capture._take_lookup(lookup)
+        started = time.monotonic()
+        for at in range(count):
+            assert capture.name_of("198.51.100.7", at + 0.5) == f"n{at}.test"
+        assert time.monotonic() - started < 10
+        assert capture.name_of("198.51.100.7") == f"n{count - 1}.test"
+        assert capture.name_of("198.51.100.7", -1.0) is None
+        # One that comes out of its turn is put where its time is
+        capture._take_lookup(
+            payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), "")
+        )
+        assert capture.name_of("198.51.100.7", 9.8) == "late.test"
+        assert capture.name_of("198.51.100.7", 9.6) == "n9.test"
+
     def test_a_connection_says_how_it_went(self):
         ok, shut, slow = "198.51.100.7", "198.51.100.8", "198.51.100.9"
         found = self.read(
@@ -284,7 +392,8 @@ class CaptureFileTest:
             )
         )
         closed, refused, unanswered, left = found.connections
-        assert (closed.outcome, closed.seconds) == ("closed", 2.0)
+        # Closed once both sides have said so
+        assert (closed.outcome, closed.seconds) == ("closed", 2.1)
         assert (closed.sent, closed.received) == (1504, 20000)
         assert (refused.outcome, refused.failed) == ("refused", True)
         assert (unanswered.outcome, unanswered.failed) == ("no answer", True)
@@ -538,6 +647,45 @@ class DnsTrustTest:
         ]
         assert self.read(elsewhere, asked=False).lookups == []
 
+    def test_dns_over_tcp_is_read_however_it_is_cut_into_packets(self):
+        def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
+            header = struct.pack("!HHIIBBHHH", *ports, 0, 0, 0x50, 0x18, 0, 0, 0)
+            return ipv4(6, at, to, header + payload)
+
+        me, server = "172.20.0.5", "9.9.9.9"
+        query = dns_message_of(dns_query("split.test"))
+        second = dns_message_of(dns_query("second.test", ident=8))
+        response = dns_message_of(dns_response("split.test", "198.51.100.7"))
+        asked = struct.pack("!H", len(query)) + query
+        asked += struct.pack("!H", len(second)) + second
+        said = struct.pack("!H", len(response)) + response
+        for cuts in ([2], [1, 2, 9], [2, len(query) + 2], [len(asked) - 3]):
+            pieces = [
+                asked[a:b] for a, b in zip([0, *cuts], [*cuts, None], strict=True)
+            ]
+            packets = [
+                (1.0 + at, over(piece, (40053, 53), me, server), True)
+                for at, piece in enumerate(pieces)
+            ]
+            # The answer too, its length on its own
+            packets += [
+                (9.0, over(said[:2], (53, 40053), server, me), False),
+                (9.1, over(said[2:], (53, 40053), server, me), False),
+            ]
+            found = self.read(packets, asked=False)
+            assert found.name_of("198.51.100.7") == "split.test", cuts
+            assert [(lookup.name, lookup.error) for lookup in found.lookups] == [
+                ("split.test", ""),
+                ("second.test", "no answer"),
+            ], cuts
+        # What is kept of a stream until its rest comes is bounded
+        capture = pcap.Capture()
+        for port in range(pcap.DNS_MOST_HELD + 50):
+            frame = over(b"\x40\x00" + b"x" * 100, (1024 + port, 53), me, server)
+            packet = pcap.parse_packet(1.0, 276, pcap_file([(1.0, frame, True)])[40:])
+            capture.add(packet)
+        assert len(capture._dns_held) == pcap.DNS_MOST_HELD
+
     def test_each_part_of_a_capture_counts_its_own_packets(self):
         capture = pcap.Capture()
         frames = list(PcapReader().feed(sample_capture(1000.0)))
@@ -572,8 +720,14 @@ class DnsTrustTest:
             assert "(udp and net 127.0.0.0/8)" not in filters[name]
         # No packet is in two parts, the reader would take it for two
         assert "outbound" not in filters["tcp"]
+        assert filters["flows"].startswith("not port 53 and not host 127.0.0.11 and (")
+        # Of port 53 the TCP part has what starts and ends a connection,
+        # the rest is the part's of what is asked there directly
+        assert filters["tcp"].startswith("not host 127.0.0.11 and (")
+        assert " or (not port 53 and (" in filters["tcp"]
+        assert filters["direct"].startswith("port 53 and not host 127.0.0.11 and not")
+        assert "tcp-syn|tcp-fin|tcp-rst" in filters["direct"]
         for name in ("tcp", "flows"):
-            assert filters[name].startswith("not port 53 and not host 127.0.0.11 and (")
             assert filters[name].endswith(")")
 
     def test_queries_never_answered_do_not_keep_later_answers_out(self):
@@ -678,6 +832,29 @@ class OtherTrafficTest:
             ("an unusually long name", name)
         ]
 
+    def test_many_names_under_one_domain_are_flagged_whatever_is_between(self):
+        count = pcap.DNS_MANY_UNDER_DOMAIN
+
+        def lookups(names: list[str]) -> list[tuple[float, bytes, bool]]:
+            return [(1.0, dns_response(name, "198.51.100.7"), False) for name in names]
+
+        # No two of them under one parent, all of them under one domain
+        varied = [f"data{n}.part{n}.evil.test" for n in range(count + 5)]
+        assert self.read(lookups(varied[: count - 1])).flagged == []
+        ((why, lookup),) = self.read(lookups(varied)).flagged
+        assert why == f"{count} names looked up under evil.test"
+        assert lookup.name == varied[count - 1]
+        # Under a country a domain has a label more: not every site of it
+        sites = [f"www.site{n}.co.uk" for n in range(count + 5)]
+        assert self.read(lookups(sites)).flagged == []
+        deeper = [f"a{n}.b{n}.evil.co.uk" for n in range(count)]
+        ((why, _),) = self.read(lookups(deeper)).flagged
+        assert why == f"{count} names looked up under evil.co.uk"
+        # Names right under their domain are counted once, by their parent
+        flat = [f"n{n}.evil.test" for n in range(count + 5)]
+        ((why, _),) = self.read(lookups(flat)).flagged
+        assert why == f"{pcap.DNS_MANY_NAMES} names looked up under evil.test"
+
     def test_many_names_under_one_parent_are_flagged(self):
         count = pcap.DNS_MANY_NAMES
         few = [(1.0, packet, False) for packet in lookups_under("cdn.test", count - 1)]
@@ -724,7 +901,11 @@ class CaptureSessionTest(LauncherTest):
         # It runs tcpdump and outlives it: the session's way out is the
         # sidecar's, and would go with one that ended at its packet limit
         script = sidecar[sidecar.index("-c") + 1]
-        assert script.count("tcpdump $common") == 3
+        assert script.count("tcpdump $common") == len(capture_module.PARTS) == 4
+        for number, part in enumerate(capture_module.PARTS, 1):
+            assert f'tcpdump $common -w {part.file} "${number}" &' in script
+            assert f'check {part.name} {part.file} "${part.name}"' in script
+        assert """trap 'kill "$tcp" "$dns" "$direct" "$flows" 2>""" in script
         assert "while :" in script
         # A tcpdump for each part, and the filter of each after the script
         filters = sidecar[sidecar.index("sh", sidecar.index("-c")) + 1 :]

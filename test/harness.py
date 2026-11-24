@@ -70,7 +70,11 @@ elif args[0] == "cp" and args[1].endswith(".status"):
     open(args[-1], "w").write(code + "\\n")
 elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
     # The parts that are not the main one have a file of their own, or none
-    other = {{"/dns.pcap": "FAKE_CAPTURE_DNS", "/flows.pcap": "FAKE_CAPTURE_FLOWS"}}
+    other = {{
+        "/dns.pcap": "FAKE_CAPTURE_DNS",
+        "/direct.pcap": "FAKE_CAPTURE_DIRECT",
+        "/flows.pcap": "FAKE_CAPTURE_FLOWS",
+    }}
     where = [env for path, env in other.items() if args[1].endswith(path)]
     source = os.environ.get(where[0]) if where else os.environ["FAKE_CAPTURE"]
     if source is None:
@@ -83,7 +87,11 @@ if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
 if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.environ:
-    other = {{"/dns.pcap": "FAKE_CAPTURE_DNS", "/flows.pcap": "FAKE_CAPTURE_FLOWS"}}
+    other = {{
+        "/dns.pcap": "FAKE_CAPTURE_DNS",
+        "/direct.pcap": "FAKE_CAPTURE_DIRECT",
+        "/flows.pcap": "FAKE_CAPTURE_FLOWS",
+    }}
     source = os.environ.get(other.get(args[5], "FAKE_CAPTURE"))
     if source is None:
         sys.exit(1)
