@@ -26,7 +26,7 @@ from test_capture import pcap_file, tcp
 from claude_airlock.events import Event, Who
 from claude_airlock.recording import health, processes, procwatch
 from claude_airlock.recording.records import TracedSession
-from claude_airlock.report import unseen
+from claude_airlock.report import follow, net_events, unseen
 
 SIDECAR = "claude-proj.procs"
 
@@ -368,6 +368,46 @@ class UnseenTest:
             {"t": 100.0, "note": "started", "beat": 10.0}, ran(180.0, 812, 7, "make")
         )
         assert self.marked(command(190.0), record=busy)[0] == 1
+
+    def test_a_watcher_that_went_silent_before_its_session_ended_is_said(self):
+        died = noted(
+            {"t": 100.0, "note": "started", "beat": 10.0},
+            {"t": 130.0, "note": "alive"},
+            ran(110.0, 812, 7, "make"),
+        )
+        # To its end, and well before it
+        assert died.silent_from(150.0) is None
+        assert died.silent_from(500.0) == 130.0
+        assert net_events.watched_summary(died, False, 150.0) == [
+            "  processes 1 seen to run, each one shown with --verbose"
+        ]
+        last = f"{datetime.fromtimestamp(130.0):%H:%M:%S}"
+        assert net_events.watched_summary(died, False, 500.0)[1] == (
+            "  the record of its processes is INCOMPLETE, its watcher said"
+            f" nothing after {last}: what ran later is missing"
+        )
+        # One that never said how often it would, or never got to watch
+        assert noted({"t": 100.0, "note": "started"}).silent_from(500.0) is None
+        assert noted().silent_from(500.0) is None
+
+    def test_a_watcher_that_goes_silent_is_said_while_following(self):
+        now = [1000.0]
+        heard: list[health.Sample] = []
+        with mock.patch.object(follow.time, "monotonic", lambda: now[0]):
+            tail = follow.HealthTail("claude-proj", lambda _since: heard[:])
+            now[0] += follow.SILENT_AFTER - 1
+            assert tail.poll() == []
+            assert tail.newly_silent() is None
+            now[0] += 2
+            assert tail.newly_silent() == follow.SILENT_AFTER + 1
+            # Once, until it is heard again
+            now[0] += 100
+            assert tail.newly_silent() is None
+            heard.append(health.Sample(time.time() + 5))
+            assert len(tail.poll()) == 1
+            assert tail.newly_silent() is None
+            now[0] += follow.SILENT_AFTER + 1
+            assert tail.newly_silent() is not None
 
     def test_a_process_of_any_session_that_ran_then_counts(self):
         other = dataclasses.replace(self.session, name="claude-proj-2", start=125.0)

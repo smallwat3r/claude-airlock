@@ -53,7 +53,8 @@ from ..recording.health import Ended, Sample
 from ..recording.host_health import running_health, said_in
 from ..recording.pcap import Capture, take_frames
 from ..recording.pcap_file import PcapReader
-from ..recording.processes import Watcher, said_since
+from ..recording.processes import SILENT_BEATS, Watcher, said_since
+from ..recording.procwatch import HEALTH_EVERY as SAID_EVERY
 from ..recording.records import recorded_sessions
 from ..settings import Host
 from .entries import read_entries, session_files, title
@@ -76,6 +77,9 @@ HISTORY = 10
 HEALTH_EVERY = 10.0
 # Seconds between two looks at whether a tcpdump of a capture has died
 DIED_EVERY = 5.0
+# Seconds without a word on how a session is doing after which what says
+# it is taken to have ended, or hung: it says so every SAID_EVERY
+SILENT_AFTER = SILENT_BEATS * SAID_EVERY
 READ_SIZE = 1 << 20
 # How much of a transcript one look takes in, once what it held when the
 # following began is read: a session can write to it as fast as it is
@@ -244,6 +248,10 @@ class HealthTail:
         self._said_since = said_since
         self._since = time.time()
         self._asked = 0.0
+        # When a reading last came, and whether it was said that none
+        # has for too long, see newly_silent
+        self._heard = time.monotonic()
+        self._said_silent = False
 
     def poll(self) -> list[Event]:
         now = time.monotonic()
@@ -253,7 +261,19 @@ class HealthTail:
         found = self._said_since(self._since)
         if found:
             self._since = max(one.when for one in found)
+            self._heard, self._said_silent = now, False
         return [one.event() for one in found]
+
+    def newly_silent(self) -> float | None:
+        """The seconds without a reading, once they are more than
+        SILENT_AFTER, and again only after one came: what watches the
+        session has ended or hung, and what it notes of the session, its
+        processes too, is missing from then on. None as a rule."""
+        silent = time.monotonic() - self._heard
+        if self._said_silent or silent <= SILENT_AFTER:
+            return None
+        self._said_silent = True
+        return silent
 
 
 class ProxyTail:
@@ -494,9 +514,19 @@ class Follower:
         for key in set(self._captures) - set(running):
             name = clean(self._captures.pop(key).session)
             found.notes.append(labelled("network", f"the capture of {name} ended"))
-        # How each is doing, without a word on the following of it
-        for key in set(self._health) - set(watched):
-            del self._health[key]
+        # How each is doing, without a word on the following of it,
+        # unless what said so is gone and the session is not
+        gone = [self._health.pop(key) for key in set(self._health) - set(watched)]
+        left = running_containers() if gone else set()
+        for health in gone:
+            if health.session in left:
+                found.notes.append(
+                    labelled(
+                        "processes",
+                        f"the record of {clean(health.session)} is INCOMPLETE,"
+                        " its watcher ended before the session did",
+                    )
+                )
         for key, (session, said) in watched.items():
             if key not in self._health:
                 self._health[key] = HealthTail(session, said)
@@ -582,6 +612,15 @@ class Follower:
             events = health.poll()
             name_container(events, health.session, several)
             found.events += [(None, event) for event in events]
+            silent = health.newly_silent()
+            if silent is not None:
+                found.notes.append(
+                    labelled(
+                        "processes",
+                        f"the record of {clean(health.session)} is INCOMPLETE,"
+                        f" its watcher said nothing for {silent:.0f}s",
+                    )
+                )
 
     def _poll_notes(self, found: Round) -> None:
         """What the launchers of the project's sessions noted since the

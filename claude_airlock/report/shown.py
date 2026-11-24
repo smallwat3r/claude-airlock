@@ -51,6 +51,13 @@ def over(transport: str, port: int) -> str:
 # What is said of a capture that stopped before its session did, see
 # CaptureSidecar.stopped_early
 STOPPED = "its capture is INCOMPLETE, a recorder ended before the session did: {}"
+# What is said of a record of processes whose watcher ended or hung
+# before its session did, with when it was last heard, see
+# ProcessRecord.silent_from
+SILENT = (
+    "the record of its processes is INCOMPLETE, its watcher said nothing"
+    " after {:%H:%M:%S}: what ran later is missing"
+)
 
 
 def verdict(denied: bool) -> str:

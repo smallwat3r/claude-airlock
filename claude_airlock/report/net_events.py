@@ -8,6 +8,7 @@ themselves are the launcher's own."""
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from datetime import datetime
 
@@ -20,7 +21,7 @@ from ..recording.pcap import Capture, Connection, Flow, Request, Went
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
 from .recorded import Recorded, Traced
-from .shown import STOPPED, over, reached, size, verdict
+from .shown import SILENT, STOPPED, over, reached, size, verdict
 
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
@@ -355,9 +356,12 @@ def listener_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
-def watched_summary(record: ProcessRecord, verbose: bool) -> list[str]:
+def watched_summary(
+    record: ProcessRecord, verbose: bool, until: float = math.inf
+) -> list[str]:
     """The lines of the header on what a session's watcher noted: its
-    processes, and how it was doing."""
+    processes, and how it was doing. With until, when the session ended,
+    a watcher that had stopped noting before then is said."""
     if record.outside:
         under = clean(record.outside)
         said = f"  processes not recorded under {under}, only memory and CPU use"
@@ -378,6 +382,9 @@ def watched_summary(record: ProcessRecord, verbose: bool) -> list[str]:
     if record.unreadable:
         lines.append("  which process made a connection could not be seen")
     return lines + health_summary(record.samples, record.ended)
+    silent = record.silent_from(until)
+    if silent is not None:
+        lines.append(f"  {SILENT.format(datetime.fromtimestamp(silent))}")
 
 
 def captured_connections(
@@ -434,7 +441,7 @@ def network(recorded: Recorded, verbose: bool) -> tuple[list[str], list[Event]]:
     )
     events = [event for _, events in found for event in events]
     for session, record in recorded.watched:
-        lines += watched_summary(record, verbose)
+        lines += watched_summary(record, verbose, session.until)
         ran = watched_events(record, verbose)
         name_container(ran, session.name, recorded.several)
         events += ran

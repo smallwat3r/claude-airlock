@@ -21,6 +21,7 @@ import ipaddress
 import json
 import time
 from collections import Counter
+from datetime import datetime
 
 from ..errors import Fatal
 from ..events import flat
@@ -38,7 +39,7 @@ from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
 from .recorded import ReadTranscript, Recorded
-from .shown import STOPPED, reached, size
+from .shown import SILENT, STOPPED, reached, size
 from .summary import planted_reads
 
 # To one destination in one session, from this many bytes on it is said
@@ -159,6 +160,9 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
         record, capture = kept.processes, kept.capture
         if record and record.full:
             lines.append("the record of its processes stopped at its size limit")
+        silent = record.silent_from(kept.session.until) if record else None
+        if silent is not None:
+            lines.append(SILENT.format(datetime.fromtimestamp(silent)))
         if record:
             # Each place once, however often a server was started there
             waited = dict.fromkeys(

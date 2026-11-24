@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 import os
 import subprocess
 import threading
@@ -421,6 +422,19 @@ class ProcessRecord:
         ]
         return bool(noted) and not any(noted)
 
+    def silent_from(self, until: float) -> float | None:
+        """When its watcher last said anything, if that was longer
+        before a time than it ever goes without a word: the watcher had
+        ended by then, or hung, and what ran after it is not in the
+        record. None for one that said something to the last, and for
+        one that never said how often it would. Asked of the time its
+        session ended, a record with nothing in it past a point reads
+        as a session that ran nothing."""
+        if not self.beat or self.watched_from is None or not math.isfinite(until):
+            return None
+        silent = until > self.last_line + self.beat * SILENT_BEATS
+        return self.last_line if silent else None
+
     def noted_processes(
         self, start: float, end: float, within: float = 0.0
     ) -> bool | None:
@@ -433,9 +447,7 @@ class ProcessRecord:
             return None
         if self.full_at is not None and end > self.full_at:
             return None
-        if self.beat and end > self.last_line + self.beat * SILENT_BEATS:
-            # It said nothing for longer than it ever does: it had ended,
-            # and what ran after that is not in the record
+        if self.silent_from(end) is not None:
             return None
         first = bisect.bisect_left(self._noted_at, start - within)
         return first < len(self._noted_at) and self._noted_at[first] <= end + within

@@ -343,6 +343,10 @@ process it sees in the session and which one holds each connection:
   started, however often: past the fifth time what a copy held is added
   to the last one put aside, up to 512 MB, and what has no room there is
   said as `NOT ALL KEPT`.
+- A transcript rewritten shorter has its copy put aside and a new one
+  started, however often: past the fifth time what a copy held is added
+  to the last one put aside, up to 512 MB, and what has no room there is
+  said as `NOT ALL KEPT`.
 ```
 sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
 ```
