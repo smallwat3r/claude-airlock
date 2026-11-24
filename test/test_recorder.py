@@ -131,6 +131,49 @@ class RecorderTest(LauncherTest):
             recorder.catch_up(self.transcript, self.copy)
         assert len(recorder.put_aside(self.copy)) == recorder.MOST_PUT_ASIDE
 
+    def test_what_is_written_after_any_number_of_rewrites_is_still_copied(self):
+        times = recorder.MOST_PUT_ASIDE + 3
+        for _ in range(times):
+            self.rewrite(self.entries)
+            recorder.catch_up(self.transcript, self.copy)
+            self.rewrite(self.entries[:1])
+            recorder.catch_up(self.transcript, self.copy)
+            recorder.catch_up(self.transcript, self.copy)
+            assert self.copy.read_bytes() == self.transcript.read_bytes()
+        late = prompts_at(self.now + 50)[0]
+        with open(self.transcript, "a") as transcript:
+            transcript.write(json.dumps(late) + "\n")
+        recorder.catch_up(self.transcript, self.copy)
+        assert self.copy.read_bytes() == self.transcript.read_bytes()
+        # Taken out after that, it is still what the launcher copied
+        self.rewrite(self.entries[:1])
+        recorder.catch_up(self.transcript, self.copy)
+        compared = recorder.compare(self.host, self.transcript)
+        assert late in compared.gone
+        assert compared.rewritten == times + 1
+        assert (compared.dropped, len(compared.gone)) == (0, len(self.entries))
+        assert f"rewritten {times + 1} times" in compared.header()[0]
+
+    def test_what_has_no_room_left_after_many_rewrites_is_said(self):
+        whole = len("".join(json.dumps(entry) + "\n" for entry in self.entries))
+        with unittest.mock.patch.object(recorder, "MOST_COPIED", whole + 10):
+            for _ in range(recorder.MOST_PUT_ASIDE + 2):
+                self.rewrite(self.entries)
+                recorder.catch_up(self.transcript, self.copy)
+                self.rewrite(self.entries[:1])
+                recorder.catch_up(self.transcript, self.copy)
+                recorder.catch_up(self.transcript, self.copy)
+            last = recorder.put_aside(self.copy)[-1]
+            assert last.stat().st_size <= whole + 10
+            compared = recorder.compare(self.host, self.transcript)
+        assert compared.dropped > 0
+        said = "\n".join(compared.header())
+        assert f"NOT ALL KEPT: rewritten {compared.rewritten} times" in said
+        assert f"{compared.dropped} bytes had no room" in said
+        # A note that does not hold up says nothing
+        Path(f"{self.copy}{recorder.BEYOND_SUFFIX}").write_text('{"rewrites": "9"')
+        assert recorder.Beyond.of(self.copy) == recorder.Beyond()
+
     def test_a_copy_put_aside_meanwhile_is_not_added_to(self):
         recorder.catch_up(self.transcript, self.copy)
         with open(self.copy, "ab") as held:

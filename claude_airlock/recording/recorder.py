@@ -13,7 +13,10 @@ A copy is the transcript's bytes from its first one on, so how long the
 copy is says where to go on, whichever launcher does: a transcript is
 copied by every session of its project that runs while it is written. One
 that got shorter than its copy was rewritten, the copy is then put aside
-and a new one started.
+and a new one started. Past MOST_PUT_ASIDE of those, what a copy held is
+added to the last one put aside, as long as that has room, and the new
+copy starts all the same: what is written after any number of rewrites is
+still copied, and what could not be kept is counted (see Beyond).
 
 Which transcripts a session writes to is not taken from when they say
 they were written, that is the session's to set: one whose length has
@@ -27,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import glob
 import hashlib
+import json
 import os
 import threading
 import time
@@ -36,7 +40,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..background import in_background
-from ..files import bounded_lines, line_entry, open_locked, open_plain, private_dir
+from ..files import (
+    bounded_lines,
+    json_object,
+    line_entry,
+    open_locked,
+    open_plain,
+    private_dir,
+)
 from ..notice import warn
 from ..projects import (
     SUBAGENTS_DIR,
@@ -51,7 +62,8 @@ LOOK_EVERY = 0.5
 # Read and written at a time
 CHUNK = 1 << 20
 # A copy stops at this size, and a transcript is put aside at most this
-# many times: what a session can make the launcher keep is bounded
+# many times, the last of those no larger than a copy either: what a
+# session can make the launcher keep is bounded
 MOST_COPIED = 512 * 1024 * 1024
 MOST_PUT_ASIDE = 5
 # A transcript of more different lines than this is not compared with its
@@ -63,6 +75,11 @@ MOST_GONE_BYTES = 64 * 1024 * 1024
 # transcript by default
 KEPT_DAYS = 30
 ASIDE_SUFFIX = ".was"
+# Of the file that says what became of a transcript rewritten more often
+# than copies are put aside, next to its copy, see Beyond. No more of it
+# is read than this
+BEYOND_SUFFIX = ".beyond"
+BEYOND_BYTES = 4096
 # Of the directory the copies of a session's subagents are kept in
 SUBAGENTS_SUFFIX = ".subagents"
 
@@ -97,6 +114,77 @@ def still_at(descriptor: int, path: Path) -> bool:
     return (opened.st_dev, opened.st_ino) == (there.st_dev, there.st_ino)
 
 
+@dataclass(frozen=True)
+class Beyond:
+    """What became of a transcript that was rewritten more often than
+    copies are put aside: how many times more, and how many bytes of
+    what its copies held then could not be kept."""
+
+    rewrites: int = 0
+    dropped: int = 0
+
+    @classmethod
+    def of(cls, copy: Path) -> Beyond:
+        """As noted next to a copy, nothing of one that has no note or
+        one that does not hold up: the file is the launcher's own, and
+        may be cut off by one that was killed."""
+        try:
+            with open(f"{copy}{BEYOND_SUFFIX}", "rb") as note:
+                said = json_object(note.read(BEYOND_BYTES)) or {}
+        except OSError:
+            return cls()
+        rewrites, dropped = said.get("rewrites"), said.get("dropped")
+        if type(rewrites) is not int or type(dropped) is not int:
+            return cls()
+        return cls(max(0, rewrites), max(0, dropped))
+
+    def note(self, copy: Path) -> None:
+        """Keep it next to a copy, in place of what was noted before."""
+        noted = Path(f"{copy}{BEYOND_SUFFIX}.{os.getpid()}")
+        noted.write_text(
+            json.dumps({"rewrites": self.rewrites, "dropped": self.dropped})
+        )
+        os.replace(noted, f"{copy}{BEYOND_SUFFIX}")
+
+
+def keep_with_last(copy: Path, last: Path) -> int:
+    """Add what a copy holds to the last copy that was put aside, as far
+    as that has room (see MOST_COPIED). From a line of its own on: a
+    copy can end within a line. How many bytes had no room."""
+    with open(copy, "rb") as held, open(last, "ab") as aside:
+        left = os.fstat(held.fileno()).st_size
+        room = MOST_COPIED - aside.tell()
+        if left and room > 0:
+            aside.write(b"\n")
+            room -= 1
+        while left and room > 0:
+            data = held.read(min(CHUNK, left, room))
+            if not data:
+                break
+            aside.write(data)
+            left, room = left - len(data), room - len(data)
+    return left
+
+
+def start_anew(copy: Path, kept: int) -> None:
+    """Have a copy start over for a transcript that was rewritten, with
+    what it held kept. Put aside as it is the first MOST_PUT_ASIDE times,
+    a new one then starts with the next look. After that it is emptied in
+    its place, what it held added to the last one put aside, and what
+    that had no room for counted. Called with the copy locked, by its
+    open file."""
+    aside = put_aside(copy)
+    if len(aside) < MOST_PUT_ASIDE:
+        os.replace(copy, f"{copy}.{time.time_ns()}{ASIDE_SUFFIX}")
+        return
+    before = Beyond.of(copy)
+    dropped = keep_with_last(copy, aside[-1])
+    # Noted before the copy is emptied: a launcher killed between the two
+    # leaves a rewrite counted twice, not one that is not said
+    Beyond(before.rewrites + 1, before.dropped + dropped).note(copy)
+    os.ftruncate(kept, 0)
+
+
 def catch_up(transcript: Path, copy: Path) -> None:
     """Add to a copy what its transcript has gained. Under a lock, the
     launchers of other sessions of the project copy it too."""
@@ -112,9 +200,8 @@ def catch_up(transcript: Path, copy: Path) -> None:
         have = os.fstat(kept.fileno()).st_size
         if os.fstat(source.fileno()).st_size < have:
             # Rewritten. What it held is kept, and a new copy starts with
-            # the next look, unless that has happened too often.
-            if len(put_aside(copy)) < MOST_PUT_ASIDE:
-                os.replace(copy, f"{copy}.{time.time_ns()}{ASIDE_SUFFIX}")
+            # the next look, however often that has happened.
+            start_anew(copy, kept.fileno())
             return
         source.seek(have)
         while have < MOST_COPIED:
@@ -331,6 +418,9 @@ class Compared:
     # Whether the transcript has more lines than are compared: what was
     # taken out of it is then not known
     uncompared: bool = False
+    # How many bytes of what the copies held when it was rewritten could
+    # not be kept, see Beyond: what was taken out among them is not known
+    dropped: int = 0
 
     @property
     def missing(self) -> int:
@@ -357,6 +447,12 @@ class Compared:
                 f"{name}NOT COMPARED: more than {MOST_COMPARED} lines, what was"
                 f" taken out of {it} is not known"
             )
+        if self.dropped:
+            limit.append(
+                f"{name}NOT ALL KEPT: rewritten {self.rewritten} times, of what"
+                f" the launcher had copied {self.dropped} bytes had no room"
+                f" left, what was taken out of {it} with them is not known"
+            )
         if self.removed and not subagents:
             said = f"the {self.lines} lines the launcher copied are shown as REMOVED"
             return [f"{name}REMOVED, it is no longer there: {said}", *limit]
@@ -379,6 +475,7 @@ class Compared:
             self.cut_short or other.cut_short,
             self.more_gone + other.more_gone,
             self.uncompared or other.uncompared,
+            self.dropped + other.dropped,
         )
 
 
@@ -388,7 +485,10 @@ def compare(host: Host, transcript: Path) -> Compared:
     place, without making it shorter."""
     copy = copy_path(host, transcript)
     copies = [*put_aside(copy), copy]
-    found = Compared(rewritten=len(copies) - 1)
+    beyond = Beyond.of(copy)
+    found = Compared(
+        rewritten=len(copies) - 1 + beyond.rewrites, dropped=beyond.dropped
+    )
     # Neither side is held whole: the copies are read a line at a time,
     # against what stands for each line of the transcript
     current = line_digests(transcript, MOST_COMPARED)

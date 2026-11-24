@@ -321,6 +321,7 @@ compares the two. The header says what came of it:
   what a command changed are the transcript's word too.
 - A session that removed its transcript is still listed and traced, from
   the launcher's copy, for as long as that is kept.
+# transcript  NOT ALL KEPT: rewritten 9 times, of what the launcher had copied 1048576 bytes had no room left, what was taken out of it with them is not known
 - A line that holds no entry is not Claude Code's doing: half a line
   written ahead of an entry makes that entry unreadable. It is shown as
   `UNREADABLE`, with `--failed` too.
@@ -338,6 +339,10 @@ The transcript says what a tool call was, not what the command it ran went
 on to do. Unless `CLAUDE_AIRLOCK_PROC_LOG=0`, a second sidecar notes each
 process it sees in the session and which one holds each connection:
 
+- A transcript rewritten shorter has its copy put aside and a new one
+  started, however often: past the fifth time what a copy held is added
+  to the last one put aside, up to 512 MB, and what has no room there is
+  said as `NOT ALL KEPT`.
 ```
 sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
 ```

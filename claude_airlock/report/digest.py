@@ -259,6 +259,11 @@ def transcript_lines(host: Host, start: float) -> list[str]:
             lines.append(
                 f"the transcript of {short_id(path)} was removed, --trace"
                 " shows the launcher's copy of it"
+        if compared.dropped:
+            lines.append(
+                f"{named} was rewritten {compared.rewritten} times, more often"
+                " than the launcher keeps all it had copied"
+            )
             )
     return [
         *headed("written outside the project:", list(dict.fromkeys(written))),
