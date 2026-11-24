@@ -310,6 +310,11 @@ class AskedHostsTest(LauncherTest):
                     assert rule[2] in ("allowed", "confirmed")
                     assert min(at) > 2
         assert ["http_access", "allow", "allowed", "!to_own"] in rules
+        # The proxy's own by every address that leads to it, the one of
+        # "this host" too, which the kernel takes for its loopback
+        (own,) = (line.split()[3:] for line in conf if line.startswith("acl to_own "))
+        for network in ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "::/128", "::1"):
+            assert network in own
         asked = ["http_access", "allow", "confirmed", "!to_own", "!to_private"]
         assert asked in rules
 

@@ -268,7 +268,8 @@ secrets.
   not changed. Only a name of the public DNS is asked about, never an
   address or the bare name of a container, and a yes does not reach a
   private address the name leads to: a host of your own network goes on
-  the list. Nothing gets through the proxy to its own loopback or link
+  the list. Nothing gets through the proxy to its own loopback (0.0.0.0/8
+  too, which leads there) or link
   (169.254.0.0/16, where a cloud keeps a machine's credentials), on the
   list or not. A session that is not in line mode has nowhere to ask, its
   filter refuses as without this, and says so when it starts. A request
