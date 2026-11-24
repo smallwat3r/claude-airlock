@@ -62,7 +62,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from ..events import Event, clean, labelled
-from ..report.layout import Layout, painted
+from ..report.layout import DIM, Layout, painted, prefixed
 from .screen import SGR, cursor_back, erased, uncounted
 
 try:
@@ -123,6 +123,13 @@ PASTE_GAP = 0.3
 PASTE_LIMIT = 1 << 20
 # A terminal narrower than this is written to as if it were so wide
 NARROWEST = 20
+# What starts each line a chat writes of the session's own word where no
+# line says who and what: a reply of claude's, what a command of the
+# user's wrote, a line claude wrote that is no message. A line of the
+# chat's own starts with the mark of a header line, with a time, or
+# under one of those with spaces, never with this: what the session
+# writes after it cannot pass for one of them, with or without colour
+SAID = "| "
 
 
 def completions(word: str, first: bool, commands: list[str], root: str) -> list[str]:
@@ -742,10 +749,30 @@ class Page:
             return None
         return max(NARROWEST, self._console.columns() - 1)
 
+    @property
+    def said_width(self) -> int | None:
+        """What the session's own word is wrapped to, behind what each
+        line of it starts with, see said."""
+        width = self.width
+        return width and max(NARROWEST, width - len(SAID))
+
+    def said(self, lines: list[str]) -> list[str]:
+        """Lines of the session's own word as they are written, each
+        behind SAID, and so each line of one that holds a line break. In
+        colour the mark is dimmed, as what a chat says of itself is: the
+        text after it keeps its own."""
+        mark = painted(DIM, SAID.rstrip()) if self.layout.colour else SAID.rstrip()
+        gap = SAID[len(SAID.rstrip()) :]
+        return [f"{mark}{gap}{line}" if line else mark for line in prefixed("", lines)]
+
     def put(self, lines: list[str]) -> None:
         if lines:
             self._console.write(lines)
             self.touched()
+
+    def put_said(self, lines: list[str]) -> None:
+        """Write lines of the session's own word, see said."""
+        self.put(self.said(lines))
 
     def touched(self) -> None:
         """Something was written, or read, that is no line of the page:

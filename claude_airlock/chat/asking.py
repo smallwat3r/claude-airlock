@@ -79,15 +79,26 @@ DIFF_STYLES = {"  diff: -": RED, "  diff: +": GREEN, "  diff: @": CYAN}
 class Question:
     """What the user is asked while a turn runs, and what they say to it."""
 
-    def __init__(self, prompt: str, stale: bool):
+    def __init__(self, prompt: str, stale: str = ""):
         self.prompt = prompt
-        # Whether a line was being typed when the question was put: that
-        # line was meant as a prompt, and is not taken for the answer
+        # What was typed of a line when the question was put, empty for
+        # nothing: that line was meant as a prompt, and is not taken for
+        # the answer, see meant_before
         self.stale = stale
         self.put = time.monotonic()
         self.answered = threading.Event()
         # None for no answer: the input ended, or Ctrl-C
         self.said: str | None = None
+
+    def meant_before(self, line: str) -> bool:
+        """Whether a line that was entered is the one that was being
+        typed when the question was put, as it was or typed on: asked
+        once, of the first line entered since. Not one that starts
+        otherwise: what was being typed was dropped for it, and it was
+        typed with the question to read. Nor when all that was typed
+        was space, which any line can start with."""
+        was, self.stale = self.stale, ""
+        return bool(was.strip()) and line.startswith(was)
 
     def answer(self, said: str | None) -> None:
         """Take what was said first, a question is answered once."""
@@ -188,8 +199,7 @@ class Asker:
         question = self._question
         if question is None:
             return False
-        if question.stale:
-            question.stale = False
+        if question.meant_before(line):
             return False
         # Counted from when the question came before the user, not from
         # when it was put: a command of theirs can run in between, and
@@ -258,8 +268,8 @@ class Asker:
             return None
         if self._page.layout.colour:
             prompt = painted(style, prompt)
-        question = Question(prompt, stale=bool(self._console.typed()))
-        if question.stale:
+        question = Question(prompt, stale=self._console.typed())
+        if question.stale.strip():
             # It is written again after the question, where it looks like
             # the answer
             not_it = "what you were typing is not taken for the answer"
@@ -303,16 +313,18 @@ class Asker:
         names it by: its first line. Shown whole, from what claude asks
         here, unless that line is all of it: a command of several lines,
         the diff of an edit, the arguments of a tool, the plan claude
-        wants to act on. What the transcript told of the call is not
-        relied on for it, a line of a subagent's can come after the
-        question."""
+        wants to act on, each line behind the mark of what the session
+        wrote (see Page.said): a command or a plan is claude's to write,
+        and no line of it is to read as the chat's own under the
+        question. What the transcript told of the call is not relied on
+        for it, a line of a subagent's can come after the question."""
         acted = self._acted(tool, tool_input)
         named = flat(acted[0]) if acted else ""
         plan = tool_input.get("plan")
         if tool == "ExitPlanMode" and isinstance(plan, str):
-            lines = reply_lines(plan, self._page.width, self._page.layout.colour)
+            width, colour = self._page.said_width, self._page.layout.colour
             self._page.note("plan", "what claude asks to go ahead with:")
-            self._page.put([*lines, ""])
+            self._page.put([*self._page.said(reply_lines(plan, width, colour)), ""])
         elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
             whole = call_details(tool, tool_input, None, self._project_dir, True)
             name = tool.lower()[:WHAT_WIDTH]
@@ -320,7 +332,7 @@ class Asker:
             lines = prefixed("  ", whole)
             if self._page.layout.colour:
                 lines = [painted(DIFF_STYLES.get(line[:9], ""), line) for line in lines]
-            self._page.put(lines)
+            self._page.put_said(lines)
         return named[:ABOUT_WIDTH]
 
     def _permission(

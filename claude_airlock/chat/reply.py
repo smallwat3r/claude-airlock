@@ -20,6 +20,8 @@ import dataclasses
 import re
 import textwrap
 import time
+from bisect import bisect_left
+from collections import deque
 from collections.abc import Callable
 
 from ..events import Event, Kind, Who, clean
@@ -37,12 +39,12 @@ _STYLE_OF = {_CODE_MARK: CODE, _BOLD_MARK: BOLD}
 _MARKS = re.compile(f"([{_CODE_MARK}{_BOLD_MARK}])")
 _FENCE = re.compile(r"\s*(`{3,}|~{3,})")
 _HEADING = re.compile(r"(\s*)#{1,6}\s+(\S.*)")
-_CODE_SPAN = re.compile(r"(`+)(.+?)\1")
-# Not the power of a number in code that was written without backticks
-_BOLD_SPAN = re.compile(r"(?<![\w*])\*\*(\S(?:.*?\S)?)\*\*(?![\w*])")
-# A line longer than this is not looked through for marks: every mark that
-# is opened and not closed is looked for to the end of the line, and a
-# line of those is the model's to write
+_TICKS = re.compile(r"`+")
+_BOLD = "**"
+# A line longer than this is not looked through for marks, it is the
+# model's to write and no prose. A shorter one is looked through once,
+# however many of its marks are opened and not closed: see _code_spans
+# and _bold_marked
 MOST_MARKED = 4000
 
 
@@ -59,8 +61,43 @@ def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
     ) or [""]
 
 
-def _code_marked(text: str) -> str:
-    return _CODE_SPAN.sub(lambda span: _CODE_MARK + span[2] + _CODE_MARK, text)
+def _code_spans(text: str) -> list[tuple[int, int, int]]:
+    """The spans of code of a text, each as where it starts, where it
+    ends and how many backticks are at either end of it: from a run of
+    backticks to the next one of as many, as Markdown has it. Found in
+    one pass, the runs of each length in a queue of their own: a run
+    that is never closed is not looked for to the end of the text, and a
+    text of nothing but those is the model's to write."""
+    runs = [(run.start(), len(run.group())) for run in _TICKS.finditer(text)]
+    later: dict[int, deque[int]] = {}
+    for at, (_, length) in enumerate(runs):
+        later.setdefault(length, deque()).append(at)
+    spans = []
+    closed = -1
+    for at, (start, length) in enumerate(runs):
+        same = later[length]
+        # This run, and those of its length that are behind it
+        while same and same[0] <= at:
+            same.popleft()
+        if at <= closed or not same:
+            continue
+        closed = same[0]
+        spans.append((start, runs[closed][0] + length, length))
+    return spans
+
+
+def _code_marked(text: str, bold: bool = False) -> str:
+    """A text with the backticks of its spans of code replaced by the
+    marks of this module. With bold, what is between two spans has its
+    marks of bold replaced too, what is within one is code as it is."""
+    plain: Callable[[str], str] = _bold_marked if bold else str
+    parts = []
+    rest = 0
+    for start, end, ticks in _code_spans(text):
+        code = text[start + ticks : end - ticks]
+        parts += [plain(text[rest:start]), _CODE_MARK, code, _CODE_MARK]
+        rest = end
+    return "".join([*parts, plain(text[rest:])])
 
 
 def _marked(line: str) -> str:
@@ -71,19 +108,55 @@ def _marked(line: str) -> str:
         return line
     heading = _HEADING.fullmatch(line)
     if heading:
-        title = _code_marked(heading[2].replace("**", ""))
+        title = _code_marked(heading[2].replace(_BOLD, ""))
         return heading[1] + _BOLD_MARK + title + _BOLD_MARK
-    marked = ""
+    return _code_marked(line, bold=True)
+
+
+def _opens_bold(text: str, at: int) -> bool:
+    """Whether two asterisks at a place can start what is bold: not after
+    a letter, a digit or an asterisk, which is the power of a number in
+    code that was written without backticks, and with no space after."""
+    before = text[at - 1] if at else " "
+    after = text[at + 2 : at + 3]
+    return not (before.isalnum() or before in "_*") and bool(after.strip())
+
+
+def _closes_bold(text: str, at: int) -> bool:
+    """Whether two asterisks at a place can end what is bold: with no
+    space before, and not ahead of a letter, a digit or an asterisk."""
+    before = text[at - 1 : at] if at else ""
+    after = text[at + 2 : at + 3]
+    return bool(before.strip()) and not (after.isalnum() or after in ("_", "*"))
+
+
+def _bold_marked(text: str) -> str:
+    """A text with the asterisks around what is bold replaced by the
+    marks of this module: from two that can start it to the first two
+    after them that can end it. The places that can end one are found
+    once, and the one after a start looked up among them: a text of
+    starts without an end is the model's to write, and is not looked
+    through to its end for each."""
+    places = []
+    at = text.find(_BOLD)
+    while at >= 0:
+        places.append(at)
+        at = text.find(_BOLD, at + 1)
+    ends = [place for place in places if _closes_bold(text, place)]
+    parts = []
     rest = 0
-    for span in _CODE_SPAN.finditer(line):
-        marked += _BOLD_SPAN.sub(_bold_marked, line[rest : span.start()])
-        marked += _CODE_MARK + span[2] + _CODE_MARK
-        rest = span.end()
-    return marked + _BOLD_SPAN.sub(_bold_marked, line[rest:])
-
-
-def _bold_marked(span: re.Match[str]) -> str:
-    return _BOLD_MARK + span[1] + _BOLD_MARK
+    for start in places:
+        if start < rest or not _opens_bold(text, start):
+            continue
+        # At least a character between the two
+        nearest = bisect_left(ends, start + len(_BOLD) + 1)
+        if nearest == len(ends):
+            break
+        end = ends[nearest]
+        inside = text[start + len(_BOLD) : end]
+        parts += [text[rest:start], _BOLD_MARK, inside, _BOLD_MARK]
+        rest = end + len(_BOLD)
+    return "".join([*parts, text[rest:]])
 
 
 def _styled(lines: list[str]) -> list[str]:
@@ -92,16 +165,16 @@ def _styled(lines: list[str]) -> list[str]:
     styled = []
     styles: list[str] = []
     for line in lines:
-        text = ""
+        parts = []
         for part in _MARKS.split(line):
             style = _STYLE_OF.get(part)
             if style is None:
-                text += painted(";".join(styles), part)
+                parts.append(painted(";".join(styles), part))
             elif style in styles:
                 styles.remove(style)
             else:
                 styles.append(style)
-        styled.append(text)
+        styled.append("".join(parts))
     return styled
 
 
@@ -124,20 +197,26 @@ class ReplyWriter:
         self._colour = colour
         # The marks that started the block of code a line is in
         self._fence = ""
-        # The start of a line whose end has not come yet
-        self._partial = ""
+        # The start of a line whose end has not come yet, in the pieces
+        # it came in: put together once the line is whole, a line of any
+        # length comes in any number of them
+        self._partial: list[str] = []
         # Whether a line was given back, and the empty ones since the last
         self._started = False
         self._empty = 0
 
     def feed(self, text: str) -> list[str]:
         """The lines that a piece of the reply completes."""
-        *whole, self._partial = (self._partial + text).split("\n")
+        if "\n" not in text:
+            self._partial.append(text)
+            return []
+        *whole, rest = "".join([*self._partial, text]).split("\n")
+        self._partial = [rest]
         return [shown for line in whole for shown in self._taken(line)]
 
     def end(self) -> list[str]:
         """The line that was left without its end, if any."""
-        last, self._partial = self._partial, ""
+        last, self._partial = "".join(self._partial), []
         return self._taken(last.rstrip())
 
     def _taken(self, line: str) -> list[str]:
@@ -178,16 +257,16 @@ def reply_lines(text: str, width: int | None, colour: bool) -> list[str]:
 def said_whole(page: Page, said: Event) -> list[str]:
     """What was said with all of its lines, where a trace has a few: a
     chat is where it is read. At a terminal a line says when and who, and
-    the text is under it from the left edge, wrapped to the terminal and
-    with an empty line after it. In a file every line says when and who,
-    as of any event."""
+    the text is under it, each line behind the mark of what the session
+    wrote (see Page.said), wrapped to the terminal and with an empty line
+    after it. In a file every line says when and who, as of any event."""
     text = said.fields.get("text", "")
-    lines = reply_lines(text, page.width, page.layout.colour)
+    lines = reply_lines(text, page.said_width, page.layout.colour)
     if not page.layout.compact:
         whole = dataclasses.replace(said, details=lines or said.details)
         return page.layout.event(whole)
     head = page.layout.event(dataclasses.replace(said, details=[""]))
-    return [*head, *lines, ""]
+    return [*head, *page.said(lines), ""]
 
 
 class ReplyStream:
@@ -236,7 +315,9 @@ class ReplyStream:
                 # The whole of a reply comes before its last piece: one
                 # that has not come by now will not
                 self._owed = 0
-                self._writer = ReplyWriter(self._page.width, self._page.layout.colour)
+                self._writer = ReplyWriter(
+                    self._page.said_width, self._page.layout.colour
+                )
                 self._started = time.time()
         elif kind == "content_block_delta" and self._writer:
             given = event.get("delta")
@@ -286,13 +367,15 @@ class ReplyStream:
         self._owed = 0
 
     def _take(self, lines: list[str]) -> None:
-        """Write lines of the reply, at a terminal. In a file they are
-        kept for its end."""
+        """Write lines of the reply, at a terminal: behind the mark of
+        what the session wrote, no line of it says who. In a file they
+        are kept for its end."""
         if not lines:
             return
         if not self._page.layout.compact:
             self._lines += lines
             return
+        lines = self._page.said(lines)
         if not self._headed:
             self._before()
             self._headed = True

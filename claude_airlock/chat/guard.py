@@ -73,18 +73,23 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
-def _key(source: str, sign: Planted) -> tuple[str, str, str]:
+def _key(source: str, sign: Planted, read: str) -> tuple[str, str, str]:
     """What a sign the user answered for is remembered by: where it was
-    read, which sign, and the text it was found in."""
-    return source, sign.sign, _digest(sign.excerpt)
+    read, which sign, and all of what was read there, by its digest. Not
+    the place the sign was found at alone, which is the first of them: a
+    text that has the same one and more after it, a second place written
+    to instruct claude, is not the text the user went on with."""
+    return source, sign.sign, read
 
 
 class Guard:
     """Reads what claude and its subagents say and are given, and finds
     the results a turn is stopped for. Not those the user went on with
-    before: a source is asked of once for a sign and the text it was
-    found in, the trace flags it each time. A page that reads otherwise
-    the next time is asked of again, it can change between two reads."""
+    before: a source is asked of once for a sign and the text that was
+    read there, all of it, the trace flags it each time. A page that
+    reads otherwise the next time is asked of again, in whatever part: it
+    can change between two reads, and what was shown of it is the first
+    place a sign is at, not what came to be written after that."""
 
     def __init__(self) -> None:
         # Each call that has no result yet, by its id
@@ -93,7 +98,7 @@ class Guard:
         # with what the turns were stopped for
         self._asking = False
         # Each sign a turn was stopped for with its source and what was
-        # found (see _key), those the user has not answered for yet and
+        # read (see _key), those the user has not answered for yet and
         # those they went on with
         self._asked: set[tuple[str, str, str]] = set()
         self._accepted: set[tuple[str, str, str]] = set()
@@ -129,8 +134,8 @@ class Guard:
     def answered(self, went_on: bool) -> None:
         """The user answered for what the turns were stopped for. Gone
         on with, none is stopped again for the same sign of the same
-        source in the same text. Not gone on with, or not answered, it
-        stops a turn the next time too."""
+        source that reads the same throughout. Not gone on with, or not
+        answered, it stops a turn the next time too."""
         with self._lock:
             if went_on:
                 if len(self._accepted) + len(self._asked) > MOST_ACCEPTED:
@@ -158,13 +163,19 @@ class Guard:
         output = block_text(block.get("content"))
         if call is None:
             return tuple(sign for sign in result_planted("", output) if sign.stops)
-        found = result_planted(call.tool, output, call.said)
+        found = tuple(
+            sign for sign in result_planted(call.tool, output, call.said) if sign.stops
+        )
+        if not found:
+            return ()
+        # Of all that was read, once for the signs found in it
+        read = _digest(output)
         with self._lock:
             new = tuple(
                 sign
                 for sign in found
-                if sign.stops and _key(call.source, sign) not in self._accepted
+                if _key(call.source, sign, read) not in self._accepted
             )
             if len(self._asked) < MOST_ACCEPTED:
-                self._asked.update(_key(call.source, sign) for sign in new)
+                self._asked.update(_key(call.source, sign, read) for sign in new)
         return new

@@ -39,8 +39,9 @@ class Shell:
         """Run a command in the session's container. Claude is not told
         of it and the transcript does not have it, the record of what ran
         does. What it writes is the session's word as anything else from
-        there: shown a line at a time, cleaned. Ctrl-C is for the command
-        while it runs, see running."""
+        there: shown a line at a time, cleaned, behind the mark of what
+        the session wrote (see Page.said). Ctrl-C is for the command while
+        it runs, see running."""
         if not command:
             return
         self._page.note("shell", f"$ {flat(command)}  (claude is not told)")
@@ -64,7 +65,7 @@ class Shell:
                         group = line.strip()
                     else:
                         text = line.decode("utf-8", "replace").rstrip("\r\n")
-                        self._page.put([clean(text)])
+                        self._page.put_said([clean(text)])
                     first = False
         except OSError:
             self._page.note("shell", "docker could not be run")

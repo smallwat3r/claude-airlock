@@ -402,8 +402,9 @@ class Chat:
                 if message is None:
                     break
                 if isinstance(message, str):
-                    # Not what claude says in a conversation, see Agent
-                    self._page.put([clean(message).rstrip()])
+                    # Not what claude says in a conversation, see Agent:
+                    # the session's word all the same, and marked as such
+                    self._page.put_said([clean(message).rstrip()])
                     continue
                 if self._interrupt:
                     self._interrupt = False
