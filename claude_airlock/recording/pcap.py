@@ -12,6 +12,7 @@ read of that message, nothing more."""
 from __future__ import annotations
 
 import bisect
+import enum
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,7 +77,7 @@ MOST_CLOSING = 10_000
 SEQUENCE_SPACE = 1 << 32
 
 
-class Went:
+class Went(enum.StrEnum):
     """What became of a connection, as its outcome is named."""
 
     REFUSED = "refused"
@@ -87,8 +88,11 @@ class Went:
     NO_ANSWER = "no answer"
     # The capture does not tell
     UNKNOWN = ""
-    # Those of a connection that was not made
-    WRONG = (REFUSED, NO_ANSWER)
+
+    @property
+    def wrong(self) -> bool:
+        """Whether it is that of a connection that was not made."""
+        return self in (Went.REFUSED, Went.NO_ANSWER)
 
 
 @dataclass
@@ -191,7 +195,7 @@ class Connection:
         return self.answer_sequence is not None
 
     @property
-    def outcome(self) -> str:
+    def outcome(self) -> Went:
         """What became of it, see Went: UNKNOWN when the capture does
         not tell."""
         if self.refused:
@@ -204,7 +208,7 @@ class Connection:
 
     @property
     def failed(self) -> bool:
-        return self.outcome in Went.WRONG
+        return self.outcome.wrong
 
     @property
     def seconds(self) -> float | None:
@@ -294,7 +298,7 @@ class Capture:
     connections: list[Connection] = field(default_factory=list)
     # What became of them, in the order it did: when, what (no answer,
     # refused or closed) and the connection. For a reader that follows.
-    endings: list[tuple[float, str, Connection]] = field(default_factory=list)
+    endings: list[tuple[float, Went, Connection]] = field(default_factory=list)
     # Each answer of the resolver
     lookups: list[Lookup] = field(default_factory=list)
     # The lookups that stand out, each with what for, see DNS_MANY_NAMES

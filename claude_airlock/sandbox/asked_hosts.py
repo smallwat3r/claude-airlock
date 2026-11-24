@@ -25,6 +25,7 @@ that could be a host's are taken."""
 from __future__ import annotations
 
 import contextlib
+import enum
 import ipaddress
 import json
 import os
@@ -43,12 +44,26 @@ from ..settings import NAME, Host, Settings
 from .egress_proxy import asked_hosts_root
 from .networks import session_address
 
-# In the directory of a session: the hosts a request waits for an answer
-# about, written by the proxy's helper, and those the user allowed and
-# refused, written here. Each host is an empty file of its name.
-WAITING = "waiting"
-ALLOWED = "allowed"
-REFUSED = "refused"
+
+class Hosts(enum.StrEnum):
+    """What the directory of a session keeps hosts in, each a directory
+    of this name with an empty file for every host of it. The helper
+    knows them by the same names, see docker/squid-ask-helper.sh."""
+
+    # Those a request waits for an answer about, written by the proxy's
+    # helper
+    WAITING = "waiting"
+    # Those the user allowed and refused, written here
+    ALLOWED = "allowed"
+    REFUSED = "refused"
+
+    @property
+    def mode(self) -> int:
+        """Who may do what in it. The proxy runs as a user of its own:
+        it reads all of them, and writes the hosts that wait."""
+        return 0o777 if self is Hosts.WAITING else 0o755
+
+
 # Whose the directory is: the session's container and its launcher
 OWNER = "owner"
 # A host as the helper takes one for a file name, see there, written the
@@ -158,11 +173,10 @@ class AskedHosts:
             _drop(root, address)
             made = tempfile.mkdtemp(prefix=ASIDE, dir=root)
             write_whole(os.path.join(made, OWNER), json.dumps(owner))
-            # The proxy runs as a user of its own: it reads all of this,
-            # and writes the hosts that wait. Whatever the umask is.
-            for name, mode in ((WAITING, 0o777), (ALLOWED, 0o755), (REFUSED, 0o755)):
-                os.mkdir(os.path.join(made, name))
-                os.chmod(os.path.join(made, name), mode)
+            # Whatever the umask is
+            for kept in Hosts:
+                os.mkdir(os.path.join(made, kept))
+                os.chmod(os.path.join(made, kept), kept.mode)
             os.chmod(made, 0o755)  # noqa: S103
             os.rename(made, os.path.join(root, address))
             self._address = address
@@ -176,15 +190,15 @@ class AskedHosts:
                 _drop(self._host.asked_hosts_dir, self._address)
                 self._address = ""
 
-    def _path(self, kind: str, host: str = "") -> str:
-        return os.path.join(self._host.asked_hosts_dir, self._address, kind, host)
+    def _path(self, kept: Hosts, host: str = "") -> str:
+        return os.path.join(self._host.asked_hosts_dir, self._address, kept, host)
 
     def waiting(self) -> list[str]:
         """The hosts a request of the session waits for an answer about."""
         if not self._address:
             return []
         try:
-            names = os.listdir(self._path(WAITING))
+            names = os.listdir(self._path(Hosts.WAITING))
         except OSError:
             return []
         return sorted(name for name in names if is_host(name))[:MOST_WAITING]
@@ -197,12 +211,13 @@ class AskedHosts:
             return
         with contextlib.suppress(OSError):
             if allowed is not None:
-                kept = self._path(ALLOWED if allowed else REFUSED, host)
+                answer = Hosts.ALLOWED if allowed else Hosts.REFUSED
+                kept = self._path(answer, host)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
                 os.close(os.open(kept, flags, 0o644))
             # After the answer: the helper takes a host that no longer
             # waits and has none for refused
-            os.unlink(self._path(WAITING, host))
+            os.unlink(self._path(Hosts.WAITING, host))
 
 
 def open_once_addressed(asked: AskedHosts, owner: str, stop: threading.Event) -> None:

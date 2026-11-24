@@ -107,7 +107,7 @@ def proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
     return proxy_summary(requests, recorded.filtered), events
 
 
-def how_it_went(connection: Connection, outcome: str) -> str:
+def how_it_went(connection: Connection, outcome: Went) -> str:
     """An outcome of a connection as the words after its destination,
     none for no outcome: the capture does not always tell."""
     if outcome != Went.CLOSED:
@@ -124,7 +124,7 @@ def connection_event(
     capture: Capture,
     connection: Connection,
     live: bool = False,
-    ending: tuple[float, str] | None = None,
+    ending: tuple[float, Went] | None = None,
 ) -> Event:
     """A connection as an event. Of a capture that is all there it says
     how the connection went. Live there are two or more: one as it opens,
@@ -155,7 +155,7 @@ def connection_event(
     went = how_it_went(connection, outcome)
     detail = reached(capture, address, port, "tcp", connection.when)
     detail += f"  {went}" if went else ""
-    wrong = Wrong.THROUGHOUT if outcome in Went.WRONG else Wrong.NO
+    wrong = Wrong.THROUGHOUT if outcome.wrong else Wrong.NO
     return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
 
 

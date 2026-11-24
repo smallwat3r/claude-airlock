@@ -60,10 +60,11 @@ class Who(enum.Enum):
     SANDBOX = "sandbox"
 
 
-class Kind:
+class Kind(enum.StrEnum):
     """What an event is when it is not the call of a tool, as the what
     column says it and --only names it. The call of a tool is the name of
-    the tool, which is not a closed set."""
+    the tool, which is not a closed set: what an event is stays a text,
+    and one of these is the text it is written as."""
 
     PROMPT = "prompt"
     REPLY = "reply"
@@ -91,7 +92,7 @@ class Kind:
     CHANGED = "changed"
 
 
-class Stage:
+class Stage(enum.StrEnum):
     """Which part of something an event is, among its values, when it is
     followed as it happens: a tool call and its result, a connection as
     it opens and what became of it."""
