@@ -20,7 +20,8 @@ from harness import (
 )
 
 from claude_airlock import files
-from claude_airlock.sandbox import tamper
+from claude_airlock.sandbox import bounded, tamper, tampered
+from claude_airlock.sandbox import fingerprint as watched
 
 
 class TamperingTest(LauncherTest):
@@ -76,23 +77,25 @@ class TamperingTest(LauncherTest):
         with unittest.mock.patch.object(
             subprocess,
             "run",
-            side_effect=subprocess.TimeoutExpired("git", tamper.GIT_SECONDS),
+            side_effect=subprocess.TimeoutExpired("git", watched.GIT_SECONDS),
         ) as ran:
-            assert tamper.git_config_hash(str(config)) == tamper.file_hash(str(config))
-            assert tamper.moved_hooks_dir(str(self.project)) is None
+            assert watched.git_config_hash(str(config)) == bounded.file_hash(
+                str(config)
+            )
+            assert watched.moved_hooks_dir(str(self.project)) is None
         for call in ran.call_args_list:
-            assert call.kwargs["timeout"] == tamper.GIT_SECONDS
+            assert call.kwargs["timeout"] == watched.GIT_SECONDS
 
     def test_what_is_no_plain_file_is_hashed_as_unreadable(self):
         pipe = self.work / "pipe"
         os.mkfifo(pipe)
-        assert tamper.file_hash(str(pipe)) == "unreadable"
-        assert tamper.git_config_hash(str(pipe)) == "unreadable"
-        assert tamper.file_hash(str(self.work / "none")) == "unreadable"
+        assert bounded.file_hash(str(pipe)) == "unreadable"
+        assert watched.git_config_hash(str(pipe)) == "unreadable"
+        assert bounded.file_hash(str(self.work / "none")) == "unreadable"
         # A link to one says where it leads, and is not opened either
         link = self.work / "link"
         link.symlink_to(pipe)
-        assert tamper.file_hash(str(link)) != "unreadable"
+        assert bounded.file_hash(str(link)) != "unreadable"
 
     def test_new_project_claude_settings_are_reported(self):
         result = self.launch(session='mkdir .claude; echo "{}" > .claude/settings.json')
@@ -140,16 +143,16 @@ class TamperingTest(LauncherTest):
 
     def test_a_commondir_that_names_nothing_to_read_holds_no_check(self):
         git_dir = self.project / ".git"
-        for said in (b"", b"\n", b"a\0b\n", b"x" * 2 * tamper.COMMON_DIR_BYTES):
+        for said in (b"", b"\n", b"a\0b\n", b"x" * 2 * watched.COMMON_DIR_BYTES):
             (git_dir / "commondir").write_bytes(said)
-            assert tamper.common_dir(str(git_dir)) is None
-            assert tamper.git_sources(str(git_dir)) == [str(git_dir)]
+            assert watched.common_dir(str(git_dir)) is None
+            assert watched.git_sources(str(git_dir)) == [str(git_dir)]
         (git_dir / "commondir").unlink()
         os.mkfifo(git_dir / "commondir")
-        assert tamper.common_dir(str(git_dir)) is None
+        assert watched.common_dir(str(git_dir)) is None
         (git_dir / "commondir").unlink()
         (git_dir / "commondir").write_text(".\n")
-        assert tamper.git_sources(str(git_dir)) == [str(git_dir)]
+        assert watched.git_sources(str(git_dir)) == [str(git_dir)]
 
     def test_a_submodule_told_to_read_another_directory_is_reported(self):
         module = self.project / ".git" / "modules" / "one"
@@ -238,7 +241,7 @@ class TamperingTest(LauncherTest):
         del fields["projects"], fields["own_projects"]
         saved = tamper.HostCheck.from_fields(fields)
         (self.transcripts.parent / "-home-me-other").mkdir(parents=True)
-        assert tamper.planted_projects([], (), str(self.home / ".claude"))
+        assert tampered.planted_projects([], (), str(self.home / ".claude"))
         with unittest.mock.patch.object(tamper, "report_projects") as reported:
             saved.report()
         reported.assert_not_called()
@@ -246,9 +249,9 @@ class TamperingTest(LauncherTest):
     def test_more_projects_than_are_told_apart_is_said(self):
         claude = str(self.home / ".claude")
         (self.transcripts.parent / "-home-me-other").mkdir(parents=True)
-        with unittest.mock.patch.object(tamper, "MOST_PROJECTS", 0):
-            assert tamper.project_names(claude) is None
-            assert tamper.planted_projects([], (), claude) is None
+        with unittest.mock.patch.object(watched, "MOST_PROJECTS", 0):
+            assert watched.project_names(claude) is None
+            assert tampered.planted_projects([], (), claude) is None
 
     def test_a_memory_as_it_was_is_not_reported(self):
         memory = self.transcripts / "memory"
@@ -479,18 +482,18 @@ class LauncherItselfTest:
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(name)
         cleanup.enter_context(
-            unittest.mock.patch.object(tamper, "CHECKOUT_DIR", str(self.checkout))
+            unittest.mock.patch.object(watched, "CHECKOUT_DIR", str(self.checkout))
         )
 
     def changed(self, directories: list[str]) -> list[str]:
-        before = tamper.build_fingerprint(directories)
+        before = watched.build_fingerprint(directories)
         with open(self.checkout / "docker" / "allowed-domains.txt", "a") as allowed:
             allowed.write(".example.org\n")
         with open(self.checkout / "claude_airlock" / "cli.py", "a") as module:
             module.write("import os\n")
         (self.checkout / "claude_airlock" / "__pycache__" / "new.pyc").touch()
         (self.checkout / "README.md").write_text("more\n")
-        return tamper.differing(before, tamper.build_fingerprint(directories))
+        return tampered.differing(before, watched.build_fingerprint(directories))
 
     def test_what_a_session_changed_of_the_launcher_is_named(
         self, subtests: pytest.Subtests, capsys: pytest.CaptureFixture[str]
@@ -502,13 +505,13 @@ class LauncherItselfTest:
         # The checkout as the project, in it, and a part of it
         for mounted in (self.checkout, self.checkout.parent, self.checkout / "docker"):
             with subtests.test(mounted=mounted.name):
-                assert tamper.reaches_launcher([str(mounted)])
+                assert watched.reaches_launcher([str(mounted)])
                 assert self.changed([str(mounted)]) == own
-        before = tamper.build_fingerprint([str(self.checkout)])
+        before = watched.build_fingerprint([str(self.checkout)])
         (self.checkout / "bin" / "claude-airlock").write_text("#!/bin/sh\n")
         (self.checkout / "Makefile").write_text("all:\n")
-        tamper.report_build_changes(
-            before, tamper.build_fingerprint([str(self.checkout)])
+        tampered.report_build_changes(
+            before, watched.build_fingerprint([str(self.checkout)])
         )
         said = capsys.readouterr().err
         itself, _, tools = said.partition("these files that your tools run")
@@ -522,17 +525,17 @@ class LauncherItselfTest:
     ):
         project = tmp_path / "code" / "other"
         project.mkdir()
-        assert not tamper.reaches_launcher([str(project)])
+        assert not watched.reaches_launcher([str(project)])
         assert self.changed([str(project)]) == []
         # By where a directory leads
         (project / "link").symlink_to(self.checkout)
-        assert tamper.reaches_launcher([str(project / "link")])
+        assert watched.reaches_launcher([str(project / "link")])
 
     def test_a_name_made_to_drive_the_terminal_does_not(
         self, capsys: pytest.CaptureFixture[str]
     ):
         hook = "/p/.claude/hooks/\x1b[1A\x1b[2Kx\nclaude-airlock: all is well"
-        tamper.report_tampering({}, {hook: "1"})
+        tampered.report_tampering({}, {hook: "1"})
         said = capsys.readouterr().err
         assert "\x1b" not in said
         assert "  /p/.claude/hooks/[1A[2Kx\\nclaude-airlock: all is well\n" in said
@@ -550,8 +553,10 @@ class BoundedCheckTest:
             file.write_text(name)
 
     def test_the_files_of_a_tree_are_in_one_order(self):
-        found = tamper.tree_files(str(self.root), {})
-        names = [os.path.relpath(path, self.root) for path in found]
+        whole = bounded.tree_files(str(self.root))
+        names = [os.path.relpath(path, self.root) for path in whole.found]
+        # All of it, and said to be
+        assert not whole.cut
         assert names == ["a.md", "b/1.md", "b/2.md", "c/deep/3.md"]
 
     def test_a_file_lost_among_too_many_directories_says_the_rest_is_unwatched(self):
@@ -560,40 +565,43 @@ class BoundedCheckTest:
         skills = self.root.parent / "skills"
         for number in range(6):
             (skills / f"s{number}").mkdir(parents=True)
+        cut = bounded.tree_files(str(skills), most=4)
+        assert (cut.found, cut.cut) == ([], True)
+        # What was left out goes where a change to it shows
         before: dict[str, str] = {}
-        assert tamper.tree_files(str(skills), before, most=4) == []
+        assert cut.into(before) == []
         assert before == {f"{skills}: more than 4 files, the rest": "unwatched"}
         deep = self.root.parent / "deep"
         (deep / "a" / "b" / "c" / "d").mkdir(parents=True)
         (deep / "a" / "b" / "c" / "d" / "SKILL.md").touch()
         looked: dict[str, str] = {}
-        assert tamper.tree_files(str(deep), looked, most=2) == []
+        assert bounded.tree_files(str(deep), most=2).into(looked) == []
         assert looked == {f"{deep}: more than 2 files, the rest": "unwatched"}
 
     def test_a_tree_with_too_many_files_says_the_rest_is_unwatched(self):
         fingerprint: dict[str, str] = {}
-        found = tamper.tree_files(str(self.root), fingerprint, most=2)
+        found = bounded.tree_files(str(self.root), most=2).into(fingerprint)
         assert [Path(path).name for path in found] == ["a.md", "1.md"]
         assert fingerprint == {f"{self.root}: more than 2 files, the rest": "unwatched"}
         # And nothing is said of one that has no more than are watched
         fingerprint = {}
-        assert len(tamper.tree_files(str(self.root), fingerprint, 4)) == 4
+        assert len(bounded.tree_files(str(self.root), 4).into(fingerprint)) == 4
         assert fingerprint == {}
 
     def test_no_more_is_read_than_the_check_may_and_a_change_still_shows(self):
-        paths = tamper.tree_files(str(self.root), {})
-        with unittest.mock.patch.object(tamper, "MOST_HASHED_BYTES", 10):
+        paths = bounded.tree_files(str(self.root)).found
+        with unittest.mock.patch.object(bounded, "MOST_HASHED_BYTES", 10):
             before: dict[str, str] = {}
-            tamper.hash_files(paths, before)
+            bounded.hash_files(paths, before)
             unread = [path for path, said in before.items() if "not read" in said]
             assert [Path(path).name for path in unread] == ["2.md", "3.md"]
             again: dict[str, str] = {}
-            tamper.hash_files(paths, again)
+            bounded.hash_files(paths, again)
             assert before == again
             os.utime(unread[0], ns=(1, 1))
             after: dict[str, str] = {}
-            tamper.hash_files(paths, after)
-        assert tamper.differing(before, after) == [unread[0]]
+            bounded.hash_files(paths, after)
+        assert tampered.differing(before, after) == [unread[0]]
 
     def test_no_more_submodules_are_looked_for_than_are_watched(self):
         modules = self.root / "modules"
@@ -601,8 +609,10 @@ class BoundedCheckTest:
             (modules / f"m{number}").mkdir(parents=True)
             (modules / f"m{number}" / "HEAD").touch()
         fingerprint: dict[str, str] = {}
-        with unittest.mock.patch.object(tamper, "MOST_MODULES", 2):
-            found = tamper.module_git_dirs(str(modules), fingerprint)
+        with unittest.mock.patch.object(bounded, "MOST_MODULES", 2):
+            cut = bounded.module_git_dirs(str(modules))
+        assert cut.cut
+        found = cut.into(fingerprint)
         # Which ones is the order the directory is read in, not the same on
         # every filesystem: only so many of it are read
         assert len(found) == 2

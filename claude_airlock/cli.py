@@ -35,6 +35,7 @@ from .sandbox.asked_hosts import hosts_asked
 from .sandbox.claude_args import has_a_conversation, resumed_args
 from .sandbox.egress_proxy import start_egress_proxy
 from .sandbox.ending import Ending, ending_passed_on, interrupts_held
+from .sandbox.fingerprint import reaches_launcher
 from .sandbox.history import history_args
 from .sandbox.home import prepare_home, protect_config_args
 from .sandbox.image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
@@ -65,7 +66,7 @@ from .sandbox.session import (
     session_args,
 )
 from .sandbox.socket_proxy import socket_proxy_args
-from .sandbox.tamper import PendingCheck, reaches_launcher
+from .sandbox.tamper import PendingCheck
 from .settings import (
     CHECKOUT_DIR,
     NAME,
