@@ -268,8 +268,12 @@ do on its own, also when something it read told it to:
   MCP server a session adds there is started by the next session of
   another project. The launcher says so when the session ends, it does
   not prevent it.
-- The egress allowlist includes GitHub, so with a forwarded SSH agent or a
-  `GH_TOKEN` a session can still push data out to a repository or gist.
+- The egress allowlist limits what a session can reach, not what it can
+  send there. GitHub, npm and Anthropic's API, all on the list, take
+  uploads from whoever holds a token, and a session needs none of yours:
+  what it read can come with one of its own, to push to a repository or
+  a gist, or to publish a package. With a forwarded SSH agent or a
+  `GH_TOKEN` it does so as you.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
   are readable.
 
