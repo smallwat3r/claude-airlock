@@ -615,6 +615,18 @@ class BoundedCheckTest:
             bounded.hash_files(paths, after)
         assert tampered.differing(before, after) == [unread[0]]
 
+    def test_a_file_read_in_part_still_shows_what_changed_past_it(self):
+        file = self.root / "a.md"
+        file.write_bytes(b"x" * 20)
+        with unittest.mock.patch.object(bounded, "HASHED_BYTES", 10):
+            before = bounded.file_hash(str(file))
+            assert bounded.file_hash(str(file)) == before
+            # As long as it was, and written over where it is not read
+            with file.open("r+b") as held:
+                held.seek(15)
+                held.write(b"y")
+            assert bounded.file_hash(str(file)) != before
+
     def test_no_more_submodules_are_looked_for_than_are_watched(self):
         modules = self.root / "modules"
         for number in range(4):

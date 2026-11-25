@@ -218,8 +218,8 @@ submodules of 1000 git directories, and 1 GB read in all. What is past a
 count is said as `the rest`, unwatched, when a session made it so, and
 so is a watched directory with more entries or more directories below it
 than that. A file
-past the size is not read, and still told from one written since by when
-it changed.
+past 64 MB is read that far, one past what is read in all is not read:
+both are still told from one written since by when they changed.
 
 A session that ends without its launcher, a killed terminal say, is
 checked by the next `claude-airlock` launch instead.

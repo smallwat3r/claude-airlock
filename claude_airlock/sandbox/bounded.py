@@ -67,9 +67,11 @@ def sha256_hex(data: bytes) -> str:
 
 def file_hash(path: str) -> str:
     """Hash of a file, of a link where it points and what is there. Of a
-    file past HASHED_BYTES, its start and its size. What is no plain file
-    is unreadable, and is not opened to find out: a pipe would have the
-    check wait for whoever writes to it."""
+    file past HASHED_BYTES, its start and what tells it from one written
+    since, as file_stamp does of a file that is not read: its size alone
+    would not tell of what was written over past the start. What is no
+    plain file is unreadable, and is not opened to find out: a pipe would
+    have the check wait for whoever writes to it."""
     digest = hashlib.sha256()
     try:
         if os.path.islink(path):
@@ -85,7 +87,8 @@ def file_hash(path: str) -> str:
                 digest.update(chunk)
                 left -= len(chunk)
             if left == 0:
-                digest.update(b"size:%d" % os.fstat(file.fileno()).st_size)
+                # Of the file that was read, not of a link that led to it
+                digest.update(_stamp(os.fstat(file.fileno())).encode())
     except OSError:
         return "unreadable"
     return digest.hexdigest()
@@ -122,9 +125,12 @@ def file_stamp(path: str) -> str:
     the trees with too much in them to hash at every start and end of a
     session."""
     try:
-        about = os.lstat(path)
+        return _stamp(os.lstat(path))
     except OSError:
         return "unreadable"
+
+
+def _stamp(about: os.stat_result) -> str:
     return f"{about.st_ino}:{about.st_size}:{about.st_mtime_ns}:{about.st_ctime_ns}"
 
 
