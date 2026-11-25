@@ -98,10 +98,10 @@ class Watcher(Sidecar):
         return watcher_started(copied)
 
     def nothing_recorded(self) -> None:
-        say_not_recorded(self)
+        _say_not_recorded(self)
 
 
-def start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watcher:
+def _start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watcher:
     """Start the sidecar in the namespaces of a session that is up: its
     processes', and its network's, which is owner's (the session, or its
     capture sidecar). It runs the sandbox image, which has Python, as root
@@ -158,7 +158,7 @@ def watcher_started(record: Path) -> bool:
         return False
 
 
-def say_not_recorded(watcher: Watcher) -> None:
+def _say_not_recorded(watcher: Watcher) -> None:
     """Say that a session's processes were not recorded, with what its
     watcher had to say for itself. Said when the session is over: while it
     runs the terminal is the session's."""
@@ -171,7 +171,7 @@ def say_not_recorded(watcher: Watcher) -> None:
     )
 
 
-def watch_when_up(
+def _watch_when_up(
     host: Host,
     session: str,
     owner: str,
@@ -183,7 +183,7 @@ def watch_when_up(
     namespace can only be joined once it is there, by when the launcher
     is waiting on the session, hence the thread."""
     if wait_for(lambda: container_running(session), stop):
-        started.append(start_watcher(host, session, owner, image_tag))
+        started.append(_start_watcher(host, session, owner, image_tag))
 
 
 @contextmanager
@@ -197,7 +197,7 @@ def processes_recorded(
         return
     started: list[Watcher] = []
     try:
-        with in_background(watch_when_up, host, session, owner, image_tag, started):
+        with in_background(_watch_when_up, host, session, owner, image_tag, started):
             yield
     finally:
         for watcher in started:

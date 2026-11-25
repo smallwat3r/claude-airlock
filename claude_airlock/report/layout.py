@@ -96,7 +96,7 @@ STYLES = {
 }
 
 
-def styled_as(event: Event) -> str:
+def _styled_as(event: Event) -> str:
     """What an event takes its style from, among STYLES: what it is,
     unless it is the call of a tool named as a kind is. That one is in
     no style of the launcher's own lines, which it is not."""
@@ -165,7 +165,7 @@ def prefixed(start: str, texts: list[str]) -> list[str]:
     ]
 
 
-def header_lines(texts: list[str], style: str = "") -> list[Shown]:
+def _header_lines(texts: list[str], style: str = "") -> list[Shown]:
     """Texts of the launcher's own as header lines, in a style when
     given one. Each is one line and is cleaned here, whatever was done
     to it before: a text of the launcher's is as a rule said about
@@ -184,7 +184,7 @@ def header_with(start: str, rest: str, colour: bool) -> Shown:
     return Shown((painted(DIM, line) if colour else line) + rest)
 
 
-def use_colour(env: Mapping[str, str]) -> bool:
+def _use_colour(env: Mapping[str, str]) -> bool:
     """Whether the lines are coloured: on a terminal, unless NO_COLOR says
     not to (no-color.org), and anywhere when FORCE_COLOR asks for it, as a
     shell buffer of Emacs may want, which is not a terminal but shows
@@ -234,7 +234,7 @@ class Layout:
     @classmethod
     def for_output(cls, env: Mapping[str, str]) -> Layout:
         """The layout for where the output goes."""
-        return cls(use_colour(env), sys.stdout.isatty())
+        return cls(_use_colour(env), sys.stdout.isatty())
 
     @property
     def columns(self) -> str:
@@ -245,7 +245,7 @@ class Layout:
     def header(self, header: list[str], style: str = DIM) -> list[Shown]:
         """Lines about what is shown itself, dimmed in colour unless
         they are to stand out in a style of their own."""
-        return header_lines(header, style if self.colour else "")
+        return _header_lines(header, style if self.colour else "")
 
     def events(self, events: Iterable[Event]) -> list[Shown]:
         """The lines of events that follow each other, see folded."""
@@ -261,7 +261,7 @@ class Layout:
                 self._day = day
                 lines += self.header([labelled("day", day)])
         about = f"{event.who.value:<7}  {shown_what(event.what):<{WHAT_WIDTH}}  "
-        styled = styled_as(event)
+        styled = _styled_as(event)
         style = self.styles.get(styled, "")
         head = self.heads.get(styled, "")
         # Each line with the detail it is of, a detail can hold several
@@ -299,7 +299,7 @@ class Layout:
         extra = self.labels.get(label) if colon else None
         if not head and not extra:
             return painted(style, rest)
-        start = headed(head, start) if head else painted(style, start)
+        start = _headed(head, start) if head else painted(style, start)
         if extra:
             both = together(style, extra)
             bold = together(style, BOLD)
@@ -307,7 +307,7 @@ class Layout:
         return start + painted(style, said)
 
 
-def headed(style: str, about: str) -> str:
+def _headed(style: str, about: str) -> str:
     """Who and what in a style, the columns after them left as they are."""
     name = about.rstrip()
     return painted(style, name) + about[len(name) :]
@@ -334,18 +334,18 @@ def event_json(session: str, event: Event) -> str:
             # to most of what reads it
             return json.dumps({**about, **values}, allow_nan=False)
         except ValueError:
-            return json.dumps({**about, **finite(values)})
+            return json.dumps({**about, **_finite(values)})
     except RecursionError:
         # Nested as deep as could just be read, by either of the two
         return json.dumps({**about, "unreadable": True})
 
 
-def finite(value: Any) -> Any:
+def _finite(value: Any) -> Any:
     """A value with null for each number that JSON has no way to write."""
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
-        return {key: finite(inner) for key, inner in value.items()}
+        return {key: _finite(inner) for key, inner in value.items()}
     if isinstance(value, list):
-        return [finite(inner) for inner in value]
+        return [_finite(inner) for inner in value]
     return value

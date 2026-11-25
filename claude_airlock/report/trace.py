@@ -95,7 +95,7 @@ def removed_events(
     return events
 
 
-def traced_files(host: Host) -> list[Path]:
+def _traced_files(host: Host) -> list[Path]:
     """The transcripts a trace can be of, the latest session first: the
     project's, and those the launcher has a copy of that are no longer
     there, each by where it was. A session that removed its transcript is
@@ -113,7 +113,7 @@ def traced_files(host: Host) -> list[Path]:
     )
 
 
-def subagents_header(compared: list[Compared]) -> list[str]:
+def _subagents_header(compared: list[Compared]) -> list[str]:
     """The line that says how far the transcripts of a session's
     subagents are to be believed, none for a session without any."""
     if not compared:
@@ -121,7 +121,7 @@ def subagents_header(compared: list[Compared]) -> list[str]:
     return functools.reduce(Compared.with_, compared).header(len(compared))
 
 
-def unread_header(unread: int) -> list[str]:
+def _unread_header(unread: int) -> list[str]:
     """The line that says a session has more transcripts of subagents
     than are read, by how many (see subagents_unread), none when it has
     not: what those subagents ran is in no line below."""
@@ -134,7 +134,7 @@ def unread_header(unread: int) -> list[str]:
     return [labelled("subagents", said)]
 
 
-def taken_out_header(taken: Sequence[Event]) -> list[str]:
+def _taken_out_header(taken: Sequence[Event]) -> list[str]:
     """The line that says what went wrong in what was taken out of
     transcripts that are still there, none when nothing did: the counts
     of the header are of the transcripts as they are now, and a call
@@ -149,7 +149,7 @@ def taken_out_header(taken: Sequence[Event]) -> list[str]:
     return [labelled("transcript", among)]
 
 
-def session_header(
+def _session_header(
     own: ReadTranscript,
     subagents: list[ReadTranscript],
     project_dir: str,
@@ -176,15 +176,15 @@ def session_header(
     return [
         labelled("session", f"{flat(own.path.stem)}  {title(own.known)}"),
         *own.compared.header(),
-        *subagents_header([of_one.compared for of_one in subagents]),
-        *unread_header(unread),
-        *taken_out_header(taken),
+        *_subagents_header([of_one.compared for of_one in subagents]),
+        *_unread_header(unread),
+        *_taken_out_header(taken),
         *([cannot_be_read] if unreadable else []),
         *summary(own.known + theirs, project_dir, planted),
     ]
 
 
-def transcript_side(
+def _transcript_side(
     read: ReadTranscript, project_dir: str, options: WalkOptions
 ) -> tuple[list[Event], list[Event]]:
     """The events of a transcript, with those of what was taken out of
@@ -228,12 +228,12 @@ def session_events(
     noted_rows: list[tuple[str, str]] = []
     noted: list[Event] = []
     walked = WalkOptions(verbose, lines=lines)
-    sides = [transcript_side(read, project_dir, walked) for read in (own, *subagents)]
+    sides = [_transcript_side(read, project_dir, walked) for read in (own, *subagents)]
     told = [event for events, _ in sides for event in events]
     # Counted from the events: what was read is looked through once
     planted = planted_shown(event for _, known in sides for event in known)
     # What was taken out of a transcript that is still there comes after
-    # what it is known to hold, see transcript_side
+    # what it is known to hold, see _transcript_side
     taken = [event for events, known in sides for event in events[len(known) :]]
     unread = subagents_unread(path)
     if times:
@@ -245,7 +245,7 @@ def session_events(
         # Over all of the sessions' stay, as the network is, see stay
         noted_rows, noted = noted_events(host, *recorded.stay)
     header = [
-        *session_header(own, subagents, project_dir, planted, unread, taken),
+        *_session_header(own, subagents, project_dir, planted, unread, taken),
         *(
             labelled("sandbox", start_summary(event))
             for event in noted
@@ -308,12 +308,12 @@ def session_rows(files: list[Path], host: Host | None = None) -> list[tuple[Path
     return [(path, line) for _, path, line in rows]
 
 
-def list_sessions(files: list[Path], host: Host | None = None) -> str:
+def _list_sessions(files: list[Path], host: Host | None = None) -> str:
     """One line per session, see session_rows."""
     return "".join(line + "\n" for _, line in session_rows(files, host))
 
 
-def show(text: str, colour: bool = False) -> None:
+def _show(text: str, colour: bool = False) -> None:
     """Through the pager on a terminal, as it is when piped."""
     if sys.stdout.isatty():
         if colour and "R" not in os.environ.get("LESS", ""):
@@ -330,14 +330,14 @@ def trace(host: Host, args: list[str]) -> int:
     Lines, all of it or what --only and --failed choose. "list" lists
     them instead."""
     options, names, chosen = trace_options(args, ("--verbose", "--json"))
-    files = traced_files(host)
+    files = _traced_files(host)
     if names == ["list"]:
-        show(list_sessions(files, host))
+        _show(_list_sessions(files, host))
         return 0
     path = picked_session(files, names[0]) if names else files[0]
     if "--json" in options:
-        show(render_json(path, host, chosen))
+        _show(render_json(path, host, chosen))
     else:
         layout = Layout.for_output(os.environ)
-        show(render(path, host, "--verbose" in options, layout, chosen), layout.colour)
+        _show(render(path, host, "--verbose" in options, layout, chosen), layout.colour)
     return 0

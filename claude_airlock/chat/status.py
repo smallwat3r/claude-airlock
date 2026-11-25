@@ -162,7 +162,7 @@ class Sandbox:
     @classmethod
     def started(cls, name: str, start: Start, home: str) -> Sandbox:
         """The sandbox of a session of that name, started so."""
-        dirs = tuple(home_relative(mounted, home) for mounted in start.dirs)
+        dirs = tuple(_home_relative(mounted, home) for mounted in start.dirs)
         return cls(name, start.net_filter, start.asks, start.open, dirs)
 
     def parts(self) -> list[Part]:
@@ -181,19 +181,19 @@ class Sandbox:
         return parts
 
 
-def home_relative(path: str, home: str) -> str:
+def _home_relative(path: str, home: str) -> str:
     """A path as the shell shortens it, ~ for the home directory."""
     return "~" + path[len(home) :] if path.startswith(home + "/") else path
 
 
-def used_style(percent: float) -> str:
+def _used_style(percent: float) -> str:
     """How much of a limit or of the context is used, as its colour."""
     if percent >= ALARM_AT:
         return RED
     return YELLOW if percent >= WARN_AT else DIM
 
 
-def starts_again(resets: float, now: float, dated: bool = False) -> str:
+def _starts_again(resets: float, now: float, dated: bool = False) -> str:
     """When a window starts again, as short as tells it apart: the hour
     within a day, with the day of the week further off. Dated, the day
     of the month too, for what is said once and not kept in sight."""
@@ -231,8 +231,8 @@ def limit_parts(
         text = f"{WINDOWS[kind]}:{used:.0f}% used"
         resets = window.get("resets_at")
         if resets and (kind == SHORT or used >= WARN_AT):
-            text += " " + starts_again(resets, now)
-        parts.append((used_style(used), text))
+            text += " " + _starts_again(resets, now)
+        parts.append((_used_style(used), text))
     return parts
 
 
@@ -247,8 +247,8 @@ def more_said(
     if usage.window and usage.context:
         said.append(f"context {tokens(usage.context)} of {tokens(usage.window)}")
     again = [
-        f"{WINDOWS[kind]} {starts_again(window['resets_at'], now, dated=True)}"
-        for kind, window in current(limits, model_of(session), now)
+        f"{WINDOWS[kind]} {_starts_again(window['resets_at'], now, dated=True)}"
+        for kind, window in current(limits, _model_of(session), now)
         if window.get("resets_at")
     ]
     if again:
@@ -256,7 +256,7 @@ def more_said(
     return said
 
 
-def model_of(session: Session) -> str:
+def _model_of(session: Session) -> str:
     """The model of a session by the name Claude Code shows, empty until
     claude named it."""
     return session.chosen or (display_name(session.model) if session.model else "")
@@ -267,7 +267,7 @@ def status_parts(
 ) -> list[Part]:
     """The parts of the status, in the order they are shown."""
     parts: list[Part] = []
-    model = model_of(session)
+    model = _model_of(session)
     if model:
         parts.append((BOLD, model))
     if session.effort:
@@ -281,7 +281,7 @@ def status_parts(
         parts.append((DIM, f"mode:{session.mode}"))
     if usage.window and usage.context:
         used = min(100, round(100 * usage.context / usage.window))
-        parts.append((used_style(used), f"ctx:{used}%"))
+        parts.append((_used_style(used), f"ctx:{used}%"))
     parts += limit_parts(limits, model)
     if usage.spent:
         parts.append((DIM, f"${usage.spent:.2f}"))

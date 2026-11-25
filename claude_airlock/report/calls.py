@@ -74,7 +74,7 @@ def command_lines(command: object) -> list[str]:
     return lines[:-1] if len(lines) > 1 and not lines[-1] else lines
 
 
-def bash_details(
+def _bash_details(
     tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
     """A command: what ran, why (the reason Claude gave for it) and where,
@@ -199,7 +199,7 @@ def edit_diff(tool_input: dict, verbose: bool = True) -> list[str]:
     return diff
 
 
-def file_details(
+def _file_details(
     name: str,
     path: str,
     tool_input: dict,
@@ -224,7 +224,7 @@ def file_details(
     return [about, *changes]
 
 
-def todo_details(todos: list, verbose: bool) -> list[str]:
+def _todo_details(todos: list, verbose: bool) -> list[str]:
     """The list of what claude set out to do, as how far it is: how many
     are done and the one it is at. Each of them with --verbose."""
     listed = [todo for todo in todos if isinstance(todo, dict)]
@@ -243,7 +243,7 @@ def todo_details(todos: list, verbose: bool) -> list[str]:
     ]
 
 
-def question_details(questions: list) -> list[str]:
+def _question_details(questions: list) -> list[str]:
     """What claude asks the user, a line for each question: its options
     are put with it where it is answered, and are in --json."""
     return [
@@ -266,22 +266,22 @@ def call_details(
     and is not done for lines that no one is shown."""
     path = file_path(tool_input)
     if name == "Bash":
-        return bash_details(tool_input, cwd, project_dir, verbose)
+        return _bash_details(tool_input, cwd, project_dir, verbose)
     if name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
-        return todo_details(tool_input["todos"], verbose)
+        return _todo_details(tool_input["todos"], verbose)
     if path is not None:
-        return file_details(name, path, tool_input, project_dir, verbose, diffed)
+        return _file_details(name, path, tool_input, project_dir, verbose, diffed)
     if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
-        return question_details(tool_input["questions"])
+        return _question_details(tool_input["questions"])
     # Any other tool: its arguments as they are
     return [
         line
         for key, value in tool_input.items()
-        for line in clip(argument_lines(flat(key), clean(value)), verbose)
+        for line in clip(_argument_lines(flat(key), clean(value)), verbose)
     ]
 
 
-def told_keys(name: str, tool_input: dict) -> set[str] | None:
+def _told_keys(name: str, tool_input: dict) -> set[str] | None:
     """The arguments of a call that call_details tells of with all they
     hold, none when it tells of every one: a call it has a way of its
     own to describe is described by some of them."""
@@ -306,18 +306,18 @@ def call_whole(name: str, tool_input: dict, project_dir: str) -> list[str]:
     and what is allowed is all of it. Said too when an argument holds
     characters that are not shown, which would be written or run with
     the rest."""
-    told = told_keys(name, tool_input)
+    told = _told_keys(name, tool_input)
     lines = call_details(name, tool_input, None, project_dir, True)
     for key, value in tool_input.items():
         if told is not None and key not in told:
-            lines += argument_lines(flat(key), clean(value))
+            lines += _argument_lines(flat(key), clean(value))
     unseen = [flat(key) for key, value in tool_input.items() if holds_unseen(value)]
     if unseen:
         lines.append(f"{UNSEEN_FLAG} in {', '.join(unseen)}")
     return lines
 
 
-def argument_lines(key: str, value: str) -> list[str]:
+def _argument_lines(key: str, value: str) -> list[str]:
     """An argument of a call as its lines, each under its name: a line
     of a value is the model's to write, and one that stood alone could
     read as a line of the report (a result, a file outside the project)."""
@@ -325,7 +325,7 @@ def argument_lines(key: str, value: str) -> list[str]:
     return [f"{key}: {first}", *(f"{key}:   {line}" for line in more)]
 
 
-def changed_details(
+def _changed_details(
     changed: tuple[ChangedFile, ...], verbose: bool
 ) -> list[tuple[str, bool]]:
     """The lines for the files a command changed, each with whether it
@@ -353,7 +353,7 @@ def changed_details(
     return lines
 
 
-def result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, bool]]:
+def _result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, bool]]:
     """The lines for how a tool call ended and how much it put out, each
     with whether it tells of what went wrong: how a call ended that
     failed or was refused, a file changed outside the project, and each
@@ -394,13 +394,13 @@ def result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, bool
         kept, held = flat(ended.output_kept), ended.output_size
         said = f"output kept: {kept}" + (f" ({size(held)})" if held else "")
         lines.append((said, False))
-    return lines + changed_details(ended.changed, verbose)
+    return lines + _changed_details(ended.changed, verbose)
 
 
 def tell_result(event: Event, ended: Outcome | None, verbose: bool) -> None:
     """Add to an event the lines for how a tool call ended, see
-    result_details, and whether that tells of something gone wrong."""
-    for line, alert in result_details(ended, verbose):
+    _result_details, and whether that tells of something gone wrong."""
+    for line, alert in _result_details(ended, verbose):
         event.say(line, alert)
     if ended is not None and ended.wrong:
         event.went_wrong()
@@ -435,10 +435,10 @@ def call_event(
     if name in FILE_TOOLS and path is not None:
         fields["outside_project"] = outside(path, project_dir)
         if fields["outside_project"]:
-            # The line that names the file, see file_details
+            # The line that names the file, see _file_details
             alerts.add(0)
     # After the arguments, a call is named by the first of its lines
-    for key, plugin in plugin_called(name, tool_input).items():
+    for key, plugin in _plugin_called(name, tool_input).items():
         fields[key] = plugin
         details.append(f"{PLUGIN_SAID[key]}: {plugin}")
     wrong = Wrong.PART if alerts else Wrong.NO
@@ -447,7 +447,7 @@ def call_event(
     )
 
 
-def plugin_called(name: str, tool_input: dict) -> dict[str, str]:
+def _plugin_called(name: str, tool_input: dict) -> dict[str, str]:
     """The plugin a tool call is of, by what tells it: the plugin of the
     skill it runs, or the server of a plugin whose tool it is. Empty for
     a call that is of none. As the session named them, like the call."""

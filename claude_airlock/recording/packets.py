@@ -131,7 +131,7 @@ def is_loopback(address: str) -> bool:
     return address.startswith("127.") or address == "::1"
 
 
-def ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
+def _ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
     """The IP packet a captured frame carries, whether the session sent it
     and the version of IP it is, 4 or 6. Raises NotThis for a frame that
     carries something else. An Ethernet frame does not say who sent it, it
@@ -176,7 +176,7 @@ class IpHeader:
     later_fragment: bool
 
 
-def ipv4_header(datagram: bytes) -> IpHeader:
+def _ipv4_header(datagram: bytes) -> IpHeader:
     ip = Cursor(datagram)
     header_length = (ip.number(1) & 0x0F) * 4
     ip.skip(1)  # service
@@ -191,7 +191,7 @@ def ipv4_header(datagram: bytes) -> IpHeader:
     return IpHeader(protocol, source, destination, header_length, length, later)
 
 
-def ipv6_header(datagram: bytes) -> IpHeader:
+def _ipv6_header(datagram: bytes) -> IpHeader:
     """The IPv6 header, and the headers after it that come ahead of the
     transport's: a session can put those there, and what it sends must
     not go unread for it."""
@@ -228,8 +228,8 @@ def ipv6_header(datagram: bytes) -> IpHeader:
 def parse_packet(when: float, link_type: int, frame: bytes) -> Packet:
     """A captured frame as a packet. Raises NotThis unless it is IPv4 or
     IPv6, whole as far as its headers go."""
-    datagram, sent, version = ip_in_frame(link_type, frame)
-    ip = ipv4_header(datagram) if version == 4 else ipv6_header(datagram)
+    datagram, sent, version = _ip_in_frame(link_type, frame)
+    ip = _ipv4_header(datagram) if version == 4 else _ipv6_header(datagram)
     carried = datagram[ip.transport_at :]
     length = len(carried) if ip.length is None else ip.length
     source_port = port = sequence = acknowledgement = 0

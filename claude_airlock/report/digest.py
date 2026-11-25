@@ -68,7 +68,7 @@ MOST_SAID = 8
 KEPT_DESTINATIONS = 2000
 
 
-def is_model_api(address: str) -> bool:
+def _is_model_api(address: str) -> bool:
     try:
         found = ipaddress.ip_address(address)
     except ValueError:
@@ -76,12 +76,12 @@ def is_model_api(address: str) -> bool:
     return any(found in network for network in MODEL_API)
 
 
-def is_model_host(host: str) -> bool:
+def _is_model_host(host: str) -> bool:
     """The same by name, as a filtered session asks its proxy for it."""
     return host == MODEL_DOMAIN or host.endswith("." + MODEL_DOMAIN)
 
 
-def destinations(capture: Capture) -> dict[str, str]:
+def _destinations(capture: Capture) -> dict[str, str]:
     """Each destination of a capture as it is known by, with how it is
     shown: by its transport, its name (its address without one) and its
     port."""
@@ -97,21 +97,21 @@ def destinations(capture: Capture) -> dict[str, str]:
     return found
 
 
-def uploads(capture: Capture, filtered: bool) -> list[str]:
+def _uploads(capture: Capture, filtered: bool) -> list[str]:
     """The destinations a lot was sent to, the most first. Not the model's
     API, and of a filtered session not the proxy, which everything goes
     through: what went where behind it is not told apart."""
     sent: Counter[str] = Counter()
     for connection in capture.connections:
         behind_proxy = filtered and connection.port == EGRESS_PORT
-        if not behind_proxy and not is_model_api(connection.address):
+        if not behind_proxy and not _is_model_api(connection.address):
             where = reached(
                 capture, connection.address, connection.port, "tcp", connection.when
             )
             # None of one left open, or reset by the other end: not known
             sent[where] += connection.sent or 0
     for flow in capture.flows:
-        if not is_model_api(flow.address):
+        if not _is_model_api(flow.address):
             where = reached(capture, flow.address, flow.port, flow.transport, flow.when)
             sent[where] += flow.sent
     return [
@@ -121,7 +121,7 @@ def uploads(capture: Capture, filtered: bool) -> list[str]:
     ]
 
 
-def last_reached(noted: object) -> float:
+def _last_reached(noted: object) -> float:
     """When a destination was last reached as the record has it, long ago
     for what is not a time."""
     return float(noted) if isinstance(noted, (int, float)) else 0.0
@@ -139,7 +139,7 @@ def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
         known: dict[str, object] = dict(recorded) if isinstance(recorded, dict) else {}
         new = [shown for key, shown in found.items() if key not in known]
         known.update(dict.fromkeys(found, round(time.time())))
-        latest = sorted(known.items(), key=lambda item: last_reached(item[1]))
+        latest = sorted(known.items(), key=lambda item: _last_reached(item[1]))
         projects[host.project_dir] = dict(latest[-KEPT_DESTINATIONS:])
         # Under another name, then given the record's, see write_whole:
         # cut short where it is, the record would be left empty by a
@@ -150,7 +150,7 @@ def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
     return [] if first else new
 
 
-def headed(heading: str, items: list[str]) -> list[str]:
+def _headed(heading: str, items: list[str]) -> list[str]:
     """A heading and the first few of what it is about, none without any."""
     if not items:
         return []
@@ -162,7 +162,7 @@ def headed(heading: str, items: list[str]) -> list[str]:
     ]
 
 
-def network_lines(host: Host, recorded: Recorded) -> list[str]:
+def _network_lines(host: Host, recorded: Recorded) -> list[str]:
     """What the captures and the process records of a session's
     containers give."""
     lines: list[str] = []
@@ -182,7 +182,7 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
             waited = dict.fromkeys(
                 flat(listener.at) for listener in record.listeners if listener.open
             )
-            lines += headed(
+            lines += _headed(
                 "waited for connections, open to the other sessions on its network:",
                 list(waited),
             )
@@ -198,9 +198,9 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
             )
         if capture is None:
             continue
-        found.update(destinations(capture))
-        lines += uploads(capture, filtered)
-        lines += headed(
+        found.update(_destinations(capture))
+        lines += _uploads(capture, filtered)
+        lines += _headed(
             "lookups that stand out:",
             [flat(f"{lookup.name}: {why}") for why, lookup in capture.flagged],
         )
@@ -215,10 +215,10 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
         if kept.session.dropped:
             lines.append(DROPPED.format(kept.session.dropped))
     new = newly_reached(host, found) if recorded.captured else []
-    return [*headed("reached for the first time from this project:", new), *lines]
+    return [*_headed("reached for the first time from this project:", new), *lines]
 
 
-def denied_lines(recorded: Recorded) -> list[str]:
+def _denied_lines(recorded: Recorded) -> list[str]:
     """What the egress filter's log says of the session: where it sent
     a lot, and what it was refused."""
     begins = recorded.log_begins
@@ -231,7 +231,7 @@ def denied_lines(recorded: Recorded) -> list[str]:
     # of a session whose every connection is to the proxy
     sent: Counter[str] = Counter()
     for request in made:
-        if not request.denied and request.sent and not is_model_host(request.host):
+        if not request.denied and request.sent and not _is_model_host(request.host):
             sent[flat(f"{request.host}:{request.port}")] += request.sent
     return [
         *(
@@ -239,7 +239,7 @@ def denied_lines(recorded: Recorded) -> list[str]:
             for where, count in sent.most_common()
             if count >= LARGE_UPLOAD
         ),
-        *headed(
+        *_headed(
             "refused by the egress filter:",
             [f"{url} x{count}" for url, count in denied.most_common()],
         ),
@@ -247,7 +247,7 @@ def denied_lines(recorded: Recorded) -> list[str]:
     ]
 
 
-def added_since(read: ReadTranscript, length: int) -> list[dict]:
+def _added_since(read: ReadTranscript, length: int) -> list[dict]:
     """The entries a transcript has gained since it was so long, all of
     them when it was not there then. A session that is resumed goes on in
     the transcript of the one before, and what that one did was said when
@@ -261,7 +261,7 @@ def added_since(read: ReadTranscript, length: int) -> list[dict]:
     return read.entries[len(read_entries(read.path, most=length)) :]
 
 
-def transcript_lines(
+def _transcript_lines(
     host: Host, start: float, lengths: Mapping[Path, int] | None = None
 ) -> list[str]:
     """What the transcripts written to since a time say: the files
@@ -269,7 +269,7 @@ def transcript_lines(
     being written to instruct the session, what was taken out of them,
     and how many of a session's subagents have theirs go unread. With
     lengths, how long each was at that time, of what each has gained
-    since (see added_since)."""
+    since (see _added_since)."""
     lines: list[str] = []
     written: list[str] = []
     # Those of the subagents too, what one wrote is in its own
@@ -278,7 +278,7 @@ def transcript_lines(
             continue
         project_dir = project_root(path, host)
         read = ReadTranscript.read(host, path)
-        added = added_since(read, (lengths or {}).get(path, 0))
+        added = _added_since(read, (lengths or {}).get(path, 0))
         written.extend(
             flat(file) for file in written_paths(added) if outside(file, project_dir)
         )
@@ -322,17 +322,17 @@ def transcript_lines(
                 " shows the launcher's copy of it"
             )
     return [
-        *headed("written outside the project:", list(dict.fromkeys(written))),
+        *_headed("written outside the project:", list(dict.fromkeys(written))),
         *lines,
     ]
 
 
-def session_digest(
+def _session_digest(
     host: Host, session: str, start: float, lengths: Mapping[Path, int] | None = None
 ) -> list[str]:
     """The lines about a session of this project that has just ended:
     the container of that name, started at that time. lengths as for
-    transcript_lines."""
+    _transcript_lines."""
     end = time.time()
     sessions = [
         found
@@ -342,9 +342,9 @@ def session_digest(
     recorded = Recorded(host, sessions, start, end)
     noted_rows, _ = noted_events(host, start, end, session)
     return [
-        *network_lines(host, recorded),
-        *denied_lines(recorded),
-        *transcript_lines(host, start, lengths),
+        *_network_lines(host, recorded),
+        *_denied_lines(recorded),
+        *_transcript_lines(host, start, lengths),
         *(f"{about} {said}" for about, said in noted_rows),
     ]
 
@@ -363,7 +363,7 @@ def report_session(
     session ends, and what is left to do then (the check of tamper.py)
     matters more."""
     try:
-        lines = session_digest(host, session, start, lengths)
+        lines = _session_digest(host, session, start, lengths)
     except (OSError, Fatal):
         lines = []
     except Exception as problem:  # noqa: BLE001

@@ -118,7 +118,7 @@ def broken(line: str, columns: int, mark: str) -> list[str]:
     return [*rows, row]
 
 
-def rows_above(text: str, columns: int) -> int:
+def _rows_above(text: str, columns: int) -> int:
     """How many rows a prompt and what is typed after it take above
     the row their end is on. What ends at the edge has its end on the
     row after, as readline writes it."""
@@ -137,7 +137,7 @@ def erased(prompt: str, typed: str, columns: int) -> str:
     *heads, prompt = SGR.sub("", prompt).split("\n")
     # A line of the head that ends at the edge takes no row more: its
     # break goes to the next row
-    above = len(heads) + rows_above(prompt + typed, columns)
+    above = len(heads) + _rows_above(prompt + typed, columns)
     above += sum(max(0, columns_of(row) - 1) // columns for row in heads)
     up = f"\x1b[{above}A" if above else ""
     return f"{up}\r\x1b[J"
@@ -156,7 +156,7 @@ def cursor_back(prompt: str, typed: str, before: str, columns: int) -> str:
     out = " \r" if last and last % columns == 0 else ""
     if before == typed:
         return out
-    up = rows_above(whole, columns) - rows_above(part, columns)
+    up = _rows_above(whole, columns) - _rows_above(part, columns)
     across = columns_of(part.rpartition("\n")[2]) % columns
     out += f"\x1b[{up}A" if up else ""
     return out + "\r" + (f"\x1b[{across}C" if across else "")

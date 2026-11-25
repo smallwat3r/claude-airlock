@@ -29,7 +29,7 @@ class ExtraDir:
     read_only: bool = False
 
 
-def kept_out(host: Host) -> list[str]:
+def _kept_out(host: Host) -> list[str]:
     """The directories of the home that are never a session's to have,
     nor anything in them or around them: the user's keys, and what
     decides how the next session is sandboxed and what it is told, the
@@ -44,7 +44,7 @@ def kept_out(host: Host) -> list[str]:
     ]
 
 
-def reaches(one: str, other: str) -> bool:
+def _reaches(one: str, other: str) -> bool:
     """Whether one of two directories is the other or is inside it,
     either way round: mounting the first brings in the second, or a part
     of it."""
@@ -55,15 +55,15 @@ def reaches(one: str, other: str) -> bool:
 def refuse_unsafe_dir(path: str, host: Host) -> None:
     """Refuse the filesystem root, the home directory or any of its parents:
     mounting one read-write would expose the whole home and defeat the
-    sandbox. And what is kept out of every session, see kept_out, with
+    sandbox. And what is kept out of every session, see _kept_out, with
     the directories around it. By the path as it is written and by where
     it leads, a link to the home directory is the home directory."""
     real = os.path.realpath(path)
     for home, directory in ((host.home, path), (os.path.realpath(host.home), real)):
         if (home.rstrip("/") + "/").startswith(directory.rstrip("/") + "/"):
             raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
-    for kept in kept_out(host):
-        if reaches(path, kept) or reaches(real, os.path.realpath(kept)):
+    for kept in _kept_out(host):
+        if _reaches(path, kept) or _reaches(real, os.path.realpath(kept)):
             raise Fatal(
                 f"refusing to mount {path}: {kept} is not a session's to have,"
                 " it would defeat the sandbox"
@@ -80,7 +80,7 @@ def refuse_links_out(dirs: list[ExtraDir], host: Host) -> None:
     for extra in dirs:
         for root in writable:
             inside = extra.path.startswith(root.rstrip("/") + "/")
-            if inside and within(extra.path, root) is None:
+            if inside and _within(extra.path, root) is None:
                 raise Fatal(
                     f"refusing to mount {extra.path}: it is a link out of {root},"
                     " which a session could have made. Name the directory it"
@@ -88,16 +88,16 @@ def refuse_links_out(dirs: list[ExtraDir], host: Host) -> None:
                 )
 
 
-def absolute_path(raw: str, host: Host) -> str:
+def _absolute_path(raw: str, host: Host) -> str:
     """A path as written by the user made absolute, a leading ~ expanded
     and a relative one taken from the project."""
     expanded = expand_home(raw, host.home)
     return os.path.normpath(os.path.join(host.project_dir, expanded))
 
 
-def resolve_dir(raw: str, host: Host) -> str:
+def _resolve_dir(raw: str, host: Host) -> str:
     """Absolute path of an existing directory."""
-    path = absolute_path(raw, host)
+    path = _absolute_path(raw, host)
     if not os.path.isdir(path):
         raise Fatal(f"not a directory: {raw}")
     return path
@@ -112,7 +112,7 @@ def add_extra_dir(
     session from, another does not give back without a word. The project
     is already mounted, and writable: asked for read-only it is refused,
     there is no session that does not write to it."""
-    path = resolve_dir(raw, host)
+    path = _resolve_dir(raw, host)
     refuse_unsafe_dir(path, host)
     if path == host.project_dir:
         if read_only:
@@ -150,7 +150,7 @@ def configured_extra_dirs(settings: Settings, host: Host) -> list[ExtraDir]:
     return dirs
 
 
-def within(path: str, root: str) -> str | None:
+def _within(path: str, root: str) -> str | None:
     """Where a path is under a directory as that directory is mounted,
     none when it is not under it. By where the two lead, either can be
     reached through a link."""
@@ -174,14 +174,14 @@ def protected_dirs(
     dirs = list(dirs)
     inside: list[str] = []
     for raw in settings.protect:
-        path = absolute_path(raw, host)
-        if within(host.project_dir, path):
+        path = _absolute_path(raw, host)
+        if _within(host.project_dir, path):
             raise Fatal(
                 f"cannot protect {raw}: the project is in it, --add-dir-ro"
                 " mounts a directory read-only"
             )
         roots = [host.project_dir, *(extra.path for extra in dirs)]
-        found = [mounted for mounted in (within(path, r) for r in roots) if mounted]
+        found = [mounted for mounted in (_within(path, r) for r in roots) if mounted]
         if not found:
             continue
         if not os.path.lexists(path):
@@ -199,7 +199,7 @@ def protected_dirs(
     return dirs, inside
 
 
-def held_in_place(
+def _held_in_place(
     inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Sequence[str] = ()
 ) -> list[str]:
     """The directories between each protected path and what it is mounted
@@ -241,8 +241,8 @@ def protect_args(
 ) -> list[str]:
     """The read-only mounts of protected_dirs, on top of what they are
     in, and the mounts that keep them, the directories mounted inside
-    another and the hidden files where they are, see held_in_place."""
-    held = [held_arg(path) for path in held_in_place(inside, host, dirs, hidden)]
+    another and the hidden files where they are, see _held_in_place."""
+    held = [held_arg(path) for path in _held_in_place(inside, host, dirs, hidden)]
     return held + [mount_arg(path, path, "ro,z") for path in inside]
 
 

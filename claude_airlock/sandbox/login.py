@@ -34,7 +34,7 @@ Not all of the file is one for the two. Claude Code keeps the logins
 to the MCP servers in it too (KEPT_APART): those of the host stay on the
 host, a session is given none of the host's servers and is not to read
 what logs into them, and those of the sessions stay in the base, see
-taken_from.
+_taken_from.
 
 Not a boundary: a session can read and replace the login, as it could
 before, with that of another account too, which then is the host's.
@@ -105,7 +105,7 @@ HEX = re.compile(rb"(?:[0-9a-fA-F]{2})+")
 ITEM_WRITTEN = re.compile(rb'"mdat"<timedate>=\S+\s+"(\d{14})Z')
 
 
-def as_one_line(content: bytes) -> bytes:
+def _as_one_line(content: bytes) -> bytes:
     """A login as one line of JSON, in characters security prints as they
     are. One that is no JSON object is left as it is, and one nested
     too deep to write, which is a session's doing."""
@@ -118,7 +118,7 @@ def as_one_line(content: bytes) -> bytes:
         return content
 
 
-def kept_apart(content: bytes | None) -> dict:
+def _kept_apart(content: bytes | None) -> dict:
     """What a store holds that is its own and not the other's, see
     KEPT_APART: nothing when it holds no login, or one that is no JSON
     object."""
@@ -126,7 +126,7 @@ def kept_apart(content: bytes | None) -> dict:
     return {key: held[key] for key in KEPT_APART if key in held} if held else {}
 
 
-def shared_of(content: bytes | None) -> bytes | None:
+def _shared_of(content: bytes | None) -> bytes | None:
     """What of a login is the host's and the sandbox's alike: all of it
     but what is kept apart, as one line of JSON that is the same however
     the login is written. None when nothing is left, one that is no JSON
@@ -143,13 +143,13 @@ def shared_of(content: bytes | None) -> bytes | None:
     return said.encode("ascii") if shared else None
 
 
-def taken_from(own: bytes | None, other: bytes | None) -> bytes | None:
+def _taken_from(own: bytes | None, other: bytes | None) -> bytes | None:
     """What a store is to hold once it takes the login of another: the
     other's, but for what is kept apart, of which it keeps its own and
     takes none. Where neither holds any of that, the other's as it is
     written. None when nothing is left to hold."""
-    mine = kept_apart(own)
-    if not mine and not kept_apart(other):
+    mine = _kept_apart(own)
+    if not mine and not _kept_apart(other):
         return other
     held = json_object(other) if other is not None else {}
     if held is None:
@@ -163,7 +163,7 @@ def taken_from(own: bytes | None, other: bytes | None) -> bytes | None:
     return kept.encode("ascii") if theirs or mine else None
 
 
-def reads_as_login(content: bytes) -> bool:
+def _reads_as_login(content: bytes) -> bool:
     """Whether what a file holds is a login as Claude Code writes one: a
     JSON object, its account at claude.ai, when it has one, an object
     with its tokens as text. Not whose login it is, which nothing in it
@@ -194,19 +194,19 @@ class Login:
     def said(self) -> bytes | None:
         """What it says, the same for two that differ in how they are
         written alone."""
-        return None if self.content is None else as_one_line(self.content)
+        return None if self.content is None else _as_one_line(self.content)
 
     @cached_property
     def fit(self) -> bool:
         """Whether it can be another store's: no login, or what reads
         as one."""
-        return self.content is None or reads_as_login(self.content)
+        return self.content is None or _reads_as_login(self.content)
 
     @cached_property
     def shared(self) -> bytes | None:
         """What of it is carried between the host and the sandbox, see
-        shared_of: two logins are the same when this is."""
-        return shared_of(self.content)
+        _shared_of: two logins are the same when this is."""
+        return _shared_of(self.content)
 
     @cached_property
     def noted(self) -> str:
@@ -242,17 +242,17 @@ class Held:
 
     def take(self, other: Login) -> bool:
         """Make the store hold another login in the place of this one,
-        but for what is kept apart, see taken_from. Not when it was
+        but for what is kept apart, see _taken_from. Not when it was
         written since this one was read, the next look settles that."""
-        kept = taken_from(self.login.content, other.content)
+        kept = _taken_from(self.login.content, other.content)
         return self.store.unchanged(self.login) and self.store.write(kept)
 
 
-def version_of(found: os.stat_result) -> tuple[int, ...]:
+def _version_of(found: os.stat_result) -> tuple[int, ...]:
     return (found.st_ino, found.st_mtime_ns, found.st_size)
 
 
-def as_typed(words: list[str]) -> str | None:
+def _as_typed(words: list[str]) -> str | None:
     """The line that has security take a command and its arguments on
     its input, the options as they are and what they are given between
     quotes. None when it cannot be typed: a word with what the quotes do
@@ -280,7 +280,7 @@ class LoginFile:
             found = os.fstat(file.fileno())
             if found.st_size > MOST_READ:
                 return Login()
-            return Login(file.read(MOST_READ), version_of(found), found.st_mtime_ns)
+            return Login(file.read(MOST_READ), _version_of(found), found.st_mtime_ns)
 
     def unchanged(self, login: Login) -> bool:
         """Whether the file is still the one that was read."""
@@ -288,7 +288,7 @@ class LoginFile:
             found = os.lstat(self.path)
         except OSError:
             return login.content is None
-        return login.content is not None and version_of(found) == login.version
+        return login.content is not None and _version_of(found) == login.version
 
     def write(self, content: bytes | None) -> bool:
         """Make the file hold a login, whole or not at all: by a rename,
@@ -347,7 +347,7 @@ class Keychain:
         """The login in the Keychain, none when it has no such item. A
         Keychain that cannot be read (locked, or the user said no) is an
         error, not a Keychain without a login: that would be a logout."""
-        version = version_of(os.stat(self.path))
+        version = _version_of(os.stat(self.path))
         if self._read is not None and self._read.version == version:
             return self._read
         status, printed = self._ask(
@@ -385,7 +385,7 @@ class Keychain:
         """Whether the Keychain is still the one that was read: no item
         of it was written since."""
         try:
-            return version_of(os.stat(self.path)) == login.version
+            return _version_of(os.stat(self.path)) == login.version
         except OSError:
             return False
 
@@ -399,7 +399,7 @@ class Keychain:
             status, _ = self._ask("delete-generic-password", *self._item(), self.path)
             taken = status in (0, NO_ITEM)
         else:
-            line = as_one_line(content)
+            line = _as_one_line(content)
             taken = self._add(line.hex()) == 0 and self.read().said == line
         if not taken:
             self._refused()
@@ -410,7 +410,7 @@ class Keychain:
         ended. On its input where that can be: its arguments are for
         every process of the host to read."""
         add = ["add-generic-password", "-U", *self._item(), "-X", digits, self.path]
-        typed = as_typed(add)
+        typed = _as_typed(add)
         if typed is not None:
             return self._ask("-i", typed=typed)[0]
         return self._ask(*add)[0]
@@ -452,7 +452,7 @@ class HostLogin:
         return self._held().store.write(content)
 
 
-def user_name() -> str:
+def _user_name() -> str:
     """The user's name as Claude Code takes it for the account of its
     item, empty when there is none to be had."""
     try:
@@ -461,7 +461,7 @@ def user_name() -> str:
         return ""
 
 
-def host_login(host: Host, user: str) -> LoginStore:
+def _host_login(host: Host, user: str) -> LoginStore:
     """Where the host's login is kept: in the file, and on macOS (a home
     with a login Keychain, and security to read it with) where Claude
     Code keeps it there."""
@@ -471,7 +471,7 @@ def host_login(host: Host, user: str) -> LoginStore:
     return file
 
 
-def last_shared(host: Host) -> str | None:
+def _last_shared(host: Host) -> str | None:
     """What was noted of the login the two last had in common, none when
     nothing was."""
     try:
@@ -480,12 +480,12 @@ def last_shared(host: Host) -> str | None:
         return None
 
 
-def note_shared(host: Host, login: Login) -> None:
+def _note_shared(host: Host, login: Login) -> None:
     private_dir(host.state_dir)
     write_whole(host.login_synced_file, login.noted + "\n")
 
 
-def written_last(one: Held, other: Held) -> Held:
+def _written_last(one: Held, other: Held) -> Held:
     """Of two that differ, the one to keep when nothing says which of
     them changed: a login over none, then the later one."""
     if one.login.shared is None or other.login.shared is None:
@@ -498,7 +498,7 @@ class LoginPair:
 
     def __init__(self, host: Host):
         self.host = host
-        self.ours = host_login(host, user_name())
+        self.ours = _host_login(host, _user_name())
         self.theirs = LoginFile(os.path.join(host.sandbox_claude_dir, LOGIN))
         # What this launcher knows to be noted, to note it once
         self.noted: str | None = None
@@ -514,20 +514,20 @@ class LoginPair:
         if ours.login.shared == theirs.login.shared:
             self.note(ours.login)
             return
-        shared = last_shared(self.host)
+        shared = _last_shared(self.host)
         if shared == theirs.login.noted or not theirs.login.fit:
             source = ours
         elif shared == ours.login.noted:
             source = theirs
         else:
-            source = written_last(ours, theirs)
+            source = _written_last(ours, theirs)
         target = theirs if source is ours else ours
         if target.take(source.login):
             self.note(source.login)
 
     def note(self, login: Login) -> None:
         if self.noted != login.noted:
-            note_shared(self.host, login)
+            _note_shared(self.host, login)
             self.noted = login.noted
 
     def settle_quietly(self) -> None:
@@ -540,7 +540,7 @@ class LoginPair:
             pass
 
 
-def keep_settled(pair: LoginPair, stop: threading.Event) -> None:
+def _keep_settled(pair: LoginPair, stop: threading.Event) -> None:
     while not stop.wait(LOOK_EVERY):
         pair.settle_quietly()
     # What the session wrote as it ended
@@ -554,5 +554,5 @@ def login_shared(host: Host) -> Iterator[None]:
     starts logged in when the host is."""
     pair = LoginPair(host)
     pair.settle_quietly()
-    with in_background(keep_settled, pair):
+    with in_background(_keep_settled, pair):
         yield

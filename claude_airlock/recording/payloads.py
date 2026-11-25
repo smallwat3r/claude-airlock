@@ -58,7 +58,7 @@ class Lookup:
     error: str
 
 
-def dns_name(message: bytes, at: Cursor) -> str:
+def _dns_name(message: bytes, at: Cursor) -> str:
     """The name at a cursor in a DNS message, the cursor left after it.
     A name can end in a pointer to the rest of it, elsewhere in the
     message, which is followed without moving the cursor further."""
@@ -103,7 +103,7 @@ def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessag
     reader.skip(4)  # the counts of the two other sections
     if questions != 1:
         raise NotThis
-    name = dns_name(message, reader)
+    name = _dns_name(message, reader)
     asked = reader.number(2)
     reader.skip(2)  # the class asked for
     if not name:
@@ -112,7 +112,7 @@ def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessag
     addresses = []
     try:
         for _ in range(answers if response and answered else 0):
-            dns_name(message, reader)
+            _dns_name(message, reader)
             kind = reader.number(2)
             reader.skip(6)  # class, time to live
             data = reader.take(reader.number(2))

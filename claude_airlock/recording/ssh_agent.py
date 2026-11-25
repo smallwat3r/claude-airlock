@@ -109,40 +109,40 @@ def text(reader: Cursor) -> bytes:
     return reader.take(reader.number(4))
 
 
-def named(name: bytes) -> str:
+def _named(name: bytes) -> str:
     """A name the agent or a session gave, the start of it: a session's
     can be as long as a request, and every one is kept in the record."""
     return name.decode("utf-8", "replace")[:MOST_NAMED]
 
 
-def signed_for(data: bytes) -> str:
+def _signed_for(data: bytes) -> str:
     """What a signature was asked for, from what was to be signed: a
     login says as whom, a signature of a file (a git commit) says for
     what. Anything else is not told apart."""
     try:
         if data.startswith(b"SSHSIG"):
-            return f"a signature for {named(text(Cursor(data, 6)))}"
+            return f"a signature for {_named(text(Cursor(data, 6)))}"
         reader = Cursor(data)
         text(reader)  # what the two ends agreed on, which names the session
         if reader.number(1) != USERAUTH_REQUEST:
             raise NotThis
-        return f"a login as {named(text(reader))}"
+        return f"a login as {_named(text(reader))}"
     except NotThis:
         return "a signature"
 
 
-def kind_of(message: bytes) -> int:
+def _kind_of(message: bytes) -> int:
     """The number a message starts with, which says what it is, see
     AgentMessage. An empty one is none of them."""
     return message[0] if message else 0
 
 
-def passed_on(request: bytes) -> bool:
+def _passed_on(request: bytes) -> bool:
     """Whether a request is one the agent is asked on a session's behalf:
     to list the keys, to sign, and the extension that goes with signing.
     Anything else would change the agent for the user and everything else
     that uses it."""
-    kind = kind_of(request)
+    kind = _kind_of(request)
     if kind in (AgentMessage.LIST, AgentMessage.SIGN):
         return True
     if kind != AgentMessage.EXTENSION:
@@ -154,7 +154,7 @@ def passed_on(request: bytes) -> bool:
 
 
 class AgentDoor:
-    """A socket that passes what it may (see passed_on) on to the SSH agent,
+    """A socket that passes what it may (see _passed_on) on to the SSH agent,
     refuses the rest and notes each request. One connection at a time is
     one request at a time: the agent answers each before it reads the
     next."""
@@ -232,10 +232,10 @@ class AgentDoor:
                     request = read_message(client)
                     if request is None:
                         return
-                    refused_by = "" if passed_on(request) else BY_LAUNCHER
+                    refused_by = "" if _passed_on(request) else BY_LAUNCHER
                     answer = REFUSAL
                     if not refused_by:
-                        agent.sendall(framed(request))
+                        agent.sendall(_framed(request))
                         answered = read_message(agent)
                         if answered is None:
                             return
@@ -249,7 +249,7 @@ class AgentDoor:
                         # when the door is closed
                         self._unnoted = str(problem)
                         answer = REFUSAL
-                    client.sendall(framed(answer))
+                    client.sendall(_framed(answer))
             except OSError:
                 return
 
@@ -259,8 +259,8 @@ class AgentDoor:
         the session's to choose: one that is not what it says it is is
         noted as that. Raises OSError when the record cannot be written,
         a full disk or the like."""
-        kind = kind_of(request)
-        refused = kind_of(answer) == AgentMessage.FAILURE
+        kind = _kind_of(request)
+        refused = _kind_of(answer) == AgentMessage.FAILURE
         said: dict[str, object] = {}
         if refused_by:
             said["by"] = refused_by
@@ -272,7 +272,7 @@ class AgentDoor:
                     did=AgentUse.SIGN.value,
                     key=key,
                     comment=self._comments.get(key, ""),
-                    what=signed_for(text(reader)),
+                    what=_signed_for(text(reader)),
                 )
             elif kind == AgentMessage.LIST:
                 said.update(did=AgentUse.LIST.value, keys=self._listed(answer))
@@ -293,17 +293,17 @@ class AgentDoor:
 
     def _listed(self, answer: bytes) -> int:
         """How many keys the agent listed, their comments remembered."""
-        if kind_of(answer) != AgentMessage.IDENTITIES:
+        if _kind_of(answer) != AgentMessage.IDENTITIES:
             return 0
         reader = Cursor(answer, 1)
         count = reader.number(4)
         for _ in range(min(count, 1000)):
             key = fingerprint(text(reader))
-            self._comments[key] = named(text(reader))
+            self._comments[key] = _named(text(reader))
         return count
 
 
-def framed(message: bytes) -> bytes:
+def _framed(message: bytes) -> bytes:
     """A message of the agent protocol as it is sent, after its length."""
     return len(message).to_bytes(4, "big") + message
 
@@ -312,16 +312,16 @@ def read_message(connection: socket.socket) -> bytes | None:
     """The next message of the agent protocol on a connection, without
     its length, none when the other end is done or sends what is not
     one."""
-    header = read_exactly(connection, 4)
+    header = _read_exactly(connection, 4)
     if header is None:
         return None
     length = int.from_bytes(header, "big")
     if not 0 < length <= AGENT_LONGEST:
         return None
-    return read_exactly(connection, length)
+    return _read_exactly(connection, length)
 
 
-def read_exactly(connection: socket.socket, count: int) -> bytes | None:
+def _read_exactly(connection: socket.socket, count: int) -> bytes | None:
     data = b""
     while len(data) < count:
         more = connection.recv(count - len(data))
@@ -371,7 +371,7 @@ def ssh_agent_door(
     keys with ssh-add -c makes each use ask first. Gives the options the
     session is run with. What the session is given is a socket of the
     launcher's that notes each request and refuses those that are not a
-    session's to make (see passed_on). The agent's own only where no
+    session's to make (see _passed_on). The agent's own only where no
     socket of the host can be listened on for it, on macOS, as the docs
     say: where one can and that fails, the session is not started."""
     found = agent_socket(env) if settings.ssh_agent else None

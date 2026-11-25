@@ -220,7 +220,7 @@ class AskedHosts:
             os.unlink(self._path(Hosts.WAITING, host))
 
 
-def open_once_addressed(asked: AskedHosts, owner: str, stop: threading.Event) -> None:
+def _open_once_addressed(asked: AskedHosts, owner: str, stop: threading.Event) -> None:
     """Have the proxy ask for a session once its address is known, which
     is when its container is up. owner is the container the address
     belongs to: the session, or its capture sidecar."""
@@ -255,7 +255,7 @@ def hosts_asked(
         return
     asked = AskedHosts(host, name)
     try:
-        with in_background(open_once_addressed, asked, owner):
+        with in_background(_open_once_addressed, asked, owner):
             yield asked
     finally:
         asked.close()

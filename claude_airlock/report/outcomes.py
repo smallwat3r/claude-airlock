@@ -68,7 +68,7 @@ class Decision:
     mode of the session letting it run."""
 
     allowed: bool
-    # In the words of Claude Code, see decided
+    # In the words of Claude Code, see _decided
     by: str
 
     def fields(self) -> dict:
@@ -80,7 +80,7 @@ class Decision:
         return values if self.allowed else {**values, "refused": True}
 
 
-def decided(entry: dict) -> Decision | None:
+def _decided(entry: dict) -> Decision | None:
     """Who let a call run or refused it, as the entry of its result says,
     none when the permission mode of the session let it run: that is
     most calls, and the mode is told where it is set. The words for who
@@ -111,11 +111,11 @@ def decided(entry: dict) -> Decision | None:
 
 def refused(entry: dict) -> bool:
     """Whether the entry of a result says its call was not let run."""
-    decision = decided(entry)
+    decision = _decided(entry)
     return decision is not None and not decision.allowed
 
 
-def hunk_lines(hunk: dict) -> list[str]:
+def _hunk_lines(hunk: dict) -> list[str]:
     """A hunk of a diff as its lines, under the line that says where."""
     spans = [counted(hunk.get(key)) for key in HUNK_SPANS]
     given = hunk.get("lines")
@@ -167,7 +167,7 @@ def files_changed(entry: dict, project_dir: str) -> list[ChangedFile]:
             path,
             created=bool(file.get("created")),
             outside=outside(path, project_dir),
-            diff=tuple(line for hunk in hunks for line in hunk_lines(hunk)),
+            diff=tuple(line for hunk in hunks for line in _hunk_lines(hunk)),
         )
     for path in every(noted.get("changedFiles")):
         if isinstance(path, str) and path not in changed:
@@ -306,7 +306,7 @@ def outcome(
             if started and finished
             else None
         ),
-        decision=decided(entry),
+        decision=_decided(entry),
         interrupted=noted.get("interrupted") is True,
         exit_meaning=meaning if isinstance(meaning, str) else "",
         output_kept=output_kept,

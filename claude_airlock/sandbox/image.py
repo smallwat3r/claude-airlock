@@ -58,22 +58,22 @@ class Image:
         return bool(self.language_servers)
 
 
-def text_lines(text: str) -> list[str]:
+def _text_lines(text: str) -> list[str]:
     """Lines of a file, without an empty last one for the final newline."""
     lines = text.split("\n")
     return lines[:-1] if lines[-1] == "" else lines
 
 
-def marked(text: str, marker: str) -> list[str]:
+def _marked(text: str, marker: str) -> list[str]:
     """What follows the marker on each line of a part that starts with it."""
     return [
         line.removeprefix(marker)
-        for line in text_lines(text)
+        for line in _text_lines(text)
         if line.startswith(marker)
     ]
 
 
-def available_features(host: Host) -> list[str]:
+def _available_features(host: Host) -> list[str]:
     names = set()
     for directory in host.feature_dirs:
         for file in Path(directory).glob("*.Dockerfile"):
@@ -96,11 +96,11 @@ def selected_features(settings: Settings, host: Host) -> list[str]:
         lines = features_txt.read_text(encoding="utf-8").split("\n")
         listing = "\n".join(line.split("#", 1)[0] for line in lines)
     else:
-        return available_features(host)
+        return _available_features(host)
     return sorted(set(re.split(r"[,\s]+", listing)) - {""})
 
 
-def feature_file(name: str, host: Host) -> Path:
+def _feature_file(name: str, host: Host) -> Path:
     """Path of the Dockerfile fragment for a feature. The name is validated,
     it ends up in a path and comes from the environment or a config file."""
     if not re.fullmatch(r"[a-z0-9_-]+", name):
@@ -109,11 +109,11 @@ def feature_file(name: str, host: Host) -> Path:
         file = Path(directory, f"{name}.Dockerfile")
         if file.is_file():
             return file
-    available = " ".join(available_features(host))
+    available = " ".join(_available_features(host))
     raise Fatal(f"unknown feature: {name} (available: {available})")
 
 
-def with_required(names: list[str], host: Host) -> list[str]:
+def _with_required(names: list[str], host: Host) -> list[str]:
     """The features with those they require, and those these require in
     turn, sorted like the selection."""
     found: set[str] = set()
@@ -123,8 +123,8 @@ def with_required(names: list[str], host: Host) -> list[str]:
         if name in found:
             continue
         found.add(name)
-        text = feature_file(name, host).read_text(encoding="utf-8")
-        for required in marked(text, REQUIRES_MARKER):
+        text = _feature_file(name, host).read_text(encoding="utf-8")
+        for required in _marked(text, REQUIRES_MARKER):
             pending.extend(required.split())
     return sorted(found)
 
@@ -133,7 +133,7 @@ def language_servers(parts: list[Path], texts: list[str]) -> dict:
     """The language servers the parts declare, by name."""
     servers: dict = {}
     for part, text in zip(parts, texts, strict=True):
-        for line in marked(text, LSP_MARKER):
+        for line in _marked(text, LSP_MARKER):
             try:
                 declared = json.loads(line)
             except ValueError as error:
@@ -146,7 +146,7 @@ def language_servers(parts: list[Path], texts: list[str]) -> dict:
     return servers
 
 
-def lsp_plugin(servers: dict) -> str:
+def _lsp_plugin(servers: dict) -> str:
     """The manifest of the plugin that gives a session the language
     servers of its image."""
     manifest = {
@@ -158,27 +158,27 @@ def lsp_plugin(servers: dict) -> str:
     return json.dumps(manifest, indent=2)
 
 
-def sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
+def _sandbox_claude_md(parts: list[Path], texts: list[str]) -> str:
     """The CLAUDE.md of the image: the template, with the tools the parts
     say they bring in place of its placeholder bullet, which is there to
     be seen when the template is read on its own. The list is made of the
     "# claude-feat-md: " lines of the parts, so it always matches what is
     built."""
     for part, text in zip(parts, texts, strict=True):
-        if marked(text, FORMER_CLAUDE_MD_MARKER):
+        if _marked(text, FORMER_CLAUDE_MD_MARKER):
             raise Fatal(
                 f'{part}: its "{FORMER_CLAUDE_MD_MARKER}" lines are now written'
                 f' "{CLAUDE_MD_MARKER}", rename them'
             )
     template = Path(DOCKERFILE_DIR, "CLAUDE-airlock.md").read_text(encoding="utf-8")
     lines = [
-        line for line in text_lines(template) if not line.startswith("- _Placeholder:")
+        line for line in _text_lines(template) if not line.startswith("- _Placeholder:")
     ]
-    lines += ["- " + tool for text in texts for tool in marked(text, CLAUDE_MD_MARKER)]
+    lines += ["- " + tool for text in texts for tool in _marked(text, CLAUDE_MD_MARKER)]
     return "\n".join(lines).rstrip("\n")
 
 
-def feature_files(directory: Path) -> list[Path]:
+def _feature_files(directory: Path) -> list[Path]:
     """The files of a feature's directory that go into the build, in the
     order of their names."""
     return sorted(
@@ -193,7 +193,7 @@ def feature_files(directory: Path) -> list[Path]:
     )
 
 
-def image_tag(
+def _image_tag(
     host: Host, dockerfile: str, claude_md: str, context_dirs: dict[str, Path]
 ) -> str:
     """The tag of the image: a hash of everything it is built from, the
@@ -202,7 +202,7 @@ def image_tag(
     content = f"{host.home}\n{dockerfile}\n{claude_md}\n"
     digest = hashlib.sha256(content.encode())
     for name, directory in context_dirs.items():
-        for file in feature_files(directory):
+        for file in _feature_files(directory):
             digest.update(f"{name}/{file.relative_to(directory)}\n".encode())
             digest.update(file.read_bytes())
     return f"{IMAGE_NAME}:{digest.hexdigest()[:12]}"
@@ -220,8 +220,8 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     image, which claude is started with (see cli.py), so that a session has
     the servers of its image and no other, whatever the host has enabled."""
     features = {
-        name: feature_file(name, host)
-        for name in with_required(selected_features(settings, host), host)
+        name: _feature_file(name, host)
+        for name in _with_required(selected_features(settings, host), host)
     }
     parts = [
         Path(DOCKERFILE_DIR, "base.Dockerfile"),
@@ -235,10 +235,10 @@ def prepare_image(settings: Settings, host: Host) -> Image:
     }
     texts = [part.read_text(encoding="utf-8") for part in parts]
     dockerfile = "".join(text.rstrip("\n") + "\n\n" for text in texts)
-    claude_md = sandbox_claude_md(parts, texts)
+    claude_md = _sandbox_claude_md(parts, texts)
     servers = language_servers(parts, texts)
-    tag = image_tag(host, dockerfile, claude_md, context_dirs)
-    plugin = lsp_plugin(servers)
+    tag = _image_tag(host, dockerfile, claude_md, context_dirs)
+    plugin = _lsp_plugin(servers)
     return Image(
         tag, dockerfile, claude_md, context_dirs, plugin, tuple(sorted(servers))
     )

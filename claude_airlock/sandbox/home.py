@@ -18,7 +18,7 @@ what is named here:
 
 On top of the base go what a project's sessions remember (history.py) and
 a tmpfs for what Claude Code keeps for one session (session_state).
-The config (.claude.json) is the base's own, see seed_config. The login
+The config (.claude.json) is the base's own, see _seed_config. The login
 (.credentials.json) is the base's own too, and the launcher keeps it the
 same as the host's, see login.py.
 
@@ -39,7 +39,7 @@ from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .login import LOGIN
 
 CONFIG = ".claude.json"
-# What the config seeded from the host's leaves out, see seed_config
+# What the config seeded from the host's leaves out, see _seed_config
 SEED_LEFT_OUT = ("projects", "mcpServers")
 # What Claude Code keeps in ~/.claude for one session and reads back into
 # its shell: a snapshot of the shell's setup, and what its hooks export. A
@@ -65,7 +65,7 @@ MANAGED = frozenset(
 )
 
 
-def read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
+def _read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
     """A config of Claude Code as text, without some of what it holds.
     None when there is none to carry over, or not one to read."""
     try:
@@ -79,7 +79,7 @@ def read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
     return json.dumps(config, indent=2)
 
 
-def seed_config(host: Host) -> None:
+def _seed_config(host: Host) -> None:
     """Claude writes its global config atomically (temp file + rename). The
     default location, a single-file bind mount of ~/.claude.json, can't be
     renamed over, and the container home is read-only, so every config write
@@ -103,9 +103,9 @@ def seed_config(host: Host) -> None:
     seeded = os.path.join(host.sandbox_claude_dir, CONFIG)
     if os.path.lexists(seeded):
         return
-    text = read_config(Path(host.claude_dir, CONFIG))
+    text = _read_config(Path(host.claude_dir, CONFIG))
     if text is None:
-        text = read_config(Path(host.home, CONFIG), SEED_LEFT_OUT)
+        text = _read_config(Path(host.home, CONFIG), SEED_LEFT_OUT)
     if text is None:
         # Claude starts afresh
         return
@@ -114,7 +114,7 @@ def seed_config(host: Host) -> None:
     write_whole(seeded, text, replace=False)
 
 
-def make_missing(
+def _make_missing(
     directory: str, trees: tuple[str, ...], files: tuple[str, ...]
 ) -> None:
     """Make the directories and the files of a directory that are not
@@ -140,15 +140,15 @@ def prepare_home(host: Host) -> None:
     session's to create in the base, and the sandboxed sessions after it
     would follow what it put there. Empty, they say nothing."""
     base = private_dir(host.sandbox_claude_dir)
-    make_missing(
+    _make_missing(
         base,
         (*CONFIG_TREES, *WRITABLE_TREES, *SESSION_STATE, *PER_PROJECT_DIRS),
         (*CONFIG_FILES, PROMPT_HISTORY),
     )
     os.makedirs(host.claude_dir, exist_ok=True)
     os.makedirs(host.claude_state_dir, exist_ok=True)
-    make_missing(host.claude_dir, (*CONFIG_TREES, *WRITABLE_TREES), CONFIG_FILES)
-    seed_config(host)
+    _make_missing(host.claude_dir, (*CONFIG_TREES, *WRITABLE_TREES), CONFIG_FILES)
+    _seed_config(host)
 
 
 def place_in_base(host: Host, inner: str) -> bool:

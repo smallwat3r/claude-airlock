@@ -261,7 +261,7 @@ def start_summary(event: Event) -> str:
     return f"{where}, {start.limits}, network {start.network}"
 
 
-def stays(notes: list[dict]) -> list[tuple[dict, float | None]]:
+def _stays(notes: list[dict]) -> list[tuple[dict, float | None]]:
     """Of the notes of a record, in the order they were added, the start
     of each session with when it was over, in the order they began. A
     session is over when it is noted to be, and one whose launcher was
@@ -284,22 +284,23 @@ def stays(notes: list[dict]) -> list[tuple[dict, float | None]]:
 def running_between(notes: list[dict], start: float) -> list[dict]:
     """Of the notes of a record up to some time, the starts of the
     sessions that ran at some point from start on: those that began
-    since, and those that were not over by then, see stays."""
+    since, and those that were not over by then, see _stays."""
     return [
         note
-        for note, over in stays(notes)
+        for note, over in _stays(notes)
         if float(note["t"]) > start or over is None or over > start
     ]
 
 
-def widest_stay(notes: list[dict], start: float, end: float) -> tuple[float, float]:
+def _widest_stay(notes: list[dict], start: float, end: float) -> tuple[float, float]:
     """The span of time from start to end, made as long as the stay of
     the sessions of the notes that ran at some point of it: from when
     the first was started to when the last was over. Not past the end
     for one that is not noted to be over: it still runs, or its launcher
     was killed, and all that came since is not its own."""
     spans = [
-        (float(note["t"]), end if over is None else over) for note, over in stays(notes)
+        (float(note["t"]), end if over is None else over)
+        for note, over in _stays(notes)
     ]
     there = [(first, last) for first, last in spans if first <= end and last >= start]
     return (
@@ -311,10 +312,10 @@ def widest_stay(notes: list[dict], start: float, end: float) -> tuple[float, flo
 def stay_between(host: Host, start: float, end: float) -> tuple[float, float]:
     """The span of time from start to end, made as long as the stay of
     this project's sessions that ran at some point of it, see
-    widest_stay. What a session did is looked for over all of its stay,
+    _widest_stay. What a session did is looked for over all of its stay,
     see Recorded.stay."""
     notes = start_record(host).read(host.project_dir, 0.0, math.inf)
-    return widest_stay(notes, start, end)
+    return _widest_stay(notes, start, end)
 
 
 def start_events(

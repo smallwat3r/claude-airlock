@@ -37,7 +37,7 @@ from .tampered import (
 PROBLEM_WIDTH = 200
 
 
-def texts(value: object) -> list[str]:
+def _texts(value: object) -> list[str]:
     """A list of a pending check as the texts it holds. Raises TypeError
     for what is no list."""
     if not isinstance(value, list):
@@ -45,7 +45,7 @@ def texts(value: object) -> list[str]:
     return [str(text) for text in value]
 
 
-def fingerprint_of(value: object) -> dict[str, str]:
+def _fingerprint_of(value: object) -> dict[str, str]:
     """A fingerprint of a pending check. Raises TypeError for what is
     none."""
     if not isinstance(value, dict):
@@ -120,14 +120,14 @@ class HostCheck:
         what is none. The fields after the first two are not in a check
         saved by an earlier version."""
         return cls(
-            texts(pending["watched"]),
+            _texts(pending["watched"]),
             str(pending.get("claude_dir", "")),
-            texts(pending.get("memory", [])),
-            fingerprint_of(pending["before"]),
-            fingerprint_of(pending["build"]) if "build" in pending else None,
+            _texts(pending.get("memory", [])),
+            _fingerprint_of(pending["before"]),
+            _fingerprint_of(pending["build"]) if "build" in pending else None,
             str(pending.get("shared_config", "")),
-            None if pending.get("projects") is None else texts(pending["projects"]),
-            tuple(texts(pending.get("own_projects", []))),
+            None if pending.get("projects") is None else _texts(pending["projects"]),
+            tuple(_texts(pending.get("own_projects", []))),
             projects_taken="projects" in pending,
         )
 

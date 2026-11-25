@@ -48,7 +48,7 @@ NAME = "claude-airlock"
 
 class SocketAccess(enum.Enum):
     """What of the host's Docker daemon a session reaches, each by what
-    CLAUDE_AIRLOCK_DOCKER_SOCKET says for it, see socket_proxy_options of
+    CLAUDE_AIRLOCK_DOCKER_SOCKET says for it, see _socket_proxy_options of
     socket_proxy.py."""
 
     OFF = "0"
@@ -231,7 +231,7 @@ class Host:
         ]
 
 
-def logical_cwd() -> str:
+def _logical_cwd() -> str:
     """The working directory as the shell shows it, symlinks unresolved, so
     the project is mounted at the path the user and their editor refer to."""
     cwd = os.getcwd()
@@ -248,7 +248,7 @@ def detect_host(env: Mapping[str, str]) -> Host:
     home = env.get("HOME") or str(Path.home())
     return Host(
         home=home,
-        project_dir=logical_cwd(),
+        project_dir=_logical_cwd(),
         config_home=env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
         state_home=env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
     )
@@ -403,7 +403,7 @@ def settings_help() -> str:
     return "\n".join(lines)
 
 
-def read_config_file(path: str) -> dict[str, str]:
+def _read_config_file(path: str) -> dict[str, str]:
     """Defaults for the CLAUDE_AIRLOCK_* settings from the user's config
     file: one NAME=value per line, # comments, the value taken literally
     (no quotes, no variable expansion, a leading ~ is for the settings
@@ -456,7 +456,7 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     same reason: what one hides or protects, the other does not take
     back. A name of the environment that starts as a setting does and
     is none aborts, as it does in the config file."""
-    file_values = read_config_file(config_file)
+    file_values = _read_config_file(config_file)
     defaults = Settings()
     known = {setting.variable for setting in SETTINGS} | SESSION_SAID
     named = sorted(name for name in env if name.startswith(SETTING_PREFIX))

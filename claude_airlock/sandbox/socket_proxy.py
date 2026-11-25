@@ -49,7 +49,7 @@ def socket_proxy_name(settings: Settings) -> str:
     return SOCKET_PROXIES[SocketAccess.FULL if full else SocketAccess.LIMITED].name
 
 
-def is_socket(path: str) -> bool:
+def _is_socket(path: str) -> bool:
     try:
         return stat.S_ISSOCK(os.stat(path).st_mode)
     except OSError:
@@ -59,16 +59,16 @@ def is_socket(path: str) -> bool:
 def has_socket_proxy(settings: Settings) -> bool:
     """Whether the session gets a socket proxy: asked for, and there is
     a Docker socket on the host."""
-    return settings.docker_socket in SOCKET_PROXIES and is_socket(DOCKER_SOCK)
+    return settings.docker_socket in SOCKET_PROXIES and _is_socket(DOCKER_SOCK)
 
 
-def rules_path(settings: Settings) -> str:
+def _rules_path(settings: Settings) -> str:
     """The HAProxy rules of the session's mode, for a session that has a
     socket proxy."""
     return f"{DOCKERFILE_DIR}/{PROXY_RULES[settings.docker_socket]}"
 
 
-def socket_proxy_options(settings: Settings) -> list[str]:
+def _socket_proxy_options(settings: Settings) -> list[str]:
     """What the socket proxy of the session's mode is started with, for a
     session that has one, see has_socket_proxy. A write call to the host
     daemon (which runs as root) would let the session spawn a sibling that
@@ -89,7 +89,7 @@ def socket_proxy_options(settings: Settings) -> list[str]:
     return [
         mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"),
         mount_arg(
-            rules_path(settings), "/usr/local/etc/haproxy/haproxy.cfg.template", "ro,z"
+            _rules_path(settings), "/usr/local/etc/haproxy/haproxy.cfg.template", "ro,z"
         ),
         # Among what the stock rules allow unless told: should they be
         # used after all, they do not
@@ -104,10 +104,10 @@ def start_socket_proxy(settings: Settings) -> None:
     image is replaced, which ends the calls other sessions have open."""
     if not has_socket_proxy(settings):
         return
-    options = socket_proxy_options(settings)
+    options = _socket_proxy_options(settings)
     name = socket_proxy_name(settings)
     network = network_name(settings)
-    rules = Path(rules_path(settings)).read_bytes()
+    rules = Path(_rules_path(settings)).read_bytes()
     config = config_hash(PROXY_IMAGE.encode(), rules, *map(str.encode, options))
     if not proxy_current(name, config):
         start_shared_proxy(name, network, config, options, PROXY_IMAGE)

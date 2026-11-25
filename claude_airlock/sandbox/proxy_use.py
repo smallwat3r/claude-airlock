@@ -48,7 +48,7 @@ def proxy_use_file(host: Host, proxy: str) -> str:
     return os.path.join(directory, proxy)
 
 
-def proxy_in_use(host: Host, proxy: str) -> bool:
+def _proxy_in_use(host: Host, proxy: str) -> bool:
     """Whether a session uses a proxy: a launcher says so (it is starting
     one, whose container is not there yet, or has one running), or a
     session is on one of the proxy's networks, which one that outlived
@@ -66,5 +66,5 @@ def remove_idle_proxies(host: Host) -> None:
     started it: one left behind by a launcher that was killed too. To be
     called by the one launcher that may (see sidecars_locked)."""
     for proxy in sorted(running_containers().intersection(PROXY_NETWORKS)):
-        if not proxy_in_use(host, proxy):
+        if not _proxy_in_use(host, proxy):
             docker_ok("rm", "--force", proxy)

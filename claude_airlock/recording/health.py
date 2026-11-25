@@ -39,7 +39,7 @@ WAITED_ON = {IO: "the disk"}
 NEAR_LIMIT, AT_LIMIT = procwatch.NEAR_LIMIT
 
 
-def amount(count: float) -> str:
+def _amount(count: float) -> str:
     """A number of bytes as docker writes a limit of them: 512m, 3.1g."""
     for unit, size in (("g", 2**30), ("m", 2**20), ("k", 2**10)):
         if count >= size:
@@ -50,7 +50,7 @@ def amount(count: float) -> str:
     return f"{count:.0f}b"
 
 
-def of_limit(used: str, most: str | None, percent: int | None) -> str:
+def _of_limit(used: str, most: str | None, percent: int | None) -> str:
     return used if most is None else f"{used} of {most} ({percent}%)"
 
 
@@ -69,14 +69,14 @@ class Sized:
 
     @property
     def shown(self) -> str:
-        return f"[{self.pid}] {flat(self.name)} {amount(self.size)}"
+        return f"[{self.pid}] {flat(self.name)} {_amount(self.size)}"
 
     @property
     def fields(self) -> dict:
         return {"pid": self.pid, "rss": self.size, "name": self.name}
 
 
-def used_of(said: list) -> tuple[int, int | None]:
+def _used_of(said: list) -> tuple[int, int | None]:
     used, most = said
     return int(used), None if most is None else int(most)
 
@@ -109,10 +109,10 @@ class Sample:
         or KeyError for one that is not."""
         return cls(
             when,
-            memory=used_of(said["mem"]) if "mem" in said else None,
-            pids=used_of(said["pids"]) if "pids" in said else None,
+            memory=_used_of(said["mem"]) if "mem" in said else None,
+            pids=_used_of(said["pids"]) if "pids" in said else None,
             tmpfs={
-                str(place): used_of(used)
+                str(place): _used_of(used)
                 for place, used in dict(said.get("tmpfs", {})).items()
             },
             seconds=float(said.get("seconds", 0.0)),
@@ -176,8 +176,8 @@ class Sample:
         if not self.memory:
             return self._with_wait(MEMORY, "")
         used, most = self.memory
-        limit = None if most is None else amount(most)
-        said = "mem " + of_limit(amount(used), limit, procwatch.percent(used, most))
+        limit = None if most is None else _amount(most)
+        said = "mem " + _of_limit(_amount(used), limit, procwatch.percent(used, most))
         return self._with_wait(MEMORY, said)
 
     def _said_of_cpu(self) -> list[str]:
@@ -326,10 +326,10 @@ def health_summary(samples: list[Sample], ended: list[Ended]) -> list[str]:
     held = [sample.memory for sample in samples if sample.memory]
     if held:
         used, most = max(held, key=lambda memory: memory[0])
-        limit = None if most is None else amount(most)
+        limit = None if most is None else _amount(most)
         lines.append(
             "  memory "
-            + of_limit(amount(used), limit, procwatch.percent(used, most))
+            + _of_limit(_amount(used), limit, procwatch.percent(used, most))
             + " at most"
         )
     timed = [sample for sample in samples if sample.cpu is not None and sample.seconds]

@@ -115,7 +115,7 @@ _UNSHOWN_RUN = re.compile(f"[{_UNSHOWN}]{{{UNSHOWN_RUN},}}")
 # other way: the marks of emphasis, and the characters that are not shown
 _FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}]+")
 # The same but for what a path is written with, which is left where what
-# was found is shown (see as_shown): a ~ ahead of the first / of a path,
+# was found is shown (see _as_shown): a ~ ahead of the first / of a path,
 # and a * next to a /
 _SET_OFF = re.compile(
     f"(?:[`^\u00b7\u2022\u00a6{_UNSHOWN}]|~(?![\\w.-]{{0,64}}/)|(?<!/)\\*(?!/))+"
@@ -153,7 +153,7 @@ def as_read(text: str) -> str:
     return _FILLERS.sub("", unicodedata.normalize("NFKC", text))
 
 
-def as_shown(text: str) -> str:
+def _as_shown(text: str) -> str:
     """A text as it reads (see as_read), with what a path is written
     with left in it: what is shown of a text is to say which file it
     names, and ~/.ssh without its ~ names another."""
@@ -209,7 +209,7 @@ def _around(text: str, found: re.Match[str]) -> str:
 def _excerpt(read: str, found: re.Match[str], shown: str) -> str:
     """What was found in a text as it reads, with the lines around it
     (see _around), as the same text with its paths left whole has them
-    (see as_shown). Looked for again there, which is a pass and no count
+    (see _as_shown). Looked for again there, which is a pass and no count
     of what the two differ by: the same find on the same line, unless a
     character of a path is within it, and then it is shown as it was
     found."""
@@ -368,7 +368,7 @@ def planted(text: object, source: str = "") -> tuple[Planted, ...]:
     """The signs a text shows of being written to instruct who reads it,
     each once, with the first place it is found: in the text as it reads
     (see as_read), which is how what was found is shown too, but for the
-    paths it names (see as_shown). Each with the file or the page the
+    paths it names (see _as_shown). Each with the file or the page the
     text was read in, when it is known. None for what is no text."""
     if not isinstance(text, str) or not text:
         return ()
@@ -384,7 +384,7 @@ def planted(text: object, source: str = "") -> tuple[Planted, ...]:
         if isinstance(found, str):
             excerpt = found
         else:
-            shown = as_shown(text) if shown is None else shown
+            shown = _as_shown(text) if shown is None else shown
             excerpt = _excerpt(read, found, shown)
         if excerpt:
             signs.append(Planted(sign.name, excerpt, sign.stops, source))

@@ -100,7 +100,7 @@ def network_state(name: str) -> NetworkState | None:
     return NetworkState(said[0] == "true", f"mode={ISOLATED}" in said, containers)
 
 
-def create_network(name: str, internal: bool) -> bool:
+def _create_network(name: str, internal: bool) -> bool:
     """Create a network, an internal one with the host kept off it where
     docker can (see GATEWAY_MODES), as it is without where it cannot."""
     if not internal:
@@ -111,20 +111,20 @@ def create_network(name: str, internal: bool) -> bool:
     )
 
 
-def can_isolate() -> bool:
+def _can_isolate() -> bool:
     """Whether the docker daemon can keep the host off a network."""
     version = docker_output("version", "--format={{.Server.Version}}")
     major = version.strip().split(".")[0]
     return major.isdigit() and int(major) >= ISOLATED_SINCE
 
 
-def isolate_network(name: str, state: NetworkState) -> NetworkState:
+def _isolate_network(name: str, state: NetworkState) -> NetworkState:
     """Make an internal network from before the host was kept off it anew,
     once no session is on it: docker sets this when a network is made. With
     a session on it, it is left as it is and that is said, and so it is
     without a word where docker cannot do this. The proxies on it are put
     back by those who start them."""
-    if not can_isolate():
+    if not _can_isolate():
         return state
     if state.sessions:
         warn(
@@ -135,7 +135,7 @@ def isolate_network(name: str, state: NetworkState) -> NetworkState:
         return state
     for proxy in state.containers:
         docker_ok("network", "disconnect", "--force", name, proxy)
-    if docker_ok("network", "rm", name) and not create_network(name, True):
+    if docker_ok("network", "rm", name) and not _create_network(name, True):
         raise Fatal(f"the docker network {name} was not created")
     return network_state(name) or state
 
@@ -146,7 +146,7 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
     on a network with a route out would not be filtered."""
     state = network_state(name)
     if state is None:
-        created = create_network(name, internal)
+        created = _create_network(name, internal)
         # Another launcher may have been first
         state = network_state(name)
         if state is None and not created:
@@ -161,7 +161,7 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
             f" next one makes it anew: docker network rm {name}"
         )
     if internal and not state.isolated:
-        state = isolate_network(name, state)
+        state = _isolate_network(name, state)
     return set(state.containers)
 
 

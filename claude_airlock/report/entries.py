@@ -55,7 +55,7 @@ NOT_ALL_HELD = "(the rest of the transcript was not read, it holds too much to k
 SHORT_ID = 8
 
 
-def modified(path: Path) -> float:
+def _modified(path: Path) -> float:
     """When a file was last written, 0 for one that has gone since it was
     listed."""
     try:
@@ -66,7 +66,7 @@ def modified(path: Path) -> float:
 
 def session_files(host: Host) -> list[Path]:
     """The project's transcripts, the latest session first."""
-    files = sorted(transcript_files(host), key=modified, reverse=True)
+    files = sorted(transcript_files(host), key=_modified, reverse=True)
     if not files:
         looked = ", ".join(map(str, transcript_dirs(host)))
         raise Fatal(f"no session recorded for this project (looked in {looked})")

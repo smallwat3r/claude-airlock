@@ -744,7 +744,7 @@ class Chat:
         layout = self._page.layout
         # Written together: the prompt that comes back is under both
         said = layout.header([labelled("chat", kept)])
-        self._page.put([*said, waiting_line(layout)])
+        self._page.put([*said, _waiting_line(layout)])
 
     def _said_yes(self, question: str) -> bool | None:
         """Put a question of a turn that was stopped, where it is not
@@ -825,7 +825,7 @@ class Chat:
         self._asked.put(asked, request)
 
 
-def waiting_line(layout: Layout) -> Shown:
+def _waiting_line(layout: Layout) -> Shown:
     """The line that says a turn that was stopped is not gone on with
     until the user types, as a turn that is over is said."""
     return layout.header([labelled("chat", WAITING)], READY_STYLE)[0]

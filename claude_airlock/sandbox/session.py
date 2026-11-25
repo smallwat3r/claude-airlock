@@ -51,7 +51,7 @@ from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
 
-def claim_name(directory: str, name: str) -> int | None:
+def _claim_name(directory: str, name: str) -> int | None:
     """Claim a name among the launchers, none when another has it: the
     lock held on a file of that name, see lock_file."""
     return try_lock_file(os.path.join(directory, name))
@@ -80,7 +80,7 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
         # Never the name of a proxy, running or not: a session of that
         # name would be taken for it, and removed as one that is idle
         reserved = candidate in PROXY_NETWORKS
-        claim = None if reserved else claim_name(directory, candidate)
+        claim = None if reserved else _claim_name(directory, candidate)
         if claim is not None:
             if not docker_ok("container", "inspect", candidate):
                 break
@@ -93,7 +93,7 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
         os.close(claim)
 
 
-def telemetry_args(settings: Settings) -> list[str]:
+def _telemetry_args(settings: Settings) -> list[str]:
     """Unless CLAUDE_AIRLOCK_TELEMETRY=1, Claude Code is told to keep its
     usage events and crash reports to itself. They go to third parties
     (Datadog for one) outside of any tool call, with what they hold not
@@ -109,7 +109,7 @@ def telemetry_args(settings: Settings) -> list[str]:
     ]
 
 
-def connector_args(settings: Settings) -> list[str]:
+def _connector_args(settings: Settings) -> list[str]:
     """Unless CLAUDE_AIRLOCK_CONNECTORS=1, Claude Code is told not to load
     the connectors of the claude.ai account (Gmail, Google Drive and the
     like). They are a way out of the sandbox with the user's own access,
@@ -147,7 +147,7 @@ KNOWN_USERS = (
 )
 
 
-def users_file(host: Host, uid: int, gid: int) -> str:
+def _users_file(host: Host, uid: int, gid: int) -> str:
     """The passwd of a session whose user is not the image's, see
     user_args: a file of the launcher's, made when it is not there or
     says something else."""
@@ -174,7 +174,7 @@ def user_args(host: Host) -> list[str]:
     uid, gid = os.getuid(), os.getgid()
     args = [f"--user={uid}:{gid}"]
     if uid not in (0, IMAGE_UID):
-        args.append(mount_arg(users_file(host, uid, gid), "/etc/passwd", "ro,z"))
+        args.append(mount_arg(_users_file(host, uid, gid), "/etc/passwd", "ro,z"))
     return args
 
 
@@ -207,8 +207,8 @@ def base_args(
         # in the terminal's scrollback.
         env_arg("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", 1),
         env_arg("CLAUDE_CONFIG_DIR", CONTAINER_CLAUDE),
-        *telemetry_args(settings),
-        *connector_args(settings),
+        *_telemetry_args(settings),
+        *_connector_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
         env_arg(SESSION_SANDBOX, name),
@@ -242,7 +242,7 @@ def base_args(
         # image owns the version (auto-updater is off, update = rebuild), so
         # keep it self-contained.
         mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
-        *statusline_args(host),
+        *_statusline_args(host),
         DROP_CAPABILITIES,
         NO_NEW_PRIVILEGES,
         "--read-only",
@@ -250,7 +250,7 @@ def base_args(
         # in memory, and goes to a file in the project or to the host's own
         # collector, whichever the host's kernel is set for
         "--ulimit=core=0",
-        *scratch_args(settings, host),
+        *_scratch_args(settings, host),
         # Some runtimes use part of this limit themselves, see runtime.py
         f"--pids-limit={runtime.process_limit(settings.pids)}",
         # Same value for swap, otherwise docker allows as much swap again on top
@@ -266,7 +266,7 @@ def base_args(
     ]
 
 
-def configured_statusline(host: Host) -> list[str]:
+def _configured_statusline(host: Host) -> list[str]:
     """The files ~/.claude/settings.json may run as its statusline: the
     program of the command, and the first thing that program is given,
     its script when it is an interpreter ("bash ~/.claude/statusline.sh").
@@ -286,12 +286,12 @@ def configured_statusline(host: Host) -> list[str]:
     return [os.path.normpath(path) for path in named if os.path.isabs(path)]
 
 
-def launcher_statusline() -> str:
+def _launcher_statusline() -> str:
     """The statusline of this checkout."""
     return os.path.join(BIN_DIR, "claude-statusline")
 
 
-def is_same_file(path: str, other: str) -> bool:
+def _is_same_file(path: str, other: str) -> bool:
     """Whether two paths lead to one file, not so when either leads to
     none."""
     try:
@@ -300,7 +300,7 @@ def is_same_file(path: str, other: str) -> bool:
         return False
 
 
-def statusline_args(host: Host) -> list[str]:
+def _statusline_args(host: Host) -> list[str]:
     """~/.claude/settings.json runs the statusline from this checkout, which
     is neither in the image nor (usually) the mounted project, so mount the
     script alone at its host path. Also at the path settings.json names when
@@ -308,11 +308,11 @@ def statusline_args(host: Host) -> list[str]:
     checkout reached through one): the container has nothing else to follow
     the link with. A statusline of the user's own is mounted by
     own_statusline_args."""
-    script = launcher_statusline()
+    script = _launcher_statusline()
     others = [
         path
-        for path in configured_statusline(host)
-        if path != script and is_same_file(path, script)
+        for path in _configured_statusline(host)
+        if path != script and _is_same_file(path, script)
     ]
     return [mount_arg(script, target, "ro,z") for target in (script, *others[:1])]
 
@@ -333,11 +333,11 @@ def own_statusline_args(
     secrets (see hidden_files of mounts.py). What the script needs
     besides itself has to be in the image, or in a directory mounted
     next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
-    script = launcher_statusline()
-    for path in configured_statusline(host):
+    script = _launcher_statusline()
+    for path in _configured_statusline(host):
         if not path.startswith(host.home + os.sep) or ":" in path:
             continue
-        if not os.path.isfile(path) or is_same_file(path, script):
+        if not os.path.isfile(path) or _is_same_file(path, script):
             continue
         if any(path.startswith(root + os.sep) for root in mounted):
             continue
@@ -384,7 +384,7 @@ def memory_megabytes(limit: str) -> float | None:
     return float(said.group(1)) * _MEGABYTES[said.group(2).lower()]
 
 
-def scratch_args(settings: Settings, host: Host) -> list[str]:
+def _scratch_args(settings: Settings, host: Host) -> list[str]:
     """What a session writes to that is not mounted from the host: the
     tmpfs of SCRATCH and those of what Claude Code keeps for one session
     (see session_state of home.py), sized for its memory limit (see
@@ -430,7 +430,7 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
 GIT_CONFIG_SECONDS = 10
 
 
-def git_include_paths() -> list[str]:
+def _git_include_paths() -> list[str]:
     """The files the global git config pulls in with include or includeIf."""
     try:
         result = subprocess.run(
@@ -479,7 +479,7 @@ def git_config_args(host: Host) -> list[str]:
     # silently never apply. Mounted at their host path, the one the config
     # refers to. Relative paths are taken from the home directory, where
     # ~/.gitconfig is.
-    for path in git_include_paths():
+    for path in _git_include_paths():
         # Also one that is absolute, which the join leaves as it is
         path = os.path.normpath(os.path.join(host.home, expand_home(path, host.home)))
         if path in forwarded:

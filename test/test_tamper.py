@@ -775,7 +775,7 @@ class LauncherItselfTest:
 
 class CompiledApartTest(LauncherTest):
     """What Python compiled of the launcher's modules is not watched in
-    its checkout (see launcher_files), so the launcher does not run what
+    its checkout (see _launcher_files), so the launcher does not run what
     is there: it compiles to a directory of its own."""
 
     def run_launcher(self, launcher_file: Path, **env: str):

@@ -167,7 +167,7 @@ def chosen(typed: str, options: list[dict]) -> str:
     return typed.strip()
 
 
-def laid_out(start: str, text: str, width: int | None) -> list[str]:
+def _laid_out(start: str, text: str, width: int | None) -> list[str]:
     """A text after what it starts with, as the lines that fit a width,
     those that follow as far in as the first. A line as long as it is
     without a width, see Page.width. The lines are said as header lines,
@@ -178,7 +178,7 @@ def laid_out(start: str, text: str, width: int | None) -> list[str]:
     return wrapped(start + text, room, " " * len(start))
 
 
-def suggested_rule(request: dict) -> tuple[str, dict] | None:
+def _suggested_rule(request: dict) -> tuple[str, dict] | None:
     """The rule claude suggests to allow calls like the one it asks about
     from now on, as it is said and as it is given back: for this session,
     whatever claude suggested to write it to. None when it suggests none,
@@ -393,7 +393,7 @@ class Asker:
         tool_input = given if isinstance(given, dict) else {}
         if tool == "AskUserQuestion":
             return self._questions(tool_input)
-        return self._permission(tool, tool_input, suggested_rule(request))
+        return self._permission(tool, tool_input, _suggested_rule(request))
 
     def _acted(self, tool: str, tool_input: dict) -> list[str]:
         """The lines of a call as it would be made, whole. Not the reason
@@ -471,13 +471,13 @@ class Asker:
             options = [o for o in options or [] if isinstance(o, dict)]
             text = str(question.get("question", ""))
             width = self._page.width
-            lines = laid_out(labelled("question", ""), flat(text), width)
+            lines = _laid_out(labelled("question", ""), flat(text), width)
             for number, option in enumerate(options, 1):
                 start = f"  {number}. "
-                lines += laid_out(start, flat(option.get("label", "")), width)
+                lines += _laid_out(start, flat(option.get("label", "")), width)
                 more = flat(option.get("description", ""))
                 if more:
-                    lines += laid_out(" " * len(start), more, width)
+                    lines += _laid_out(" " * len(start), more, width)
             self._page.say(lines)
             typed = self.ask("answer (a number, several with commas, or in words): ")
             if typed is None:

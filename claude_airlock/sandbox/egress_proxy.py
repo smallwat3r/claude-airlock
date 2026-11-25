@@ -49,7 +49,7 @@ ASK_HELPER = "squid-ask-helper.sh"
 ASKED_HOSTS_MOUNT = "/var/lib/claude-airlock/asked"
 
 
-def egress_config_hash() -> str:
+def _egress_config_hash() -> str:
     files = (
         Path(DOCKERFILE_DIR, name).read_bytes()
         for name in ("squid.conf", "allowed-domains.txt", ASK_HELPER)
@@ -90,17 +90,17 @@ def start_egress_proxy(host: Host) -> None:
         f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
     ]
     start_shared_proxy(
-        EGRESS_PROXY, FILTER_NET, egress_config_hash(), options, SQUID_IMAGE
+        EGRESS_PROXY, FILTER_NET, _egress_config_hash(), options, SQUID_IMAGE
     )
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
     # The internal networks of the sessions with a socket proxy, those that
     # are there: sessions may be running on them
     for network in FILTER_NETS[1:]:
         docker_ok("network", "connect", network, EGRESS_PROXY)
-    wait_for_egress_proxy()
+    _wait_for_egress_proxy()
 
 
-def wait_for_egress_proxy(timeout: float = 15.0) -> None:
+def _wait_for_egress_proxy(timeout: float = 15.0) -> None:
     """Wait until squid accepts connections. It takes a moment to listen
     after its container starts, and a session started sooner has its first
     requests refused."""
@@ -119,7 +119,7 @@ def egress_proxy_current() -> bool:
     """Running, and started from the config as it is on disk now. A stale
     proxy is replaced on the next filtered start, which briefly drops the
     connections of other filtered sessions."""
-    return proxy_current(EGRESS_PROXY, egress_config_hash())
+    return proxy_current(EGRESS_PROXY, _egress_config_hash())
 
 
 def rotate_access_log() -> None:
@@ -129,7 +129,7 @@ def rotate_access_log() -> None:
     docker_ok("exec", EGRESS_PROXY, "sh", "-c", f"{over_limit} && squid -k rotate")
 
 
-def keep_access_log_rotated(stop: threading.Event) -> None:
+def _keep_access_log_rotated(stop: threading.Event) -> None:
     """Rotate the proxy's log out whenever it is found over the limit,
     every ROTATE_EVERY seconds until told to stop."""
     while not stop.wait(ROTATE_EVERY):
@@ -143,5 +143,5 @@ def access_log_rotated() -> Iterator[None]:
     after request refused, each with a URL as long as the proxy takes,
     would have it grow for as long as it runs, and every reader of the
     log after it read all of that."""
-    with in_background(keep_access_log_rotated):
+    with in_background(_keep_access_log_rotated):
         yield

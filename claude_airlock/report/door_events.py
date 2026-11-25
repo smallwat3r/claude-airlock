@@ -27,7 +27,7 @@ def unrecorded(said: dict) -> dict[str, int] | None:
     }
 
 
-def unrecorded_event(when: float, door: str, counted: dict[str, int]) -> Event:
+def _unrecorded_event(when: float, door: str, counted: dict[str, int]) -> Event:
     """That a session used a door more than is noted use by use, which
     is how one would be rid of the record of what it did before."""
     if counted:
@@ -41,7 +41,7 @@ def unrecorded_event(when: float, door: str, counted: dict[str, int]) -> Event:
     )
 
 
-def ssh_agent_event(when: float, said: dict) -> Event:
+def _ssh_agent_event(when: float, said: dict) -> Event:
     """A request to the SSH agent: a signature, the list of the keys, or
     another the launcher refused."""
     refused = bool(said.get("refused"))
@@ -74,7 +74,7 @@ def ssh_agent_event(when: float, said: dict) -> Event:
     )
 
 
-def docker_event(when: float, said: dict) -> Event:
+def _docker_event(when: float, said: dict) -> Event:
     """A call to the Docker socket, through the socket proxy."""
     status = said.get("status")
     denied = status == 403
@@ -95,8 +95,8 @@ def docker_event(when: float, said: dict) -> Event:
 
 # How the use of each door is shown, by the door
 DOOR_EVENTS: dict[str, Callable[[float, dict], Event]] = {
-    Door.SSH_AGENT.value: ssh_agent_event,
-    Door.DOCKER.value: docker_event,
+    Door.SSH_AGENT.value: _ssh_agent_event,
+    Door.DOCKER.value: _docker_event,
 }
 
 
@@ -111,7 +111,7 @@ def use_event(said: dict) -> Event | None:
     when = float(said["t"])
     counted = unrecorded(said)
     if counted is not None:
-        return unrecorded_event(when, door, counted)
+        return _unrecorded_event(when, door, counted)
     return shown(when, said)
 
 

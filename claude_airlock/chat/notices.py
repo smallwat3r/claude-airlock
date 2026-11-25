@@ -20,7 +20,7 @@ MOST_TASKS = 1000
 CONNECTED = "connected"
 
 
-def servers_line(servers: list[tuple[str, str]]) -> str:
+def _servers_line(servers: list[tuple[str, str]]) -> str:
     """The MCP servers of a session in a line: how many can be used, and
     each one that cannot with how it is (failed, needs-auth, pending). A
     server brings tools and instructions of its own, and one that is not
@@ -75,7 +75,7 @@ class Notices:
         if servers == self._servers:
             return
         self._servers = list(servers)
-        self._page.note("chat", servers_line(servers)[:ABOUT_WIDTH])
+        self._page.note("chat", _servers_line(servers)[:ABOUT_WIDTH])
 
     def cleared(self) -> None:
         self._page.note("chat", "a new conversation, the one before is cleared")

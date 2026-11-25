@@ -184,7 +184,7 @@ GIT_WORKTREES = "worktrees"
 MOST_WORKTREES = 200
 # What of its checkout the launcher runs and starts its sidecars from: its
 # programs, its modules, and the parts of the image with the rules of the
-# two proxies. Watched when a session can write them, see launcher_files.
+# two proxies. Watched when a session can write them, see _launcher_files.
 LAUNCHER_TREES = ("bin", "claude_airlock", "docker")
 # Where Python keeps what it compiled of the modules, written again
 # whenever one changed or another Python runs them
@@ -208,7 +208,7 @@ SERVERS = "mcpServers"
 SERVERS_BYTES = 16 * 1024 * 1024
 
 
-def git_says(*args: str) -> bytes | None:
+def _git_says(*args: str) -> bytes | None:
     """What git says when it is asked about a config, none when that
     cannot be had: no git, a config it cannot read, one it was not done
     with within GIT_SECONDS, and one it says more of than GIT_SAID_BYTES.
@@ -241,7 +241,7 @@ def git_says(*args: str) -> bytes | None:
 
 def git_listing(file: str) -> bytes | None:
     """The entries of a git config as git lists them with -z, none for
-    one that git is not asked about or has no answer for (see git_says).
+    one that git is not asked about or has no answer for (see _git_says).
     Git is not given what is no plain file, a pipe a session of this
     project that still runs can put there, nor a file past
     GIT_CONFIG_BYTES, which no config a user keeps comes near."""
@@ -255,28 +255,28 @@ def git_listing(file: str) -> bytes | None:
             return None
     if large:
         return None
-    return git_says("config", "--file", file, "--list", "-z")
+    return _git_says("config", "--file", file, "--list", "-z")
 
 
-def listing_hash(listing: bytes) -> str:
+def _listing_hash(listing: bytes) -> str:
     """Hash of the entries of a git config that last, see
-    lasting_entries."""
-    return sha256_hex(b"\0".join(lasting_entries(listing)))
+    _lasting_entries."""
+    return sha256_hex(b"\0".join(_lasting_entries(listing)))
 
 
 def git_config_hash(file: str) -> str:
     """Hash of a git config without its branch tracking entries, they change
     on every push -u or checkout and cannot run anything, see
-    lasting_entries for those that are kept. One that cannot
+    _lasting_entries for those that are kept. One that cannot
     be read says so: the file is the session's, which can take the right
     to read it away, and the check must not be made to fail. Nor to wait,
     nor to hold more than a config takes, see git_listing: one git has no
     listing of is hashed as the file it is."""
     listing = git_listing(file)
-    return file_hash(file) if listing is None else listing_hash(listing)
+    return file_hash(file) if listing is None else _listing_hash(listing)
 
 
-def included_configs(listing: bytes, config: str) -> list[str]:
+def _included_configs(listing: bytes, config: str) -> list[str]:
     """The files a git config has git read with it, by its listing:
     those of include.path, and of includeIf whatever its condition, which
     holds in one place and not in another. A relative one is taken from
@@ -316,12 +316,12 @@ def hash_git_config(config: str, fingerprint: dict[str, str]) -> None:
             unread = "not read: " + file_stamp(file)
             fingerprint[file] = file_hash(file) if file == config else unread
             continue
-        fingerprint[file] = listing_hash(listing)
-        included = included_configs(listing, file)
+        fingerprint[file] = _listing_hash(listing)
+        included = _included_configs(listing, file)
         pending += [path for path in reversed(included) if os.path.lexists(path)]
 
 
-def lasting_entries(listing: bytes) -> list[bytes]:
+def _lasting_entries(listing: bytes) -> list[bytes]:
     """The entries of a git config, as git lists them with -z (a name,
     a line break, the value), without those of branch tracking. Still
     with where a branch is pushed to and pulled from when that is no
@@ -346,7 +346,7 @@ def lasting_entries(listing: bytes) -> list[bytes]:
     return kept
 
 
-def servers_in(value: object, at: tuple[str, ...] = ()) -> Iterator[tuple[str, str]]:
+def _servers_in(value: object, at: tuple[str, ...] = ()) -> Iterator[tuple[str, str]]:
     """Every set of servers a config holds, at whatever depth: where it
     is and what it says. Not one that names no server, which is what a
     project that was only run in the sandbox has."""
@@ -357,11 +357,11 @@ def servers_in(value: object, at: tuple[str, ...] = ()) -> Iterator[tuple[str, s
             if inner:
                 yield "/".join(at), json.dumps(inner, sort_keys=True)
         else:
-            yield from servers_in(inner, (*at, str(key)))
+            yield from _servers_in(inner, (*at, str(key)))
 
 
-def servers_hash(config: str) -> str:
-    """Hash of the servers a config of Claude Code starts, see servers_in,
+def _servers_hash(config: str) -> str:
+    """Hash of the servers a config of Claude Code starts, see _servers_in,
     and of nothing else in it: the rest is rewritten by every session.
     The file is a session's to write, so one that is not a plain file
     says so, and one too large or too odd to read is told from one
@@ -378,13 +378,13 @@ def servers_hash(config: str) -> str:
     if held is None:
         return "not read: " + file_stamp(config)
     try:
-        said = sorted(servers_in(held))
+        said = sorted(_servers_in(held))
     except (ValueError, RecursionError):
         return "not read: " + file_stamp(config)
     return sha256_hex(json.dumps(said).encode())
 
 
-def is_plugin_use_marker(path: str, cache: str) -> bool:
+def _is_plugin_use_marker(path: str, cache: str) -> bool:
     """Whether a file of the plugin cache is one of the notes of the
     sessions using a plugin (see PLUGIN_USE_MARKERS). Only inside that
     directory at the top of a version: one of that name further down is
@@ -397,11 +397,11 @@ def is_plugin_use_marker(path: str, cache: str) -> bool:
     )
 
 
-def git_configs(git_dir: str) -> list[str]:
+def _git_configs(git_dir: str) -> list[str]:
     """The config files of a git directory: its own, and the one a
     working tree reads on top once extensions.worktreeConfig is set.
     Those of the working trees it keeps are read from their own
-    directories, see worktree_sources."""
+    directories, see _worktree_sources."""
     configs = [os.path.join(git_dir, name) for name in ("config", "config.worktree")]
     return [config for config in configs if os.path.isfile(config)]
 
@@ -436,7 +436,7 @@ def git_sources(git_dir: str) -> list[str]:
     return [git_dir] if common in (None, git_dir) else [git_dir, common]
 
 
-def worktree_sources(
+def _worktree_sources(
     git_dir: str, watched: list[str], fingerprint: dict[str, str]
 ) -> list[str]:
     """The directories git reads a config and hooks from in the working
@@ -476,9 +476,9 @@ def git_files(git_dir: str, fingerprint: dict[str, str]) -> list[str]:
     both, then those of the working trees it keeps."""
     watched = [os.path.join(git_dir, COMMON_DIR)]
     sources = git_sources(git_dir)
-    sources += worktree_sources(git_dir, watched, fingerprint)
+    sources += _worktree_sources(git_dir, watched, fingerprint)
     for source in dict.fromkeys(sources):
-        for config in git_configs(source):
+        for config in _git_configs(source):
             hash_git_config(config, fingerprint)
         watched += tree_files(os.path.join(source, "hooks")).into(fingerprint)
     return watched
@@ -497,7 +497,7 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
     # With what the config includes, where a project keeps such a setting
     # as often as in the config itself
     asked = ("--includes", "--type=path", "--get", "core.hooksPath")
-    said = git_says("config", "--file", config, *asked)
+    said = _git_says("config", "--file", config, *asked)
     if said is None:
         return None
     value = said.decode("utf-8", "replace").strip()
@@ -526,7 +526,7 @@ def commands_in(value: object) -> Iterator[str]:
             pending += value
 
 
-def named_files(settings_file: str, base: str) -> list[str]:
+def _named_files(settings_file: str, base: str) -> list[str]:
     """The files the commands of a settings file name. A hook that runs a
     script is changed by changing the script, with the settings as they
     were. Found by taking each word of a command for a path, relative ones
@@ -552,7 +552,7 @@ def named_files(settings_file: str, base: str) -> list[str]:
     return found
 
 
-def import_text(file: str) -> str:
+def _import_text(file: str) -> str:
     """What a file of instructions says, nothing for one that is not
     there, is no plain file or is past what is read of one, as
     settings_object has it of a settings file."""
@@ -580,7 +580,7 @@ def imported_files(instructions: str) -> list[str]:
     pending = [(instructions, 0)]
     while pending and len(found) < MOST_IMPORTED:
         file, depth = pending.pop()
-        for word in _IMPORT.findall(import_text(file)):
+        for word in _IMPORT.findall(_import_text(file)):
             for named in dict.fromkeys((word, word.rstrip(_AFTER_IMPORT))):
                 path = expand_home(named, home)
                 path = os.path.normpath(os.path.join(os.path.dirname(file), path))
@@ -592,7 +592,7 @@ def imported_files(instructions: str) -> list[str]:
     return list(found)[:MOST_IMPORTED]
 
 
-def claude_files(
+def _claude_files(
     root: str,
     files: tuple[str, ...],
     trees: tuple[str, ...],
@@ -609,7 +609,7 @@ def claude_files(
         found = tree_files(os.path.join(root, name)).into(fingerprint)
         watched += [path for path in found if not path.startswith(noted)]
     for name in command_files:
-        watched += named_files(os.path.join(root, name), root)
+        watched += _named_files(os.path.join(root, name), root)
     for name in files:
         if os.path.basename(name) in INSTRUCTION_NAMES:
             watched += imported_files(os.path.join(root, name))
@@ -621,7 +621,7 @@ def agent_memory_dirs(directories: Sequence[str]) -> list[str]:
     mounted directory. A session writes there in the ordinary way of
     things and every later one is told what is there, as with what
     Claude remembers of the project: said with that, see
-    report_memory."""
+    _report_memory."""
     return [
         os.path.join(directory, name)
         for directory in directories
@@ -645,9 +645,9 @@ def host_exec_fingerprint(
     git and claude to work, so instead of locking them the launcher compares
     this before and after a session (see report_tampering). With them
     what Claude remembers of the project, the files of the memory
-    directories, which is said apart (see report_memory), and the
+    directories, which is said apart (see _report_memory), and the
     servers of the config the sandboxed sessions share, which is too
-    (see report_servers). Not seen: a CLAUDE.md below the top of a
+    (see _report_servers). Not seen: a CLAUDE.md below the top of a
     project, and what a script goes on to run."""
     fingerprint: dict[str, str] = {}
     watched = []
@@ -662,12 +662,12 @@ def host_exec_fingerprint(
             moved = moved_hooks_dir(directory, source)
             if moved:
                 watched += tree_files(moved).into(fingerprint)
-        watched += claude_files(
+        watched += _claude_files(
             directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
         )
     if claude_dir:
         files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
-        watched += claude_files(
+        watched += _claude_files(
             claude_dir, files, CONFIG_TREES, ("settings.json",), fingerprint
         )
     for directory in memory:
@@ -676,15 +676,15 @@ def host_exec_fingerprint(
     for name in CONFIG_WATCHED_TREES if claude_dir else ():
         root = os.path.join(claude_dir, name)
         for path in tree_files(root, MOST_STAMPED_FILES).into(fingerprint):
-            if name == PLUGIN_CACHE and is_plugin_use_marker(path, root):
+            if name == PLUGIN_CACHE and _is_plugin_use_marker(path, root):
                 continue
             fingerprint[path] = file_stamp(path)
     if shared_config:
-        fingerprint[shared_config] = servers_hash(shared_config)
+        fingerprint[shared_config] = _servers_hash(shared_config)
     return fingerprint
 
 
-def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
+def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
     """The files of one mounted directory that build_fingerprint hashes,
     the git configs it finds on the way hashed as those are."""
     watched: list[str] = []
@@ -693,7 +693,7 @@ def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
             break
         names = {*subdirs, *files}
         if directory != root:
-            watched += below_the_top(directory, names, fingerprint)
+            watched += _below_the_top(directory, names, fingerprint)
         if GIT_HEAD in files:
             # A git directory by what it holds, without a .git to say so:
             # git takes it for one from there on down, with the config
@@ -728,7 +728,7 @@ def reaches_launcher(directories: Sequence[str], checkout: str = "") -> bool:
     return False
 
 
-def launcher_files(
+def _launcher_files(
     directories: Sequence[str], fingerprint: dict[str, str], checkout: str = ""
 ) -> list[str]:
     """The files of the launcher itself, when a session can write them:
@@ -751,7 +751,7 @@ def launcher_files(
 
 def is_launcher_file(path: str, checkout: str = "") -> bool:
     """Whether a path of a fingerprint is of the launcher itself, see
-    launcher_files."""
+    _launcher_files."""
     checkout = checkout or CHECKOUT_DIR
     return path.startswith(
         tuple(os.path.join(checkout, tree) + os.sep for tree in LAUNCHER_TREES)
@@ -769,9 +769,9 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     watched: list[str] = []
     try:
         # First, should there be more files than are hashed
-        watched += launcher_files(directories, fingerprint)
+        watched += _launcher_files(directories, fingerprint)
         for root in directories:
-            watched += build_files(root, fingerprint)
+            watched += _build_files(root, fingerprint)
     except RecursionError:
         # Directories nested deeper than Python walks, a session's doing:
         # said as a change, the check must not be made to fail
@@ -782,7 +782,7 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     return fingerprint
 
 
-def below_the_top(
+def _below_the_top(
     directory: str, names: set[str], fingerprint: dict[str, str]
 ) -> list[str]:
     """What is watched of a directory below the top of a project for
@@ -790,7 +790,7 @@ def below_the_top(
     the files to hash, the git configs hashed as those are."""
     watched: list[str] = []
     if CLAUDE_MARKS & names:
-        watched += claude_files(
+        watched += _claude_files(
             directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
         )
     if ".git" in names:

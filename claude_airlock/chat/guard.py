@@ -53,7 +53,7 @@ def stop_said(found: tuple[Planted, ...], stopped: bool, asked: bool) -> list[st
 @dataclass(frozen=True)
 class Called:
     """A call that has no result yet: its tool, what it reads as it is
-    remembered by (see source_of), and where that is said to be from
+    remembered by (see _source_of), and where that is said to be from
     (see said_source)."""
 
     tool: str
@@ -61,7 +61,7 @@ class Called:
     said: str
 
 
-def source_of(tool: str, given: object) -> str:
+def _source_of(tool: str, given: object) -> str:
     """What a call reads, as what it is remembered by: the file or the
     page when it names one, else all it was called with. No longer than a
     digest, a command can be of any length."""
@@ -150,7 +150,7 @@ class Guard:
         for it when there are more than MOST_OPEN."""
         tool, given = str(block.get("name")), block.get("input")
         self._calls[str(block.get("id"))] = Called(
-            tool, source_of(tool, given), said_source(given)
+            tool, _source_of(tool, given), said_source(given)
         )
         while len(self._calls) > MOST_OPEN:
             del self._calls[next(iter(self._calls))]

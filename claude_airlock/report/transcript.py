@@ -96,7 +96,7 @@ def as_typed(text: str) -> str:
     return f"{name.strip()} {args.strip()}".strip()
 
 
-def command_event(when: float, entry: dict, verbose: bool) -> Event | None:
+def _command_event(when: float, entry: dict, verbose: bool) -> Event | None:
     """What a command of Claude Code's said (/model, /context), which the
     model had no part in. None for an entry that holds nothing said."""
     content = entry.get("content")
@@ -109,7 +109,7 @@ def command_event(when: float, entry: dict, verbose: bool) -> Event | None:
     return Event(when, Who.CLAUDE, Kind.COMMAND, details, {"text": text})
 
 
-def talk_event(when: float, who: Who, block: dict, verbose: bool) -> Event | None:
+def _talk_event(when: float, who: Who, block: dict, verbose: bool) -> Event | None:
     """A prompt or a reply, none for one without text."""
     said = clean(block.get("text", ""))
     text = (as_typed(said) if who is Who.USER else said).strip().splitlines()
@@ -124,7 +124,7 @@ def talk_event(when: float, who: Who, block: dict, verbose: bool) -> Event | Non
     )
 
 
-def unreadable_event(when: float, entry: dict) -> Event:
+def _unreadable_event(when: float, entry: dict) -> Event:
     """A line of the transcript that holds no entry, see line_entry of
     files.py: what a session did there is not told, that it is so is.
     When is not known either, it is put where it was found."""
@@ -137,7 +137,7 @@ def unreadable_event(when: float, entry: dict) -> Event:
     )
 
 
-def untold_event(when: float, entries: list[dict]) -> Event:
+def _untold_event(when: float, entries: list[dict]) -> Event:
     """Entries of a transcript that add to no event, as one that counts
     them by their kind: a step in which the model only thought, a title,
     a mode or a model with nothing before it to have changed from. Said
@@ -152,7 +152,7 @@ def untold_event(when: float, entries: list[dict]) -> Event:
     return Event(when, Who.SANDBOX, Kind.TRANSCRIPT, [detail], {"entries": entries})
 
 
-def read_anew(used: dict[str, int], before: int) -> int:
+def _read_anew(used: dict[str, int], before: int) -> int:
     """How much of the conversation a step read at full price that the
     step before had left in the cache, 0 when the cache held: a step
     reads again what the one before read, and less than half of that
@@ -164,7 +164,7 @@ def read_anew(used: dict[str, int], before: int) -> int:
     return sum(used[kind] for kind in INPUT_TOKENS) - used["cache_read_input_tokens"]
 
 
-def step_event(when: float, who: Who, usage: dict) -> Event | None:
+def _step_event(when: float, who: Who, usage: dict) -> Event | None:
     """What a step of the model used, none when that is nothing: the
     tokens it wrote, and the ones it read with how many of them are new
     since the step before, which is what the results it was given and the
@@ -203,7 +203,7 @@ class OpenCall:
     source: str = ""
 
 
-def open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
+def _open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
     """A call as its result needs it, by its event, the entry it is in
     and the call itself. Its result is added to the event when the two
     are told as a whole, and is an event of its own when not."""
@@ -216,7 +216,7 @@ def open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
     return OpenCall(event.who, name, started, label, added_to, source=source)
 
 
-def side_of(who: Who, entry: dict) -> tuple[Who, str]:
+def _side_of(who: Who, entry: dict) -> tuple[Who, str]:
     """Whose side of a conversation an entry is of: claude's, or that of
     one subagent, which Claude Code names in each entry of its."""
     return who, kept(entry.get("agentId"))
@@ -333,7 +333,7 @@ class Walk:
         """The events an entry adds."""
         kind = entry.get("type")
         if kind == UNREADABLE:
-            return [unreadable_event(self._when, entry)]
+            return [_unreadable_event(self._when, entry)]
         stamp = local_time(entry)
         self._when = stamp.timestamp() if stamp else self._when
         if kind == "system" and entry.get("subtype") == "local_command":
@@ -386,7 +386,7 @@ class Walk:
         step = step_of(entry)
         if not self._live or not step:
             return []
-        side = side_of(who, entry)
+        side = _side_of(who, entry)
         before, issued = self._at.get(side, ("", []))
         if before == step:
             return []
@@ -416,12 +416,12 @@ class Walk:
             return []
         self._steps[step[0]] = None
         self._remember(self._steps)
-        used = step_event(self._when, who, self._usage.get(*step))
+        used = _step_event(self._when, who, self._usage.get(*step))
         # Said with the step it is about, or not at all
         why = self._asides.dropped()
         if not used:
             return []
-        anew = read_anew(used.fields, self._read.get(who, 0))
+        anew = _read_anew(used.fields, self._read.get(who, 0))
         self._read[who] = sum(used.fields[kind] for kind in INPUT_TOKENS)
         if anew:
             said = f"cache MISSED, {amount(anew)} read anew"
@@ -459,11 +459,11 @@ class Walk:
         return events
 
     def _talk(self, who: Who, block: dict) -> list[Event]:
-        return self._said(talk_event(self._when, who, block, self._whole))
+        return self._said(_talk_event(self._when, who, block, self._whole))
 
     def _command(self, entry: dict) -> list[Event]:
         """What a command of Claude Code's said, as of anything said."""
-        return self._said(command_event(self._when, entry, self._whole))
+        return self._said(_command_event(self._when, entry, self._whole))
 
     @property
     def _whole(self) -> bool:
@@ -493,13 +493,13 @@ class Walk:
             self._diffed,
         )
         call = str(block.get("id"))
-        issued = open_call(event, entry, block, whole=not self._live)
+        issued = _open_call(event, entry, block, whole=not self._live)
         if self._live:
             self._calls += 1
             event.number = issued.number = self._calls
             event.fields = {"stage": Stage.CALL, **event.fields}
             # Of the step its side is at, when the entry names it
-            _, in_step = self._at.get(side_of(who, entry), ("", []))
+            _, in_step = self._at.get(_side_of(who, entry), ("", []))
             if step_of(entry) and len(in_step) < MOST_REMEMBERED:
                 in_step.append(call)
         self._open[call] = issued
@@ -543,7 +543,7 @@ class Walk:
             verbose=False,
             diffed=False,
         )
-        return open_call(event, issued, block, whole=False)
+        return _open_call(event, issued, block, whole=False)
 
     def _result(self, entry: dict, block: dict) -> list[Event]:
         """How a call ended: added to its event, or an event of its own
@@ -605,7 +605,7 @@ class Walk:
             fields[key] = any(flags)
 
 
-def steps_used(entries: list[dict]) -> dict[str, dict]:
+def _steps_used(entries: list[dict]) -> dict[str, dict]:
     """What each step of the model used, by its id: as the last entry of
     a step has it, should an earlier one be short."""
     return dict(found for found in map(step_usage, entries) if found)
@@ -618,7 +618,7 @@ def left_events(
     were taken out of it: a result whose call is among those is named
     after it."""
     other = OtherPart(calls_issued(gone))
-    walk = Walk(project_dir, options, steps_used(entries), other)
+    walk = Walk(project_dir, options, _steps_used(entries), other)
     events = [event for entry in entries for event in walk.take(entry)]
     walk.end()
     return events
@@ -631,12 +631,12 @@ def taken_out_events(
     next to what is left of it. A result that was taken out or altered
     is named after its call, which may be left, and a call that was is
     told with its result, which may be left too. Then one event for the
-    entries that add to none (see untold_event), at the time of the
+    entries that add to none (see _untold_event), at the time of the
     first: nothing that was taken out goes without a word."""
     if not gone:
         return []
     other = OtherPart(calls_issued(left), tool_results(left))
-    walk = Walk(project_dir, options, steps_used(gone), other)
+    walk = Walk(project_dir, options, _steps_used(gone), other)
     events: list[Event] = []
     untold: list[dict] = []
     for entry in gone:
@@ -649,7 +649,7 @@ def taken_out_events(
     if untold:
         times = entry_times(untold) or entry_times(gone)
         when = times[0].timestamp() if times else 0.0
-        events.append(untold_event(when, untold))
+        events.append(_untold_event(when, untold))
     return events
 
 

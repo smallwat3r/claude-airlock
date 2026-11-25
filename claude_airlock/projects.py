@@ -46,7 +46,7 @@ def sandboxed_root(host: Host) -> str:
     return project_roots(host)[-1]
 
 
-def transcript_dir(host: Host, root: str) -> Path:
+def _transcript_dir(host: Host, root: str) -> Path:
     """Where Claude Code keeps the transcripts of the sessions that knew
     the project as root: named after the path, everything but letters and
     digits dashed."""
@@ -65,7 +65,7 @@ def project_root(path: Path, host: Host) -> str:
     what the paths it recorded are to be compared with."""
     place = (subagent_session(path) or path).parent
     for root in project_roots(host):
-        if transcript_dir(host, root) == place:
+        if _transcript_dir(host, root) == place:
             return root
     return host.project_dir
 
@@ -73,7 +73,7 @@ def project_root(path: Path, host: Host) -> str:
 def transcript_dirs(host: Host) -> list[Path]:
     """Where the project's transcripts are, see project_roots."""
     return list(
-        dict.fromkeys(transcript_dir(host, root) for root in project_roots(host))
+        dict.fromkeys(_transcript_dir(host, root) for root in project_roots(host))
     )
 
 
@@ -83,7 +83,7 @@ def memory_dirs(host: Host) -> list[str]:
     return [str(directory / MEMORY_DIR) for directory in transcript_dirs(host)]
 
 
-def plain_files(directory: Path) -> tuple[list[str], set[str]]:
+def _plain_files(directory: Path) -> tuple[list[str], set[str]]:
     """The names of the plain files of a directory, and those of its
     directories, neither through a link. None for one that is not there.
     As the listing says, without a look at each: it is listed often while
@@ -105,7 +105,7 @@ def plain_files(directory: Path) -> tuple[list[str], set[str]]:
     return files, directories
 
 
-def listed_transcripts(directory: Path) -> tuple[list[Path], set[str]]:
+def _listed_transcripts(directory: Path) -> tuple[list[Path], set[str]]:
     """The transcripts in one of the project's directories, and the names
     of the directories next to them: that of a session holds what its
     subagents wrote."""
@@ -113,7 +113,7 @@ def listed_transcripts(directory: Path) -> tuple[list[Path], set[str]]:
     # files, not a link to something else on the host or a pipe that never
     # ends. A session can still put one in a transcript's place after it
     # was listed, so each is opened with open_plain of files.py.
-    files, directories = plain_files(directory)
+    files, directories = _plain_files(directory)
     found = [directory / name for name in files if name.endswith(TRANSCRIPT_SUFFIX)]
     return found, directories
 
@@ -124,7 +124,7 @@ def transcript_files(host: Host) -> list[Path]:
     return [
         transcript
         for directory in transcript_dirs(host)
-        for transcript in listed_transcripts(directory)[0]
+        for transcript in _listed_transcripts(directory)[0]
     ]
 
 
@@ -141,7 +141,7 @@ def subagent_files(transcript: Path) -> list[Path]:
         return []
     names = sorted(
         name
-        for name in plain_files(directory)[0]
+        for name in _plain_files(directory)[0]
         if name.startswith(SUBAGENT_PREFIX) and name.endswith(TRANSCRIPT_SUFFIX)
     )
     return [directory / name for name in names[:MOST_SUBAGENTS]]
@@ -159,7 +159,7 @@ def subagents_unread(transcript: Path) -> int:
         return 0
     there = sum(
         name.startswith(SUBAGENT_PREFIX) and name.endswith(TRANSCRIPT_SUFFIX)
-        for name in plain_files(directory)[0]
+        for name in _plain_files(directory)[0]
     )
     return max(0, there - MOST_SUBAGENTS)
 
@@ -169,7 +169,7 @@ def session_transcripts(host: Host) -> list[Path]:
     those of their subagents."""
     found: list[Path] = []
     for directory in transcript_dirs(host):
-        transcripts, directories = listed_transcripts(directory)
+        transcripts, directories = _listed_transcripts(directory)
         for transcript in transcripts:
             found.append(transcript)
             # Most sessions started no subagent and have no directory

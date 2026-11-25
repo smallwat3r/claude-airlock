@@ -87,7 +87,7 @@ class ProxyRequest:
             return 0
 
 
-def as_recorded(address: str) -> str:
+def _as_recorded(address: str) -> str:
     """The address a request came from, written the way the record of a
     session has the addresses it was given (see session_addresses of
     networks.py): one of IPv6 can be written in more ways than one, and
@@ -111,7 +111,7 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
         return ProxyRequest(
             float(ended),
             float(milliseconds) / 1000,
-            as_recorded(address),
+            _as_recorded(address),
             "DENIED" in result,
             method,
             url,
@@ -122,7 +122,7 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
         return None
 
 
-def made_by(
+def _made_by(
     request: ProxyRequest, session: TracedSession, start: float, end: float
 ) -> bool:
     """Whether a session made a request between start and end: it came
@@ -140,9 +140,9 @@ def requests_made(
     logged: list[ProxyRequest], sessions: list[TracedSession], start: float, end: float
 ) -> Iterator[tuple[ProxyRequest, TracedSession]]:
     """Each request of the log that one of the sessions made between
-    start and end, see made_by, with the session that made it."""
+    start and end, see _made_by, with the session that made it."""
     for request in logged:
-        by = next((s for s in sessions if made_by(request, s, start, end)), None)
+        by = next((s for s in sessions if _made_by(request, s, start, end)), None)
         if by is not None:
             yield request, by
 

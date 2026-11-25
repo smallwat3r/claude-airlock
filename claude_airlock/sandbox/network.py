@@ -52,7 +52,7 @@ def namespace_args(settings: Settings) -> list[str]:
     return [network, "--dns=127.0.0.1"]
 
 
-def prepare_network(settings: Settings, host: Host) -> None:
+def _prepare_network(settings: Settings, host: Host) -> None:
     """Create the session's network as needed, and in filtered mode start
     the egress proxy, or replace one started from another config."""
     network = network_name(settings)
@@ -68,7 +68,7 @@ def prepare_network(settings: Settings, host: Host) -> None:
     if not egress_proxy_current():
         start_egress_proxy(host)
     # Not yet when the network was made since the proxy started, or made
-    # anew (see isolate_network). Refused when it has joined already.
+    # anew (see _isolate_network). Refused when it has joined already.
     docker_ok("network", "connect", network, EGRESS_PROXY)
     rotate_access_log()
 
@@ -79,7 +79,7 @@ def session_network(settings: Settings, host: Host) -> Iterator[None]:
     the proxies it goes through, started as needed and said to be in use.
     When it is over, the proxies no session uses any more are removed."""
     with sidecars_locked(host):
-        prepare_network(settings, host)
+        _prepare_network(settings, host)
         start_socket_proxy(settings)
         uses = [
             lock_file(proxy_use_file(host, proxy), shared=True)
@@ -108,7 +108,7 @@ def network_args(
     the default bridge) that only allows domains listed in
     docker/allowed-domains.txt. Filtering is by the host named in the
     CONNECT request, so it survives CDN IP churn. The network and the
-    sidecar are those of prepare_network. asked says whether the user is
+    sidecar are those of _prepare_network. asked says whether the user is
     asked about a host that is not listed, which the session is then
     told: only where there is a place to ask, see hosts_asked. Told all
     the same, a session would wait for an answer nobody is asked for."""

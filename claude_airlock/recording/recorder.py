@@ -174,7 +174,7 @@ class Beyond:
         os.replace(noted, f"{copy}{BEYOND_SUFFIX}")
 
 
-def keep_with_last(copy: Path, last: Path) -> int:
+def _keep_with_last(copy: Path, last: Path) -> int:
     """Add what a copy holds to the last copy that was put aside, as far
     as that has room (see MOST_COPIED). From a line of its own on: a
     copy can end within a line. How many bytes had no room."""
@@ -193,7 +193,7 @@ def keep_with_last(copy: Path, last: Path) -> int:
     return left
 
 
-def start_anew(copy: Path, kept: int) -> None:
+def _start_anew(copy: Path, kept: int) -> None:
     """Have a copy start over for a transcript that was rewritten, with
     what it held kept. Put aside as it is the first MOST_PUT_ASIDE times,
     a new one then starts with the next look. After that it is emptied in
@@ -205,7 +205,7 @@ def start_anew(copy: Path, kept: int) -> None:
         os.replace(copy, f"{copy}.{time.time_ns()}{ASIDE_SUFFIX}")
         return
     before = Beyond.of(copy)
-    dropped = keep_with_last(copy, aside[-1])
+    dropped = _keep_with_last(copy, aside[-1])
     # Noted before the copy is emptied: a launcher killed between the two
     # leaves a rewrite counted twice, not one that is not said
     dataclasses.replace(
@@ -214,11 +214,11 @@ def start_anew(copy: Path, kept: int) -> None:
     os.ftruncate(kept, 0)
 
 
-def note_no_room(copy: Path) -> None:
+def _note_no_room(copy: Path) -> None:
     """Note next to a copy that a launcher stopped adding to it with more
     to copy, for want of room (see MOST_A_SESSION). Under the lock of the
     copy, which is made as needed: the launchers of other sessions note
-    what became of it too, see start_anew."""
+    what became of it too, see _start_anew."""
     private_dir(str(copy.parent))
     with open_locked(copy, "ab"):
         before = Beyond.of(copy)
@@ -244,7 +244,7 @@ def catch_up(transcript: Path, copy: Path, most: int = MOST_COPIED) -> int:
         if os.fstat(source.fileno()).st_size < have:
             # Rewritten. What it held is kept, and a new copy starts with
             # the next look, however often that has happened.
-            start_anew(copy, kept.fileno())
+            _start_anew(copy, kept.fileno())
             return 0
         source.seek(have)
         while have + added < MOST_COPIED and added < most:
@@ -408,7 +408,7 @@ class Copier:
         if transcript in self._short:
             return
         if last or self._written[transcript] == have:
-            note_no_room(copy)
+            _note_no_room(copy)
             self._short.add(transcript)
             self.stopped += 1
         self._written[transcript] = have
@@ -432,7 +432,7 @@ def let_go_of_old_copies(host: Host) -> None:
             directory.rmdir()
 
 
-def keep_copying(copier: Copier, stop: threading.Event) -> None:
+def _keep_copying(copier: Copier, stop: threading.Event) -> None:
     more = False
     while True:
         # Without the wait after a look whose turns left more to copy: a
@@ -454,7 +454,7 @@ def transcripts_copied(host: Host) -> Iterator[Copier]:
     let_go_of_old_copies(host)
     copier = Copier(host, time.time() - 1)
     try:
-        with in_background(keep_copying, copier):
+        with in_background(_keep_copying, copier):
             yield copier
     finally:
         if copier.failed:
@@ -476,7 +476,7 @@ def transcripts_copied(host: Host) -> Iterator[Copier]:
             )
 
 
-def lines_of(path: Path) -> Iterator[tuple[bytes, bytes | None]]:
+def _lines_of(path: Path) -> Iterator[tuple[bytes, bytes | None]]:
     """The whole lines of a transcript or of a copy, one at a time, each
     as what stands for it and the line itself, none for a file that
     cannot be read. A last line without its end is still being written,
@@ -495,7 +495,7 @@ def line_digests(path: Path, most: int) -> set[bytes] | None:
     than so many different lines: they are not all held to be compared
     with, a transcript can be made of lines of a byte each."""
     digests: set[bytes] = set()
-    for digest, _ in lines_of(path):
+    for digest, _ in _lines_of(path):
         digests.add(digest)
         if len(digests) > most:
             return None
@@ -511,7 +511,7 @@ def removed_transcripts(host: Host) -> list[Path]:
     for directory in transcript_dirs(host):
         for copy in Path(host.transcript_copies_dir, directory.name).glob("*.jsonl"):
             transcript = directory / copy.name
-            if copy.is_file() and not plain_file(transcript):
+            if copy.is_file() and not _plain_file(transcript):
                 removed.append(transcript)
     return removed
 
@@ -523,11 +523,11 @@ def removed_subagents(host: Host, transcript: Path) -> list[Path]:
         subagent
         for copy in sorted(copies.glob("agent-*.jsonl"))
         for subagent in [transcript.with_suffix("") / SUBAGENTS_DIR / copy.name]
-        if copy.is_file() and not plain_file(subagent)
+        if copy.is_file() and not _plain_file(subagent)
     ]
 
 
-def plain_file(path: Path) -> bool:
+def _plain_file(path: Path) -> bool:
     """Whether a transcript is there to be read, see open_plain."""
     file = open_plain(path)
     if file is None:
@@ -667,7 +667,7 @@ def compare(host: Host, transcript: Path) -> Compared:
         dropped=beyond.dropped,
         no_room=beyond.no_room,
     )
-    copied = (line for path in copies for line in lines_of(path))
+    copied = (line for path in copies for line in _lines_of(path))
     first = next(copied, None)
     if first is None:
         # Nothing to compare with, the transcript is not read for it: a
@@ -697,7 +697,7 @@ def compare(host: Host, transcript: Path) -> Compared:
             held += size
             found.gone.append(entry)
     found.uncompared = current is None
-    found.removed = not plain_file(transcript)
+    found.removed = not _plain_file(transcript)
     found.cut_short = (length(copy) or 0) >= MOST_COPIED and (
         length(transcript) or 0
     ) > (length(copy) or 0)

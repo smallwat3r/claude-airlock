@@ -115,7 +115,7 @@ def tokens(count: float) -> str:
     return brief.amount(round(count))
 
 
-def read_by(usage: object) -> list[float]:
+def _read_by(usage: object) -> list[float]:
     """The counts of what was read, of the usage claude gives: new,
     written to the cache and read from it."""
     given = usage if isinstance(usage, dict) else {}
@@ -128,7 +128,7 @@ def used(result: dict, spent: float) -> list[str]:
     session's, spent is what it was before the turn."""
     given = result.get("usage")
     usage = given if isinstance(given, dict) else {}
-    read = read_by(usage)
+    read = _read_by(usage)
     written = measured(usage.get("output_tokens"))
     if not sum(read) and not written:
         # A command of Claude Code's, the model was not asked
@@ -183,7 +183,7 @@ class Usage:
             usage = self._drift.field(inner, "usage", dict)
         else:
             usage = inner.get("usage")
-        self._context = sum(read_by(usage)) or self._context
+        self._context = sum(_read_by(usage)) or self._context
 
     def parts(self, result: dict, model: str) -> list[str]:
         """What the end of a turn says it used, then how full the context
@@ -192,7 +192,7 @@ class Usage:
         parts = used(result, self._spent)
         total = measured(result.get("total_cost_usd"))
         self._spent = self._spent if total is None else total
-        window = window_of(result, model)
+        window = _window_of(result, model)
         self._window = window or self._window
         if not parts:
             return []
@@ -210,7 +210,7 @@ class Usage:
         return parts
 
 
-def window_of(result: dict, model: str) -> float:
+def _window_of(result: dict, model: str) -> float:
     """How much the model of the session can read at most, as the end of
     a turn says of each model it used."""
     given = result.get("modelUsage")

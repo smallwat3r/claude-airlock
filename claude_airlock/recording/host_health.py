@@ -217,7 +217,7 @@ def collect_left_behind(host: Host) -> None:
         record.keep(host, end)
 
 
-def process_limit_hits(events: int) -> int | None:
+def _process_limit_hits(events: int) -> int | None:
     """How often the process limit of a cgroup was run into, read from
     its open pids.events file. None when the count cannot be read, which
     is the case once the cgroup is removed."""
@@ -246,7 +246,7 @@ def watch_process_limit(
         changed.register(events, select.POLLPRI)
         noted = 0
         while True:
-            hits = process_limit_hits(events)
+            hits = _process_limit_hits(events)
             if hits is None:
                 return
             if hits > noted:

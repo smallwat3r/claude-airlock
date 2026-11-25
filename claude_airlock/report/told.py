@@ -72,7 +72,7 @@ class Instructions:
         return {**about, **flagged(self.planted)}
 
 
-def instructions_planted(
+def _instructions_planted(
     kind: str, content: object, path: str = ""
 ) -> tuple[Planted, ...]:
     """The signs in a file read as instructions (see planted.py), each
@@ -90,7 +90,7 @@ def instruction_files(given: dict, scan: bool = True) -> tuple[Instructions, ...
         kind, content = kept(file.get("type")) or "?", file.get("content")
         size = len(content) if isinstance(content, str) else 0
         path = kept(file["path"])
-        signs = instructions_planted(kind, content, path) if scan else ()
+        signs = _instructions_planted(kind, content, path) if scan else ()
         files.append(Instructions(path, kind, size, signs))
     return tuple(files)
 
@@ -129,7 +129,7 @@ def instructions_read(entries: list[dict]) -> list[str]:
     return lines
 
 
-def diagnostic_lines(file: dict) -> list[str]:
+def _diagnostic_lines(file: dict) -> list[str]:
     """What a language server reported of one file: how many of each
     severity, then each message with its line."""
     found = [d for d in listed(file.get("diagnostics")) if isinstance(d, dict)]
@@ -294,7 +294,7 @@ class Asides:
         files = [file for file in listed(given.get("files")) if isinstance(file, dict)]
         if not self._verbose or not files:
             return []
-        lines = [line for file in files for line in diagnostic_lines(file)]
+        lines = [line for file in files for line in _diagnostic_lines(file)]
         fields = {"kind": "diagnostics", "files": files}
         return [Event(when, who, Kind.CONTEXT, lines, fields)]
 
@@ -376,7 +376,7 @@ class Asides:
         self._models[source] = asked
         if was is None or was == asked:
             return []
-        line = f"{model_shown(*asked)}  was: {model_shown(*was)}"
+        line = f"{_model_shown(*asked)}  was: {_model_shown(*was)}"
         fields = {
             "model": asked[0],
             "effort": asked[1] or None,
@@ -387,6 +387,6 @@ class Asides:
         return [Event(when, who, Kind.MODEL, [line], fields)]
 
 
-def model_shown(model: str, effort: str) -> str:
+def _model_shown(model: str, effort: str) -> str:
     said = shortened(flat(model))
     return f"{said}, effort {shortened(flat(effort))}" if effort else said

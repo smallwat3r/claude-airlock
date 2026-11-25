@@ -16,7 +16,7 @@ from ..settings import Host, Settings
 from .records import TracedSession, record_traced_session
 
 
-def record_address(
+def _record_address(
     name: str, owner: str, host: Host, started: float, stop: threading.Event
 ) -> None:
     """Note each address the session has, a line of the record for each:
@@ -44,7 +44,7 @@ def session_address_recorded(
         yield
         return
     with (
-        in_background(record_address, name, owner, host, time.time()),
+        in_background(_record_address, name, owner, host, time.time()),
         access_log_rotated(),
     ):
         yield

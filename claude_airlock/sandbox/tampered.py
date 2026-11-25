@@ -33,7 +33,7 @@ def differing(before: dict[str, str], after: dict[str, str]) -> list[str]:
     )
 
 
-def first_named(paths: list[str]) -> list[str]:
+def _first_named(paths: list[str]) -> list[str]:
     """The lines that name the first MOST_NAMED paths of a report, and
     say how many more there are."""
     more = len(paths) - MOST_NAMED
@@ -53,7 +53,7 @@ def report_build_changes(
         warn(
             f"since {whose}, files of {NAME} itself have changed,"
             " which the next session is started and sandboxed by:",
-            *first_named(own),
+            *_first_named(own),
             f"Review them (git diff in {CHECKOUT_DIR}) before you start"
             " another session.",
         )
@@ -65,12 +65,12 @@ def report_build_changes(
         " host (make, a package manager, a test runner, a hook manager, an"
         " editor), or that git and Claude follow below the top of the"
         " project, have changed:",
-        *first_named(changed),
+        *_first_named(changed),
         "Read them before you build, test or commit there outside the sandbox.",
     )
 
 
-def named_changes(changed: list[str], claude_dir: str) -> list[str]:
+def _named_changes(changed: list[str], claude_dir: str) -> list[str]:
     """The changed files as they are named in the report: each by its
     path, those under a watched tree of ~/.claude by their directory
     WATCHED_TREE_DEPTH down, with how many of them changed there."""
@@ -91,7 +91,7 @@ def named_changes(changed: list[str], claude_dir: str) -> list[str]:
     ]
 
 
-def report_memory(changed: list[str], unchecked: str = "") -> None:
+def _report_memory(changed: list[str], unchecked: str = "") -> None:
     """Name the changed files of what Claude remembers of the project.
     Said apart from the rest: a session writes there in the ordinary way
     of things, when it is told something to keep. But what is there is
@@ -103,12 +103,12 @@ def report_memory(changed: list[str], unchecked: str = "") -> None:
     warn(
         f"{whose} changed what Claude remembers of this project,"
         " which every later session here is told:",
-        *first_named(changed),
+        *_first_named(changed),
         "Read them, a later session follows what they say.",
     )
 
 
-def report_servers(config: str, unchecked: str = "") -> None:
+def _report_servers(config: str, unchecked: str = "") -> None:
     """Say that the servers of the config the sandboxed sessions share
     have changed. Said apart from the rest: nothing of it runs on the
     host, but a server is a command, and one a session of this project
@@ -132,20 +132,20 @@ def report_tampering(
     memory: Sequence[str] = (),
     shared_config: str = "",
 ) -> None:
-    """Name the files that differ, see named_changes for how, those of
-    the memory directories apart (see report_memory), and the servers of
-    the sandbox's own config (see report_servers). unchecked is the
+    """Name the files that differ, see _named_changes for how, those of
+    the memory directories apart (see _report_memory), and the servers of
+    the sandbox's own config (see _report_servers). unchecked is the
     name of an earlier session that ended without this check, when the
     report is the late one for it."""
     differ = differing(before, after)
     roots = tuple(directory + os.sep for directory in memory)
     remembered = [path for path in differ if path in memory or path.startswith(roots)]
-    report_memory(remembered, unchecked)
+    _report_memory(remembered, unchecked)
     # Not for a check saved by a version that did not watch them
     if shared_config and shared_config in differ and shared_config in before:
-        report_servers(shared_config, unchecked)
+        _report_servers(shared_config, unchecked)
     others = set(differ).difference(remembered, [shared_config])
-    changed = named_changes([path for path in differ if path in others], claude_dir)
+    changed = _named_changes([path for path in differ if path in others], claude_dir)
     if not changed:
         return
     if unchecked:
@@ -205,7 +205,7 @@ def report_projects(planted: list[str] | None, unchecked: str = "") -> None:
             f"since {whose} started, Claude Code has a directory for"
             " other projects that had none, by its doing or that of a project"
             " first used meanwhile:",
-            *first_named(planted),
+            *_first_named(planted),
             "A session can make one for a project that has none yet. What is"
             " there is told to the next session of that project, on the host too:"
             " look into them, and remove what is not yours.",

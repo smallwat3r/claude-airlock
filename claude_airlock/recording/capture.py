@@ -180,7 +180,7 @@ SAID_LINES = 100
 # next to its own: 0 is its packet limit, any other that it died, which
 # the record of the session says (see CaptureSidecar.noted). One that
 # never got to write its file failed to start, which is said by ending
-# with its status (see start_capture).
+# with its status (see _start_capture).
 _COMMON = f"-i any -p -n -U -Z root --immediate-mode -s {SNAP_LENGTH} -c {PACKET_LIMIT}"
 _STARTED = "\n".join(
     f'tcpdump $common -w {part.file} "${number}" &\n{part.name}=$!'
@@ -255,7 +255,7 @@ class CaptureSidecar(Sidecar):
                     statuses[part.name] = target.read_text()
                 except OSError:
                     continue
-        return died(statuses)
+        return _died(statuses)
 
     def copy_out(self, directory: str) -> Path | None:
         """The main capture, and the others next to it under the same
@@ -295,7 +295,7 @@ def dropped_packets(said: str) -> int:
     return sum(int(count) for count in _DROPPED.findall(said))
 
 
-def died(statuses: dict[str, str]) -> str:
+def _died(statuses: dict[str, str]) -> str:
     """The parts whose tcpdump died, by the status each part that ended
     left, as it is said: empty when none did. 0 is a packet limit, which
     is not a death."""
@@ -308,7 +308,7 @@ def died(statuses: dict[str, str]) -> str:
 
 def died_so_far(sidecar: str) -> str:
     """The parts of the capture of a running session whose tcpdump has
-    died, as died says them. Empty when none has, and when the sidecar
+    died, as _died says them. Empty when none has, and when the sidecar
     cannot be asked."""
     files = {part.file + STATUS_SUFFIX: part.name for part in PARTS}
     # Each file that is there with what it holds, as file:status
@@ -320,10 +320,10 @@ def died_so_far(sidecar: str) -> str:
         file, _, status = line.partition(":")
         if file in files:
             statuses[files[file]] = status
-    return died(statuses)
+    return _died(statuses)
 
 
-def start_capture(
+def _start_capture(
     settings: Settings, host: Host, session: str, image_tag: str
 ) -> CaptureSidecar:
     """Start the sidecar a session is about to join. It runs the sandbox
@@ -371,7 +371,7 @@ def session_captured(
     if not settings.net_log:
         yield
         return
-    sidecar = start_capture(settings, host, session, image_tag)
+    sidecar = _start_capture(settings, host, session, image_tag)
     try:
         yield
     finally:

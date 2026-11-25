@@ -99,7 +99,7 @@ ACTIONS = {action.option: action for action in Action if action is not Action.RU
 OPTIONS_END = "--"
 
 
-def parse_args(argv: list[str]) -> ParsedArgs:
+def _parse_args(argv: list[str]) -> ParsedArgs:
     """Take the launcher's own options out of argv. Only up to where
     they end: what follows -- is for claude, or for bash, as it is
     written, an option of the launcher's name too. One thing to do at a
@@ -132,8 +132,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     return ParsedArgs(action, claude_args, added)
 
 
-def main(argv: list[str], usage: str = "") -> int:
-    action, claude_args, added = parse_args(argv)
+def _main(argv: list[str], usage: str = "") -> int:
+    action, claude_args, added = _parse_args(argv)
     if action is Action.HELP:
         # Ahead of the settings: a config file that is refused is one of
         # the things the text is asked about
@@ -172,7 +172,7 @@ def main(argv: list[str], usage: str = "") -> int:
     refuse_links_out(dirs, host)
     dirs, protected = protected_dirs(dirs, settings, host)
     plan = Plan(settings, host, image, action, dirs, protected, claude_args)
-    return chats(plan) if plan.is_chat else session(plan)
+    return _chats(plan) if plan.is_chat else session(plan)
 
 
 @dataclass(frozen=True)
@@ -190,7 +190,7 @@ class Plan:
     dirs: list[ExtraDir]
     protected: list[str]
     claude_args: list[str]
-    # Where a chat leaves what is to be done after it, see chats
+    # Where a chat leaves what is to be done after it, see _chats
     handover: Handover | None = None
 
     @property
@@ -203,7 +203,7 @@ class Plan:
         return self.action is Action.LINE_MODE
 
 
-def chats(plan: Plan) -> int:
+def _chats(plan: Plan) -> int:
     """A chat, and after it one with each session its user asked to go on
     with (/resume). Each is a session of its own from start to finish:
     the one before is over, recorded and checked before the next starts,
@@ -239,7 +239,7 @@ def session(plan: Plan) -> int:
         return ending.status(status)
 
 
-def session_watched(
+def _session_watched(
     plan: Plan, name: str, owner: str, runtime: Runtime
 ) -> AbstractContextManager[None]:
     """The recorder for CLAUDE_AIRLOCK_PROC_LOG while a session runs. It
@@ -285,7 +285,7 @@ def session_run_args(
     ]
 
 
-def command_args(plan: Plan) -> list[str]:
+def _command_args(plan: Plan) -> list[str]:
     """What the session's program is given: the user's arguments, for
     claude after the launcher's own."""
     if not plan.runs_claude:
@@ -340,7 +340,7 @@ def recorded_session(
             session_captured(settings, host, name, image.tag),
             session_address_recorded(settings, host, name, owner),
             socket_proxy_watched(settings, host, name, owner),
-            session_watched(plan, name, owner, runtime),
+            _session_watched(plan, name, owner, runtime),
         ):
             running.enter_context(recording)
         copier = running.enter_context(transcripts_copied(host))
@@ -380,7 +380,7 @@ def recorded_session(
             )
         run_args = run_args + agent_args
         try:
-            status = run_session(run_args, image, command_args(plan), ending, through)
+            status = run_session(run_args, image, _command_args(plan), ending, through)
         finally:
             # Gone before its recorders are, and before what it left
             # behind is checked: docker run can return and leave its
@@ -457,7 +457,7 @@ def cli(usage: str = "") -> int:
         for stream in (sys.stdout, sys.stderr):
             if isinstance(stream, io.TextIOWrapper):
                 stream.reconfigure(errors="backslashreplace")
-        status = main(sys.argv[1:], usage)
+        status = _main(sys.argv[1:], usage)
         # Here, where a reader that left can still be told from a failure
         sys.stdout.flush()
         return status

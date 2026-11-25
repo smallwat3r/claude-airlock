@@ -38,7 +38,7 @@ ARG CLAUDE_CODE_VERSION=2.1.326
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
-# ~/.cache is mounted as a named volume (see scratch_args in
+# ~/.cache is mounted as a named volume (see _scratch_args in
 # claude_airlock/sandbox/session.py). A new volume
 # takes the owner and mode of the directory it covers, so create it open to
 # whichever host user the container runs as, the way /tmp is.

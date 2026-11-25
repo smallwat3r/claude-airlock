@@ -32,12 +32,12 @@ MOST_SAID = 20
 MOST_MISSED = 50
 
 
-def shape(value: object, depth: int = SHAPE_DEPTH) -> str:
+def _shape(value: object, depth: int = SHAPE_DEPTH) -> str:
     """The fields of a message and the kind of each, without what they
     hold: enough to see what moved, and nothing of the conversation."""
     if isinstance(value, dict) and depth:
         fields = (
-            f"{flat(key)}: {shape(held, depth - 1)}" for key, held in value.items()
+            f"{flat(key)}: {_shape(held, depth - 1)}" for key, held in value.items()
         )
         return "{" + ", ".join(fields) + "}"
     return type(value).__name__
@@ -109,4 +109,4 @@ class Drift:
             return None
         self._said.update(new)
         said = flat(message.get("claude_code_version") or version)[:NAME_WIDTH]
-        return Change(tuple(new), said, shape(message)[:SHAPE_WIDTH])
+        return Change(tuple(new), said, _shape(message)[:SHAPE_WIDTH])

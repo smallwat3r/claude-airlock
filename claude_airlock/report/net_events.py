@@ -40,7 +40,7 @@ PROCESS_WIDTH = 200
 HIDDEN_HOLDER = "a process that cannot be looked into"
 
 
-def proxy_summary(
+def _proxy_summary(
     requests: list[ProxyRequest], sessions: list[TracedSession]
 ) -> list[str]:
     """Each destination with its number of requests and bytes, the
@@ -105,7 +105,7 @@ def name_container(events: list[Event], name: str, shown: bool) -> None:
             event.tag = f"[{clean(name)}]"
 
 
-def proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
+def _proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
     """What filtered sessions asked the egress proxy for, as summary lines
     and as one event per request, each with the container it came from
     (see name_container)."""
@@ -117,14 +117,14 @@ def proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
         name_container([event], by.name, recorded.several)
         requests.append(request)
         events.append(event)
-    lines = proxy_summary(requests, recorded.filtered)
+    lines = _proxy_summary(requests, recorded.filtered)
     begins = recorded.log_begins
     if begins is not None:
         lines.append(f"  {LOG_SHORT.format(datetime.fromtimestamp(begins))}")
     return lines, events
 
 
-def how_it_went(connection: Connection, outcome: Went) -> str:
+def _how_it_went(connection: Connection, outcome: Went) -> str:
     """An outcome of a connection as the words after its destination,
     none for no outcome: the capture does not always tell."""
     if outcome != Went.CLOSED:
@@ -137,7 +137,7 @@ def how_it_went(connection: Connection, outcome: Went) -> str:
     return went
 
 
-def connection_event(
+def _connection_event(
     capture: Capture,
     connection: Connection,
     live: bool = False,
@@ -169,14 +169,14 @@ def connection_event(
             bytes_out=connection.sent,
             bytes_in=connection.received,
         )
-    went = how_it_went(connection, outcome)
+    went = _how_it_went(connection, outcome)
     detail = reached(capture, address, port, "tcp", connection.when)
     detail += f"  {went}" if went else ""
     wrong = Wrong.THROUGHOUT if outcome.wrong else Wrong.NO
     return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
 
 
-def flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
+def _flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
     """What was sent to one place by another protocol than TCP, as an
     event at the time of the first packet. Of a capture that is all there
     it says how much went out, live just that it started."""
@@ -192,16 +192,16 @@ def flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
         fields["stage"] = Stage.OPEN
     else:
         fields.update(packets=flow.packets, bytes_out=flow.sent)
-        detail += f"  {sent_by(flow)}"
+        detail += f"  {_sent_by(flow)}"
     return Event(flow.when, Who.SANDBOX, Kind.NET, [detail], fields)
 
 
-def sent_by(flow: Flow) -> str:
+def _sent_by(flow: Flow) -> str:
     packets = f"{flow.packets} packet{'s' if flow.packets > 1 else ''}"
     return f"{packets}, {size(flow.sent)} out"
 
 
-def flag_event(why: str, lookup: Lookup) -> Event:
+def _flag_event(why: str, lookup: Lookup) -> Event:
     """A lookup that stands out, see pcap.py for what makes one."""
     fields = {"name": lookup.name, "type": lookup.kind, "flagged": why}
     detail = flat(f"lookup {lookup.name} {lookup.kind} FLAGGED: {why}")
@@ -210,7 +210,7 @@ def flag_event(why: str, lookup: Lookup) -> Event:
     )
 
 
-def request_event(request: Request) -> Event:
+def _request_event(request: Request) -> Event:
     """A plain HTTP request, which unlike one over TLS can be read."""
     fields = {
         "protocol": "http",
@@ -223,7 +223,7 @@ def request_event(request: Request) -> Event:
     return Event(request.when, Who.SANDBOX, Kind.NET, [detail], fields)
 
 
-def lookup_event(lookup: Lookup) -> Event:
+def _lookup_event(lookup: Lookup) -> Event:
     """An answer of the resolver: what was asked and what came back."""
     answer = ", ".join(lookup.addresses) or "nothing"
     said = f"FAILED: {lookup.error}" if lookup.error else f"-> {answer}"
@@ -251,7 +251,7 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
     ]
     lines += [
         f"  {reached(capture, flow.address, flow.port, flow.transport, flow.when)}"
-        f"  {sent_by(flow)}"
+        f"  {_sent_by(flow)}"
         for flow in sorted(capture.flows, key=lambda flow: -flow.sent)
     ]
     if not count and not capture.flows:
@@ -295,23 +295,23 @@ def capture_events(
     live = past is not None
     started, ended, looked_up, asked, sent, flagged = past or (0, 0, 0, 0, 0, 0)
     events = [
-        connection_event(capture, connection, live)
+        _connection_event(capture, connection, live)
         for connection in capture.connections[started:]
     ]
     if live:
         events += [
-            connection_event(capture, connection, live, (when, what))
+            _connection_event(capture, connection, live, (when, what))
             for when, what, connection in capture.endings[ended:]
         ]
-    events += [request_event(request) for request in capture.requests[asked:]]
-    events += [flow_event(capture, flow, live) for flow in capture.flows[sent:]]
-    events += [flag_event(why, lookup) for why, lookup in capture.flagged[flagged:]]
+    events += [_request_event(request) for request in capture.requests[asked:]]
+    events += [_flow_event(capture, flow, live) for flow in capture.flows[sent:]]
+    events += [_flag_event(why, lookup) for why, lookup in capture.flagged[flagged:]]
     if verbose:
-        events += [lookup_event(lookup) for lookup in capture.lookups[looked_up:]]
+        events += [_lookup_event(lookup) for lookup in capture.lookups[looked_up:]]
     return events
 
 
-def name_processes(events: list[Event], record: ProcessRecord) -> None:
+def _name_processes(events: list[Event], record: ProcessRecord) -> None:
     """Say of each connection which process made it, where one was noted
     to hold it: by its ports, so this is not a guess by the clock."""
     for event in events:
@@ -335,7 +335,7 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
         event.notes.append(f"by: {flat(shown_lineage(lineage))}")
 
 
-def process_events(record: ProcessRecord) -> list[Event]:
+def _process_events(record: ProcessRecord) -> list[Event]:
     """One event per process that was seen to run, or to become another
     program. What a process says it is, is its own to choose."""
     events = []
@@ -356,7 +356,7 @@ def process_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
-def listener_events(record: ProcessRecord) -> list[Event]:
+def _listener_events(record: ProcessRecord) -> list[Event]:
     """One event per socket that started to wait for connections, with
     the process that held it. One that waits on more than the session's
     own loopback says so: the other sessions that run are on its network,
@@ -381,7 +381,7 @@ def listener_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
-def limit_lines(record: ProcessRecord) -> list[str]:
+def _limit_lines(record: ProcessRecord) -> list[str]:
     """The line of the header on a session that ran into its process
     limit, nothing for one that did not."""
     if not record.process_limit:
@@ -414,12 +414,12 @@ def watched_summary(
         said = f"  processes not recorded under {under}, only memory and CPU use"
         return [
             said,
-            *limit_lines(record),
+            *_limit_lines(record),
             *health_summary(record.samples, record.ended),
         ]
     hint = "" if verbose else ", each one shown with --verbose"
     lines = [f"  processes {len(record.processes)} seen to run{hint}"]
-    lines += limit_lines(record)
+    lines += _limit_lines(record)
     reachable = sum(listener.open for listener in record.listeners)
     if reachable:
         lines.append(
@@ -437,7 +437,7 @@ def watched_summary(
     return lines + health_summary(record.samples, record.ended)
 
 
-def captured_connections(
+def _captured_connections(
     recorded: Recorded, found: Traced, verbose: bool
 ) -> tuple[list[str], list[Event]]:
     """What a captured session connected to, as summary lines and as
@@ -454,7 +454,7 @@ def captured_connections(
     events = capture_events(capture, verbose)
     record = recorded.processes_of(session)
     if record:
-        name_processes(events, record)
+        _name_processes(events, record)
     name_container(events, session.name, recorded.several)
     stopped = [f"  {STOPPED.format(flat(session.stopped))}"] if session.stopped else []
     if session.dropped:
@@ -462,11 +462,11 @@ def captured_connections(
     return [heading, *capture_summary(capture, verbose), *stopped], events
 
 
-def watched_events(record: ProcessRecord, verbose: bool) -> list[Event]:
+def _watched_events(record: ProcessRecord, verbose: bool) -> list[Event]:
     """What a session's watcher noted, as events: the sockets that waited
     for connections, how the session was doing, and with --verbose each
     process that was seen to run."""
-    ran = listener_events(record) + (process_events(record) if verbose else [])
+    ran = _listener_events(record) + (_process_events(record) if verbose else [])
     ran += [sample.event() for sample in record.samples]
     return ran + [ended.event() for ended in record.ended]
 
@@ -477,9 +477,9 @@ def network(recorded: Recorded, verbose: bool) -> tuple[list[str], list[Event]]:
     filtered session, a capture for one run without
     CLAUDE_AIRLOCK_NET_LOG=0, and the record of its processes for one run
     without CLAUDE_AIRLOCK_PROC_LOG=0."""
-    found = [proxy_requests(recorded)] if recorded.filtered else []
+    found = [_proxy_requests(recorded)] if recorded.filtered else []
     found += [
-        captured_connections(recorded, captured, verbose)
+        _captured_connections(recorded, captured, verbose)
         for captured in recorded.captured
     ]
     lines = (
@@ -494,7 +494,7 @@ def network(recorded: Recorded, verbose: bool) -> tuple[list[str], list[Event]]:
     events = [event for _, events in found for event in events]
     for session, record in recorded.watched:
         lines += watched_summary(record, verbose, session.until)
-        ran = watched_events(record, verbose)
+        ran = _watched_events(record, verbose)
         name_container(ran, session.name, recorded.several)
         events += ran
     return lines, events

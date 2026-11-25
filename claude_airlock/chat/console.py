@@ -135,7 +135,7 @@ NARROWEST = 20
 SAID = "| "
 
 
-def read_whatever_comes(stream: TextIO) -> None:
+def _read_whatever_comes(stream: TextIO) -> None:
     """Have what is read from the input and is no text in its encoding
     read all the same, each such byte as the character that stands for
     one that could not be (U+FFFD), which shows in the line. It would
@@ -270,7 +270,7 @@ class Console:
         self._interrupted = False
         self.interactive = sys.stdin.isatty()
         # Whatever is typed or sent in, reading it is not what fails
-        read_whatever_comes(sys.stdin)
+        _read_whatever_comes(sys.stdin)
         # Whether the line being typed can be erased and written again
         self._redrawn = bool(
             readline

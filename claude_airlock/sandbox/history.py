@@ -64,7 +64,7 @@ def is_own(name: str, own: set[str]) -> bool:
     return any(name == mine or name.startswith(mine + WORKTREE_MARK) for mine in own)
 
 
-def other_projects(host: Host) -> list[str]:
+def _other_projects(host: Host) -> list[str]:
     """The directories of projects that are another project's, by name."""
     projects = Path(host.claude_dir, "projects")
     own = own_names(host)
@@ -81,14 +81,14 @@ def other_projects(host: Host) -> list[str]:
     ]
 
 
-def project_store(host: Host) -> Path:
+def _project_store(host: Host) -> Path:
     """Where the launcher keeps what a project's sessions remember, named
     like the project's cache volume."""
     store = os.path.join(host.history_dir, project_slug(host.project_dir))
     return Path(private_dir(store))
 
 
-def own_prompts(host: Host) -> list[str]:
+def _own_prompts(host: Host) -> list[str]:
     """The lines of the shared prompt history that are this project's."""
     roots = set(project_roots(host))
     kept = []
@@ -108,21 +108,21 @@ def own_prompts(host: Host) -> list[str]:
     return kept
 
 
-def prepare_store(host: Host) -> Path:
+def _prepare_store(host: Host) -> Path:
     """The project's store with what is mounted from it in place. What
     each is mounted over is made with the session's ~/.claude, see
     home.py."""
-    store = project_store(host)
+    store = _project_store(host)
     for name in PER_PROJECT_DIRS:
         (store / name).mkdir(mode=0o700, exist_ok=True)
     prompts = store / PROMPT_HISTORY
     if not prompts.exists():
         # Whole or not at all: a launcher that starts meanwhile mounts it
-        write_whole(str(prompts), "".join(own_prompts(host)), replace=False)
+        write_whole(str(prompts), "".join(_own_prompts(host)), replace=False)
     return store
 
 
-def prepare_shared(host: Host) -> Path:
+def _prepare_shared(host: Host) -> Path:
     """The host's ~/.claude with what is mounted from it in place when the
     history is shared: there has to be something to mount."""
     shared = Path(host.claude_dir)
@@ -141,19 +141,19 @@ def history_args(settings: Settings, host: Host) -> list[str]:
     claude = CONTAINER_CLAUDE
     kept = (*PER_PROJECT_DIRS, PROMPT_HISTORY)
     if settings.shared_history:
-        shared = prepare_shared(host)
+        shared = _prepare_shared(host)
         return [
             # Shown by bin/claude-statusline, and said in docker/CLAUDE-airlock.md
             env_arg("CLAUDE_AIRLOCK_SHARED_HISTORY", 1),
             *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
         ]
-    others = other_projects(host)
+    others = _other_projects(host)
     args = []
     if others:
         empty = empty_dir(host)
         args += [
             mount_arg(empty, f"{claude}/projects/{name}", "ro,z") for name in others
         ]
-    store = prepare_store(host)
+    store = _prepare_store(host)
     args += [mount_arg(str(store / name), f"{claude}/{name}", "z") for name in kept]
     return args

@@ -137,7 +137,7 @@ class Note(enum.StrEnum):
     ALIVE = "alive"
 
 
-def take_identity(uid: int, gid: int) -> None:
+def _take_identity(uid: int, gid: int) -> None:
     """Read files as the session's user from here on, and hold no
     capability. The process stays root's, so not the session's to signal
     or to look into."""
@@ -263,7 +263,7 @@ def limit_hits(pid: int, root: str = "/proc") -> int | None:
     return None
 
 
-def keyed(path: str) -> dict[str, int]:
+def _keyed(path: str) -> dict[str, int]:
     """A file of names with a number each, a line for each."""
     found = {}
     for line in read(path).decode("ascii", "replace").splitlines():
@@ -287,7 +287,7 @@ def limit(said: str) -> int | None:
     return None if said == "max" else int(said)
 
 
-def session_tmpfs(mounts: str) -> list[str]:
+def _session_tmpfs(mounts: str) -> list[str]:
     """Where the session has a tmpfs to write to, by the list of what one
     of its processes has mounted: those docker mounts for it, not the
     kernel's own under /proc, /sys and /dev. But /dev/shm, which programs
@@ -306,7 +306,7 @@ def session_tmpfs(mounts: str) -> list[str]:
     return found[:MOST_TMPFS]
 
 
-def is_loopback(address: str) -> bool:
+def _is_loopback(address: str) -> bool:
     """Whether an address is the session's own loopback, which nothing
     else reaches and no capture has: the same as in packets.py."""
     return address.startswith("127.") or address == "::1"
@@ -373,7 +373,7 @@ class CgroupHealth:
         last look: the kernel ends the one that holds the most, it does
         not say which."""
         try:
-            ended = keyed(f"{cgroup}/memory.events").get("oom_kill", 0)
+            ended = _keyed(f"{cgroup}/memory.events").get("oom_kill", 0)
         except OSError:
             return
         if self._ended is not None and ended > self._ended:
@@ -401,7 +401,7 @@ class CgroupHealth:
         limited: dict[str, tuple[int, int | None]] = {}
         try:
             held = int(read(f"{cgroup}/memory.current"))
-            cached = keyed(f"{cgroup}/memory.stat").get("inactive_file", 0)
+            cached = _keyed(f"{cgroup}/memory.stat").get("inactive_file", 0)
             most = limit(read(f"{cgroup}/memory.max").decode().strip())
             limited["memory"] = (max(held - cached, 0), most)
             said["mem"] = list(limited["memory"])
@@ -442,7 +442,7 @@ class CgroupHealth:
         CPU and disk."""
         counted = {}
         try:
-            cpu = keyed(f"{cgroup}/cpu.stat")
+            cpu = _keyed(f"{cgroup}/cpu.stat")
             counted["cpu"] = cpu["usage_usec"]
             counted["throttled"] = cpu.get("throttled_usec", 0)
         except (OSError, KeyError):
@@ -550,7 +550,7 @@ class Health(CgroupHealth):
             pass
         tmpfs = {}
         try:
-            places = session_tmpfs(f"{self._first}/mounts")
+            places = _session_tmpfs(f"{self._first}/mounts")
         except OSError:
             places = []
         for place in places:
@@ -747,7 +747,7 @@ class Watch:
         has it, so nothing asks who made it, and a session can make as
         many as it likes without the network."""
         current = {
-            key: inode for key, inode in current.items() if not is_loopback(key[1])
+            key: inode for key, inode in current.items() if not _is_loopback(key[1])
         }
         self._connections &= current.keys()
         self._tries = {key: n for key, n in self._tries.items() if key in current}
@@ -804,14 +804,14 @@ class Watch:
             self._listening.add(key)
             port, on, _ = key
             held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
-            self.note(reserved=not is_loopback(on), listen=port, on=on, pids=held_by)
+            self.note(reserved=not _is_loopback(on), listen=port, on=on, pids=held_by)
 
 
-def main(args: list[str]) -> int:
+def _main(args: list[str]) -> int:
     path = args[0]
     with open(path, "a", encoding="utf-8") as out:
         if len(args) > 1:
-            take_identity(int(args[1]), int(args[2]))
+            _take_identity(int(args[1]), int(args[2]))
         watch = Watch(out)
         watch.note(reserved=True, note=Note.STARTED, beat=HEARTBEAT_EVERY)
         while True:
@@ -821,6 +821,6 @@ def main(args: list[str]) -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main(sys.argv[1:]))
+        sys.exit(_main(sys.argv[1:]))
     except KeyboardInterrupt:
         sys.exit(0)

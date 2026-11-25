@@ -51,7 +51,7 @@ def transcript_of(host: Host, session: object) -> Path | None:
     return places[-1]
 
 
-def command_names(given: object) -> list[str]:
+def _command_names(given: object) -> list[str]:
     """The commands claude says it has, as they are typed: only what is
     a name."""
     names = given if isinstance(given, list) else []
@@ -62,7 +62,7 @@ def command_names(given: object) -> list[str]:
     ]
 
 
-def servers_of(given: object) -> list[tuple[str, str]]:
+def _servers_of(given: object) -> list[tuple[str, str]]:
     """The MCP servers claude lists, each with how it is."""
     servers = given if isinstance(given, list) else []
     return [
@@ -124,8 +124,8 @@ class Session:
         self.chosen = ""
         version = read(message, "claude_code_version", str) or self.version
         self.version = flat(version)[:NAME_KEPT]
-        self.commands = command_names(read(message, "slash_commands", list))
-        self.servers = servers_of(read(message, "mcp_servers", list))
+        self.commands = _command_names(read(message, "slash_commands", list))
+        self.servers = _servers_of(read(message, "mcp_servers", list))
         # Not said by every version, and not missed
         self.fast = message.get("fast_mode_state") == "on"
         return True

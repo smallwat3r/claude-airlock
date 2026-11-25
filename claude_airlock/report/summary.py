@@ -140,7 +140,7 @@ def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str,
     return rows
 
 
-def files_written(entries: list[dict], project_dir: str) -> list[str]:
+def _files_written(entries: list[dict], project_dir: str) -> list[str]:
     """Each file the session wrote and how often, flagged when it is
     outside the project."""
     written = Counter(written_paths(entries))
@@ -150,7 +150,7 @@ def files_written(entries: list[dict], project_dir: str) -> list[str]:
     return lines
 
 
-def url_host(url: str) -> str:
+def _url_host(url: str) -> str:
     """The host a URL names, the URL as it is when it names none or is
     not one: it is the session's to write."""
     try:
@@ -159,10 +159,10 @@ def url_host(url: str) -> str:
         return url
 
 
-def pages_fetched(entries: list[dict]) -> list[str]:
+def _pages_fetched(entries: list[dict]) -> list[str]:
     """Each host the session fetched a page from with its tools."""
     urls = [call_input(block).get("url") for _, block in tool_calls(entries)]
-    hosts = Counter(url_host(url) for url in urls if isinstance(url, str))
+    hosts = Counter(_url_host(url) for url in urls if isinstance(url, str))
     lines = ["pages fetched"] if hosts else []
     return lines + [f"  {flat(host)} x{count}" for host, count in sorted(hosts.items())]
 
@@ -175,6 +175,6 @@ def summary(
     return [
         *(labelled(name, value) for name, value in rows),
         *instructions_read(entries),
-        *files_written(entries, project_dir),
-        *pages_fetched(entries),
+        *_files_written(entries, project_dir),
+        *_pages_fetched(entries),
     ]

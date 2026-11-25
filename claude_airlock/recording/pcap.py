@@ -269,7 +269,7 @@ class Request:
         return f"http://{self.host or self.address}{self.target}"
 
 
-def domain_of(labels: list[str]) -> str:
+def _domain_of(labels: list[str]) -> str:
     """The domain a name is of, by its labels: its last two, or three
     under a country that has com, co and the like of its own (see
     DNS_SECOND_LEVEL)."""
@@ -587,7 +587,7 @@ class Capture:
         # Under a parent of two labels or more, not under com
         if len(labels) < 3:
             return
-        parent, domain = ".".join(labels[1:]), domain_of(labels)
+        parent, domain = ".".join(labels[1:]), _domain_of(labels)
         count = self._under[parent] = self._under.get(parent, 0) + 1
         if count == DNS_MANY_NAMES:
             self.flagged.append((f"{count} names looked up under {parent}", lookup))
