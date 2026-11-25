@@ -22,23 +22,100 @@ def uncounted(prompt: str) -> str:
 NO_COLUMN = ("Mn", "Me", "Cf")
 
 
+# The vowels and the final consonants of Hangul, which wcwidth gives no
+# column: written after a first consonant, they are part of its syllable
+JOINED = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
+
+
 def columns_of(text: str) -> int:
     """How many columns of a terminal a text takes, as wcwidth counts
     them for readline and a terminal for itself: two for the wide
     characters of East Asia, none for what is put on the one before or
     shows nothing. Counted too wide, a text would have more rows erased
     than it takes, those above it: what is counted is in part the
-    session's choice."""
+    session's choice. Where terminals differ, the fewer are counted."""
     return sum(
         (
             0
-            if unicodedata.combining(c) or unicodedata.category(c) in NO_COLUMN
+            if unicodedata.combining(c)
+            or unicodedata.category(c) in NO_COLUMN
+            or any(first <= ord(c) <= last for first, last in JOINED)
             else 2
             if unicodedata.east_asian_width(c) in "WF"
             else 1
         )
         for c in text
     )
+
+
+# What a tab can take, to the next stop
+TAB_COLUMNS = 8
+# The categories of what one terminal shows wide and another does not,
+# whatever Unicode says of its width: the symbols emoji are among, and
+# what this Python does not know yet and a terminal may
+MAYBE_WIDE = ("So", "Cn", "Co")
+# The selector that has the character before it shown as an emoji, wide
+EMOJI_SELECTOR = "\ufe0f"
+# An escape of colour that ends every style
+SGR_RESET = re.compile(r"\x1b\[0*m")
+# No more styles than this are taken up again on the next row
+MOST_STYLES = 8
+
+
+def columns_at_most(char: str) -> int:
+    """How many columns a character takes in the terminal that gives it
+    the most: for what must not be longer than a row, see broken. Not
+    how many it takes, which columns_of counts for what is erased, the
+    fewest: the two err to opposite sides, each to the one that is safe
+    for what it is used for."""
+    if char == "\t":
+        return TAB_COLUMNS
+    if char == EMOJI_SELECTOR:
+        return 1
+    category = unicodedata.category(char)
+    if unicodedata.combining(char) or category in ("Mn", "Me"):
+        return 0
+    if category in MAYBE_WIDE or unicodedata.east_asian_width(char) in "WFA":
+        return 2
+    return 1
+
+
+def broken(line: str, columns: int, mark: str) -> list[str]:
+    """A line as the rows it is written on, none longer than a terminal
+    of that many columns is wide, each after the first behind a mark.
+
+    A line longer than the terminal is wide is otherwise wrapped by the
+    terminal, and what the session put after so many columns starts a
+    row: there it reads as a line of the launcher's own, a question, a
+    warning, a line of the trace. Broken here, every row starts with
+    what the launcher wrote. A style of colour is ended with the row and
+    taken up again after the mark."""
+    room = max(1, columns)
+    if len(line) <= room and line.isascii() and "\t" not in line and "\x1b" not in line:
+        return [line]
+    start = max(1, room - sum(map(columns_at_most, SGR.sub("", mark))))
+    rows: list[str] = []
+    row, left = "", room
+    styles: list[str] = []
+    at = 0
+    while at < len(line):
+        escape = SGR.match(line, at)
+        if escape:
+            if SGR_RESET.fullmatch(escape.group()):
+                styles.clear()
+            else:
+                styles = [*styles, escape.group()][-MOST_STYLES:]
+            row += escape.group()
+            at = escape.end()
+            continue
+        taken = columns_at_most(line[at])
+        if taken > left and left < (room if not rows else start):
+            rows.append(row + ("\x1b[0m" if styles else ""))
+            row, left = mark + "".join(styles), start
+        row += line[at]
+        left -= taken
+        at += 1
+    return [*rows, row]
 
 
 def rows_above(text: str, columns: int) -> int:

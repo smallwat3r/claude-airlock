@@ -23,7 +23,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ..events import clean, flat, labelled
-from ..report.calls import call_details
+from ..report.calls import call_whole
 from ..report.layout import (
     BLANK,
     BOLD,
@@ -307,7 +307,7 @@ class Asker:
             acted = {
                 key: said for key, said in tool_input.items() if key != "description"
             }
-        return call_details(tool, acted, None, self._project_dir, True)
+        return call_whole(tool, acted, self._project_dir)
 
     def _reviewed(self, tool: str, tool_input: dict) -> str:
         """Show the call that is asked about, and give what the question
@@ -329,8 +329,10 @@ class Asker:
                 [*self._page.replied(reply_lines(plan, width, colour)), BLANK]
             )
         elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
-            whole = call_details(tool, tool_input, None, self._project_dir, True)
-            name = tool.lower()[:WHAT_WIDTH]
+            whole = call_whole(tool, tool_input, self._project_dir)
+            # On one line: a name is claude's to give, and what followed
+            # a line break in it would read as a line of the chat's own
+            name = flat(tool).lower()[:WHAT_WIDTH]
             self._page.say([f"{name:<{WHAT_WIDTH}}  the call whole:"])
             self._page.put_said(
                 prefixed("  ", whole), lambda line: DIFF_STYLES.get(line[:9], "")

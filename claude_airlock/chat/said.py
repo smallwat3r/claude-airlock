@@ -17,6 +17,9 @@ from .drift import Drift
 
 # Of a list claude gives (its commands, its MCP servers), what is kept
 MOST_LISTED = 1000
+# No more of a name the session gives of itself is kept than this, its
+# model, its mode, its version: they are shown above the prompt
+NAME_KEPT = 100
 _COMMAND = re.compile(r"[\w:.-]{1,100}")
 _SESSION_ID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 # What /model says of the model it chose, by the name Claude Code shows
@@ -106,15 +109,16 @@ class Session:
             if starts
             else message.get("permissionMode")
         )
-        self.mode = flat(mode or self.mode)
+        self.mode = flat(mode or self.mode)[:NAME_KEPT]
         self.first_mode = self.first_mode or self.mode
         if not starts:
             return False
         session = read(message, "session_id", str)
         self.id = session if session and is_session_id(session) else ""
-        self.model = flat(read(message, "model", str) or self.model)
+        self.model = flat(read(message, "model", str) or self.model)[:NAME_KEPT]
         self.chosen = ""
-        self.version = flat(read(message, "claude_code_version", str) or self.version)
+        version = read(message, "claude_code_version", str) or self.version
+        self.version = flat(version)[:NAME_KEPT]
         self.commands = command_names(read(message, "slash_commands", list))
         self.servers = servers_of(read(message, "mcp_servers", list))
         return True
@@ -135,5 +139,5 @@ class Session:
         reply = message.get("message")
         model = reply.get("model") if isinstance(reply, dict) else None
         if isinstance(model, str) and model and not model.startswith("<"):
-            self.model = flat(model)
+            self.model = flat(model)[:NAME_KEPT]
             self.chosen = ""

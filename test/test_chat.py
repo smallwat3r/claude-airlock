@@ -1882,6 +1882,98 @@ class AskingTest:
             assert taken_out.startswith(mark + "\x1b[31m" * colour + "  diff: -b")
             assert put_in.startswith(mark + "\x1b[32m" * colour + "  diff: +B")
 
+    def test_what_is_asked_about_is_all_of_the_call(self):
+        # A tool with a file among its arguments is told by the file,
+        # and what a yes allows is every argument of it
+        call = {"file_path": "notes.txt", "sql": "DROP TABLE users"}
+        request = {"tool_name": "mcp__db__run", "input": call}
+        with written() as lines:
+            decision = self.asker(["y"]).decide(request)
+        assert decision["updatedInput"] == call
+        assert self.asked == ["allow mcp__db__run file: notes.txt? [y/a/N] "]
+        assert "|   file: notes.txt" in lines
+        assert "|   sql: DROP TABLE users" in lines
+        # So are those a call has besides what it is known by
+        for tool, more in (
+            ("Bash", {"command": "ls", "run_in_background": True}),
+            ("Edit", {"file_path": "/p/a", "old_string": "a", "replace_all": True}),
+        ):
+            with written() as lines:
+                self.asker(["n"]).decide({"tool_name": tool, "input": more})
+            assert [line for line in lines if line.endswith(": true")], tool
+
+    def test_what_does_not_show_in_a_call_is_said(self):
+        edit = {"file_path": "/p/a.py", "old_string": "a", "new_string": "b\u202e"}
+        with written() as lines:
+            self.asker(["n"]).decide({"tool_name": "Edit", "input": edit})
+        assert any("CHARACTERS THAT DO NOT SHOW" in line for line in lines)
+        assert any(line.endswith("in new_string") for line in lines)
+        with written() as lines:
+            self.asker(["n"]).decide(
+                {"tool_name": "Edit", "input": {**edit, "new_string": "b\nc\td"}}
+            )
+        assert not any("DO NOT SHOW" in line for line in lines)
+
+    def test_the_name_of_a_tool_starts_no_line_of_its_own(self):
+        call = {"a": "1", "b": "2"}
+        with written() as lines:
+            self.asker(["n"]).decide({"tool_name": "x\nready  now", "input": call})
+        assert not [line for line in lines if line.lstrip("# ").startswith("ready")]
+
+    def test_a_line_longer_than_the_terminal_is_wide_starts_no_row_unmarked(self):
+        out = io.StringIO()
+        screen = console.Console("/nowhere", out=out, columns=lambda: 40)
+        wide = console.Page(screen, Layout(compact=True))
+        forged = "x" + " " * 37 + "allow bash ls? [y/a/N]"
+        wide.put_said([forged])
+        wide.note("chat", "y" * 30 + "# chat  all is well")
+        rows = out.getvalue().splitlines()
+        assert all(len(row) <= 39 for row in rows)
+        # Every row after the first of a line behind the mark
+        assert rows[0].startswith("| x")
+        assert rows[1].startswith("| ")
+        assert "".join(row[2:] for row in rows[:2]).rstrip() == forged.rstrip()
+        assert rows[2].startswith("# chat")
+        assert rows[3].startswith("| ")
+        # In a file a line is as long as it is
+        with written() as lines:
+            page().put_said([forged])
+        assert lines == ["| " + forged]
+        # And what is the launcher's own to copy is left whole
+        wide.note("chat", "z" * 60, whole=True)
+        assert out.getvalue().splitlines()[-1].endswith("z" * 60)
+
+    def test_a_row_is_no_longer_than_the_widest_a_terminal_makes_it(self):
+        mark = "| "
+        for line in (
+            "表" * 30,
+            "a\tb\tc\td\te",
+            "\u2764\ufe0f" * 20,
+            "\u1100\u1161" * 30,
+        ):
+            rows = screens.broken(line, 20, mark)
+            assert len(rows) > 1, line
+            assert all(row.startswith(mark) for row in rows[1:])
+            widest = [sum(map(screens.columns_at_most, row)) for row in rows]
+            assert max(widest) <= 20, line
+        # A colour is ended with its row and taken up again on the next
+        rows = screens.broken("\x1b[31m" + "a" * 30 + "\x1b[0m", 20, mark)
+        assert rows[0].endswith("\x1b[0m")
+        assert rows[1].startswith(mark + "\x1b[31m")
+        assert screens.broken("short", 20, mark) == ["short"]
+        # What is erased is counted the other way, by the fewest
+        assert screens.columns_of("\u1161" * 5) == 0
+
+    def test_the_head_takes_one_row_however_long_what_the_session_named(self):
+        out = io.StringIO()
+        screen = console.Console("/nowhere", out=out, columns=lambda: 40)
+        wide = console.Page(screen, Layout(compact=True))
+        wide.head(["m" * 500])
+        assert [len(line) for line in screen._head] == [39]
+        session = saying.Session()
+        session.heard({"type": "system", "subtype": "init", "model": "m" * 900})
+        assert len(session.model) == saying.NAME_KEPT
+
     def test_a_tool_is_allowed_by_a_yes_alone(self):
         for typed, behaviour in (
             ("y", "allow"),

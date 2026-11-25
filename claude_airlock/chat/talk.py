@@ -679,7 +679,8 @@ class Chat:
         resumed = self._handover is not None and self._handover.session
         if self._session.id and self._left and not resumed:
             again = f"claude-airlock --line-mode --resume {self._session.id}"
-            self._page.note("chat", f"to go on with this session: {again}")
+            # Whole: a command to copy, and the id in it is one (see said.py)
+            self._page.note("chat", f"to go on with this session: {again}", whole=True)
 
     def _answer(self, message: dict) -> None:
         """Answer what claude asks its host: whether a tool may be used,

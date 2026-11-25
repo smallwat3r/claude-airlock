@@ -100,7 +100,9 @@ When claude asks whether it may use a tool, `y` allows that one call, `a`
 allows calls like it until the session ends, and anything else refuses it.
 The question names the call by its first line. A call of more than that,
 a command of several lines or the arguments of a tool, is shown whole
-above the question first. A line you entered before the question was on
+above the question first, with every argument it would be made with: a
+yes allows all of them. When one holds characters that do not show
+(control, direction or zero width), a line says so. A line you entered before the question was on
 the screen is not its answer: what you were typing is not taken for one,
 and what you typed while a command of yours ran is dropped when the
 question comes.

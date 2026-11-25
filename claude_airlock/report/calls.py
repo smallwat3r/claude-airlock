@@ -11,7 +11,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Iterator
 
-from ..events import Event, Who, Wrong, clean, flat
+from ..events import Event, Who, Wrong, clean, flat, holds_unseen
 from ..sandbox.plugins import plugin_server, skill_plugin
 from .brief import clip, clip_ends, shortened
 from .entries import (
@@ -40,6 +40,8 @@ DIFFED_LINES_BRIEF = 500
 # is where a command says what went wrong. All of it is in --json.
 FAILED_OUTPUT = (2, 6)
 VERBOSE_OUTPUT = (10, 10)
+# Said of a call that is asked about, see call_whole
+UNSEEN_FLAG = "CHARACTERS THAT DO NOT SHOW (control, direction or zero width)"
 # What tells the plugin a call is of, each value of the event with what
 # its line starts with
 PLUGIN_SAID = {"plugin": "plugin", "plugin_server": "plugin server"}
@@ -153,6 +155,42 @@ def call_details(
         for key, value in tool_input.items()
         for line in clip(argument_lines(flat(key), clean(value)), verbose)
     ]
+
+
+def told_keys(name: str, tool_input: dict) -> set[str] | None:
+    """The arguments of a call that call_details tells of with all they
+    hold, none when it tells of every one: a call it has a way of its
+    own to describe is described by some of them."""
+    if name == "Bash":
+        return {"command", "description"}
+    if name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
+        return {"todos"}
+    if file_path(tool_input) is not None:
+        named = "file_path" if tool_input.get("file_path") else "notebook_path"
+        held = {"Edit": {"old_string", "new_string"}, "Write": {"content"}}
+        return {named, *held.get(name, ())}
+    if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
+        return {"questions"}
+    return None
+
+
+def call_whole(name: str, tool_input: dict, project_dir: str) -> list[str]:
+    """The lines of a call with all it would be made with, for what is
+    asked before it is: as call_details describes it in full, then every
+    argument that does not tell of, as it is. The call of a tool with a
+    file among its arguments is otherwise described by the file alone,
+    and what is allowed is all of it. Said too when an argument holds
+    characters that are not shown, which would be written or run with
+    the rest."""
+    told = told_keys(name, tool_input)
+    lines = call_details(name, tool_input, None, project_dir, True)
+    for key, value in tool_input.items():
+        if told is not None and key not in told:
+            lines += argument_lines(flat(key), clean(value))
+    unseen = [flat(key) for key, value in tool_input.items() if holds_unseen(value)]
+    if unseen:
+        lines.append(f"{UNSEEN_FLAG} in {', '.join(unseen)}")
+    return lines
 
 
 def argument_lines(key: str, value: str) -> list[str]:

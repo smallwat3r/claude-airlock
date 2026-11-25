@@ -149,18 +149,28 @@ class Event:
         self.wrong = max(self.wrong, how)
 
 
+def _text(value: object) -> str:
+    """A value as text, one that is not text as the JSON it was read
+    from."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (ValueError, TypeError, RecursionError):
+        # Nested as deep as could just be read
+        return "(not shown, it cannot be written out)"
+
+
 def clean(value: object) -> str:
     """A value as text that is safe to show, one that is not text as the
     JSON it was read from."""
-    if isinstance(value, str):
-        text = value
-    else:
-        try:
-            text = json.dumps(value, ensure_ascii=False)
-        except (ValueError, TypeError, RecursionError):
-            # Nested as deep as could just be read
-            text = "(not shown, it cannot be written out)"
-    return _UNSAFE.sub("", text)
+    return _UNSAFE.sub("", _text(value))
+
+
+def holds_unseen(value: object) -> bool:
+    """Whether a value holds what clean leaves out of it: said where
+    the value is acted on as it is, and not only shown."""
+    return bool(_UNSAFE.search(_text(value)))
 
 
 def flat(value: object) -> str:

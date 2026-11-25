@@ -63,7 +63,7 @@ from typing import TextIO
 
 from ..events import Event, clean, labelled
 from ..report.layout import DIM, Layout, Shown, Styled, painted, prefixed
-from .screen import SGR, cursor_back, erased, uncounted
+from .screen import SGR, broken, cursor_back, erased, uncounted
 
 try:
     import readline
@@ -777,17 +777,38 @@ class Page:
         SAID: cleaned and styled by what made them, see ReplyWriter."""
         return self._marked(prefixed("", list(lines)))
 
+    @property
+    def _mark(self) -> str:
+        """The mark of what the session wrote. In colour it is dimmed, as
+        what a chat says of itself is: the text after it keeps its own."""
+        return painted(DIM, SAID.rstrip()) if self.layout.colour else SAID.rstrip()
+
     def _marked(self, lines: list[str]) -> list[Shown]:
-        """Lines behind the mark of what the session wrote. In colour the
-        mark is dimmed, as what a chat says of itself is: the text after
-        it keeps its own."""
-        mark = painted(DIM, SAID.rstrip()) if self.layout.colour else SAID.rstrip()
+        """Lines behind the mark of what the session wrote."""
+        mark = self._mark
         gap = SAID[len(SAID.rstrip()) :]
         return [Shown(f"{mark}{gap}{line}" if line else mark) for line in lines]
 
-    def put(self, lines: list[Shown]) -> None:
+    def _rows(self, line: str) -> list[str]:
+        """A line as the rows of the terminal it is written on, each
+        after the first behind the mark of what the session wrote: most
+        of a line that long is the session's, and none of it starts a
+        row as the launcher's own would, see broken. As it is in a file,
+        where a line is as long as it is."""
+        width = self.width
+        if width is None:
+            return [line]
+        return broken(line, width, self._mark + SAID[len(SAID.rstrip()) :])
+
+    def put(self, lines: list[Shown], whole: bool = False) -> None:
+        """Write lines, as the rows of the terminal they take, see _rows.
+        As they are when whole, for what is the launcher's own word from
+        its start to its end and is to be copied as it is: a command."""
         if lines:
-            self._console.write(lines)
+            rows = (
+                lines if whole else [row for line in lines for row in self._rows(line)]
+            )
+            self._console.write([Shown(row) for row in rows])
             self.touched()
 
     def put_said(
@@ -808,21 +829,27 @@ class Page:
         return self._console.redrawn
 
     def head(self, lines: list[str]) -> None:
-        """Have these lines above the prompt, see Console.set_head."""
-        self._console.set_head(lines)
+        """Have these lines above the prompt, see Console.set_head. No
+        more of each than a row of the terminal: what is erased with the
+        prompt is counted in rows, and a line of more, long by what the
+        session named, would have the rows above it erased or its own
+        start one as the launcher's."""
+        self._console.set_head([self._rows(line)[0] for line in lines])
 
     def working(self, line: str) -> None:
         """Say that a turn still runs above the head, as a header line,
         or no longer when empty. See Console.set_working."""
-        self._console.set_working(self.layout.header([line])[0] if line else "")
+        shown = self._rows(self.layout.header([line])[0])[0] if line else ""
+        self._console.set_working(shown)
 
-    def say(self, notes: list[str]) -> None:
-        """Lines about the chat itself, as the header lines of a trace."""
-        self.put(self.layout.header(notes))
+    def say(self, notes: list[str], whole: bool = False) -> None:
+        """Lines about the chat itself, as the header lines of a trace.
+        Whole as put has it."""
+        self.put(self.layout.header(notes), whole)
 
-    def note(self, label: str, text: str) -> None:
+    def note(self, label: str, text: str, whole: bool = False) -> None:
         """A line about the chat itself under a label, see labelled."""
-        self.say([labelled(label, text)])
+        self.say([labelled(label, text)], whole)
 
     def events(self, events: list[Event]) -> list[Shown]:
         return self.layout.events(events)
