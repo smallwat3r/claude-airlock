@@ -137,7 +137,9 @@ class Commands:
     its own to do it is given: request asks claude for something of its
     own doing and has the answer told (see Agent.request), shell runs a
     command in the sandbox, resume leaves for an earlier session and says
-    whether it does, status says the status."""
+    whether it does, status says the status, and changed is told that
+    what the status says changed before a line says so: the line then
+    has the status as it now is under it."""
 
     def __init__(
         self,
@@ -147,6 +149,7 @@ class Commands:
         shell: Callable[[str], None],
         resume: Callable[[list[str]], bool],
         status: Callable[[], None] = lambda: None,
+        changed: Callable[[], object] = lambda: None,
     ):
         self._page = page
         self._session = session
@@ -154,6 +157,7 @@ class Commands:
         self._shell = shell
         self._resume = resume
         self._status = status
+        self._changed = changed
 
     def do(self, text: str) -> Did:
         """Do what a line asks of the chat itself."""
@@ -231,6 +235,7 @@ class Commands:
         told = response.get("response")
         mode = told.get("mode") if isinstance(told, dict) else None
         self._session.mode = flat(mode or self._session.mode)
+        self._changed()
         self._page.note("chat", f"mode {self._session.mode}")
 
 
@@ -264,7 +269,7 @@ LOCALS = (
     Local(
         STATUS,
         "/status",
-        "the model, effort, context, limits, cost and sandbox, or /statusline",
+        "the sandbox, model, context, limits and cost in full, or /statusline",
         Commands._said_status,
     ),
     Local(

@@ -57,7 +57,7 @@ from .followed import POLL, Followed
 from .guard import CLEAR, GO_ON, STILL_READ, Guard, stop_said
 from .hosts import HostQuestions, Hosts
 from .notices import Notices
-from .pipe import Agent, Unread
+from .pipe import Agent, Answer, Unread
 from .plain import PlainLines
 from .reply import ReplyStream
 from .said import Session, own
@@ -117,6 +117,14 @@ STOP_WAIT = 15.0
 # The messages in a row that may fail to be taken in before the chat
 # gives up on showing what the session does
 MOST_FAILED = 5
+# Seconds the first prompt waits for claude to say which settings it goes
+# by, where a prompt is written once and stays as it is: its status then
+# names the model. Claude answers as soon as it runs, in about as long as
+# its container takes to start
+SETTLE_WAIT = 3.0
+# Seconds the next prompt waits there for claude to answer what the chat
+# asked of it (/mode), which it does at once
+ANSWER_WAIT = 1.0
 
 
 class Life(enum.Enum):
@@ -231,17 +239,23 @@ class Chat:
         )
         self._heartbeat = Heartbeat(self._page, self._turns, lambda: self._asker.asking)
         self._status = StatusLine(
-            self._page, sandbox, self._session, self._usage, self._drift
+            self._page,
+            sandbox,
+            self._session,
+            self._usage,
+            self._drift,
+            lambda: self._notices.running,
         )
         self._shell = Shell(self._page, sandbox.name, lambda: self._asker.asking)
         resume = Resume(self._page, host, self._turns, self._read, handover)
         self._commands = Commands(
             self._page,
             self._session,
-            lambda *asked, **more: self._agent.request(*asked, **more),
+            self._request,
             self._shell.run,
             resume.resume,
             self._status.show,
+            self._status.refresh,
         )
         # What takes in each kind of message claude says
         self._takes: dict[str, Callable[[dict], None]] = {
@@ -255,8 +269,13 @@ class Chat:
             "assistant": self._said,
             "user": self._said,
         }
-        # Whether claude was asked for its settings and has not answered
+        # Whether claude was asked for its settings and has not answered,
+        # and set once it answered the first time, or ended
         self._settings_asked = False
+        self._settled = threading.Event()
+        # When claude was last asked for something a line of the user's
+        # asks of it, see _request
+        self._requested = -math.inf
         # Whether a line is waited for, and whether Ctrl-C came for a turn
         self._reading = False
         self._interrupt = False
@@ -283,6 +302,12 @@ class Chat:
             listener.start()
             self._asked.start(self._agent)
             self._ask_settings()
+            if self._console.interactive and not self._page.redrawn:
+                # Where the first prompt stays as it is written, it
+                # waits a moment for what claude goes by. At a terminal
+                # its status is written again in its place when that
+                # comes, and lines that are all there wait for nothing
+                self._settled.wait(SETTLE_WAIT)
             # What the session was started with heads the first prompt
             # too: that is when it matters most
             self._status.refresh()
@@ -344,6 +369,7 @@ class Chat:
         that has not started yet sees that claude is over, see _read."""
         self._becomes(Life.ended)
         self._wake.set()
+        self._settled.set()
         if self._reading:
             os.kill(os.getpid(), signal.SIGINT)
 
@@ -376,6 +402,7 @@ class Chat:
             # A command of the user's that still runs is waited for, no
             # line is read meanwhile unless they are asked something
             self._shell.wait()
+            self._wait_for_answer()
             if not self._console.interactive:
                 self._wait_for_turn()
                 if self._guarded:
@@ -434,6 +461,33 @@ class Chat:
         ):
             self._wake.wait(0.2)
             self._wake.clear()
+
+    def _request(
+        self, subtype: str, on_answer: Answer | None = None, **more: object
+    ) -> str:
+        """Ask claude for something a line of the user's asks of it
+        (/mode, see Commands), and note when: its answer is waited
+        for, and the next prompt gives it a moment to come, see
+        _wait_for_answer."""
+        self._requested = time.monotonic()
+        return self._agent.request(subtype, on_answer, True, **more)
+
+    def _wait_for_answer(self) -> None:
+        """Give claude a moment to answer what the chat just asked of
+        it, where someone types and a prompt that was written stays as
+        it is: the answer is then above the prompt, which has the
+        status as it now is. Not at a terminal, where what comes later
+        is written above the prompt, nor for lines that are all there,
+        which wait for more than that, see _wait_for_turn. And once for
+        what was asked: a claude that does not answer holds up no
+        prompt after the first."""
+        if self._page.redrawn or not self._console.interactive:
+            return
+        patience = self._requested + ANSWER_WAIT
+        while (
+            self._agent.pending and not self._life.over and time.monotonic() < patience
+        ):
+            time.sleep(0.02)
 
     def _send(self, text: str) -> None:
         """Give claude a prompt. While a turn runs claude takes it up
@@ -531,7 +585,12 @@ class Chat:
     def _look(self) -> None:
         """Look at what the session did besides saying it: write what
         is followed, have the user asked about the hosts that wait, and
-        say that a turn that is quiet still runs."""
+        say that a turn that is quiet still runs. The status first,
+        made again as it is by now: what claude said since may have
+        changed it, and so may the time, at which a limit starts again,
+        and how wide the terminal is. What is written next then has it
+        under it as it is."""
+        self._status.refresh()
         self._followed.show()
         if self._hosts:
             self._hosts.look()
@@ -595,12 +654,16 @@ class Chat:
         status is written again once an answer was taken in, see
         _answered."""
         self._settings_asked = False
-        if response.get("subtype") != "success":
-            self._drift.missed("settings")
-            return
-        applied = self._drift.field(response.get("response"), "applied", dict)
-        if applied is not None:
-            self._session.settled(applied)
+        try:
+            if response.get("subtype") != "success":
+                self._drift.missed("settings")
+                return
+            applied = self._drift.field(response.get("response"), "applied", dict)
+            if applied is not None:
+                self._session.settled(applied)
+        finally:
+            # Whatever it answered, the first prompt waits no longer
+            self._settled.set()
 
     def _reset(self, _message: dict) -> None:
         self._notices.cleared()

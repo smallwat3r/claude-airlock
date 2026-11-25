@@ -133,9 +133,15 @@ class Session:
     def settled(self, applied: dict) -> None:
         """Take in the settings claude says it goes by, as it answers
         when asked for them (get_settings): the effort, which the start
-        of a turn does not say. None for a model that is not told one."""
+        of a turn does not say, none for a model that is not told one.
+        And the model, while none is known: the status then says which
+        one a first prompt is for. From the first turn on it is the one
+        claude says it started the turn with, and replied with."""
         effort = applied.get("effort")
         self.effort = flat(effort)[:NAME_KEPT] if isinstance(effort, str) else ""
+        model = applied.get("model")
+        if not self.model and isinstance(model, str):
+            self.model = flat(model)[:NAME_KEPT]
 
     def replied(self, message: dict) -> None:
         """Take in a reply of claude's own: the model that wrote it is the

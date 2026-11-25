@@ -23,7 +23,8 @@ has (the status, see status.py), and above that a line that says a turn
 still runs, see set_working. At a terminal it goes with the
 prompt, under what is written, and is written again in its place when it
 changes. Anywhere else it is written with the prompt of each line read,
-and with the prompt written again when it changed.
+and once it changed under what is written next, with the prompt: never
+for the change alone, see _head_changed.
 
 A line the user typed is written again in a style of its own once it is
 entered, for what they said to be found among what is written around it.
@@ -489,14 +490,16 @@ class Console:
                     # be given to go on from: written after the prompt
                     # as typed, and typed on, but not changed
                     self._begun, self._filled = self._filled, ""
+                    if self._editline:
+                        # The head is written here, and editline given
+                        # the prompt alone, see _given
+                        self._say(above)
                 elif not self._held or self._asked is not None:
                     self._shown = above
                     self._say(above + shown)
                     self._on_screen = True
             begun = self._begun
-        # Readline counts the columns of a prompt, and takes an escape of
-        # colour for none only when told so: a question can be in colour
-        typed = self._typed(uncounted(above + shown) + begun if self._redrawn else "")
+        typed = self._typed(self._given(above, shown) + begun if self._redrawn else "")
         if not (self._editline and self._redrawn):
             return typed
         # A key of a new line pressed within the line, see _set_up
@@ -514,6 +517,19 @@ class Console:
             self._forget(line)
             self._filled = line + "\n"
         return self._line(prompt, headed)
+
+    def _given(self, above: str, shown: str) -> str:
+        """The prompt readline is given to write: it counts the columns
+        of one, and takes an escape of colour for none only when told
+        so, a question can be in colour. With the head above it, which
+        GNU readline writes once and leaves alone. Not for editline,
+        which has the head written for it, see _line: it writes an
+        escape with the character after it, and before a line break it
+        writes neither, so a head in colour would share a row with the
+        prompt. And it counts the rows of a prompt as one, and breaks
+        the last where all of them together are as wide as the
+        terminal."""
+        return uncounted(shown if self._editline else above + shown)
 
     def _typed(self, prompt: str) -> str:
         """Wait for a line, the one place Ctrl-C ends as
@@ -675,8 +691,14 @@ class Console:
                 self._head_changed()
 
     def _head_changed(self) -> None:
-        """Write the head of the line being read again. Called with the
-        lock held."""
+        """Write the head of the line being read again, at a terminal,
+        where that is done in its place. Anywhere else nothing is
+        written for a head that changed: what is written next has it
+        under it, with the prompt, and so has the next line read. A
+        prompt for each change would stand among the lines, one for
+        each figure that moved. Called with the lock held."""
+        if not self._redrawn:
+            return
         if self._reading is not None and self._headed and self._asked is None:
             self._put("", self._reading)
 

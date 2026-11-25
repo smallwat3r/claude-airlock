@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import itertools
 import json
 import os
 import queue
@@ -80,7 +81,9 @@ BUNCH_GAP = 0.12
 # moment, and one that starts with "twice" asks a second time once it has
 # the first answer. One that starts with "slow" is answered in pieces, a
 # moment apart. A request for a permission mode is answered as claude
-# does, for the two modes it knows here. A prompt that starts with a slash
+# does, for the two modes it knows here, and one for its settings with
+# the effort and the model it is given here, after a while when told so.
+# A prompt that starts with a slash
 # is a command of Claude Code's: the turn it ends used nothing. One that
 # starts with "fetch" is given a page that is written to pass for the
 # system, and says whether it was then told to stop. One that starts with
@@ -207,9 +210,12 @@ while True:
         answer = {"request_id": said["request_id"], "subtype": "success"}
         mode = said["request"].get("mode")
         if said["request"]["subtype"] == "get_settings":
+            # As long after it was asked as claude takes to run
+            time.sleep(float(os.environ.get("FAKE_SETTINGS_AFTER", "0")))
             # None is what claude says for a model that is told no effort
             effort = os.environ.get("FAKE_EFFORT")
-            answer["response"] = {"applied": {"effort": effort}}
+            applied = {"effort": effort, "model": os.environ.get("FAKE_MODEL")}
+            answer["response"] = {"applied": applied}
             if effort == "not known":
                 # As a version that does not know the request
                 answer = {**answer, "subtype": "error", "error": "unknown"}
@@ -262,6 +268,28 @@ def page(layout: Layout | None = None) -> console.Page:
     """Somewhere to write to, as a file is written to unless laid out
     otherwise."""
     return console.Page(console.Console("/nowhere"), layout or Layout())
+
+
+def status_rows(
+    session: saying.Session | None = None,
+    usage: turn.Usage | None = None,
+    limits: status.Limits | None = None,
+    sandbox: status.Sandbox | None = None,
+    room: int | None = None,
+    tasks: int = 0,
+    now: float | None = None,
+) -> list[str]:
+    """The status as the rows it is written on where there is so much
+    room, all the room there is without. Of a session nothing is known
+    of, and of a sandbox started as most are, unless given."""
+    session = session or saying.Session()
+    named = status.named_group(session, tasks)
+    used = status.used_groups(
+        session, usage or turn.Usage(), limits or status.Limits(), now
+    )
+    sandbox = sandbox or status.Sandbox("claude-test")
+    rows = status.status_rows(sandbox.parts(), named, used, room)
+    return [status.row_text(row) for row in rows]
 
 
 def a_chat(
@@ -358,10 +386,11 @@ class ChatTest(LauncherTest):
         be written, one thing or the other when several are given, then
         type, in bunches a moment apart when several, as Emacs sends
         what is long, and after a pause when Paused. What was written
-        in all."""
+        in all, without colour unless NO_COLOR is given as empty."""
         environment = {**self.environment(), "TERM": term, "COLUMNS": "100"}
-        environment.update(settings)
+        # Without colour, unless it is given as empty
         environment["NO_COLOR"] = "1"
+        environment.update(settings)
         command = [sys.executable, str(LAUNCHER), "--line-mode"]
         chat = Terminal(command, environment, PATIENCE, self.project)
         with contextlib.closing(chat) as terminal:
@@ -532,11 +561,14 @@ class ChatTest(LauncherTest):
     def test_the_status_shows_the_effort_claude_says_it_goes_by(self):
         done = self.chat("hello\n/status\n", FAKE_EFFORT="high")
         assert done.returncode == 0, done.stderr
-        assert "# status      effort:high [claude-proj] net:open\n" in done.stdout
+        # Above the prompt, and in full when asked for
+        assert "\n[claude-proj] net:open  effort:high\n> /status\n" in done.stdout
+        assert "#   model     effort high\n" in done.stdout
         assert "CHANGED" not in done.stdout
         # A model that is told none
         done = self.chat("hello\n/status\n")
-        assert "# status      [claude-proj] net:open\n" in done.stdout
+        assert "\n[claude-proj] net:open\n> /status\n" in done.stdout
+        assert "effort" not in done.stdout
         assert "CHANGED" not in done.stdout
 
     def test_a_claude_that_says_no_settings_is_said_once_and_not_waited_for(self):
@@ -545,7 +577,55 @@ class ChatTest(LauncherTest):
         assert len(re.findall(r"# turn ", done.stdout)) == 2
         changed = re.findall(r"CHANGED in what Claude Code says: (.*?)\.", done.stdout)
         assert changed == ["no settings in control_response"]
-        assert "# status      [claude-proj] net:open\n" in done.stdout
+        assert "\n[claude-proj] net:open\n> /status\n" in done.stdout
+
+    def test_the_status_follows_what_claude_says_while_a_turn_runs(self):
+        chat = a_chat(self.chat_host())
+        with written():
+            chat._status.refresh()
+            assert chat._console._head == ["[claude-test] net:open"]
+            # Between the start of a turn and its end: the mode claude
+            # goes into, the model that replied, a limit of the account
+            chat._heard(
+                {"type": "system", "subtype": "status", "permissionMode": "plan"}
+            )
+            chat._heard({"type": "assistant", "message": {"model": "claude-fable-5-2"}})
+            limit = {"rateLimitType": "seven_day", "utilization": 0.95}
+            chat._heard({"type": "rate_limit_event", "rate_limit_info": limit})
+            # Made again with each look at what the session did
+            chat._look()
+        assert chat._console._head == [
+            "[claude-test] net:open  Fable 5.2 mode:plan  7d:95% used"
+        ]
+
+    def test_a_prompt_waits_once_for_what_the_chat_asked_of_claude(self):
+        claude = RecordedClaude()
+        chat = a_chat(self.chat_host(), claude, typed=True)
+        claude.pending = True
+
+        def waited() -> float:
+            began = time.monotonic()
+            chat._wait_for_answer()
+            return time.monotonic() - began
+
+        with written(), unittest.mock.patch.object(talk, "ANSWER_WAIT", 0.5):
+            # Nothing was asked for by a line: what waits is not waited for
+            assert waited() < 0.2
+            assert chat._commands.do("/mode plan") is commands.Did.DONE
+            assert claude.asked == ["set_permission_mode"]
+            # A moment, for the answer to be above the prompt. No longer,
+            # and once: a claude that does not answer holds up no
+            # prompt after the first
+            assert waited() > 0.4
+            assert waited() < 0.2
+            # Not where lines are all there, which wait for the turn,
+            # nor once the answer came
+            chat._commands.do("/mode plan")
+            chat._console.interactive = False
+            assert waited() < 0.2
+            chat._console.interactive = True
+            claude.pending = False
+            assert waited() < 0.2
 
     def test_a_tool_is_refused_when_the_input_ends(self):
         done = self.chat("run the tests\n")
@@ -705,6 +785,54 @@ class ChatTest(LauncherTest):
     def test_the_first_prompt_has_the_sandbox_above_it(self):
         said = self.at_a_terminal(("> ", "\x04"), term="dumb")
         assert "[claude-proj] net:open\n> " in said
+
+    def test_in_a_shell_buffer_of_emacs_the_first_prompt_waits_for_what_claude_goes_by(
+        self,
+    ):
+        # Claude answers once it runs, a moment after the chat started
+        said = self.at_a_terminal(
+            ("> ", "\x04"),
+            term="dumb",
+            FAKE_EFFORT="high",
+            FAKE_MODEL="claude-fable-5-2",
+            FAKE_SETTINGS_AFTER="0.3",
+        )
+        # One prompt, under the status as it is by then
+        assert "\n[claude-proj] net:open  Fable 5.2 effort:high\n> " in said
+        assert said.count("> ") == 1, said
+
+    def test_in_a_shell_buffer_of_emacs_a_change_of_mode_writes_one_prompt_with_it(
+        self,
+    ):
+        said = self.at_a_terminal(
+            ("> ", "/mode plan\n"), ("mode:plan\r\n> ", "\x04"), term="dumb"
+        )
+        # What claude answered, then the status as it now is: not a
+        # prompt before the answer, nor one for the status alone
+        changed = "# chat        mode plan\n[claude-proj] net:open  mode:plan\n> "
+        assert f"> /mode plan\n{changed}" in said
+        assert said.count("> ") == 2, said
+
+    def test_at_a_terminal_in_colour_the_status_has_a_row_of_its_own(self):
+        said = self.at_a_terminal(
+            ("> ", "hello\r"),
+            ("# ready", ""),
+            ("> ", "\x04"),
+            NO_COLOR="",
+            FAKE_EFFORT="high",
+        )
+        assert "\x1b[1;32m[claude-proj]\x1b[0m" in said
+        plain = screens.SGR.sub("", said)
+        # Its last part is in colour, which ends where the row does:
+        # editline writes neither that nor the line break when given
+        # them, the status would share a row with the prompt
+        assert "net:open> " not in plain
+        assert "effort:high> " not in plain
+        # The line typed is under it, as it was by then: claude said
+        # what it goes by a moment after the chat started, or before
+        assert re.search(r"net:open(  effort:high)?\s+> hello", plain)
+        # And so is the prompt once the turn is over
+        assert re.search(r"net:open  effort:high\s+> ", plain)
 
     def test_a_command_that_used_nothing_has_no_turn_line(self):
         done = self.chat("/model sonnet\nhello\n")
@@ -2952,7 +3080,10 @@ def lines_now(lines: list[str]) -> str:
 
 class CommandsTest(LauncherTest):
     def commands(
-        self, handover: commands.Handover | None = None, status=lambda: None
+        self,
+        handover: commands.Handover | None = None,
+        status=lambda: None,
+        changed=lambda: None,
     ) -> commands.Commands:
         host = Host(str(self.home), str(self.project), "", "")
         shown = page()
@@ -2968,6 +3099,7 @@ class CommandsTest(LauncherTest):
             self.shell.run,
             resume.resume,
             status,
+            changed,
         )
 
     def test_status_and_statusline_say_what_the_statusline_writes(self):
@@ -3308,7 +3440,9 @@ class CommandsTest(LauncherTest):
         assert self.requests == []
 
     def test_the_mode_is_asked_of_claude_and_said_when_it_answers(self):
-        ours = self.commands()
+        # What was written by the time the status is told to have changed
+        told: list[str] = []
+        ours = self.commands(changed=lambda: told.append(sys.stdout.getvalue()))
         with written() as lines:
             assert ours.do("/mode") is commands.Did.DONE
             assert self.requests == []
@@ -3317,6 +3451,7 @@ class CommandsTest(LauncherTest):
             assert (asked, more) == ("set_permission_mode", {"mode": "plan"})
             answered({"subtype": "error", "error": "no such\x1b[2J mode"})
             assert self.session.mode == ""
+            assert told == []
             answered({"subtype": "success", "response": {"mode": "plan"}})
         assert self.session.mode == "plan"
         assert lines == [
@@ -3324,6 +3459,10 @@ class CommandsTest(LauncherTest):
             "# chat        mode not changed: no such[2J mode",
             "# chat        mode plan",
         ]
+        # Once, before the line that says so: the status is under it
+        assert len(told) == 1
+        assert "mode not changed" in told[0]
+        assert "mode plan" not in told[0]
 
     def test_what_completes_and_what_help_says_are_the_same_commands(self):
         said = "\n".join(commands.HELP)
@@ -3372,11 +3511,7 @@ class StatusTest(LauncherTest):
         assert status.display_name("something-else") == "something-else"
 
     def test_the_status_says_what_is_known_and_nothing_else(self):
-        sandbox = status.Sandbox("claude-test")
-        parts = status.status_parts(
-            saying.Session(), turn.Usage(), status.Limits(), sandbox
-        )
-        assert status.status_line(parts, colour=False) == "[claude-test] net:open"
+        assert status_rows() == ["[claude-test] net:open"]
         session = saying.Session(model="claude-opus-5-5")
         usage = turn.Usage()
         limits = status.Limits()
@@ -3391,34 +3526,34 @@ class StatusTest(LauncherTest):
             {"total_cost_usd": 0.5, "modelUsage": {"m": {"contextWindow": 200_000}}},
             "m",
         )
-        parts = status.status_parts(session, usage, limits, sandbox)
         reset = f"{datetime.fromtimestamp(soon):%H:%M}"
-        assert (
-            status.status_line(parts, colour=False)
-            == f"Opus 5.5 ctx:25% 5h:42% used {reset} 7d:95% used $0.50"
-            " [claude-test] net:open"
-        )
-        # A limit nearly used up stands out in red
-        assert ("31", "7d:95% used") in parts
+        # The sandbox first, the launcher's own word, then what claude
+        # says: two spaces between what belongs together
+        used = f"ctx:25%  5h:42% used {reset}  7d:95% used  $0.50"
+        assert status_rows(session, usage, limits) == [
+            f"[claude-test] net:open  Opus 5.5  {used}"
+        ]
+        # A limit nearly used up stands out in red, and is never left out
+        groups = status.used_groups(session, usage, limits)
+        assert [status.Part(status.RED, "7d:95% used", "7d:95%")] in groups
 
     def test_the_mode_is_said_when_it_changed_and_of_plan_always(self):
-        sandbox = status.Sandbox("claude-test")
-
         def shown(session: saying.Session) -> str:
-            parts = status.status_parts(session, turn.Usage(), status.Limits(), sandbox)
-            return status.status_line(parts, colour=False)
+            return status_rows(session)[0]
 
         session = saying.Session()
         session.heard({"subtype": "init", "permissionMode": "bypassPermissions"})
         assert "mode:" not in shown(session)
         session.heard({"subtype": "status", "permissionMode": "acceptEdits\x1b[2J"})
-        assert " mode:acceptEdits[2J " in " " + shown(session)
+        assert shown(session).endswith("  mode:acceptEdits[2J")
         session.heard({"subtype": "status", "permissionMode": "bypassPermissions"})
         assert "mode:" not in shown(session)
         # The one a prompt is not acted on in, started with or not
         planning = saying.Session()
         planning.heard({"subtype": "init", "permissionMode": "plan"})
         assert "mode:plan" in shown(planning)
+        # It stands out, among what is dimmed: it changes what a prompt does
+        assert status.named_group(planning) == [status.Part(status.BOLD, "mode:plan")]
 
     def test_the_sandbox_is_shown_as_the_session_was_started(self):
         settings = Settings(
@@ -3434,7 +3569,7 @@ class StatusTest(LauncherTest):
         with unittest.mock.patch.object(started, "has_socket_proxy", return_value=True):
             start = started.Start.of(settings, DOCKERS_OWN, "", dirs, ssh_agent=True)
         sandbox = status.Sandbox.started("claude-x", start, str(self.home))
-        assert [text for _, text in sandbox.parts()] == [
+        assert [part.text for part in sandbox.parts()] == [
             "[claude-x]",
             "net:filtered",
             "ssh-agent",
@@ -3449,18 +3584,28 @@ class StatusTest(LauncherTest):
             start = started.Start.of(settings, DOCKERS_OWN, "", [], ssh_agent=False)
         sandbox = status.Sandbox.started("claude-x", start, str(self.home))
         assert sandbox.open == ("history:all",)
+        # A filter that asks about the hosts it does not allow
+        asking_filter = status.Sandbox("claude-x", net_filter=True, net_ask=True)
+        assert [part.text for part in asking_filter.parts()] == [
+            "[claude-x]",
+            "net:ask",
+        ]
 
-    def test_it_heads_the_prompt_and_is_said_when_asked_for(self):
+    def test_it_heads_the_prompt_and_is_said_in_full_when_asked_for(self):
         shown = page()
         session, usage = saying.Session(), turn.Usage()
         line = status.StatusLine(shown, status.Sandbox("claude-test"), session, usage)
         with written() as lines:
-            assert line.refresh() == "[claude-test] net:open"
+            assert line.refresh() == ["[claude-test] net:open"]
             assert shown._console._head == ["[claude-test] net:open"]
             session.replied({"message": {"model": "claude-opus-5-5"}})
             line.show()
-            assert shown._console._head == ["Opus 5.5 [claude-test] net:open"]
-        assert lines == ["# status      Opus 5.5 [claude-test] net:open"]
+            assert shown._console._head == ["[claude-test] net:open  Opus 5.5"]
+        assert lines == [
+            "# status      what the status above the prompt says, in full:",
+            "#   sandbox   claude-test, network open",
+            "#   model     Opus 5.5",
+        ]
 
     def test_the_limits_are_read_where_claude_now_says_them(self):
         # All the windows by name, the figures no longer beside the type
@@ -3479,14 +3624,10 @@ class StatusTest(LauncherTest):
                 },
             }
         )
-        parts = status.status_parts(
-            saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
-        )
         reset = f"{datetime.fromtimestamp(soon):%H:%M}"
-        assert (
-            status.status_line(parts, colour=False)
-            == f"5h:24% used {reset} 7d:22% used [claude-test] net:open"
-        )
+        assert status_rows(limits=limits) == [
+            f"[claude-test] net:open  5h:24% used {reset}  7d:22% used"
+        ]
         assert set(limits.windows) == {"five_hour", "seven_day"}
         # Not a set of windows: what is beside the type still counts
         limits.heard({"rateLimitType": "seven_day", "unifiedWindows": [1]})
@@ -3562,22 +3703,17 @@ class StatusTest(LauncherTest):
         limits.heard(
             {"rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": 9e11}
         )
-        parts = status.status_parts(
-            saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
-        )
-        assert "5h:40% used" in status.status_line(parts, colour=False)
+        assert status_rows(limits=limits) == ["[claude-test] net:open  5h:40% used"]
 
     def test_the_effort_is_shown_after_the_model_once_claude_said_it(self):
-        sandbox = status.Sandbox("claude-test")
         session = saying.Session(model="claude-fable-5-2")
 
         def shown() -> str:
-            parts = status.status_parts(session, turn.Usage(), status.Limits(), sandbox)
-            return status.status_line(parts, colour=False)
+            return status_rows(session)[0]
 
-        assert shown() == "Fable 5.2 [claude-test] net:open"
+        assert shown() == "[claude-test] net:open  Fable 5.2"
         session.settled({"effort": "high\x1b[2J", "model": "claude-fable-5-2"})
-        assert shown() == "Fable 5.2 effort:high[2J [claude-test] net:open"
+        assert shown() == "[claude-test] net:open  Fable 5.2 effort:high[2J"
         # A model that is told none, and what is no effort
         for none in (None, 3, ["high"]):
             session.settled({"effort": none})
@@ -3585,9 +3721,32 @@ class StatusTest(LauncherTest):
         init = {"subtype": "init", "session_id": SESSION, "fast_mode_state": "on"}
         session.heard(init)
         session.settled({"effort": "xhigh"})
-        assert shown() == "Fable 5.2 effort:xhigh fast [claude-test] net:open"
+        assert shown() == "[claude-test] net:open  Fable 5.2 effort:xhigh fast"
         session.heard({**init, "fast_mode_state": "off"})
-        assert " fast " not in shown()
+        assert " fast" not in shown()
+
+    def test_the_model_claude_goes_by_is_shown_before_the_first_turn(self):
+        session = saying.Session()
+        # As claude answers when asked for its settings, before any prompt
+        session.settled({"effort": "medium", "model": "claude-fable-5-2"})
+        assert status_rows(session) == [
+            "[claude-test] net:open  Fable 5.2 effort:medium"
+        ]
+        # From its first turn on the model is the one a turn is said to be of
+        init = {"subtype": "init", "session_id": SESSION, "model": "claude-opus-5-5"}
+        session.heard(init)
+        session.settled({"effort": "medium", "model": "claude-fable-5-2"})
+        assert status_rows(session) == [
+            "[claude-test] net:open  Opus 5.5 effort:medium"
+        ]
+        # What is no name is none, and a long one is not kept whole
+        for none in (None, 7, ["claude-fable-5-2"]):
+            unnamed = saying.Session()
+            unnamed.settled({"model": none})
+            assert unnamed.model == ""
+        long = saying.Session()
+        long.settled({"model": "m" * 900 + "\x1b[2J"})
+        assert long.model == "m" * saying.NAME_KEPT
 
     def test_an_account_without_a_window_shows_none_of_it(self):
         # As claude says it of a plan that has no limit by the hour
@@ -3614,18 +3773,16 @@ class StatusTest(LauncherTest):
 
         def shown(model: str, chosen: str = "") -> str:
             session = saying.Session(model=model, chosen=chosen)
-            parts = status.status_parts(
-                session, turn.Usage(), limits, status.Sandbox("claude-test")
-            )
-            return status.status_line(parts, colour=False)
+            return status_rows(session, limits=limits)[0]
 
         assert (
-            shown("claude-haiku-5-5") == "Haiku 5.5 7d:22% used [claude-test] net:open"
+            shown("claude-haiku-5-5")
+            == "[claude-test] net:open  Haiku 5.5  7d:22% used"
         )
         # The week of the one model, while it is the session's
         assert (
             shown("claude-fable-5-2")
-            == "Fable 5.2 7d:22% used fable:43% used [claude-test] net:open"
+            == "[claude-test] net:open  Fable 5.2  7d:22% used  fable:43% used"
         )
         assert "fable:43% used" in shown("claude-haiku-5-5", chosen="Fable 5.2")
         assert "fable:" not in shown("claude-fable-5-2", chosen="Opus 5.5")
@@ -3642,35 +3799,62 @@ class StatusTest(LauncherTest):
             {"rateLimitType": "seven_day", "utilization": 0.5, "resetsAt": week}
         )
 
-        def texts() -> list[str]:
-            return [text for _, text in status.limit_parts(limits, "", now)]
+        def texts(at: float = now) -> list[str]:
+            groups = status.limit_groups(limits, "", at)
+            return [" ".join(part.text for part in group) for group in groups]
 
         at = datetime.fromtimestamp(hour)
         on = datetime.fromtimestamp(week)
         assert texts() == [f"5h:10% used {at:%H:%M}", "7d:50% used"]
+        # Far from used up, either gives way where there is no room,
+        # when it starts again first
+        ranks = [[part.rank for part in group] for group in status.limit_groups(limits)]
+        assert ranks == [[status.Rank.LIMIT, status.Rank.RESET], [status.Rank.LIMIT]]
         # Nearly used up: when it starts again is what there is to wait for
         limits.heard({"rateLimitType": "seven_day", "utilization": 0.7})
         assert texts()[1] == f"7d:70% used {on:%a %H:%M}"
-        # Past the limit, as claude says it of a turn that went on
+        # Past the limit, as claude says it of a turn that went on: in
+        # red, and never left out, nor is when it starts again
         limits.heard({"rateLimitType": "seven_day", "utilization": 1.2})
-        assert (status.RED, f"7d:120% used {on:%a %H:%M}") in status.limit_parts(
-            limits, "", now
-        )
+        assert status.limit_groups(limits, "", now)[1] == [
+            status.Part(status.RED, "7d:120% used", "7d:120%"),
+            status.Part(status.RED, f"{on:%a %H:%M}"),
+        ]
         # What no part of a window is changes nothing
         for odd in (-0.5, 50, float("nan")):
             limits.heard({"rateLimitType": "seven_day", "utilization": odd})
         assert limits.windows["seven_day"]["used_percentage"] == 120.0
         # Once it has started again nothing is known to be used of it
-        later = [text for _, text in status.limit_parts(limits, "", hour)]
-        assert later == [f"7d:120% used {on:%a %H:%M}"]
-        assert status.limit_parts(limits, "", week) == []
+        assert texts(hour) == [f"7d:120% used {on:%a %H:%M}"]
+        assert texts(week) == []
 
-    def test_status_says_what_the_line_has_no_room_for(self):
+    def test_status_says_it_all_in_full_a_line_for_each_thing(self):
         now = 1_800_000_000.0
         week = now + 3 * status.DAY
-        session = saying.Session(model="claude-fable-5-2", version="2.1.326")
         usage, limits = turn.Usage(), status.Limits()
-        assert status.more_said(saying.Session(), usage, limits, now) == []
+        # Nothing known of the session yet: the sandbox, in the words
+        # its start is said in, with all that is open to it
+        sandbox = status.Sandbox(
+            "claude-test",
+            net_filter=True,
+            net_ask=True,
+            open=("ssh-agent", "connectors"),
+            dirs=("~/shared", "/srv/data (ro)"),
+        )
+        network = "filtered to the allowed domains, you are asked about others"
+        assert status.said_in_full(sandbox, saying.Session(), usage, limits) == [
+            "status      what the status above the prompt says, in full:",
+            f"  sandbox   claude-test, network {network}",
+            "  open      ssh-agent, connectors",
+            "  mounted   ~/shared, /srv/data (ro)",
+        ]
+        session = saying.Session(model="claude-fable-5-2", version="2.1.326")
+        session.id, session.mode, session.effort, session.fast = (
+            SESSION,
+            "plan",
+            "high",
+            True,
+        )
         windows = {
             "seven_day": {"utilization": 0.22, "resetsAt": week},
             "seven_day_overage_included": {"utilization": 0.43, "resetsAt": week},
@@ -3682,23 +3866,219 @@ class StatusTest(LauncherTest):
             "m",
         )
         on = f"{datetime.fromtimestamp(week):%a %d %b %H:%M}"
-        assert status.more_said(session, usage, limits, now) == [
-            "Claude Code 2.1.326",
-            f"context {turn.tokens(50_000)} of {turn.tokens(200_000)}",
-            f"limits start again: 7d {on}, fable {on}",
+        sandbox = status.Sandbox("claude-test")
+        held = f"{turn.tokens(50_000)} of {turn.tokens(200_000)} tokens"
+        assert status.said_in_full(sandbox, session, usage, limits, 2, now)[1:] == [
+            "  sandbox   claude-test, network open",
+            "  model     Fable 5.2, effort high, fast mode",
+            "  mode      plan, claude plans and changes nothing",
+            "  tasks     2 still run, claude goes on when one ends",
+            f"  context   25% used, {held}",
+            f"  limits    7d: 22% used, starts again {on}",
+            f"            fable: 43% used, starts again {on}",
+            "  cost      $0.50, as Claude Code counts it",
+            f"  session   {SESSION}",
+            "  version   Claude Code 2.1.326",
         ]
-        shown = page()
-        line = status.StatusLine(shown, status.Sandbox("claude-test"), session, usage)
-        with written() as lines:
-            line.show()
-        assert lines[1].startswith("# status      Claude Code 2.1.326, context ")
+        # A mode that is not plan is its name, and one task is one
+        session.mode = "acceptEdits"
+        said = status.said_in_full(sandbox, session, usage, limits, 1, now)
+        assert said[3:5] == [
+            "  mode      acceptEdits",
+            "  tasks     1 still runs, claude goes on when one ends",
+        ]
 
     def test_the_model_chosen_with_model_is_shown_before_it_replies(self):
         session = saying.Session(model="claude-fable-5-2", chosen="Opus 5.5")
-        parts = status.status_parts(
-            session, turn.Usage(), status.Limits(), status.Sandbox("claude-test")
+        assert status.named_group(session) == [status.Part(status.BOLD, "Opus 5.5")]
+
+    def under_way(self, now: float) -> tuple[saying.Session, turn.Usage, status.Limits]:
+        """A session with a figure for each thing the status shows: an
+        eighth of its context used, the limit by the hour and the week
+        of its model far from used up, the limit by the week nearly."""
+        session = saying.Session(model="claude-fable-5-2", effort="high")
+        usage, limits = turn.Usage(), status.Limits()
+        week = now + 3 * status.DAY
+        windows = {
+            "five_hour": {"utilization": 0.4, "resetsAt": now + 3600},
+            "seven_day": {"utilization": 0.72, "resetsAt": week},
+            "seven_day_overage_included": {"utilization": 0.43, "resetsAt": week},
+        }
+        limits.heard({"rateLimitType": "five_hour", "unifiedWindows": windows})
+        usage.step({"message": {"usage": {"input_tokens": 120_000}}})
+        window = {"m": {"contextWindow": 1_000_000}}
+        usage.parts({"total_cost_usd": 1.25, "modelUsage": window}, "m")
+        return session, usage, limits
+
+    def test_the_status_takes_two_rows_where_one_has_no_room_for_it(self):
+        now = 1_800_000_000.0
+        session, usage, limits = self.under_way(now)
+        at = f"{datetime.fromtimestamp(now + 3600):%H:%M}"
+        on = f"{datetime.fromtimestamp(now + 3 * status.DAY):%a %H:%M}"
+        used = f"ctx:12%  5h:40% used {at}  7d:72% used {on}  fable:43% used  $1.25"
+        whole = f"[claude-test] net:open  Fable 5.2 effort:high  {used}"
+
+        def rows(room: int | None) -> list[str]:
+            return status_rows(session, usage, limits, room=room, now=now)
+
+        # In a file a line is as long as it is
+        assert rows(None) == rows(len(whole)) == [whole]
+        # Still one row, each part said the shorter way it has: a row
+        # less above every prompt is worth more than a word
+        terse = whole.replace(" used", "")
+        assert rows(len(whole) - 1) == rows(len(terse)) == [terse]
+        # Then the sandbox over the session, each said whole again
+        session_row = f"Fable 5.2 effort:high  {used}"
+        over = ["[claude-test] net:open", session_row]
+        assert rows(len(terse) - 1) == rows(len(session_row)) == over
+        # No room for the session on one row: how claude is set goes
+        # next to the sandbox, whose row is mostly free, and nothing is
+        # left out or said shorter
+        beside = ["[claude-test] net:open  Fable 5.2 effort:high", used]
+        assert rows(len(session_row) - 1) == rows(len(used)) == beside
+        # Shorter still, that way loses less too: what was used is said
+        # the shorter way, where under the sandbox alone parts of the
+        # session would be left out
+        assert rows(len(used) - 1) == [beside[0], used.replace(" used", "")]
+        # Nothing to say of the session yet: the sandbox is all there is
+        assert status_rows(room=30) == ["[claude-test] net:open"]
+        # A sandbox whose row has no room for more as it is keeps it
+        # to itself: nothing of the sandbox gives way for the model
+        long = status.Sandbox(
+            "claude-a-project-with-a-long-name",
+            net_filter=True,
+            open=("ssh-agent", "docker:full"),
+            dirs=("~/shared",),
         )
-        assert parts[0] == (status.BOLD, "Opus 5.5")
+        room = len(session_row) - 1
+        opened = "net:filtered ssh-agent docker:full"
+        assert status_rows(session, usage, limits, long, room, now=now) == [
+            f"[claude-a-project-with-a-long-name] {opened} dirs: ~/shared",
+            session_row.replace(" used", ""),
+        ]
+        # However much of the session is then left out: next to it the
+        # model would be there for a name that is cut
+        assert status_rows(session, usage, limits, long, 62, now=now) == [
+            f"[claude-a-project-wi~] {opened}  ...",
+            f"Fable 5.2  ctx:12%  5h:40%  7d:72% {on}  fable:43%  ...",
+        ]
+
+    def test_in_a_row_too_short_the_parts_give_way_the_least_needed_first(self):
+        now = 1_800_000_000.0
+        session, usage, limits = self.under_way(now)
+        session.mode = "plan"
+        used = status.used_groups(session, usage, limits, now)
+        groups = [status.named_group(session), *used]
+        at = f"{datetime.fromtimestamp(now + 3600):%H:%M}"
+        on = f"{datetime.fromtimestamp(now + 3 * status.DAY):%a %H:%M}"
+
+        def fitted(room: int) -> str:
+            return status.row_text(status.fitted(groups, room))
+
+        asked, week = "Fable 5.2 effort:high mode:plan", f"7d:72% {on}"
+        whole = f"ctx:12%  5h:40% used {at}  7d:72% used {on}  fable:43% used  $1.25"
+        steps = [
+            f"{asked}  {whole}",
+            # Each said the shorter way it has
+            f"{asked}  ctx:12%  5h:40% {at}  {week}  fable:43%  $1.25",
+            # What the session cost, and a mark for what is left out
+            f"{asked}  ctx:12%  5h:40% {at}  {week}  fable:43%  ...",
+            # When a limit that is far from used up starts again
+            f"{asked}  ctx:12%  5h:40%  {week}  fable:43%  ...",
+            # How the model is asked to work
+            f"Fable 5.2 mode:plan  ctx:12%  5h:40%  {week}  fable:43%  ...",
+            # The limits that are far from used up, the last first
+            f"Fable 5.2 mode:plan  ctx:12%  5h:40%  {week}  ...",
+            f"Fable 5.2 mode:plan  ctx:12%  {week}  ...",
+            # How full a context is that is far from full
+            f"Fable 5.2 mode:plan  {week}  ...",
+        ]
+        for wanted, shorter in itertools.pairwise(steps):
+            assert fitted(len(wanted)) == wanted
+            assert fitted(len(wanted) - 1) == shorter
+        # The model, the mode and what is nearly used up, with when it
+        # starts again, stay however little room there is
+        assert fitted(10) == steps[-1]
+        # A context that is nearly full stays too
+        usage.step({"message": {"usage": {"input_tokens": 950_000}}})
+        used = status.used_groups(session, usage, limits, now)
+        groups = [status.named_group(session), *used]
+        assert fitted(10) == f"Fable 5.2 mode:plan  ctx:95%  {week}  ..."
+
+    def test_what_is_open_to_the_session_is_never_left_out(self):
+        name = "claude-a-project-with-a-long-name"
+        sandbox = status.Sandbox(
+            name,
+            net_filter=True,
+            open=("ssh-agent", "docker:full"),
+            dirs=("~/shared", "/srv/data (ro)"),
+        )
+        opened = "net:filtered ssh-agent docker:full"
+
+        def fitted(room: int) -> str:
+            return status.row_text(status.fitted([sandbox.parts()], room))
+
+        whole = f"[{name}] {opened} dirs: ~/shared /srv/data (ro)"
+        assert fitted(len(whole)) == whole
+        # What is mounted by how many there are, then not at all
+        counted = f"[{name}] {opened} dirs:2"
+        assert fitted(len(whole) - 1) == fitted(len(counted)) == counted
+        left_out = f"[{name}] {opened}  ..."
+        assert fitted(len(counted) - 1) == fitted(len(left_out)) == left_out
+        # Then the name is cut, and nothing else: no shorter than
+        # tells it from another
+        assert fitted(len(left_out) - 5) == f"[{name[:27]}~] {opened}  ..."
+        assert fitted(10) == f"[claude-~] {opened}  ..."
+
+    def test_the_status_is_made_for_the_page_as_wide_as_it_is_now(self):
+        wide = [200]
+        screen = console.Console("/nowhere", io.StringIO(), columns=lambda: wide[0])
+        shown = console.Page(screen, Layout(compact=True))
+        session, usage, limits = self.under_way(time.time())
+        line = status.StatusLine(shown, status.Sandbox("claude-test"), session, usage)
+        line.limits = limits
+        assert len(line.refresh()) == 1
+        # The terminal was made narrower since
+        wide[0] = 80
+        sandbox, said = line.refresh()
+        assert sandbox == "[claude-test] net:open  Fable 5.2 effort:high"
+        assert said.startswith("ctx:12%  5h:40% used ")
+        assert said.endswith("  fable:43% used  $1.25")
+        assert screen._head == [sandbox, said]
+        assert max(map(len, screen._head)) < 80
+        # In colour each part has its own, and takes no more room for it
+        coloured = console.Page(screen, Layout(colour=True, compact=True))
+        line = status.StatusLine(
+            coloured, status.Sandbox("claude-test"), session, usage
+        )
+        line.limits = limits
+        painted = line.refresh()
+        assert painted[0] == (
+            "\x1b[1;32m[claude-test]\x1b[0m \x1b[33mnet:open\x1b[0m"
+            "  \x1b[1mFable 5.2\x1b[0m \x1b[2meffort:high\x1b[0m"
+        )
+        assert [screens.SGR.sub("", row) for row in painted] == [sandbox, said]
+
+    def test_the_tasks_claude_left_to_run_are_counted_while_they_do(self):
+        session = saying.Session(model="claude-fable-5-2")
+        assert status_rows(session, tasks=2) == [
+            "[claude-test] net:open  Fable 5.2 tasks:2"
+        ]
+        assert "tasks" not in status_rows(session)[0]
+        running = [1]
+        line = status.StatusLine(
+            page(),
+            status.Sandbox("claude-test"),
+            session,
+            turn.Usage(),
+            tasks=lambda: running[0],
+        )
+        with written() as lines:
+            assert line.refresh() == ["[claude-test] net:open  Fable 5.2 tasks:1"]
+            line.show()
+            running[0] = 0
+            assert line.refresh() == ["[claude-test] net:open  Fable 5.2"]
+        assert "#   tasks     1 still runs, claude goes on when one ends" in lines
 
 
 class ConsoleTest(LauncherTest):
@@ -3770,7 +4150,7 @@ class ConsoleTest(LauncherTest):
             assert screen.typed() == ""
         assert out.getvalue() == "one\n\ntwo\n> \nallow? "
 
-    def test_the_head_is_above_the_prompt_and_written_again_when_it_changes(self):
+    def test_the_head_is_above_the_prompt_and_written_with_what_comes_next(self):
         screen = console.Console(str(self.project))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -3779,11 +4159,62 @@ class ConsoleTest(LauncherTest):
             screen._headed, screen._reading, screen._shown = True, "> ", "model x\n"
             screen._on_screen = True
             screen.write(["one"])
+            # Nothing is written for a head that changed: no prompt
+            # for each figure that moved
             screen.set_head(["model y", "ctx 3%"])
+            assert out.getvalue() == "\none\n> "
+            # What is written next has it under it, with the prompt
             screen.write(["two"])
             # Not above a question
             screen.ask("allow? ")
-        assert out.getvalue() == "\none\n> \nmodel y\nctx 3%\n> \ntwo\n> \nallow? "
+        assert out.getvalue() == "\none\n> \ntwo\nmodel y\nctx 3%\n> \nallow? "
+
+    def test_at_a_terminal_the_head_is_written_again_in_its_place(self):
+        out = io.StringIO()
+        screen = console.Console(str(self.project), out=out, columns=lambda: 40)
+        screen.set_head(["model x"])
+        screen._redrawn, screen._headed = True, True
+        screen._reading, screen._shown = "> ", "model x\n> "
+        with unittest.mock.patch.object(console.readline, "get_line_buffer") as typed:
+            typed.return_value = ""
+            screen.set_head(["model y", "ctx 3%"])
+            assert out.getvalue() == "\x1b[1A\r\x1b[Jmodel y\nctx 3%\n> "
+            # Both of its rows are erased with the prompt the next time
+            screen.set_head(["model z"])
+        assert out.getvalue().endswith("\x1b[2A\r\x1b[Jmodel z\n> ")
+
+    def test_editline_is_given_the_prompt_alone_and_the_head_is_written_for_it(self):
+        head = "\x1b[1;32m[claude-x]\x1b[0m \x1b[33mnet:open\x1b[0m"
+        given: list[str] = []
+
+        def typed(prompt: str) -> str:
+            given.append(prompt)
+            return "hello"
+
+        def read(editline: bool) -> str:
+            out = io.StringIO()
+            screen = console.Console(str(self.project), out=out, columns=lambda: 80)
+            screen._redrawn, screen._hooked, screen._editline = True, False, editline
+            screen.set_head([head])
+            with (
+                unittest.mock.patch("builtins.input", typed),
+                unittest.mock.patch.object(
+                    console.readline, "get_line_buffer"
+                ) as buffer,
+            ):
+                buffer.return_value = ""
+                assert screen.read("> ", headed=True) == "hello"
+            return out.getvalue()
+
+        # Editline writes an escape with the character after it, and
+        # neither before a line break: the head is not its to write.
+        # Then the line as it was read, nobody typed it here
+        assert read(editline=True) == head + "\nhello\n"
+        assert given == ["> "]
+        # GNU readline writes all of it, the escapes marked as taking
+        # no column
+        assert read(editline=False) == "hello\n"
+        assert given[1] == screens.uncounted(head) + "\n> "
 
     def test_ctrl_c_ends_the_wait_for_a_line_with_the_console_let_go_of(self):
         screen = console.Console(str(self.project))

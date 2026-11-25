@@ -176,14 +176,6 @@ def _header_lines(texts: list[str], style: str = "") -> list[Shown]:
     return [Shown(painted(style, line)) for line in lines]
 
 
-def header_with(start: str, rest: str, colour: bool) -> Shown:
-    """A header line that starts with a text of the launcher's own, on
-    one line and dimmed in colour, and goes on with one that keeps the
-    styles it has: a status in its colours."""
-    line = HEADER_START + flat(start)
-    return Shown((painted(DIM, line) if colour else line) + rest)
-
-
 def _use_colour(env: Mapping[str, str]) -> bool:
     """Whether the lines are coloured: on a terminal, unless NO_COLOR says
     not to (no-color.org), and anywhere when FORCE_COLOR asks for it, as a

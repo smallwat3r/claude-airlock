@@ -79,9 +79,10 @@ and CPU the sandbox uses](img/line-mode.png)
 - With `CLAUDE_AIRLOCK_NET_ASK=1`, a host the egress filter does not
   allow, before it is refused: see [What you type](#what-you-type).
 - After a turn, how long it took and what it cost.
-- Above the prompt, the status: the model and the effort it is asked
-  for, how full the context is, the limits of your account, and the
-  sandbox with its network mode. See [The status](#the-status).
+- Above the prompt, the status: the sandbox with its network mode and
+  what is open to it, the model and the effort it is asked for, how
+  full the context is and the limits of your account. See
+  [The status](#the-status).
 
 The lines are those of `--trace`, see
 [Reading the lines](trace.md#reading-the-lines). `--trace` has the rest
@@ -90,32 +91,85 @@ once the session is over, such as which process made each connection.
 ## The status
 
 ```
-Fable 5.2 effort:high ctx:12% 5h:40% used 14:00 7d:72% used Sun 12:00 fable:43% used $1.25 [claude-proj] net:open docker:ps
+[claude-proj] net:open docker:ps  Fable 5.2 effort:high  ctx:12%  5h:40% used 14:00  7d:72% used Sun 12:00  $1.25
 ```
+
+First the sandbox, which is the launcher's own word, then what Claude
+Code says of the session. Two spaces are between two things, one within
+each: the time after a limit is when that limit starts again.
 
 | Part | Says |
 | --- | --- |
-| `Fable 5.2` | The model, as Claude Code names it |
+| `[claude-proj] net:open docker:ps` | The sandbox: its container, whether its network is filtered (`net:filtered`, `net:ask` when you are asked about the hosts the filter does not allow, `net:open`), what is open to it, and what is mounted next to the project (`dirs: ~/shared`) |
+| `Fable 5.2` | The model, as Claude Code names it. Above the first prompt too |
 | `effort:high` | The effort the model is asked for, as `/effort` sets it. Not there for a model that takes none |
 | `fast` | Fast mode is on |
 | `mode:plan` | The permission mode, when it is not the one the session started in, and `plan` always |
+| `tasks:2` | The tasks claude started that still run: it goes on by itself when one ends |
 | `ctx:12%` | How full the context is |
 | `5h:40% used 14:00` | The limit of the account by the hour, and when it starts again |
 | `7d:72% used Sun 12:00` | The limit by the week. When it starts again is said from 70% on |
 | `fable:43% used` | The weekly limit of Fable alone, while Fable is the model of the session |
 | `$1.25` | What the session cost, as Claude Code counts it |
-| `[claude-proj] net:open docker:ps` | The sandbox: its container, whether its network is filtered, what is open to it and what is mounted next to the project |
 
 - A limit is dim, yellow from 70% used and red from 90%, and so is the
-  context.
+  context. The mode and the tasks are not dimmed: they change what
+  happens next, a prompt is not acted on in `plan`.
+- It takes one row where the terminal is wide enough. Where it is not,
+  each part is first said the shorter way it has, `5h:40% 14:00` and
+  `dirs:2` for two directories. Where that is still too long it takes
+  two rows, the sandbox over the session, each said whole again if it
+  fits:
+
+  ```
+  [claude-proj] net:open docker:ps dirs: ~/shared
+  Fable 5.2 effort:high  ctx:12%  5h:40% used 14:00  7d:72% used Sun 12:00  $1.25
+  ```
+
+  In a terminal too narrow for that, 80 columns here, the model goes
+  next to the sandbox when less is lost that way and that row has room
+  for both as they are:
+
+  ```
+  [claude-proj] net:open docker:ps  Fable 5.2 effort:high
+  ctx:12%  5h:40% used 14:00  7d:72% used Sun 12:00  fable:43% used  $1.25
+  ```
+
+- A row that is still too long leaves parts out, the least needed
+  first: the cost, when a limit that is far from used up starts again,
+  the effort and `fast`, the directories, such a limit itself, and the
+  context while it is far from full. `...` at the end of the row says that some
+  were left out, `/status` says all of it. The network, what is open to
+  the session, the model, the mode, the tasks and what is nearly used up
+  are never left out: the name of the sandbox is cut before they are
+  (`[claude-pr~]`).
 - Only the limits your plan has are shown: an account without a limit by
   the hour has no `5h`. A limit that has started again since claude last
   said it is left out until claude says it anew, with its next reply.
-- The status is made of what Claude Code says as it goes. Nothing is
+- The status is made of what Claude Code says as it goes, and follows
+  it: at a terminal it is written again in its place while a turn runs,
+  and when the terminal is made wider. Anywhere else, a shell buffer of
+  Emacs, it is written with each prompt, and what changed meanwhile is
+  under the next line written: never a prompt of its own. Nothing is
   known of the limits before the first reply of a session.
-- `/status` says the line, and under it what the line has no room for:
-  the version of Claude Code, how many tokens the context holds, and the
-  day and time each limit starts again.
+- `/status` says it in full, a line for each thing and none of it left
+  out, with what the status has no room for: how many tokens the context
+  holds, the day each limit starts again, the session and the version of
+  Claude Code.
+
+  ```
+  # status      what the status above the prompt says, in full:
+  #   sandbox   claude-proj, network open
+  #   open      docker:ps
+  #   model     Fable 5.2, effort high
+  #   context   12% used, 120.1k of 1.00M tokens
+  #   limits    5h: 40% used, starts again Wed 25 Nov 14:00
+  #             7d: 72% used, starts again Sun 29 Nov 12:00
+  #   cost      $1.25, as Claude Code counts it
+  #   session   3fa9c0de-1111-4222-8333-444455556666
+  #   version   Claude Code 2.1.326
+  ```
+
 - A statusline of your own (`statusLine` of the settings) is not run
   here. It is in Claude Code's native UI, see
   [Statusline](../README.md#statusline).
@@ -136,7 +190,7 @@ A line can be typed at any time, claude takes it up when it can.
 | `/mode plan` | Changes the permission mode |
 | `/resume` | Leaves this session for an earlier one of the project |
 | `/mcp` | The MCP servers of the session |
-| `/status`, `/statusline` | The model, effort, context, limits, cost and sandbox, see [The status](#the-status) |
+| `/status`, `/statusline` | The status in full, a line for each thing: the sandbox, the model, the context, the limits and the cost, see [The status](#the-status) |
 | `!make test` | Runs a command in the sandbox, claude is not told |
 | `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 
