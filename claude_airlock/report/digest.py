@@ -190,6 +190,9 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
             "lookups that stand out:",
             [flat(f"{lookup.name}: {why}") for why, lookup in capture.flagged],
         )
+        if capture.dns_unread:
+            unread = f"{capture.dns_unread} DNS messages of its capture were not read"
+            lines.append(f"{unread}, more than are kept")
         cut = ", ".join(parts_cut_short(capture))
         if cut:
             lines.append(f"its capture stopped at its packet limit ({cut})")

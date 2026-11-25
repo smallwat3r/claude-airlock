@@ -70,6 +70,12 @@ DNS_MOST_PENDING = 2000
 DNS_MOST_HELD = 1000
 DNS_HELD_BYTES = 4096
 DNS_LENGTH = 2
+# No more lookups than this are kept of a capture, the DNS messages past
+# them are counted and not read. Each part of a capture has a packet
+# limit, which bounds what a packet a lookup would: over TCP one packet
+# can hold dozens of messages, and a session can send any number of them
+# to a port of its own.
+MOST_LOOKUPS = 100_000
 # A connection that one side has ended is followed until the other has
 # too, for what went over it meanwhile: no more of them than this, a
 # session can leave any number half open
@@ -303,6 +309,8 @@ class Capture:
     lookups: list[Lookup] = field(default_factory=list)
     # The lookups that stand out, each with what for, see DNS_MANY_NAMES
     flagged: list[tuple[str, Lookup]] = field(default_factory=list)
+    # The DNS messages that were not read, past MOST_LOOKUPS
+    dns_unread: int = 0
     # Each plain HTTP request
     requests: list[Request] = field(default_factory=list)
     # Each place something was sent to by another protocol than TCP
@@ -444,6 +452,9 @@ class Capture:
         on loopback, is nothing the resolver said."""
         if not self._is_dns(packet):
             return
+        if len(self.lookups) >= MOST_LOOKUPS:
+            self.dns_unread += 1
+            return
         try:
             found = dns_message(packet.when, message)
         except NotThis:
@@ -480,6 +491,10 @@ class Capture:
         self._pending[key] = when
 
     def _take_lookup(self, lookup: Lookup) -> None:
+        if len(self.lookups) >= MOST_LOOKUPS:
+            # Of the queries still waiting when the last one was kept
+            self.dns_unread += 1
+            return
         self.lookups.append(lookup)
         self._flag(lookup)
         if lookup.kind in ("A", "AAAA"):

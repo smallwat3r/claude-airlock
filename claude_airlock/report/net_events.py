@@ -250,6 +250,11 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         lines.append(f"  dns {len(names)} names looked up{hint}")
     if capture.flagged:
         lines.append(f"  dns {len(capture.flagged)} lookups FLAGGED, see --failed")
+    if capture.dns_unread:
+        lines.append(
+            f"  dns {capture.dns_unread} more messages NOT READ, past the"
+            f" {len(capture.lookups)} lookups that are kept"
+        )
     cut = ", ".join(parts_cut_short(capture))
     if cut:
         lines.append(

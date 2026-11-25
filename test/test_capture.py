@@ -12,6 +12,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import unittest.mock
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from harness import (
 from claude_airlock.reader import NotThis
 from claude_airlock.recording import payloads
 from claude_airlock.recording.pcap_file import PcapReader
+from claude_airlock.report import net_events
 
 
 def unnamed_port() -> int:
@@ -543,6 +545,24 @@ class DnsTrustTest:
                     )
                     assert found.names == {}
                     assert found.lookups[0].error == "no answer"
+
+    def test_no_more_lookups_are_kept_than_a_capture_may_have(self):
+        packets = []
+        for number in range(5):
+            name = f"n{number}.test"
+            packets += [
+                (number + 0.1, dns_query(name), True),
+                (number + 0.2, dns_response(name, "6.6.6.6"), False),
+            ]
+        with unittest.mock.patch.object(pcap, "MOST_LOOKUPS", 2):
+            found = self.read(packets, asked=False)
+        assert [lookup.name for lookup in found.lookups] == ["n0.test", "n1.test"]
+        # The messages past them are counted, and said
+        assert found.dns_unread == 6
+        said = net_events.capture_summary(found, False)
+        assert (
+            "  dns 6 more messages NOT READ, past the 2 lookups that are kept" in said
+        )
 
     def test_an_answer_nobody_asked_for_names_nothing(self):
         found = self.read(
