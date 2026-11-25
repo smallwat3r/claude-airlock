@@ -357,7 +357,8 @@ class AskingSessionTest(LauncherTest):
         )
         assert result.status == 0, result.stderr
         assert "CLAUDE_AIRLOCK_NET_ASK asks in line mode only" in result.stderr
-        assert "--env=CLAUDE_AIRLOCK_NET_ASK=1" in result.flags
+        # Nor is the session told to wait for an answer nobody is asked for
+        assert not [flag for flag in result.flags if "NET_ASK" in flag]
         assert list((self.state / "asked-hosts").iterdir()) == []
         # Nothing to say without the filter, nor of a filter that does not ask
         for settings in (

@@ -272,7 +272,7 @@ def session_run_args(
         *extra_dir_args(dirs),
         *protect_args(protected, host, dirs),
         *protect_env_args(protected),
-        *network_args(settings, capture),
+        *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
         *git_config_args(host),
         *shadow_args(settings, host, dirs),

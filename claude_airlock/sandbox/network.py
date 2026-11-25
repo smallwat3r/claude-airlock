@@ -98,7 +98,9 @@ def session_network(settings: Settings, host: Host) -> Iterator[None]:
             pass
 
 
-def network_args(settings: Settings, capture: str = "") -> list[str]:
+def network_args(
+    settings: Settings, capture: str = "", asked: bool = False
+) -> list[str]:
     """Network: open egress by default, in the network namespace of the
     capture sidecar when one is named (see capture.py). In filtered mode
     the container joins an internal network with no route out, where
@@ -106,7 +108,10 @@ def network_args(settings: Settings, capture: str = "") -> list[str]:
     the default bridge) that only allows domains listed in
     docker/allowed-domains.txt. Filtering is by the host named in the
     CONNECT request, so it survives CDN IP churn. The network and the
-    sidecar are those of prepare_network."""
+    sidecar are those of prepare_network. asked says whether the user is
+    asked about a host that is not listed, which the session is then
+    told: only where there is a place to ask, see hosts_asked. Told all
+    the same, a session would wait for an answer nobody is asked for."""
     namespace = (
         [f"--network=container:{capture}"] if capture else namespace_args(settings)
     )
@@ -124,7 +129,7 @@ def network_args(settings: Settings, capture: str = "") -> list[str]:
         env_arg("NO_PROXY", no_proxy),
         env_arg("no_proxy", no_proxy),
         # Told to the session, see docker/CLAUDE-airlock.md
-        *([env_arg("CLAUDE_AIRLOCK_NET_ASK", 1)] if settings.net_ask else []),
+        *([env_arg("CLAUDE_AIRLOCK_NET_ASK", 1)] if settings.net_ask and asked else []),
         # Direct port 22 is blocked on the internal net, so tunnel
         # git-over-SSH through the proxy as a CONNECT to :22
         env_arg(
