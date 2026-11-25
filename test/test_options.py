@@ -172,7 +172,10 @@ class OptionsTest(LauncherTest):
         def removed(**env: str) -> list[str]:
             (self.work / "log").unlink(missing_ok=True)
             calls = self.launch(FAKE_PS=proxies, **env).calls
-            return [call[-1] for call in calls if call[:2] == ["rm", "--force"]]
+            removed = [call[-1] for call in calls if call[:2] == ["rm", "--force"]]
+            # After the container of the session itself
+            assert removed[0].startswith("claude-proj")
+            return removed[1:]
 
         # Whichever session started them, and nothing that is not a proxy
         assert removed() == ["claude-airlock-ps-proxy", "claude-egress-proxy"]

@@ -693,6 +693,23 @@ class UncheckedSessionTest(LauncherTest):
         assert self.LATE not in self.launch().stderr
         assert self.pending() == []
 
+    def test_a_session_whose_container_is_still_there_is_checked_later(self):
+        # docker run returned and left it running: a client that was
+        # killed, a terminal that was detached
+        left = self.launch(
+            session="echo x > .git/hooks/pre-commit", FAKE_LEFT="claude-proj"
+        )
+        assert ["rm", "--force", "claude-proj"] in left.calls
+        assert "claude-proj could not be removed, it may still run" in left.stderr
+        assert "pre-commit" not in left.stderr
+        assert len(self.pending()) == 1
+        # Left alone while it is there, and checked once it is gone
+        still = self.launch(FAKE_LEFT="claude-proj")
+        assert self.LATE not in still.stderr
+        following = self.launch()
+        assert self.LATE in following.stderr
+        assert f"  {self.project}/.git/hooks/pre-commit\n" in following.stderr
+
     def test_a_checked_session_leaves_nothing_pending(self):
         self.launch(session="echo x > .git/hooks/pre-commit")
         assert self.pending() == []

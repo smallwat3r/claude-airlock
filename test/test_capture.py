@@ -1037,7 +1037,11 @@ class CaptureSessionTest(LauncherTest):
             {"pid": me, "launched": launcher.process_started(me)},
         ):
             result = self.left_behind(**mine)
-            assert [c for c in result.calls if c[0] in ("stop", "cp", "rm")] == []
+            # But for the container of the session that just ran
+            touched = [c for c in result.calls if c[0] in ("stop", "cp", "rm")]
+            assert {tuple(call) for call in touched} == {
+                ("rm", "--force", "claude-proj")
+            }
 
     def test_another_process_with_the_id_of_a_launcher_is_not_taken_for_it(self):
         assert launcher.process_started(os.getpid())

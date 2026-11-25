@@ -16,7 +16,7 @@ from typing import NamedTuple
 
 from .action import Action
 from .chat import CHAT_ARGS, Handover, Sandbox, chat
-from .docker import docker_ok
+from .docker import container_gone, docker_ok, remove_container
 from .errors import Fatal
 from .notice import warn
 from .recording.address import session_address_recorded
@@ -367,6 +367,12 @@ def recorded_session(
         try:
             status = run_session(run_args, image, command_args(plan), ending, through)
         finally:
+            # Gone before its recorders are, and before what it left
+            # behind is checked: docker run can return and leave its
+            # container running (a client that was killed, a daemon that
+            # was restarted under it, a terminal that was detached), which
+            # would go on writing with nothing looking any more
+            remove_container(name)
             note_end(host, name)
     # Whole once the recorders are done
     return status, hit.lines()
@@ -406,8 +412,18 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
         try:
             report_session(host, name, started, limits)
         finally:
-            # Whatever became of the digest: this check matters more
-            check.run()
+            # Whatever became of the digest: this check matters more.
+            # Of a session that is over: one whose container is still
+            # there could change what was just checked, so its check is
+            # left for the next launch, which runs it once it is gone
+            if container_gone(name):
+                check.run()
+            else:
+                warn(
+                    f"the container of the session {name} could not be removed,"
+                    " it may still run: what it left behind is checked by the"
+                    f" next launch, once docker rm --force {name} has ended it"
+                )
     return status
 
 

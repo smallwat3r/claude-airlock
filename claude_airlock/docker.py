@@ -109,6 +109,20 @@ def container_running(name: str) -> bool:
     return state.strip() == "true"
 
 
+def remove_container(name: str) -> None:
+    """Remove a container, running or not, nothing when there is none."""
+    docker_ok("rm", "--force", name)
+
+
+def container_gone(name: str) -> bool:
+    """Whether no container of that name is there any more, as far as
+    docker says: not when it says there is one, nor when it does not
+    answer."""
+    quiet = subprocess.DEVNULL
+    asked = docker("container", "inspect", name, stdout=quiet, stderr=quiet)
+    return asked.returncode not in (0, TIMED_OUT)
+
+
 def docker_bytes(*args: str) -> bytes | None:
     """Stdout of a docker command as the bytes they are, None when it
     fails."""
