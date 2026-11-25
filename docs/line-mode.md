@@ -79,12 +79,46 @@ and CPU the sandbox uses](img/line-mode.png)
 - With `CLAUDE_AIRLOCK_NET_ASK=1`, a host the egress filter does not
   allow, before it is refused: see [What you type](#what-you-type).
 - After a turn, how long it took and what it cost.
-- Above the prompt, the status: the model, how full the context is, the
-  limits of your account, and the sandbox with its network mode.
+- Above the prompt, the status: the model and the effort it is asked
+  for, how full the context is, the limits of your account, and the
+  sandbox with its network mode. See [The status](#the-status).
 
 The lines are those of `--trace`, see
 [Reading the lines](trace.md#reading-the-lines). `--trace` has the rest
 once the session is over, such as which process made each connection.
+
+## The status
+
+```
+Fable 5.2 effort:high ctx:12% 5h:40% used 14:00 7d:72% used Sun 12:00 fable:43% used $1.25 [claude-proj] net:open docker:ps
+```
+
+| Part | Says |
+| --- | --- |
+| `Fable 5.2` | The model, as Claude Code names it |
+| `effort:high` | The effort the model is asked for, as `/effort` sets it. Not there for a model that takes none |
+| `fast` | Fast mode is on |
+| `mode:plan` | The permission mode, when it is not the one the session started in, and `plan` always |
+| `ctx:12%` | How full the context is |
+| `5h:40% used 14:00` | The limit of the account by the hour, and when it starts again |
+| `7d:72% used Sun 12:00` | The limit by the week. When it starts again is said from 70% on |
+| `fable:43% used` | The weekly limit of Fable alone, while Fable is the model of the session |
+| `$1.25` | What the session cost, as Claude Code counts it |
+| `[claude-proj] net:open docker:ps` | The sandbox: its container, whether its network is filtered, what is open to it and what is mounted next to the project |
+
+- A limit is dim, yellow from 70% used and red from 90%, and so is the
+  context.
+- Only the limits your plan has are shown: an account without a limit by
+  the hour has no `5h`. A limit that has started again since claude last
+  said it is left out until claude says it anew, with its next reply.
+- The status is made of what Claude Code says as it goes. Nothing is
+  known of the limits before the first reply of a session.
+- `/status` says the line, and under it what the line has no room for:
+  the version of Claude Code, how many tokens the context holds, and the
+  day and time each limit starts again.
+- A statusline of your own (`statusLine` of the settings) is not run
+  here. It is in Claude Code's native UI, see
+  [Statusline](../README.md#statusline).
 
 ## What you type
 
@@ -102,7 +136,7 @@ A line can be typed at any time, claude takes it up when it can.
 | `/mode plan` | Changes the permission mode |
 | `/resume` | Leaves this session for an earlier one of the project |
 | `/mcp` | The MCP servers of the session |
-| `/status`, `/statusline` | The model, context, limits, cost and sandbox |
+| `/status`, `/statusline` | The model, effort, context, limits, cost and sandbox, see [The status](#the-status) |
 | `!make test` | Runs a command in the sandbox, claude is not told |
 | `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 

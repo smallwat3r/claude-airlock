@@ -264,7 +264,7 @@ LOCALS = (
     Local(
         STATUS,
         "/status",
-        "the model, context, limits, cost and sandbox, or /statusline",
+        "the model, effort, context, limits, cost and sandbox, or /statusline",
         Commands._said_status,
     ),
     Local(

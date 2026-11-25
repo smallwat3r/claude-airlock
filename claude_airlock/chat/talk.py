@@ -255,6 +255,8 @@ class Chat:
             "assistant": self._said,
             "user": self._said,
         }
+        # Whether claude was asked for its settings and has not answered
+        self._settings_asked = False
         # Whether a line is waited for, and whether Ctrl-C came for a turn
         self._reading = False
         self._interrupt = False
@@ -280,6 +282,7 @@ class Chat:
             listener = threading.Thread(target=self._listen, daemon=True)
             listener.start()
             self._asked.start(self._agent)
+            self._ask_settings()
             # What the session was started with heads the first prompt
             # too: that is when it matters most
             self._status.refresh()
@@ -576,6 +579,29 @@ class Chat:
         self._status.refresh()
         self._wake.set()
 
+    def _ask_settings(self) -> None:
+        """Ask claude which settings it goes by, for the effort the
+        status shows: no message of a turn says it. As the chat starts,
+        and after each turn, which may have changed it (/effort, /model).
+        Not waited for, and not asked again while no answer came: a
+        version that does not know the request shows no effort."""
+        if self._settings_asked:
+            return
+        self._settings_asked = True
+        self._agent.request("get_settings", self._settings_said, waited=False)
+
+    def _settings_said(self, response: dict) -> None:
+        """Take in the settings claude answers that it goes by. The
+        status is written again once an answer was taken in, see
+        _answered."""
+        self._settings_asked = False
+        if response.get("subtype") != "success":
+            self._drift.missed("settings")
+            return
+        applied = self._drift.field(response.get("response"), "applied", dict)
+        if applied is not None:
+            self._session.settled(applied)
+
     def _reset(self, _message: dict) -> None:
         self._notices.cleared()
 
@@ -631,6 +657,7 @@ class Chat:
         if more or turn.said or turn.interrupted or ended_badly(result):
             self._page.say([turn_line(turn, result, more)])
         self._status.refresh()
+        self._ask_settings()
         if not turn.guarded:
             # Not of a turn that was stopped for what claude read: it has
             # not finished, and what comes next is said where it stopped

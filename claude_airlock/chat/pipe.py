@@ -143,6 +143,8 @@ class Agent:
         # What waits for the answer to a request of the chat's, by the id
         # it was asked under
         self._answers: dict[str, Answer] = {}
+        # Those of them the chat does not wait for the answer to
+        self._unwaited: set[str] = set()
         self._asking = threading.Lock()
         # What claude said, see Said
         self.messages = Backlog()
@@ -263,16 +265,24 @@ class Agent:
         return self.send({"type": "user", "message": message})
 
     def request(
-        self, subtype: str, on_answer: Answer | None = None, **more: object
+        self,
+        subtype: str,
+        on_answer: Answer | None = None,
+        waited: bool = True,
+        **more: object,
     ) -> str:
         """Ask claude for something of its own doing. The id its answer
-        will name, which on_answer is given when it comes, see answered."""
+        will name, which on_answer is given when it comes, see answered.
+        Not waited for when the chat goes on the same without the
+        answer, see pending."""
         asked = f"chat-{next(self._requests)}"
         request = {"subtype": subtype, **more}
         if on_answer:
             # Before it is asked: the answer may come at once
             with self._asking:
                 self._answers[asked] = on_answer
+                if not waited:
+                    self._unwaited.add(asked)
         self.send({"type": "control_request", "request_id": asked, "request": request})
         return asked
 
@@ -286,14 +296,16 @@ class Agent:
             return
         with self._asking:
             take = self._answers.pop(asked, None)
+            self._unwaited.discard(asked)
         if take:
             take(response)
 
     @property
     def pending(self) -> bool:
-        """Whether a request of the chat's waits for its answer."""
+        """Whether a request of the chat's waits for its answer, of
+        those that are waited for."""
         with self._asking:
-            return bool(self._answers)
+            return bool(self._answers.keys() - self._unwaited)
 
     def respond(self, asked: object, decision: dict) -> None:
         """Answer what claude asked under an id."""

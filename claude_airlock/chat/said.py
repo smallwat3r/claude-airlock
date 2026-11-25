@@ -90,6 +90,11 @@ class Session:
     model: str = ""
     # The name of the model /model chose, until claude names it by its id
     chosen: str = ""
+    # How hard the model is asked to think, as Claude Code names it
+    # (high), empty for a model that is not told and until claude said
+    effort: str = ""
+    # Whether the replies are made in fast mode
+    fast: bool = False
     # Of Claude Code
     version: str = ""
     servers: list[tuple[str, str]] = field(default_factory=list)
@@ -121,7 +126,16 @@ class Session:
         self.version = flat(version)[:NAME_KEPT]
         self.commands = command_names(read(message, "slash_commands", list))
         self.servers = servers_of(read(message, "mcp_servers", list))
+        # Not said by every version, and not missed
+        self.fast = message.get("fast_mode_state") == "on"
         return True
+
+    def settled(self, applied: dict) -> None:
+        """Take in the settings claude says it goes by, as it answers
+        when asked for them (get_settings): the effort, which the start
+        of a turn does not say. None for a model that is not told one."""
+        effort = applied.get("effort")
+        self.effort = flat(effort)[:NAME_KEPT] if isinstance(effort, str) else ""
 
     def replied(self, message: dict) -> None:
         """Take in a reply of claude's own: the model that wrote it is the

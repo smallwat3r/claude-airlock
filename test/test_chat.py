@@ -204,9 +204,16 @@ while True:
     if said is None:
         break
     if said["type"] == "control_request":
-        mode = said["request"]["mode"]
         answer = {"request_id": said["request_id"], "subtype": "success"}
-        if mode in ("default", "plan"):
+        mode = said["request"].get("mode")
+        if said["request"]["subtype"] == "get_settings":
+            # None is what claude says for a model that is told no effort
+            effort = os.environ.get("FAKE_EFFORT")
+            answer["response"] = {"applied": {"effort": effort}}
+            if effort == "not known":
+                # As a version that does not know the request
+                answer = {**answer, "subtype": "error", "error": "unknown"}
+        elif mode in ("default", "plan"):
             answer["response"] = {"mode": mode}
         else:
             answer.update(subtype="error", error="must be one of\x1b[2J default, plan")
@@ -271,6 +278,8 @@ def a_chat(
     sandbox = status.Sandbox("claude-test")
     screen = console.Console(host.project_dir)
     screen.interactive = typed
+    # Something to ask is always there, as in a chat that is run
+    claude = claude or RecordedClaude()
     chat = talk.Chat(
         host,
         sandbox,
@@ -518,6 +527,24 @@ class ChatTest(LauncherTest):
         # None of them is a prompt
         assert len(re.findall(r"# turn ", done.stdout)) == 1
         assert "prompt      /mode" not in done.stdout
+
+    def test_the_status_shows_the_effort_claude_says_it_goes_by(self):
+        done = self.chat("hello\n/status\n", FAKE_EFFORT="high")
+        assert done.returncode == 0, done.stderr
+        assert "# status      effort:high [claude-proj] net:open\n" in done.stdout
+        assert "CHANGED" not in done.stdout
+        # A model that is told none
+        done = self.chat("hello\n/status\n")
+        assert "# status      [claude-proj] net:open\n" in done.stdout
+        assert "CHANGED" not in done.stdout
+
+    def test_a_claude_that_says_no_settings_is_said_once_and_not_waited_for(self):
+        done = self.chat("hello\nhello\n/status\n", FAKE_EFFORT="not known")
+        assert done.returncode == 0, done.stderr
+        assert len(re.findall(r"# turn ", done.stdout)) == 2
+        changed = re.findall(r"CHANGED in what Claude Code says: (.*?)\.", done.stdout)
+        assert changed == ["no settings in control_response"]
+        assert "# status      [claude-proj] net:open\n" in done.stdout
 
     def test_a_tool_is_refused_when_the_input_ends(self):
         done = self.chat("run the tests\n")
@@ -1738,6 +1765,14 @@ class PipeTest:
         # Told once
         agent.answered({"response": answer})
         assert answers == [answer]
+        # What the chat goes on without is told its answer, and holds
+        # nothing up meanwhile
+        quiet = agent.request("get_settings", answers.append, waited=False)
+        assert not agent.pending
+        answer = {"request_id": quiet, "subtype": "success"}
+        agent.answered({"response": answer})
+        assert answers[-1] == answer
+        assert agent._unwaited == set()
 
 
 class PlainTest:
@@ -3341,7 +3376,10 @@ class StatusTest(LauncherTest):
         session = saying.Session(model="claude-opus-5-5")
         usage = turn.Usage()
         limits = status.Limits()
-        limits.heard({"rateLimitType": "five_hour", "utilization": 0.42, "resetsAt": 9})
+        soon = int(time.time()) + 3600
+        limits.heard(
+            {"rateLimitType": "five_hour", "utilization": 0.42, "resetsAt": soon}
+        )
         limits.heard({"rateLimitType": "seven_day", "utilization": 0.95})
         limits.heard({"rateLimitType": "overage", "utilization": 0.1})
         usage.step({"message": {"usage": {"input_tokens": 50_000}}})
@@ -3350,7 +3388,7 @@ class StatusTest(LauncherTest):
             "m",
         )
         parts = status.status_parts(session, usage, limits, sandbox)
-        reset = f"{datetime.fromtimestamp(9):%H:%M}"
+        reset = f"{datetime.fromtimestamp(soon):%H:%M}"
         assert (
             status.status_line(parts, colour=False)
             == f"Opus 5.5 ctx:25% 5h:42% used {reset} 7d:95% used $0.50"
@@ -3423,14 +3461,15 @@ class StatusTest(LauncherTest):
     def test_the_limits_are_read_where_claude_now_says_them(self):
         # All the windows by name, the figures no longer beside the type
         limits = status.Limits()
+        soon = int(time.time()) + 3600
         limits.heard(
             {
                 "status": "allowed",
                 "rateLimitType": "five_hour",
-                "resetsAt": 9,
+                "resetsAt": soon,
                 "unifiedWindows": {
-                    "five_hour": {"utilization": 0.24, "resetsAt": 9},
-                    "seven_day": {"utilization": 0.22, "resetsAt": 99},
+                    "five_hour": {"utilization": 0.24, "resetsAt": soon},
+                    "seven_day": {"utilization": 0.22, "resetsAt": soon + 99},
                     "overage": {"utilization": 0.5},
                     "opus": "not a window",
                 },
@@ -3439,7 +3478,7 @@ class StatusTest(LauncherTest):
         parts = status.status_parts(
             saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
         )
-        reset = f"{datetime.fromtimestamp(9):%H:%M}"
+        reset = f"{datetime.fromtimestamp(soon):%H:%M}"
         assert (
             status.status_line(parts, colour=False)
             == f"5h:24% used {reset} 7d:22% used [claude-test] net:open"
@@ -3523,6 +3562,132 @@ class StatusTest(LauncherTest):
             saying.Session(), turn.Usage(), limits, status.Sandbox("claude-test")
         )
         assert "5h:40% used" in status.status_line(parts, colour=False)
+
+    def test_the_effort_is_shown_after_the_model_once_claude_said_it(self):
+        sandbox = status.Sandbox("claude-test")
+        session = saying.Session(model="claude-fable-5-2")
+
+        def shown() -> str:
+            parts = status.status_parts(session, turn.Usage(), status.Limits(), sandbox)
+            return status.status_line(parts, colour=False)
+
+        assert shown() == "Fable 5.2 [claude-test] net:open"
+        session.settled({"effort": "high\x1b[2J", "model": "claude-fable-5-2"})
+        assert shown() == "Fable 5.2 effort:high[2J [claude-test] net:open"
+        # A model that is told none, and what is no effort
+        for none in (None, 3, ["high"]):
+            session.settled({"effort": none})
+            assert "effort" not in shown()
+        init = {"subtype": "init", "session_id": SESSION, "fast_mode_state": "on"}
+        session.heard(init)
+        session.settled({"effort": "xhigh"})
+        assert shown() == "Fable 5.2 effort:xhigh fast [claude-test] net:open"
+        session.heard({**init, "fast_mode_state": "off"})
+        assert " fast " not in shown()
+
+    def test_an_account_without_a_window_shows_none_of_it(self):
+        # As claude says it of a plan that has no limit by the hour
+        week = int(time.time()) + 3 * status.DAY
+        limits = status.Limits()
+        limits.heard(
+            {
+                "status": "allowed",
+                "rateLimitType": "seven_day",
+                "resetsAt": week,
+                "unifiedWindows": {
+                    "seven_day": {"utilization": 0.22, "resetsAt": week},
+                    "seven_day_overage_included": {
+                        "utilization": 0.43,
+                        "resetsAt": week,
+                    },
+                },
+            }
+        )
+        assert (
+            limits.drift.told({"type": "rate_limit_event"}, {"rate_limit_event"})
+            is None
+        )
+
+        def shown(model: str, chosen: str = "") -> str:
+            session = saying.Session(model=model, chosen=chosen)
+            parts = status.status_parts(
+                session, turn.Usage(), limits, status.Sandbox("claude-test")
+            )
+            return status.status_line(parts, colour=False)
+
+        assert (
+            shown("claude-haiku-5-5") == "Haiku 5.5 7d:22% used [claude-test] net:open"
+        )
+        # The week of the one model, while it is the session's
+        assert (
+            shown("claude-fable-5-2")
+            == "Fable 5.2 7d:22% used fable:43% used [claude-test] net:open"
+        )
+        assert "fable:43% used" in shown("claude-haiku-5-5", chosen="Fable 5.2")
+        assert "fable:" not in shown("claude-fable-5-2", chosen="Opus 5.5")
+        assert "fable:" not in shown("")
+
+    def test_a_window_says_when_it_starts_again_once_it_matters(self):
+        now = 1_800_000_000.0
+        hour, week = now + 3600, now + 3 * status.DAY
+        limits = status.Limits()
+        limits.heard(
+            {"rateLimitType": "five_hour", "utilization": 0.1, "resetsAt": hour}
+        )
+        limits.heard(
+            {"rateLimitType": "seven_day", "utilization": 0.5, "resetsAt": week}
+        )
+
+        def texts() -> list[str]:
+            return [text for _, text in status.limit_parts(limits, "", now)]
+
+        at = datetime.fromtimestamp(hour)
+        on = datetime.fromtimestamp(week)
+        assert texts() == [f"5h:10% used {at:%H:%M}", "7d:50% used"]
+        # Nearly used up: when it starts again is what there is to wait for
+        limits.heard({"rateLimitType": "seven_day", "utilization": 0.7})
+        assert texts()[1] == f"7d:70% used {on:%a %H:%M}"
+        # Past the limit, as claude says it of a turn that went on
+        limits.heard({"rateLimitType": "seven_day", "utilization": 1.2})
+        assert (status.RED, f"7d:120% used {on:%a %H:%M}") in status.limit_parts(
+            limits, "", now
+        )
+        # What no part of a window is changes nothing
+        for odd in (-0.5, 50, float("nan")):
+            limits.heard({"rateLimitType": "seven_day", "utilization": odd})
+        assert limits.windows["seven_day"]["used_percentage"] == 120.0
+        # Once it has started again nothing is known to be used of it
+        later = [text for _, text in status.limit_parts(limits, "", hour)]
+        assert later == [f"7d:120% used {on:%a %H:%M}"]
+        assert status.limit_parts(limits, "", week) == []
+
+    def test_status_says_what_the_line_has_no_room_for(self):
+        now = 1_800_000_000.0
+        week = now + 3 * status.DAY
+        session = saying.Session(model="claude-fable-5-2", version="2.1.326")
+        usage, limits = turn.Usage(), status.Limits()
+        assert status.more_said(saying.Session(), usage, limits, now) == []
+        windows = {
+            "seven_day": {"utilization": 0.22, "resetsAt": week},
+            "seven_day_overage_included": {"utilization": 0.43, "resetsAt": week},
+        }
+        limits.heard({"rateLimitType": "seven_day", "unifiedWindows": windows})
+        usage.step({"message": {"usage": {"input_tokens": 50_000}}})
+        usage.parts(
+            {"total_cost_usd": 0.5, "modelUsage": {"m": {"contextWindow": 200_000}}},
+            "m",
+        )
+        on = f"{datetime.fromtimestamp(week):%a %d %b %H:%M}"
+        assert status.more_said(session, usage, limits, now) == [
+            "Claude Code 2.1.326",
+            f"context {turn.tokens(50_000)} of {turn.tokens(200_000)}",
+            f"limits start again: 7d {on}, fable {on}",
+        ]
+        shown = page()
+        line = status.StatusLine(shown, status.Sandbox("claude-test"), session, usage)
+        with written() as lines:
+            line.show()
+        assert lines[1].startswith("# status      Claude Code 2.1.326, context ")
 
     def test_the_model_chosen_with_model_is_shown_before_it_replies(self):
         session = saying.Session(model="claude-fable-5-2", chosen="Opus 5.5")

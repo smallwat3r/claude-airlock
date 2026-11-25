@@ -1,8 +1,9 @@
 """The status of a chat, above its prompt as the head of a shell's prompt
-is: the model, the permission mode when it changed, how full its context
-is, the limits of the account, what the session cost, and the sandbox it
-runs in. Written again at the end of
-each turn, and when /status asks, which says it in a line too.
+is: the model and the effort it is asked for, the permission mode when it
+changed, how full its context is, the limits of the account, what the
+session cost, and the sandbox it runs in. Written again at the end of
+each turn, and when /status asks, which says it in a line too, and under
+it what the line has no room for.
 
 The chat makes it of what it knows: what claude says as it goes, and what
 the launcher started the session with. Claude Code's own statusline (the
@@ -12,6 +13,7 @@ here. What is not known yet is left out."""
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -38,11 +40,25 @@ from ..report.layout import (
 from .console import Page
 from .drift import Drift
 from .said import Session
-from .turn import Usage
+from .turn import Usage, tokens
 
 # The windows of the limits of the account that are shown, as claude
-# names them, with how the status names them
-WINDOWS = {"five_hour": "5h", "seven_day": "7d"}
+# names them, with how the status names them. An account has those of its
+# plan, not all of them: one without a limit by the hour has no 5h
+WINDOWS = {"five_hour": "5h", "seven_day": "7d", "seven_day_overage_included": "fable"}
+# Those that are the week of one model alone, each with what the name of
+# that model holds: shown while it is the model of the session. Claude
+# Code names this one the Fable limit, and says it of no other model
+OF_A_MODEL = {"seven_day_overage_included": "fable"}
+# The one that starts again within the day, and says when at all times.
+# The others say it once they are nearly used up
+SHORT = "five_hour"
+# Claude gives what is used of a window as a part of it, which is more
+# than the whole once a session went on past the limit. Not this much more
+MOST_USED = 10
+# How long before a window starts again the hour says when, the day too
+# from there on
+DAY = 24 * 3600
 # How the name of the session is coloured
 NAME_STYLE = together(BOLD, GREEN)
 # From how many percent used a limit or the context is yellow, and red
@@ -116,7 +132,7 @@ class Limits:
         window: dict = {}
         # A fraction of the limit, as the API says it
         used = measured(said.get("utilization"))
-        if used is not None and used <= 1:
+        if used is not None and 0 <= used <= MOST_USED:
             window["used_percentage"] = round(used * 100, 1)
         resets = measured(said.get("resetsAt"))
         # A time that can be shown as one, see LATEST of report/entries.py
@@ -177,21 +193,73 @@ def used_style(percent: float) -> str:
     return YELLOW if percent >= WARN_AT else DIM
 
 
-def limit_parts(limits: Limits) -> list[Part]:
-    """What is used of each window of the limits claude said, with when
-    the shorter one starts again."""
-    parts = []
-    for kind, label in WINDOWS.items():
+def starts_again(resets: float, now: float, dated: bool = False) -> str:
+    """When a window starts again, as short as tells it apart: the hour
+    within a day, with the day of the week further off. Dated, the day
+    of the month too, for what is said once and not kept in sight."""
+    at = datetime.fromtimestamp(resets)
+    if dated:
+        return f"{at:%a %d %b %H:%M}"
+    return f"{at:%H:%M}" if resets - now < DAY else f"{at:%a %H:%M}"
+
+
+def current(limits: Limits, model: str, now: float) -> list[tuple[str, dict]]:
+    """The windows of the limits claude said that hold now, each under
+    its name. Not one that has started again since: what was used of it
+    is used no longer, and claude says the new one with its next reply.
+    Not the week of a model that is not the session's."""
+    held = []
+    for kind in WINDOWS:
         window = limits.windows.get(kind, {})
-        used = window.get("used_percentage")
-        if used is None:
-            continue
-        text = f"{label}:{used:.0f}% used"
         resets = window.get("resets_at")
-        if resets and kind == "five_hour":
-            text += f" {datetime.fromtimestamp(resets):%H:%M}"
+        other = kind in OF_A_MODEL and OF_A_MODEL[kind] not in model.lower()
+        if "used_percentage" in window and not other and not (resets and resets <= now):
+            held.append((kind, window))
+    return held
+
+
+def limit_parts(
+    limits: Limits, model: str = "", now: float | None = None
+) -> list[Part]:
+    """What is used of each window of the limits claude said, for a
+    session of that model, with when the shortest one starts again, and
+    the others once they are nearly used up."""
+    now = time.time() if now is None else now
+    parts = []
+    for kind, window in current(limits, model, now):
+        used = window["used_percentage"]
+        text = f"{WINDOWS[kind]}:{used:.0f}% used"
+        resets = window.get("resets_at")
+        if resets and (kind == SHORT or used >= WARN_AT):
+            text += " " + starts_again(resets, now)
         parts.append((used_style(used), text))
     return parts
+
+
+def more_said(
+    session: Session, usage: Usage, limits: Limits, now: float | None = None
+) -> list[str]:
+    """What /status says besides the line, which has no room for it: the
+    version of Claude Code, how much the context holds, and when each
+    limit starts again."""
+    now = time.time() if now is None else now
+    said = [f"Claude Code {session.version}"] if session.version else []
+    if usage.window and usage.context:
+        said.append(f"context {tokens(usage.context)} of {tokens(usage.window)}")
+    again = [
+        f"{WINDOWS[kind]} {starts_again(window['resets_at'], now, dated=True)}"
+        for kind, window in current(limits, model_of(session), now)
+        if window.get("resets_at")
+    ]
+    if again:
+        said.append("limits start again: " + ", ".join(again))
+    return said
+
+
+def model_of(session: Session) -> str:
+    """The model of a session by the name Claude Code shows, empty until
+    claude named it."""
+    return session.chosen or (display_name(session.model) if session.model else "")
 
 
 def status_parts(
@@ -199,9 +267,13 @@ def status_parts(
 ) -> list[Part]:
     """The parts of the status, in the order they are shown."""
     parts: list[Part] = []
-    model = session.chosen or (display_name(session.model) if session.model else "")
+    model = model_of(session)
     if model:
         parts.append((BOLD, model))
+    if session.effort:
+        parts.append((DIM, f"effort:{session.effort}"))
+    if session.fast:
+        parts.append((DIM, "fast"))
     # The prompt is the same in every mode. Said when it is not the one
     # the session started in, and of plan always: a prompt is not acted
     # on there
@@ -210,7 +282,7 @@ def status_parts(
     if usage.window and usage.context:
         used = min(100, round(100 * usage.context / usage.window))
         parts.append((used_style(used), f"ctx:{used}%"))
-    parts += limit_parts(limits)
+    parts += limit_parts(limits, model)
     if usage.spent:
         parts.append((DIM, f"${usage.spent:.2f}"))
     return parts + sandbox.parts()
@@ -249,7 +321,11 @@ class StatusLine:
         return line
 
     def show(self) -> None:
-        """Say the status, as /status asks."""
+        """Say the status, as /status asks, and what the line leaves
+        out, see more_said."""
         line = self.refresh()
         head = labelled("status", "")
         self._page.put([header_with(head, line, self._page.layout.colour)])
+        more = more_said(self._session, self._usage, self.limits)
+        if more:
+            self._page.note("status", ", ".join(more))
