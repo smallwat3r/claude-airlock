@@ -9,7 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,6 +32,7 @@ from ..files import (
     try_lock_file,
     write_whole,
 )
+from ..notice import warn
 from ..settings import (
     BIN_DIR,
     CONTAINER_CLAUDE,
@@ -43,8 +44,9 @@ from ..settings import (
 )
 from .claude_args import is_a_command, says_permissions
 from .ending import Ending
-from .home import home_args, session_state, statusline_of
+from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
+from .mounts import SHADOWED_NAMES, names_secrets
 from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
@@ -264,15 +266,38 @@ def base_args(
     ]
 
 
-def configured_statusline(host: Host) -> str | None:
-    """The program ~/.claude/settings.json runs as its statusline, if any."""
+def configured_statusline(host: Host) -> list[str]:
+    """The files ~/.claude/settings.json may run as its statusline: the
+    program of the command, and the first thing that program is given,
+    its script when it is an interpreter ("bash ~/.claude/statusline.sh").
+    Those that are named by their whole path.
+
+    Of the host's settings alone, which a session cannot write unless
+    CLAUDE_AIRLOCK_RW_CONFIG is on: never of a project's, where a session
+    could name any file of the home directory to have it mounted next
+    time."""
     try:
         settings = settings_object(Path(host.claude_dir, "settings.json"))
         words = shlex.split(statusline_of(settings))
     except ValueError:
-        return None
-    program = expand_home(words[0] if words else "", host.home)
-    return os.path.normpath(program) if os.path.isabs(program) else None
+        return []
+    given = [word for word in words[1:] if not word.startswith("-")]
+    named = [expand_home(word, host.home) for word in words[:1] + given[:1]]
+    return [os.path.normpath(path) for path in named if os.path.isabs(path)]
+
+
+def launcher_statusline() -> str:
+    """The statusline of this checkout."""
+    return os.path.join(BIN_DIR, "claude-statusline")
+
+
+def is_same_file(path: str, other: str) -> bool:
+    """Whether two paths lead to one file, not so when either leads to
+    none."""
+    try:
+        return os.path.samefile(path, other)
+    except OSError:
+        return False
 
 
 def statusline_args(host: Host) -> list[str]:
@@ -281,16 +306,54 @@ def statusline_args(host: Host) -> list[str]:
     script alone at its host path. Also at the path settings.json names when
     that is another way to the same file (a symlink to the script, or a
     checkout reached through one): the container has nothing else to follow
-    the link with."""
-    script = os.path.join(BIN_DIR, "claude-statusline")
-    targets = [script]
-    configured = configured_statusline(host)
-    try:
-        if configured and configured != script and os.path.samefile(configured, script):
-            targets.append(configured)
-    except OSError:
-        pass
-    return [mount_arg(script, target, "ro,z") for target in targets]
+    the link with. A statusline of the user's own is mounted by
+    own_statusline_args."""
+    script = launcher_statusline()
+    others = [
+        path
+        for path in configured_statusline(host)
+        if path != script and is_same_file(path, script)
+    ]
+    return [mount_arg(script, target, "ro,z") for target in (script, *others[:1])]
+
+
+def own_statusline_args(
+    settings: Settings, host: Host, mounted: Sequence[str]
+) -> list[str]:
+    """A statusline of the user's own, for Claude Code's native UI: the
+    file ~/.claude/settings.json runs as one is mounted alone, read-only,
+    where the settings name it. Claude Code runs it in the container,
+    which has the settings and without this not the file.
+
+    Only a plain file of the home directory, where a session has nothing
+    but what the launcher mounts: a path anywhere else could be a
+    program of the image, which the host's must not stand in for. Not
+    what is in the project or a directory mounted next to it (mounted),
+    which is there already, and not a file whose name says it holds
+    secrets (see hidden_files of mounts.py). What the script needs
+    besides itself has to be in the image, or in a directory mounted
+    next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
+    script = launcher_statusline()
+    for path in configured_statusline(host):
+        if not path.startswith(host.home + os.sep) or ":" in path:
+            continue
+        if not os.path.isfile(path) or is_same_file(path, script):
+            continue
+        if any(path.startswith(root + os.sep) for root in mounted):
+            continue
+        patterns = SHADOWED_NAMES + settings.shadow
+        names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
+        if any(names_secrets(name, patterns) for name in names):
+            warn(f"the statusline {path} is not mounted: its name is one of secrets")
+            continue
+        inner = os.path.relpath(path, host.home)
+        in_claude = os.path.relpath(path, host.claude_dir)
+        if not in_claude.startswith(os.pardir) and not place_in_base(host, in_claude):
+            # There already with what the launcher mounts of ~/.claude,
+            # or no place for it could be made
+            continue
+        return [mount_arg(path, f"{CONTAINER_HOME}/{inner}", "ro,z")]
+    return []
 
 
 # What a session can write to outside its mounts. /tmp is where builds and

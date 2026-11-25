@@ -299,6 +299,14 @@ def openable(directory: str) -> bool:
     return stat.S_ISDIR(about.st_mode) and about.st_uid == os.getuid()
 
 
+def names_secrets(name: str, patterns: Sequence[str]) -> bool:
+    """Whether a file of that name is taken to hold secrets, by the name
+    globs that are hidden. Not a template (see SHADOW_EXEMPT)."""
+    if name in SHADOW_EXEMPT:
+        return False
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
 def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden:
     """What to shadow: .env files (and direnv's .envrc, which commonly
     exports secrets, plus .netrc and .pypirc, which hold nothing but
@@ -334,9 +342,7 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
                 continue
             subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
             for name in sorted(files):
-                if name in SHADOW_EXEMPT:
-                    continue
-                if not any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
+                if not names_secrets(name, patterns):
                     continue
                 path = os.path.join(directory, name)
                 try:

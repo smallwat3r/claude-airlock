@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from ..docker import Tmpfs, env_arg, mount_arg
 from ..files import json_object, private_dir, write_whole
 from ..settings import CONFIG_FILES, CONFIG_TREES, CONTAINER_CLAUDE, Host, Settings
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
+from .login import LOGIN
 
 CONFIG = ".claude.json"
 # What the config seeded from the host's leaves out, see seed_config
@@ -48,6 +50,19 @@ SESSION_STATE = ("shell-snapshots", "session-env")
 PROTECTED_CONFIG = (*CONFIG_FILES, *CONFIG_TREES)
 # The directories of the host's ~/.claude that a session can write
 WRITABLE_TREES = ("plugins", "projects")
+# The names of a session's ~/.claude that the launcher has its own way
+# with: a mount, a tmpfs, or a file it keeps in the base
+MANAGED = frozenset(
+    (
+        *PROTECTED_CONFIG,
+        *WRITABLE_TREES,
+        *SESSION_STATE,
+        *PER_PROJECT_DIRS,
+        PROMPT_HISTORY,
+        CONFIG,
+        LOGIN,
+    )
+)
 
 
 def read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
@@ -134,6 +149,36 @@ def prepare_home(host: Host) -> None:
     os.makedirs(host.claude_state_dir, exist_ok=True)
     make_missing(host.claude_dir, (*CONFIG_TREES, *WRITABLE_TREES), CONFIG_FILES)
     seed_config(host)
+
+
+def place_in_base(host: Host, inner: str) -> bool:
+    """Make the place in the base for one file of the host's ~/.claude
+    that is mounted alone over it, named from ~/.claude. Whether it is
+    there to mount over.
+
+    docker would make it as root otherwise. Not when the launcher has
+    its own way with the name it is under (settings.json, hooks, plugins,
+    the history of a project): what is mounted there is there already,
+    and nothing else goes over the rest. Nor through anything a session
+    put in the base that is no plain directory or file: a mount over a
+    link would land where the link says."""
+    names = inner.split(os.sep)
+    if names[0] in MANAGED or not all(names) or ".." in names:
+        return False
+    place = host.sandbox_claude_dir
+    try:
+        for name in names[:-1]:
+            place = os.path.join(place, name)
+            if not os.path.lexists(place):
+                os.mkdir(place, 0o700)
+            if not stat.S_ISDIR(os.lstat(place).st_mode):
+                return False
+        place = os.path.join(place, names[-1])
+        if not os.path.lexists(place):
+            write_whole(place, "", replace=False)
+        return stat.S_ISREG(os.lstat(place).st_mode)
+    except OSError:
+        return False
 
 
 def home_args(host: Host) -> list[str]:

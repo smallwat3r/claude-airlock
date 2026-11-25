@@ -183,9 +183,84 @@ class InstallTest(LauncherTest):
         flags = self.launch().flags
         assert f"--volume={self.STATUSLINE}:{link}:ro,z" in flags
 
-    def test_another_statusline_is_left_alone(self):
-        other = self.home / "other-statusline"
-        other.touch()
-        settings_json = {"statusLine": {"type": "command", "command": str(other)}}
-        (self.home / ".claude" / "settings.json").write_text(json.dumps(settings_json))
-        assert not [f for f in self.launch().flags if "other-statusline" in f]
+    def launched_with(self, command: str | None = None):
+        """A launch with that command as the statusline of the settings,
+        or as they are, and the calls of that launch alone."""
+        if command is not None:
+            settings_json = {"statusLine": {"type": "command", "command": command}}
+            settings_file = self.home / ".claude" / "settings.json"
+            settings_file.write_text(json.dumps(settings_json))
+        (self.work / "log").unlink(missing_ok=True)
+        return self.launch()
+
+    def test_a_statusline_of_the_users_own_is_mounted_where_settings_name_it(self):
+        own = self.home / "bin" / "own-statusline"
+        own.parent.mkdir()
+        own.touch()
+        for command in (
+            str(own),
+            "~/bin/own-statusline --wide",
+            f"bash -e {own}",
+            "/bin/bash ~/bin/own-statusline",
+        ):
+            flags = self.launched_with(command).flags
+            assert f"--volume={own}:/home/sandbox/bin/own-statusline:ro,z" in flags
+        # The one of this checkout is still there for who goes back to it
+        assert f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z" in flags
+
+    def test_a_statusline_in_the_claude_directory_has_its_place_in_the_base(self):
+        own = self.home / ".claude" / "status" / "line.sh"
+        own.parent.mkdir(parents=True)
+        own.write_text("#!/bin/sh\n")
+        flags = self.launched_with("~/.claude/status/line.sh").flags
+        assert f"--volume={own}:/home/sandbox/.claude/status/line.sh:ro,z" in flags
+        # Made by the launcher, empty, for docker not to make it as root
+        place = self.base / "status" / "line.sh"
+        assert place.read_text() == ""
+        # What a session left in the base where the file goes is not
+        # mounted through
+        place.unlink()
+        place.symlink_to("/etc/passwd")
+        assert not [f for f in self.launched_with().flags if "line.sh" in f]
+        place.parent.rename(self.base / "kept")
+        place.parent.symlink_to(self.base / "kept")
+        assert not [f for f in self.launched_with().flags if "line.sh" in f]
+
+    def test_what_is_mounted_already_is_not_mounted_as_a_statusline(self):
+        # With ~/.claude, with the project, or as the settings themselves
+        hook = self.home / ".claude" / "hooks" / "status.sh"
+        hook.touch()
+        inside = self.project / "status.sh"
+        inside.touch()
+        for command in (str(hook), str(inside), "~/.claude/settings.json"):
+            flags = self.launched_with(command).flags
+            assert not [f for f in flags if f.endswith("status.sh:ro,z")]
+            assert len([f for f in flags if "/settings.json:" in f]) == 1
+
+    def test_no_other_file_of_the_host_is_mounted_as_a_statusline(self):
+        secrets = self.home / ".netrc"
+        secrets.write_text("machine example.org password hunter2\n")
+        (self.home / "linked").symlink_to(secrets)
+        (self.home / "a:b").touch()
+        (self.home / "dir").mkdir()
+        outside = self.work / "outside-statusline"
+        outside.touch()
+        before = len(self.launched_with().flags)
+        for command in (
+            "~/.netrc",
+            "~/linked",
+            "~/a:b",
+            "~/dir",
+            "~/missing",
+            str(outside),
+            "/bin/sh ~/.netrc",
+            "cat ~/dir",
+            "npx -y some-statusline@latest",
+            "bash -c 'echo \"unclosed",
+            "",
+        ):
+            result = self.launched_with(command)
+            assert result.status == 0, (command, result.stderr)
+            assert len(result.flags) == before, command
+        said = self.launched_with("~/.netrc").stderr
+        assert "is not mounted: its name is one of secrets" in said

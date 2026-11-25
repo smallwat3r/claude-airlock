@@ -343,9 +343,9 @@ pinned.
 ## Statusline
 
 For Claude Code's native UI. `bin/claude-statusline` shows the model,
-the 5h and 7d usage limits, and inside the sandbox the container name, the
-network mode, the doors that are open and the extra mounts. Enable it in
-`~/.claude/settings.json`:
+the usage limits your plan has (5h, 7d), and inside the sandbox the
+container name, the network mode, the doors that are open and the extra
+mounts. Enable it in `~/.claude/settings.json`:
 
 ```json
 {
@@ -359,8 +359,27 @@ network mode, the doors that are open and the extra mounts. Enable it in
 The script is mounted into the container at its host path, a symlink to it
 too, so the same setting works inside and outside the sandbox.
 
-[Line mode](#line-mode) does not run it. It shows the same above its
-prompt, made from what it knows of the session.
+A statusline of your own works in the sandbox too. The file the command
+of `~/.claude/settings.json` runs is mounted read-only where the settings
+name it, whether it is the program (`~/.claude/statusline.sh`) or the
+script an interpreter is given (`bash ~/bin/statusline.sh`):
+
+- It has to be a file of your home directory, named by its whole path.
+  A command the image has (`npx some-statusline`) needs no mount.
+- Only that file is mounted. What it runs has to be in the image (bash,
+  `jq`, Python and Node.js are), and what it reads besides in a directory
+  mounted with `CLAUDE_AIRLOCK_EXTRA_DIRS_RO`.
+- A file whose name is one of secrets (`.env`, `.netrc`) is not mounted.
+- Only the statusline of `~/.claude/settings.json` on the host, not one a
+  project's settings name.
+- It can show the sandbox as `bin/claude-statusline` does, from the
+  variables a session has of how it was started: that script reads each
+  of them, the name of the container first, which is not set outside
+  the sandbox.
+
+[Line mode](#line-mode) runs neither. It shows the same above its
+prompt, made from what it knows of the session, with the effort and the
+weekly limit of Fable while that is the model.
 
 ## Editor integration
 

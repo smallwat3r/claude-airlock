@@ -45,6 +45,9 @@ What a session is given and what it is kept from.
   stays on the host, as git's `store` helper keeps passwords in clear
   there. There is no gpg in the image, so sign the commits on the host
   before pushing.
+- The file `~/.claude/settings.json` runs as its statusline, read-only,
+  when it is a file of your home directory, see
+  [Statusline](../README.md#statusline).
 
 ## What is read-only or hidden
 

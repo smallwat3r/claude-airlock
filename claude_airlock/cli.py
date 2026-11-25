@@ -62,6 +62,7 @@ from .sandbox.session import (
     base_args,
     container_name,
     git_config_args,
+    own_statusline_args,
     permission_args,
     run_session,
     session_args,
@@ -277,6 +278,9 @@ def session_run_args(
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
         *git_config_args(host),
+        *own_statusline_args(
+            settings, host, [host.project_dir, *(extra.path for extra in dirs)]
+        ),
         *hidden.args(host),
     ]
 
