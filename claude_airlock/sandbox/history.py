@@ -143,7 +143,7 @@ def history_args(settings: Settings, host: Host) -> list[str]:
     if settings.shared_history:
         shared = _prepare_shared(host)
         return [
-            # Shown by bin/claude-statusline, and said in docker/CLAUDE-airlock.md
+            # Said in docker/CLAUDE-airlock.md
             env_arg("CLAUDE_AIRLOCK_SHARED_HISTORY", 1),
             *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
         ]

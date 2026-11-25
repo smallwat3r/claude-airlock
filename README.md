@@ -57,7 +57,6 @@ Contents:
 
 - Docker (Linux, or Docker Desktop on macOS)
 - Python 3.13 or later for the launcher, standard library only
-- bash and `jq` on the host if you use the statusline outside the sandbox
 
 ## Install
 
@@ -342,27 +341,12 @@ pinned.
 
 ## Statusline
 
-For Claude Code's native UI. `bin/claude-statusline` shows the model,
-the usage limits your plan has (5h, 7d), and inside the sandbox the
-container name, the network mode, the doors that are open and the extra
-mounts. Enable it in `~/.claude/settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/code/claude-airlock/bin/claude-statusline"
-  }
-}
-```
-
-The script is mounted into the container at its host path, a symlink to it
-too, so the same setting works inside and outside the sandbox.
-
-A statusline of your own works in the sandbox too. The file the command
-of `~/.claude/settings.json` runs is mounted read-only where the settings
-name it, whether it is the program (`~/.claude/statusline.sh`) or the
-script an interpreter is given (`bash ~/bin/statusline.sh`):
+For Claude Code's native UI. The launcher has no statusline of its own
+and adds none: the one of your `~/.claude/settings.json` works in the
+sandbox as on the host. The file its command runs is mounted read-only
+where the settings name it, whether it is the program
+(`~/.claude/statusline.sh`) or the script an interpreter is given
+(`bash ~/bin/statusline.sh`):
 
 - It has to be a file of your home directory, named by its whole path.
   A command the image has (`npx some-statusline`) needs no mount.
@@ -372,14 +356,14 @@ script an interpreter is given (`bash ~/bin/statusline.sh`):
 - A file whose name is one of secrets (`.env`, `.netrc`) is not mounted.
 - Only the statusline of `~/.claude/settings.json` on the host, not one a
   project's settings name.
-- It can show the sandbox as `bin/claude-statusline` does, from the
-  variables a session has of how it was started: that script reads each
-  of them, the name of the container first, which is not set outside
-  the sandbox.
+- It can show the sandbox from the variables a session has of how it was
+  started, `env | grep CLAUDE_AIRLOCK_` in a session lists them: the name
+  of the container, which is not set outside the sandbox, the network
+  mode and the doors that are open.
 
-[Line mode](#line-mode) runs neither. It shows the same above its
-prompt, made from what it knows of the session, with the effort and the
-weekly limit of Fable while that is the model.
+[Line mode](#line-mode) does not run it. It shows a status of its own
+above its prompt, made from what it knows of the session, with the
+effort and the weekly limit of Fable while that is the model.
 
 ## Editor integration
 

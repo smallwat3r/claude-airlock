@@ -123,6 +123,6 @@ def socket_proxy_args(settings: Settings) -> list[str]:
         return []
     return [
         env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),
-        # Shown by bin/claude-statusline
+        # Said in docker/CLAUDE-airlock.md
         env_arg("CLAUDE_AIRLOCK_DOCKER_SOCKET", settings.docker_socket.value),
     ]

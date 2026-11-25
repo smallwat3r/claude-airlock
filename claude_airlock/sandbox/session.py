@@ -34,7 +34,6 @@ from ..files import (
 )
 from ..notice import warn
 from ..settings import (
-    BIN_DIR,
     CONTAINER_CLAUDE,
     CONTAINER_HOME,
     SESSION_KERNEL,
@@ -209,7 +208,7 @@ def base_args(
         env_arg("CLAUDE_CONFIG_DIR", CONTAINER_CLAUDE),
         *_telemetry_args(settings),
         *_connector_args(settings),
-        # Read by bin/claude-statusline to show a sandbox badge and the
+        # For a statusline of the user's own to show the sandbox and the
         # network mode in the Claude UI
         env_arg(SESSION_SANDBOX, name),
         env_arg("CLAUDE_AIRLOCK_NET_FILTER", int(settings.net_filter)),
@@ -242,7 +241,6 @@ def base_args(
         # image owns the version (auto-updater is off, update = rebuild), so
         # keep it self-contained.
         mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
-        *_statusline_args(host),
         DROP_CAPABILITIES,
         NO_NEW_PRIVILEGES,
         "--read-only",
@@ -286,37 +284,6 @@ def _configured_statusline(host: Host) -> list[str]:
     return [os.path.normpath(path) for path in named if os.path.isabs(path)]
 
 
-def _launcher_statusline() -> str:
-    """The statusline of this checkout."""
-    return os.path.join(BIN_DIR, "claude-statusline")
-
-
-def _is_same_file(path: str, other: str) -> bool:
-    """Whether two paths lead to one file, not so when either leads to
-    none."""
-    try:
-        return os.path.samefile(path, other)
-    except OSError:
-        return False
-
-
-def _statusline_args(host: Host) -> list[str]:
-    """~/.claude/settings.json runs the statusline from this checkout, which
-    is neither in the image nor (usually) the mounted project, so mount the
-    script alone at its host path. Also at the path settings.json names when
-    that is another way to the same file (a symlink to the script, or a
-    checkout reached through one): the container has nothing else to follow
-    the link with. A statusline of the user's own is mounted by
-    own_statusline_args."""
-    script = _launcher_statusline()
-    others = [
-        path
-        for path in _configured_statusline(host)
-        if path != script and _is_same_file(path, script)
-    ]
-    return [mount_arg(script, target, "ro,z") for target in (script, *others[:1])]
-
-
 def own_statusline_args(
     settings: Settings, host: Host, mounted: Sequence[str]
 ) -> list[str]:
@@ -333,11 +300,10 @@ def own_statusline_args(
     secrets (see hidden_files of mounts.py). What the script needs
     besides itself has to be in the image, or in a directory mounted
     next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
-    script = _launcher_statusline()
     for path in _configured_statusline(host):
         if not path.startswith(host.home + os.sep) or ":" in path:
             continue
-        if not os.path.isfile(path) or _is_same_file(path, script):
+        if not os.path.isfile(path):
             continue
         if any(path.startswith(root + os.sep) for root in mounted):
             continue

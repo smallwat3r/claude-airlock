@@ -252,7 +252,7 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
         for extra in dirs
     ]
     if dirs:
-        # Read by bin/claude-statusline to list the mounted extra directories
+        # The mounted extra directories, said in docker/CLAUDE-airlock.md
         shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
         args.append(env_arg(SESSION_DIRS, shown))
     return args

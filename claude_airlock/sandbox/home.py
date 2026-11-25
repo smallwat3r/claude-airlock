@@ -234,7 +234,7 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
         for item in PROTECTED_CONFIG
     ]
     if settings.rw_config:
-        # Shown by bin/claude-statusline
+        # Said in docker/CLAUDE-airlock.md
         args.append(env_arg("CLAUDE_AIRLOCK_RW_CONFIG", 1))
     return args
 

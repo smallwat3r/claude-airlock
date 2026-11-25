@@ -403,7 +403,7 @@ def ssh_agent_door(
         yield [
             mount,
             env_arg("SSH_AUTH_SOCK", AGENT_TARGET),
-            # Shown by bin/claude-statusline
+            # Said in docker/CLAUDE-airlock.md
             env_arg("CLAUDE_AIRLOCK_SSH_AGENT", 1),
         ]
     finally:

@@ -11,7 +11,7 @@ PYTEST ?= $(UV_RUN) pytest
 SHELLCHECK ?= shellcheck
 
 LAUNCHER := bin/claude-airlock
-SHELL_SOURCES := bin/claude-statusline docker/squid-ask-helper.sh \
+SHELL_SOURCES := docker/squid-ask-helper.sh \
 	test/smoke/run.sh \
 	$(wildcard test/smoke/inside/*.sh)
 

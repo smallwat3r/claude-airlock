@@ -11,7 +11,6 @@ from pathlib import Path
 
 from harness import (
     LAUNCHER,
-    ROOT,
     LauncherTest,
     image,
     settings,
@@ -144,8 +143,6 @@ class ImageTest(LauncherTest):
 
 
 class InstallTest(LauncherTest):
-    STATUSLINE = ROOT / "bin" / "claude-statusline"
-
     def test_the_launcher_can_be_symlinked(self):
         link = self.work / "bin" / "claude-airlock"
         link.symlink_to(LAUNCHER)
@@ -170,19 +167,6 @@ class InstallTest(LauncherTest):
             assert "CLAUDE_AIRLOCK_NET_FILTER" in result.stdout
             assert result.calls == []
 
-    def test_statusline_is_mounted_at_its_host_path(self):
-        assert (
-            f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z" in self.launch().flags
-        )
-
-    def test_statusline_is_also_mounted_where_settings_point(self):
-        link = self.home / "statusline"
-        link.symlink_to(self.STATUSLINE)
-        settings_json = {"statusLine": {"type": "command", "command": "~/statusline"}}
-        (self.home / ".claude" / "settings.json").write_text(json.dumps(settings_json))
-        flags = self.launch().flags
-        assert f"--volume={self.STATUSLINE}:{link}:ro,z" in flags
-
     def launched_with(self, command: str | None = None):
         """A launch with that command as the statusline of the settings,
         or as they are, and the calls of that launch alone."""
@@ -192,6 +176,11 @@ class InstallTest(LauncherTest):
             settings_file.write_text(json.dumps(settings_json))
         (self.work / "log").unlink(missing_ok=True)
         return self.launch()
+
+    def test_no_statusline_is_mounted_unless_settings_name_one(self):
+        before = self.launched_with().flags
+        assert not [f for f in before if "statusline" in f]
+        assert self.launched_with("").flags == before
 
     def test_a_statusline_of_the_users_own_is_mounted_where_settings_name_it(self):
         own = self.home / "bin" / "own-statusline"
@@ -205,8 +194,7 @@ class InstallTest(LauncherTest):
         ):
             flags = self.launched_with(command).flags
             assert f"--volume={own}:/home/sandbox/bin/own-statusline:ro,z" in flags
-        # The one of this checkout is still there for who goes back to it
-        assert f"--volume={self.STATUSLINE}:{self.STATUSLINE}:ro,z" in flags
+            assert len([f for f in flags if "statusline" in f]) == 1
 
     def test_a_statusline_in_the_claude_directory_has_its_place_in_the_base(self):
         own = self.home / ".claude" / "status" / "line.sh"

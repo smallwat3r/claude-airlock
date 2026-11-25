@@ -14,10 +14,9 @@ from typing import Any
 
 from .errors import Fatal
 
-# The checkout's bin and docker directories, found from where this package
+# The checkout's docker directory, found from where this package
 # really is, so bin/claude-airlock can be symlinked from anywhere
 CHECKOUT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-BIN_DIR = os.path.join(CHECKOUT_DIR, "bin")
 DOCKERFILE_DIR = os.path.join(CHECKOUT_DIR, "docker")
 
 # What more than one module has to agree on: the home of the image's user,
