@@ -13,7 +13,7 @@ import unittest.mock
 import pytest
 from harness import LauncherTest
 
-from claude_airlock import files
+from claude_airlock import background, files
 
 
 class FilesTest(LauncherTest):
@@ -70,6 +70,20 @@ class FilesTest(LauncherTest):
             assert held.fileno()
         waiting.join(10)
         assert record.read_text() == "1\n2\n"
+
+    def test_work_that_fails_next_to_a_session_is_said(self, capsys):
+        def keep_copying(_stop: threading.Event) -> None:
+            raise ValueError("odd")
+
+        def kept_up(stop: threading.Event) -> None:
+            stop.wait()
+
+        with background.in_background(keep_copying), background.in_background(kept_up):
+            pass
+        said = capsys.readouterr().err
+        assert "FAILED (keep copying)" in said
+        assert "ValueError('odd')" in said
+        assert "kept up" not in said
 
     def test_a_lock_is_held_until_it_is_let_go_of(self):
         path = str(self.work / "lock")
