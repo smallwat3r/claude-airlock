@@ -61,6 +61,14 @@ and CPU the sandbox uses](img/line-mode.png)
   the MCP servers the session has, with those that are not connected,
   and again when they change.
 - Each reply, and what its subagents do.
+- What the session writes besides, to its errors or as a line that is no
+  message of Claude Code's, behind a `|`. No more of it than can be
+  read: past 500 lines within 5 seconds a line says how many more were
+  left out, and while it goes on that fast 5 lines of every 5 seconds
+  are shown.
+- That a line of Claude Code's was too long to be read: nothing is known
+  of what it said, and claude may wait for an answer to it that cannot be
+  given. Ctrl-C stops the turn.
 - What each step of the model used: the tokens it wrote and read, and
   whether it missed the cache.
 - Every connection the session opens, and how it ended: closed after how
@@ -85,7 +93,7 @@ A line can be typed at any time, claude takes it up when it can.
 | You type | Does |
 | --- | --- |
 | Enter | Sends the line |
-| Ctrl-C | Interrupts the turn, a second one stops the session. At the prompt, drops the line, a second one within 3 seconds leaves. While a `!COMMAND` runs, ends that command |
+| Ctrl-C | Interrupts the turn, a second one stops the session. At the prompt, drops the line, a second one within 3 seconds leaves. At a question, it leaves that without an answer too, which refuses what it asks. While a `!COMMAND` runs, ends that command |
 | Ctrl-D, `/exit`, `/quit` | Leaves |
 | Tab | Completes the names of commands and of files (`@src/main.py`) |
 | Up, Down | The lines typed before |
@@ -104,17 +112,36 @@ The question names the call by its first line. A call of more than that,
 a command of several lines or the arguments of a tool, is shown whole
 above the question first, with every argument it would be made with: a
 yes allows all of them. When one holds characters that do not show
-(control, direction or zero width), a line says so. A line you entered before the question was on
-the screen is not its answer: what you were typing is not taken for one,
-and what you typed while a command of yours ran is dropped when the
-question comes.
+(control, direction or zero width), a line says so.
+
+A question is answered by a line typed with the question to read:
+
+- A line entered sooner after the question came than it can be read is
+  not its answer, and is dropped: within half a second at a terminal,
+  which is how Enter pressed twice comes, and within a second where what
+  you type is not seen until it is entered, a shell buffer of Emacs.
+- A line typed for a question that is no longer asked is dropped too:
+  one you entered as the turn was interrupted or stopped, or right after
+  the question was answered.
+- What you were typing when the question came is not taken for the
+  answer. It is the prompt you meant it as, sent when you enter it.
+- What you typed while a command of yours ran is gone when the question
+  comes. The question is put while the command runs, which goes on
+  meanwhile.
+
+A line that was entered and dropped is said to be, and is not sent to
+claude as a prompt either: a `y` that allowed nothing is no answer to
+what claude said last. Enter it again if it was a prompt.
 
 With `CLAUDE_AIRLOCK_NET_ASK=1`, the egress filter asks whether the
 session may reach a host that is not on its list, and holds the request
 meanwhile. `y` lets it through, anything else refuses it, and either
 holds for that host until the session ends. Ctrl-C refuses the request
-that waits and is asked again at the next one. Where the lines are not
-typed, a file or a pipe, the host is refused.
+that waits and is asked again at the next one. A command of yours is
+asked about as claude's are, while it runs: `!curl https://example.org`
+waits for your answer and goes on with it, and Ctrl-C ends the command
+first, the question stays until it is answered or Ctrl-C comes again.
+Where the lines are not typed, a file or a pipe, the host is refused.
 
 ## Stopping a turn for what it read
 

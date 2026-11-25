@@ -30,7 +30,9 @@ talk.py. What a chat does itself with a line (/mode, /resume, !COMMAND)
 is in commands.py and shell.py, what it says of claude's doings besides
 answering in notices.py. What the egress filter asks the user about a
 host it does not allow is put by hosts.py. What claude says over the pipe
-is checked for being what it should be in said.py."""
+is checked for being what it should be in said.py, and what the session
+writes there that is no message of claude's is shown by plain.py, no more
+of it than can be read."""
 
 from .commands import Handover
 from .pipe import CHAT_ARGS

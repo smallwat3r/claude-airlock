@@ -52,6 +52,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import enum
+import io
 import os
 import select
 import shutil
@@ -132,6 +133,20 @@ NARROWEST = 20
 # under one of those with spaces, never with this: what the session
 # writes after it cannot pass for one of them, with or without colour
 SAID = "| "
+
+
+def read_whatever_comes(stream: TextIO) -> None:
+    """Have what is read from the input and is no text in its encoding
+    read all the same, each such byte as the character that stands for
+    one that could not be (U+FFFD), which shows in the line. It would
+    else be raised, in every locale but C: a file of prompts kept in
+    another encoding, or a terminal set to one, would end the chat
+    where it stands, and the session with it. A stream that was read
+    from cannot be set so: only a chat before this one has by then, the
+    one of a session that was resumed, which has set it."""
+    if isinstance(stream, io.TextIOWrapper) and stream.errors != "replace":
+        with contextlib.suppress(io.UnsupportedOperation):
+            stream.reconfigure(errors="replace")
 
 
 def completions(word: str, first: bool, commands: list[str], root: str) -> list[str]:
@@ -254,6 +269,8 @@ class Console:
         self._waiting = False
         self._interrupted = False
         self.interactive = sys.stdin.isatty()
+        # Whatever is typed or sent in, reading it is not what fails
+        read_whatever_comes(sys.stdin)
         # Whether the line being typed can be erased and written again
         self._redrawn = bool(
             readline
@@ -417,9 +434,13 @@ class Console:
         signal asks for it, see interrupt."""
         line: str | None = None
         try:
-            line = self._line(prompt, headed)
+            typed = self._line(prompt, headed)
             if self.interactive:
-                line = self._with_paste(line, prompt, headed)
+                typed = self._with_paste(typed, prompt, headed)
+            # Entered once what came with it is too, not before: Ctrl-C
+            # or the end of the input while a paste is typed on drops
+            # all of it, and nothing of it is written again as sent
+            line = typed
         except EOFError:
             return None
         finally:
@@ -431,7 +452,8 @@ class Console:
                     # Enter went to the next line
                     self._on_screen = False
                 self._prompting = Prompting()
-                self._begun = ""
+                # What was pasted goes with a line that was dropped
+                self._begun = self._filled = ""
             # One that came once the line was entered is not for the next
             self._interrupted = False
         if not self.interactive:

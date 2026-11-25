@@ -11,7 +11,10 @@ subagents work on is not held up by a question nobody has answered yet.
 
 What each of them does is not here: what the session did is written by
 followed.py, a turn that is quiet is said to run by turn.py, a line that
-is the chat's own to do is done by commands.py."""
+is the chat's own to do is done by commands.py. A command of the user's
+has a thread more while it runs, which writes what it writes: the first
+waits for it, and reads a line meanwhile only when the user is asked
+something (see shell.py)."""
 
 from __future__ import annotations
 
@@ -54,7 +57,8 @@ from .followed import POLL, Followed
 from .guard import CLEAR, GO_ON, STILL_READ, Guard, stop_said
 from .hosts import HostQuestions, Hosts
 from .notices import Notices
-from .pipe import Agent
+from .pipe import Agent, Unread
+from .plain import PlainLines
 from .reply import ReplyStream
 from .said import Session, own
 from .shell import Shell
@@ -196,6 +200,8 @@ class Chat:
         self._turns = Turns()
         self._usage = Usage(self._drift)
         self._notices = Notices(self._page)
+        # What the session writes that is no message of claude's
+        self._plain = PlainLines(self._page)
         self._followed = Followed(
             host, sandbox.name, self._page, self._turns, lambda: self._replies.writing
         )
@@ -227,7 +233,7 @@ class Chat:
         self._status = StatusLine(
             self._page, sandbox, self._session, self._usage, self._drift
         )
-        self._shell = Shell(self._page, sandbox.name)
+        self._shell = Shell(self._page, sandbox.name, lambda: self._asker.asking)
         resume = Resume(self._page, host, self._turns, self._read, handover)
         self._commands = Commands(
             self._page,
@@ -311,8 +317,13 @@ class Chat:
     def _on_interrupt(self, _number: int, _frame: object) -> None:
         """Ctrl-C: for the turn that runs when one does, and for a session
         that is slow to leave. Else it ends the wait for a line, which
-        drops what was typed."""
-        if self._shell.running and not self._life.leaving:
+        drops what was typed, and leaves a question that waits without
+        an answer (see _converse)."""
+        # Whether claude has ended while a line is read, as one can be
+        # while a command runs: this is then how the end is told, and
+        # for the line, see _session_ended
+        told = self._life.over and self._reading
+        if self._shell.running and not (self._life.leaving or told):
             # For the command the user runs
             self._shell.interrupt()
             return
@@ -359,6 +370,9 @@ class Chat:
         # When Ctrl-C last dropped the line, for the one that follows it
         dropped = -math.inf
         while not self._life.over:
+            # A command of the user's that still runs is waited for, no
+            # line is read meanwhile unless they are asked something
+            self._shell.wait()
             if not self._console.interactive:
                 self._wait_for_turn()
                 if self._guarded:
@@ -381,6 +395,9 @@ class Chat:
                 if now - dropped <= LEAVE_WITHIN:
                     return
                 dropped = now
+                # At a question it leaves that without an answer too,
+                # which refuses what it asks
+                self._asker.line_dropped()
                 self._page.note("chat", "Ctrl-C again leaves")
                 continue
             dropped = -math.inf
@@ -440,6 +457,8 @@ class Chat:
         until claude has ended."""
         # The messages in a row that could not be taken in
         stumbled = 0
+        # When what the session did was last looked at
+        looked = -math.inf
         try:
             while True:
                 # Nothing said within POLL is an empty message, for what is
@@ -450,22 +469,22 @@ class Chat:
                     message = {}
                 if message is None:
                     break
-                if isinstance(message, str):
-                    # Not what claude says in a conversation, see Agent:
-                    # the session's word all the same, and marked as such
-                    self._page.put_said([message.rstrip()])
-                    continue
                 if self._interrupt:
+                    # Ahead of whatever was said: a session writes lines
+                    # of its own as fast as it likes, and Ctrl-C is not
+                    # to wait until it pauses
                     self._interrupt = False
                     # What claude asked is refused with it
                     self._asker.give_up()
                     self._stop()
                 try:
-                    self._heard(message)
-                    self._followed.show()
-                    if self._hosts:
-                        self._hosts.look()
-                    self._heartbeat.beat()
+                    claudes = self._taken_in(message)
+                    # After each message of claude's, and while the
+                    # session writes lines of its own as often as while
+                    # it says nothing: there is no end to those
+                    if claudes or time.monotonic() - looked >= POLL:
+                        self._look()
+                        looked = time.monotonic()
                     stumbled = 0
                 except Exception as error:
                     # One message that cannot be taken in is not the end
@@ -477,6 +496,7 @@ class Chat:
                     self._page.say([labelled("chat", skipped)])
             self._replies.turn_over()
             self._followed.show(now=True)
+            self._plain.say_left_out(now=True)
             if not self._life.left:
                 self._page.note("chat", "the session ended")
         except Exception as error:  # noqa: BLE001
@@ -489,6 +509,31 @@ class Chat:
         finally:
             self._session_ended()
             self._asked.close()
+
+    def _taken_in(self, message: dict | str | Unread) -> bool:
+        """Take in what came over the pipe. Whether it was a message of
+        claude's, the empty one that stands for nothing said too: not a
+        line that is none, which is the session's word all the same and
+        marked as such (see Agent), nor what stands for a line that
+        could not be read."""
+        if isinstance(message, dict):
+            self._heard(message)
+            return True
+        if isinstance(message, Unread):
+            self._plain.unread()
+        else:
+            self._plain.heard(message)
+        return False
+
+    def _look(self) -> None:
+        """Look at what the session did besides saying it: write what
+        is followed, have the user asked about the hosts that wait, and
+        say that a turn that is quiet still runs."""
+        self._followed.show()
+        if self._hosts:
+            self._hosts.look()
+        self._heartbeat.beat()
+        self._plain.say_left_out()
 
     def _heard(self, message: dict) -> None:
         """Take in one thing claude said, by its kind, then say what of

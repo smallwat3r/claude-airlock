@@ -8,7 +8,9 @@ request goes through or is refused by what they say.
 
 A yes or a no holds for that host until the session ends, so what is
 tried again is not asked about again. No answer, the user interrupted
-the turn or is leaving, refuses the request that waits and nothing more.
+the turn, pressed Ctrl-C at the question or is leaving, refuses the
+request that waits and nothing more. A request of a command of the
+user's is asked about while the command runs, see shell.py.
 Where nobody is there to answer, lines that are not typed, the host is
 refused."""
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import enum
 import itertools
 import json
 import queue
@@ -37,11 +38,11 @@ CHAT_ARGS = (
     "--permission-prompt-tool=stdio",
     "--include-partial-messages",
 )
-# A line longer than this is dropped, and so is one that holds more once
-# read than a line may (MOST_LINE_HELD). No more than so many wait to be
-# taken in, nor more bytes of them than BACKLOG_BYTES, as they are held
-# (see held_size): a line can be long, a result with a picture in it is,
-# but not a thousand of them at once
+# A line longer than this is not taken in, nor is one that holds more
+# once read than a line may (MOST_LINE_HELD): Unread stands for it. No
+# more than so many wait to be taken in, nor more bytes of them than
+# BACKLOG_BYTES, as they are held (see held_size): a line can be long, a
+# result with a picture in it is, but not a thousand of them at once
 LINE_LIMIT = 64 << 20
 BACKLOG = 1000
 BACKLOG_BYTES = 256 << 20
@@ -53,6 +54,22 @@ PLAIN_WIDTH = 2000
 type Answer = Callable[[dict], None]
 
 
+class Unread(enum.Enum):
+    """What stands, among what claude said, for a line of its that was
+    not taken in: too long, or holding too much once read. Nothing is
+    known of what it said, which may be a request claude waits for the
+    answer to, or the end of a turn: that there was such a line is not
+    to go without a word."""
+
+    LINE = enum.auto()
+
+
+# What claude said, as it waits to be taken in: an object, the text of a
+# line that is none, what stands for a line that was not read, then None
+# when claude has ended
+type Said = dict | str | Unread | None
+
+
 class Backlog:
     """What claude said and waits to be taken in, bounded by how many and
     by how large they are together: past either, what is to be added
@@ -62,9 +79,7 @@ class Backlog:
     def __init__(self, most: int = BACKLOG, most_bytes: int = BACKLOG_BYTES) -> None:
         self._most = most
         self._most_bytes = most_bytes
-        self._held: collections.deque[tuple[dict | str | None, int]] = (
-            collections.deque()
-        )
+        self._held: collections.deque[tuple[Said, int]] = collections.deque()
         self._bytes = 0
         self._changed = threading.Condition()
 
@@ -74,9 +89,7 @@ class Backlog:
             return False
         return len(self._held) >= self._most or self._bytes + size > self._most_bytes
 
-    def put(
-        self, item: dict | str | None, size: int = 0, timeout: float | None = None
-    ) -> None:
+    def put(self, item: Said, size: int = 0, timeout: float | None = None) -> None:
         """Add what was said, of so many bytes as it was read. Waits for
         room, raises queue.Full when there is none within the timeout."""
         with self._changed:
@@ -86,7 +99,7 @@ class Backlog:
             self._bytes += size
             self._changed.notify_all()
 
-    def get(self, timeout: float | None = None) -> dict | str | None:
+    def get(self, timeout: float | None = None) -> Said:
         """Take the oldest, raises queue.Empty when there is none within
         the timeout."""
         with self._changed:
@@ -131,8 +144,7 @@ class Agent:
         # it was asked under
         self._answers: dict[str, Answer] = {}
         self._asking = threading.Lock()
-        # What claude said, each an object, or the text of a line that is
-        # none, then None when it has ended
+        # What claude said, see Said
         self.messages = Backlog()
         self.ended = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -162,6 +174,9 @@ class Agent:
                 return
 
     def _read(self) -> None:
+        """Take in what claude says, a line each, until it has ended. A
+        line that is too long, or holds too much once read, is not: what
+        stands for it is, once for the whole of it (see Unread)."""
         out = self._process.stdout
         dropping = False
         try:
@@ -169,19 +184,28 @@ class Agent:
                 line = out.readline(LINE_LIMIT)
                 if not line:
                     break
-                complete = line.endswith(b"\n")
+                # Without its end, a line shorter than the limit is the
+                # last one, written as claude ended: a line all the same
+                whole = line.endswith(b"\n") or len(line) < LINE_LIMIT
                 # What it takes once read, which is what waits: a line
                 # of small values takes dozens of times its length
                 held = held_size(line)
-                if complete and not dropping and held <= MOST_LINE_HELD:
+                if not whole or dropping or held > MOST_LINE_HELD:
+                    # The rest of a line that was too long goes with its
+                    # start, and is said with its end
+                    if whole:
+                        self.messages.put(Unread.LINE)
+                else:
                     # Not an object: claude run for something else than a
                     # conversation, which is then shown as it is written
                     plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
                     found = json_object(line)
                     said = plain if found is None else found
                     self.messages.put(said, held)
-                # The rest of a line that was too long goes with its start
-                dropping = not complete
+                dropping = not whole
+            if dropping:
+                # One that was too long and ended with claude
+                self.messages.put(Unread.LINE)
         finally:
             # What it had to say for itself as it ended comes first
             self._errors.join(1.0)
@@ -202,12 +226,23 @@ class Agent:
             text = line.decode("utf-8", "replace").rstrip("\n")
             if not text.strip():
                 continue
-            if not self.ended.is_set():
-                with contextlib.suppress(queue.Full):
-                    self.messages.put(text, len(line), timeout=1.0)
-                    continue
-            # Nobody listens any more, or not fast enough
-            print(clean(text), file=sys.stderr)
+            if not self._passed_on(text, len(line)):
+                # Nobody listens any more
+                print(clean(text), file=sys.stderr)
+
+    def _passed_on(self, text: str, size: int) -> bool:
+        """Have a line of the errors wait to be taken in with what claude
+        said. Whether it does: not once claude has ended. Without room
+        for it, it waits for some, and whatever writes there waits with
+        it on a pipe that is no longer read, as claude does. Written
+        around a listener that is slow, it would be on the terminal
+        without the mark of what the session wrote, and for as long as a
+        session cares to write."""
+        while not self.ended.is_set():
+            with contextlib.suppress(queue.Full):
+                self.messages.put(text, size, timeout=1.0)
+                return True
+        return False
 
     def send(self, message: dict) -> bool:
         """Say something to claude, nothing to one that has ended. It is

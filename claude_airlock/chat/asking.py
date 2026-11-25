@@ -6,6 +6,10 @@ answers it is read by the one who reads every line, who may be reading
 one already: a line that was being typed when the question came was meant
 as a prompt, and is not taken for the answer.
 
+A line that was typed for a question and is not its answer is dropped,
+and said to be: entered before the question could be read, or once it
+was no longer asked. It was no prompt for claude, a yes least of all.
+
 What is allowed is what was read. The call is shown whole before it is
 asked about, its input is given back as it was shown, and a rule to allow
 such calls from now on is said in full before it can be taken.
@@ -69,6 +73,24 @@ LOOK_EVERY = 0.2
 # typed before it could be read: it is not the answer, a yes among them
 # would allow a tool unseen
 TOO_SOON = 1.0
+# Where it can be seen, what was typed before the question came is known
+# (see meant_before): a line entered right after it is one whose keys
+# were on their way, Enter pressed twice or a yes meant for the question
+# before this one. Shorter there, for who answers one question after the
+# other not to be held up: nobody reads one and types two keys in less,
+# and a key pressed twice comes sooner
+SEEN_TOO_SOON = 0.5
+# What is said of a line that is dropped: entered before the question
+# could be read, and typed for a question that is no longer asked, as
+# far as can be told, so the user is told how it is a prompt after all
+EARLY = (
+    "that line came before the question could be read, it is dropped:"
+    " neither the answer nor a prompt"
+)
+LATE = (
+    "that line was typed for a question that is no longer asked, it is"
+    " dropped: enter it again if it is a prompt"
+)
 # The least room the text of a question or an option is wrapped to,
 # however far in it starts
 NARROWEST_TEXT = 20
@@ -90,6 +112,10 @@ class Question:
         self.answered = threading.Event()
         # None for no answer: the input ended, or Ctrl-C
         self.said: str | None = None
+        # When it was no longer asked, none while it is, and what was
+        # typed for it of a line by then, see gone
+        self.went: float | None = None
+        self.left = ""
 
     def meant_before(self, line: str) -> bool:
         """Whether a line that was entered is the one that was being
@@ -101,11 +127,35 @@ class Question:
         was, self.stale = self.stale, ""
         return bool(was.strip()) and line.startswith(was)
 
-    def answer(self, said: str | None) -> None:
-        """Take what was said first, a question is answered once."""
-        if not self.answered.is_set():
-            self.said = said
-            self.answered.set()
+    def answer(self, said: str | None) -> bool:
+        """Take what was said first, a question is answered once.
+        Whether this was taken."""
+        if self.answered.is_set():
+            return False
+        self.said = said
+        self.answered.set()
+        return True
+
+    def gone(self, typed: str) -> None:
+        """It is no longer asked: note when, and what was typed of a
+        line by then, which was typed with the question to read. Unless
+        it is the line that was being typed when the question was put,
+        and still is."""
+        self.went = time.monotonic()
+        before = self.stale
+        self.left = "" if before.strip() and typed.startswith(before) else typed
+
+    def meant_after(self, line: str, moment: float) -> bool:
+        """Whether a line that was entered once the question was no
+        longer asked was typed for it all the same: the one that was
+        being typed when it went, as it was or typed on, or one entered
+        within a moment of that, sooner than anyone sees that it went.
+        Not the line that was being typed when the question was put."""
+        if self.went is None or self.meant_before(line):
+            return False
+        if self.left.strip() and line.startswith(self.left):
+            return True
+        return time.monotonic() - self.went < moment
 
 
 def chosen(typed: str, options: list[dict]) -> str:
@@ -180,6 +230,9 @@ class Asker:
         # reads what is typed lets go of the one it answers, and must not
         # take the next for it, which another thread has put meanwhile
         self._putting = threading.Lock()
+        # The question that was last let go of, until a line is entered:
+        # that line may have been typed for it, see _for_one_gone
+        self._went: Question | None = None
         # How often what was asked was given up on, and how often it had
         # been when what is now put was asked, none for what the chat
         # asks itself: what claude asked before the last time is not put
@@ -194,33 +247,60 @@ class Asker:
         return self._question is not None
 
     def take(self, line: str) -> bool:
-        """Give a line the user typed to the question that waits for one.
-        Whether it was its answer: not without a question, and not a line
-        that was being typed when it was put."""
-        question = self._question
-        if question is None:
-            return False
-        if question.meant_before(line):
-            return False
+        """Give a line the user entered to the question that waits for
+        one. Whether the line is done with: the answer, or one that was
+        typed for a question and is no answer, which is said and dropped
+        (see the module). Not a line that was being typed when the
+        question was put, nor one without a question to be for: those
+        are for claude."""
+        with self._putting:
+            question = self._question
+            went, self._went = self._went, None
+        if question is None or question.meant_before(line):
+            return self._for_one_gone(went, line)
         # Counted from when the question came before the user, not from
         # when it was put: a command of theirs can run in between, and
         # nothing is read then. A line entered before it came is none
         # for it wherever it was typed.
         shown = self._console.asked_for()
-        unseen = self._console.interactive and not self._console.sees_typing
-        if shown is None or (unseen and shown < TOO_SOON):
+        if shown is None and not self._console.interactive:
+            # Not typed: a line of a file was read before the question
+            # was put, and is the prompt it was written as
             early = "that line came before the question could be read"
-            self._page.say(
-                [labelled("chat", f"{early}, it is not taken for the answer")]
-            )
+            self._page.note("chat", f"{early}, it is not taken for the answer")
             return False
+        if shown is None or shown < self._too_soon():
+            self._page.note("chat", EARLY)
+            return True
         # Over before the next line is read, and before its answer wakes
         # the thread that puts the next question: that one must stay
-        if not self._let_go(question):
-            # Given up on meanwhile, the line is no answer to what is
-            # asked now
+        if not (self._let_go(question) and question.answer(line)):
+            # Given up on meanwhile: the line was typed for it, and is
+            # no answer to what is asked now
+            question.left = ""
+            self._page.note("chat", LATE)
+        return True
+
+    def _too_soon(self) -> float:
+        """The seconds within which a line that is entered was not typed
+        for what is before the user, see TOO_SOON: none where the lines
+        are not typed, each is there for what comes next."""
+        if not self._console.interactive:
+            return 0.0
+        return SEEN_TOO_SOON if self._console.sees_typing else TOO_SOON
+
+    def _for_one_gone(self, went: Question | None, line: str) -> bool:
+        """Whether a line that answers no question was typed for the
+        one that was let go of before it, see meant_after: it is then
+        said and dropped. A y typed for a question that was given up on
+        in that moment is no prompt, nor is the second of two that were
+        typed for one. Nothing is said of a line with nothing on it,
+        which is no prompt anyway."""
+        if went is None or not line.strip():
             return False
-        question.answer(line)
+        if not went.meant_after(line, self._too_soon()):
+            return False
+        self._page.note("chat", LATE)
         return True
 
     def _let_go(self, question: Question) -> bool:
@@ -230,8 +310,24 @@ class Asker:
             if self._question is not question:
                 return False
             self._question = None
+            question.gone(self._console.typed())
+            self._went = question
             self._console.ask(None)
             return True
+
+    def line_dropped(self) -> None:
+        """Ctrl-C dropped the line being typed, where no turn runs for
+        it to interrupt. What was typed of that line for a question that
+        went is gone with it, and the question that waits is left
+        without an answer, which refuses what it asks: that one alone,
+        what waits to be put after it is still put. Not for the handler
+        of a signal, see give_up."""
+        with self._putting:
+            question, went = self._question, self._went
+        if went:
+            went.left = ""
+        if question:
+            question.answer(None)
 
     def give_up(self) -> None:
         """Leave the question that waits without an answer, and what
