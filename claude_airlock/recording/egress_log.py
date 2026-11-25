@@ -258,9 +258,11 @@ def log_since(most: int) -> str:
     the first thing it is given, holds past so many bytes, the second: the
     place it is read from, on a line, then no more than most bytes from
     there. From where the log ends when it is given no place, and from
-    its start when it is shorter than the place, it was rotated since."""
+    its start when it is shorter than the place, it was rotated since.
+    The size is asked of wc, which is the same everywhere but for the
+    spaces some put before it, stat is asked another way on macOS."""
     return (
-        'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
+        'size=$(wc -c <"$1") || exit 1; size=$((size)); from=${2:-$size};'
         ' [ "$size" -lt "$from" ] && from=0;'
         f' echo "$from"; tail -c +"$((from + 1))" "$1" | head -c {most}'
     )

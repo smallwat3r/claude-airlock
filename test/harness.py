@@ -122,7 +122,7 @@ if args[0] == "exec" and "grep -Hs" in " ".join(args[2:5]):
     part, _, code = os.environ.get("FAKE_CAPTURE_DIED", "").partition(":")
     if code:
         print("/" + part + ".pcap.status:" + code)
-if args[0] == "exec" and "stat -c" in args[4] and "FAKE_ACCESS_LOG" in os.environ:
+if args[0] == "exec" and "wc -c" in args[4] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"], "rb") as access_log:
         logged = access_log.read()
     start = int(args[7]) if len(args) > 7 else len(logged)

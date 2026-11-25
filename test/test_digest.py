@@ -181,7 +181,9 @@ class DigestTest(LauncherTest):
         # All of it, of a transcript that lines were taken out of since:
         # where its entries are then says nothing of when they came
         self.session(session="true")
-        cut = f"sed -i '/cut/d' '{transcript}'"
+        # Not sed -i, which the sed of macOS takes another way
+        kept = f"{transcript}.kept"
+        cut = f"grep -v cut '{transcript}' > '{kept}'; mv '{kept}' '{transcript}'"
         said = self.session(
             session=f"sleep 1.2; {cut}; echo '{since}' >> '{transcript}'"
         )
