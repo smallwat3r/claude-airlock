@@ -37,8 +37,8 @@ def told_over_the_pipe(event: Event, since: float) -> bool:
     and what claude says of the session as it happens (see Notices).
     Any since the chat started, one from before is the history of a
     session that is resumed, which only the transcript has."""
-    claudes = event.who is Who.CLAUDE and event.what == Kind.REPLY
-    said = claudes or event.what in SAID_LIVE
+    claudes = event.who is Who.CLAUDE and event.kind is Kind.REPLY
+    said = claudes or event.kind in SAID_LIVE
     return said and event.when >= since
 
 
@@ -105,7 +105,7 @@ class Followed:
                 self._turns.current.shown += 1
             if told_over_the_pipe(event, self._started):
                 continue
-            if event.what in READ_WHOLE:
+            if event.kind in READ_WHOLE:
                 lines += self._page.events(together) + said_whole(self._page, event)
                 together = []
             else:

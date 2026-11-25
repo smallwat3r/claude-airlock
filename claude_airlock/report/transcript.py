@@ -302,7 +302,7 @@ class Walk:
         typed = typed_while_working(entry)
         if typed is None:
             events = self._asides.take(entry, self._when)
-            if any(event.what == Kind.COMPACT for event in events):
+            if any(event.kind is Kind.COMPACT for event in events):
                 # What is read from here on is another conversation
                 self._read.clear()
             return self._beside(events)
@@ -398,7 +398,13 @@ class Walk:
         }
         details = ["of: " + issued.label] if named else []
         event = Event(
-            self._when, issued.who, issued.name.lower(), details, fields, issued.number
+            self._when,
+            issued.who,
+            issued.name.lower(),
+            details,
+            fields,
+            issued.number,
+            call=True,
         )
         tell_result(event, ended, self._verbose)
         return [event]

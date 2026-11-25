@@ -62,7 +62,7 @@ def planted_shown(events: Iterable[Event]) -> int:
     files: set[object] = set()
     for event in events:
         fields = event.fields
-        if "tool" in fields:
+        if event.call:
             results += bool(fields.get(INJECTION))
         elif fields.get("kind") == INSTRUCTIONS:
             files.update(

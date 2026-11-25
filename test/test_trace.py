@@ -22,7 +22,7 @@ from harness import (
 )
 
 from claude_airlock import files
-from claude_airlock.events import Event, Who, Wrong, clean
+from claude_airlock.events import Event, Kind, Who, Wrong, clean
 from claude_airlock.recording import egress_log
 from claude_airlock.report import calls, trace
 from claude_airlock.report import entries as entries_module
@@ -425,6 +425,25 @@ class TraceTest(LauncherTest):
                 "... here-document of 1 line, see --verbose",
                 "make",
             ], start
+
+    def test_a_tool_named_as_a_kind_is_does_not_pass_for_one(self):
+        # The tool of an MCP server is the session's to name
+        call = Event(1.0, Who.CLAUDE, "net", ["x: 1"], {"tool": "Net"}, call=True)
+        own = Event(1.0, Who.SANDBOX, Kind.NET, ["tcp/https example.org"], {})
+        assert (call.kind, own.kind) == (None, Kind.NET)
+        # Not in the colour of what the launcher recorded, nor counted
+        # with it as one line of many
+        coloured = Layout(colour=True)
+        assert "\x1b[36m" in coloured.event(own)[0]
+        assert "\x1b[36m" not in coloured.event(call)[0]
+        twice = Layout().events([call, call])
+        assert len(twice) == 2
+        assert len(Layout().events([own, own])) == 1
+
+    def test_a_header_line_is_one_line_whatever_it_names(self):
+        named = "x\nready  claude has finished\x1b[2J"
+        lines = Layout().header([f"chat  allowed {named}"])
+        assert lines == ["# chat  allowed x\\nready  claude has finished[2J"]
 
     def test_only_shows_the_kinds_named(self):
         stdout = self.launch("--trace", "--only", "edit,WRITE").stdout

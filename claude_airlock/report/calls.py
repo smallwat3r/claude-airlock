@@ -311,7 +311,9 @@ def call_event(
         fields[key] = plugin
         details.append(f"{PLUGIN_SAID[key]}: {plugin}")
     wrong = Wrong.PART if alerts else Wrong.NO
-    return Event(when, who, name.lower(), details, fields, alerts=alerts, wrong=wrong)
+    return Event(
+        when, who, name.lower(), details, fields, alerts=alerts, wrong=wrong, call=True
+    )
 
 
 def plugin_called(name: str, tool_input: dict) -> dict[str, str]:

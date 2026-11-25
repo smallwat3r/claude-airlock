@@ -89,9 +89,9 @@ class Timeline:
         # dated ahead would have all that is read after it be too long ago
         self._now = max(self._now, min(event.when, time.time()))
         call = fields.get("id")
-        if "tool" in fields and isinstance(call, str):
+        if event.call and isinstance(call, str):
             self._note(event, call)
-        elif event.what == Kind.NET and fields.get("stage") != Stage.OUTCOME:
+        elif event.kind is Kind.NET and fields.get("stage") != Stage.OUTCOME:
             self._mark(event)
 
     def _note(self, event: Event, call: str) -> None:

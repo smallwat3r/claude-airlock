@@ -299,7 +299,7 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
     to hold it: by its ports, so this is not a guess by the clock."""
     for event in events:
         fields = event.fields
-        if event.what != Kind.NET or "source_port" not in fields:
+        if event.kind is not Kind.NET or "source_port" not in fields:
             continue
         made = (fields["source_port"], fields["address"], fields["port"], event.when)
         lineage = record.holder(*made)

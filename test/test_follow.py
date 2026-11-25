@@ -223,7 +223,7 @@ class FollowTest(LauncherTest):
 
         def said(number: int, stage: Stage, when: float) -> Event:
             fields = {"id": f"c{number}", "tool": "Bash", "stage": stage}
-            return Event(when, Who.CLAUDE, "bash", ["$ make"], fields)
+            return Event(when, Who.CLAUDE, "bash", ["$ make"], fields, call=True)
 
         with mock.patch.object(stream, "MOST_CALLS", 5):
             for number in range(50):

@@ -90,6 +90,10 @@ class Kind(enum.StrEnum):
     # What the launchers noted, see noted.py
     STARTED = "started"
     CHANGED = "changed"
+    # A use of one of the doors out of the sandbox, see Door of
+    # recording/doors.py, which names them the same
+    SSH_AGENT = "ssh-agent"
+    DOCKER = "docker"
     # What a trace says of itself and of how far its records go, the
     # lines above its events: an event of its own where there are none,
     # in --json
@@ -111,7 +115,8 @@ class Stage(enum.StrEnum):
 class Event:
     """Something that happened: when (seconds since the epoch), who did
     it, what kind of thing (see Kind, or the name of the tool for a call)
-    and the lines that describe it."""
+    and the lines that describe it. A call says that it is one, see
+    call: by its name alone it could pass for the kind it is named as."""
 
     when: float
     who: Who
@@ -131,6 +136,23 @@ class Event:
     alerts: set[int] = field(default_factory=set)
     # Whether it tells of something gone wrong, and in how much of it
     wrong: Wrong = Wrong.NO
+    # Whether it is the call of a tool, or its result: what then names
+    # the tool, in small letters, which is the session's to choose (the
+    # tool of an MCP server can be named net, or started)
+    call: bool = False
+
+    @property
+    def kind(self) -> Kind | None:
+        """What it is when it is no call of a tool, none for one, and
+        for what is of no kind there is. Asked for what only an event of
+        the launcher's or of the transcript itself is treated as: a call
+        named as a kind is, is not of that kind."""
+        if self.call:
+            return None
+        try:
+            return Kind(self.what)
+        except ValueError:
+            return None
 
     @property
     def lines(self) -> list[str]:

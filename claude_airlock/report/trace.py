@@ -189,7 +189,7 @@ def session_events(
         *(
             labelled("sandbox", start_summary(event))
             for event in noted
-            if event.what == Kind.STARTED
+            if event.kind is Kind.STARTED
         ),
         *net_lines,
         *(labelled(about, said) for about, said in noted_rows),

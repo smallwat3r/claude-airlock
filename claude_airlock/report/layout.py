@@ -11,7 +11,10 @@ only what lays lines out makes: a header line, the lines of an event, and
 in a chat what the session said behind its mark (see Page of
 chat/console.py). What writes to a terminal takes no other, so a text of
 the session's cannot be written as it is, as a line of the launcher's
-own, without the type check saying so."""
+own, without the type check saying so. And each of those that makes one
+cleans the text it is given itself, a header line kept to the one line
+it is: that a line is Shown says it was cleaned, not that whoever built
+its text remembered to."""
 
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, NewType
 
-from ..events import Event, Kind, Wrong, labelled
+from ..events import Event, Kind, Wrong, clean, flat, labelled
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -65,6 +68,7 @@ ALERT = together(BOLD, RED)
 # stands out: commands, writes and the network. The conversation, which
 # its user saw anyway, and the lines about the trace itself are dimmed,
 # the other tools are left as they are.
+KINDS = frozenset(kind.value for kind in Kind)
 STYLES = {
     Kind.PROMPT: DIM,
     Kind.REPLY: DIM,
@@ -90,6 +94,13 @@ STYLES = {
     "write": MAGENTA,
     "notebookedit": MAGENTA,
 }
+
+
+def styled_as(event: Event) -> str:
+    """What an event takes its style from, among STYLES: what it is,
+    unless it is the call of a tool named as a kind is. That one is in
+    no style of the launcher's own lines, which it is not."""
+    return "" if event.call and event.what in KINDS else event.what
 
 
 def went_wrong(event: Event) -> bool:
@@ -128,7 +139,7 @@ def folded(events: Iterable[Event]) -> list[Event]:
         last, count = runs[-1] if runs else (None, 0)
         if (
             last
-            and event.what in (Kind.NET, Kind.DNS)
+            and event.kind in (Kind.NET, Kind.DNS)
             and (event.who, event.what, event.lines)
             == (last.who, last.what, last.lines)
             and went_wrong(event) == went_wrong(last)
@@ -156,15 +167,20 @@ def prefixed(start: str, texts: list[str]) -> list[str]:
 
 def header_lines(texts: list[str], style: str = "") -> list[Shown]:
     """Texts of the launcher's own as header lines, in a style when
-    given one."""
-    return [Shown(painted(style, line)) for line in prefixed(HEADER_START, texts)]
+    given one. Each is one line and is cleaned here, whatever was done
+    to it before: a text of the launcher's is as a rule said about
+    something the session named, a tool, a file, a host, and what
+    followed a line break in that name would be a header line of its
+    own, in the launcher's voice."""
+    lines = [(HEADER_START + flat(text)).rstrip() for text in texts]
+    return [Shown(painted(style, line)) for line in lines]
 
 
 def header_with(start: str, rest: str, colour: bool) -> Shown:
     """A header line that starts with a text of the launcher's own, on
     one line and dimmed in colour, and goes on with one that keeps the
     styles it has: a status in its colours."""
-    line = HEADER_START + start
+    line = HEADER_START + flat(start)
     return Shown((painted(DIM, line) if colour else line) + rest)
 
 
@@ -245,13 +261,16 @@ class Layout:
                 self._day = day
                 lines += self.header([labelled("day", day)])
         about = f"{event.who.value:<7}  {shown_what(event.what):<{WHAT_WIDTH}}  "
-        style = self.styles.get(event.what, "")
-        head = self.heads.get(event.what, "")
+        styled = styled_as(event)
+        style = self.styles.get(styled, "")
+        head = self.heads.get(styled, "")
         # Each line with the detail it is of, a detail can hold several
         shown = [
             (index, line)
             for index, detail in enumerate(event.lines)
-            for line in prefixed("", [detail])
+            # Cleaned here too, whatever made the event: no line is laid
+            # out with what could drive the terminal
+            for line in prefixed("", [clean(detail)])
         ]
         for at, (index, line) in enumerate(shown):
             first = at == 0
