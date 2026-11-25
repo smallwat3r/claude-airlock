@@ -528,6 +528,13 @@ class TraceTest(LauncherTest):
         assert missing.status != 0
         assert "matches no session" in missing.stderr
 
+    def test_a_session_is_picked_by_its_whole_id_whatever_else_starts_with_it(self):
+        # Left by a session next to its own, which could not be named
+        self.write_transcript(f"{self.SESSION}x", prompts_at(1800000000))
+        several = self.launch("--trace", "3fa9")
+        assert "matches several sessions" in several.stderr
+        assert self.launch("--trace", self.SESSION).status == 0
+
     def test_a_link_planted_among_the_transcripts_is_not_read(self):
         secret = self.work / "secret.jsonl"
         secret.write_text(json.dumps({"type": "ai-title", "aiTitle": "TOP SECRET"}))

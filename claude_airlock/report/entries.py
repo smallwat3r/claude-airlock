@@ -62,8 +62,11 @@ def session_files(host: Host) -> list[Path]:
 
 
 def sessions_named(files: list[Path], name: str) -> list[Path]:
-    """The transcripts whose session id starts with name."""
-    return [path for path in files if path.stem.startswith(name)]
+    """The transcripts whose session id starts with name, or the one
+    whose id it is: a session can leave a transcript whose name starts
+    with its own, and could then no longer be named."""
+    whole = [path for path in files if path.stem == name]
+    return whole or [path for path in files if path.stem.startswith(name)]
 
 
 def short_id(path: Path) -> str:
