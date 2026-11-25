@@ -35,6 +35,10 @@ REGISTRY_ACCEPT = (
 IMAGE_REF = r"(?<![\w./-])([a-z0-9][a-z0-9._/-]*):([\w.-]+)@sha256:[0-9a-f]{64}"
 # name==version, as written in the uv pip install lines
 PYPI_PIN = r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]*)==(\d[\w.]*)"
+# What a pin is written as: the digest of an image, and a version or a
+# checksum, see plain
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
 
 def fetch(url: str, headers: dict | None = None, method: str = "GET"):
@@ -84,9 +88,19 @@ def image_digest(image: str, tag: str) -> str:
         method="HEAD",
     ) as resp:
         digest = resp.headers["Docker-Content-Digest"]
-    if not digest:
-        sys.exit(f"failed to resolve digest of {image}:{tag}")
+    if not digest or not DIGEST.fullmatch(digest):
+        sys.exit(f"failed to resolve digest of {image}:{tag}, got {digest!r}")
     return digest
+
+
+def plain(value: object, label: str) -> str:
+    """A version or a checksum as a registry gave it, or the end of the
+    run: it is written into the Dockerfiles and the launcher's own code
+    as it is, where a quote, a blank or a line break would be read as
+    more than the pin."""
+    if not isinstance(value, str) or not PLAIN.fullmatch(value):
+        sys.exit(f"failed to resolve {label}, got {value!r}")
+    return value
 
 
 class Pins:
@@ -112,9 +126,9 @@ class Pins:
             sys.exit(f"nothing matched for {label}")
 
     def set_arg(self, name: str, value: str | None) -> None:
-        if not value:
-            sys.exit(f"failed to resolve {name}")
-        self.substitute(rf"(?m)^ARG {name}=.*$", f"ARG {name}={value}", name)
+        self.substitute(
+            rf"(?m)^ARG {name}=.*$", f"ARG {name}={plain(value, name)}", name
+        )
 
     def write(self) -> list[Path]:
         changed = [p for p, text in self.texts.items() if text != self.original[p]]
@@ -130,7 +144,7 @@ class Pins:
 def pin_node(pins: Pins) -> None:
     # node tracks the current LTS line, its digest is refreshed by pin_digests
     lts = next(r for r in fetch_json("https://nodejs.org/dist/index.json") if r["lts"])
-    major = lts["version"].removeprefix("v").split(".")[0]
+    major = plain(lts["version"].removeprefix("v").split(".")[0], "node")
     pins.substitute(r"node:\d+-(?=[a-z]+-slim)", f"node:{major}-", "node tag")
     print("node", major)
 
@@ -206,7 +220,7 @@ def pin_terraform_ls(pins: Pins) -> None:
 
 
 def pin_uv(pins: Pins) -> None:
-    uv = github_latest_tag("astral-sh/uv")
+    uv = plain(github_latest_tag("astral-sh/uv"), "uv")
     pins.substitute(r"astral-sh/uv:[0-9.]+", f"astral-sh/uv:{uv}", "uv")
     print("uv", uv)
 
@@ -235,7 +249,8 @@ def pin_gopls(pins: Pins) -> None:
 
 def pin_pypi(pins: Pins) -> None:
     for name in sorted({name for name, _ in pins.findall(PYPI_PIN)}):
-        version = fetch_json(f"https://pypi.org/pypi/{name}/json")["info"]["version"]
+        latest = fetch_json(f"https://pypi.org/pypi/{name}/json")["info"]["version"]
+        version = plain(latest, name)
         pins.substitute(
             rf"(?<![\w.-]){re.escape(name)}==\d[\w.]*", f"{name}=={version}", name
         )
