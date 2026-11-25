@@ -373,8 +373,10 @@ class Chat:
         turn of its own after it, which it then says it starts."""
         started = self._begin()
         self._guarded = False
-        self._agent.prompt(text)
-        if not started:
+        if self._agent.prompt(text) is False:
+            unread = "not sent, the session does not read what it is told"
+            self._page.note("chat", f"{unread}: Ctrl-C stops it")
+        elif not started:
             self._page.note("chat", "sent, claude takes it up when it can")
 
     def _begin(self) -> bool:

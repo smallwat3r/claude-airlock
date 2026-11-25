@@ -25,7 +25,7 @@ from collections.abc import Callable
 from ..docker import NOT_FOUND, docker_popen
 from ..errors import Fatal
 from ..events import clean
-from ..files import json_object
+from ..files import MOST_LINE_HELD, held_size, json_object
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
 # about permissions asked over the same pipe, and a reply told as it is made
@@ -37,12 +37,16 @@ CHAT_ARGS = (
     "--permission-prompt-tool=stdio",
     "--include-partial-messages",
 )
-# A line longer than this is dropped, and no more than so many wait to be
-# taken in, nor more bytes of them than BACKLOG_BYTES: a line can be long,
-# a result with a picture in it is, but not a thousand of them at once
+# A line longer than this is dropped, and so is one that holds more once
+# read than a line may (MOST_LINE_HELD). No more than so many wait to be
+# taken in, nor more bytes of them than BACKLOG_BYTES, as they are held
+# (see held_size): a line can be long, a result with a picture in it is,
+# but not a thousand of them at once
 LINE_LIMIT = 64 << 20
 BACKLOG = 1000
 BACKLOG_BYTES = 256 << 20
+# No more than so many lines wait to be said to claude, see Agent.send
+SAID_BACKLOG = 256
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
 # What is told the answer claude gives to a request of the chat's
@@ -119,7 +123,9 @@ class Agent:
         except FileNotFoundError:
             raise Fatal(NOT_FOUND) from None
         self._on_end = on_end
-        self._speaking = threading.Lock()
+        # What is to be said to claude, a line each, then None when no
+        # more is: written by a thread of its own, see _write
+        self._to_say: queue.Queue[bytes | None] = queue.Queue(SAID_BACKLOG)
         self._requests = itertools.count(1)
         # What waits for the answer to a request of the chat's, by the id
         # it was asked under
@@ -131,8 +137,29 @@ class Agent:
         self.ended = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._errors = threading.Thread(target=self._read_errors, daemon=True)
+        self._writer = threading.Thread(target=self._write, daemon=True)
         self._errors.start()
         self._reader.start()
+        self._writer.start()
+
+    def _write(self) -> None:
+        """Say to claude what waits to be said, in the order it was
+        given. In a thread of its own: a session that stops reading what
+        it is told, and goes on asking, would otherwise hold whoever
+        answers it on a pipe that is full, the thread that listens and
+        acts on Ctrl-C, and with it the chat."""
+        pipe = self._process.stdin
+        while pipe:
+            line = self._to_say.get()
+            try:
+                if line is None:
+                    pipe.close()
+                    return
+                pipe.write(line)
+                pipe.flush()
+            except (OSError, ValueError):
+                # One that has ended: nothing more is said to it
+                return
 
     def _read(self) -> None:
         out = self._process.stdout
@@ -143,13 +170,16 @@ class Agent:
                 if not line:
                     break
                 complete = line.endswith(b"\n")
-                if complete and not dropping:
+                # What it takes once read, which is what waits: a line
+                # of small values takes dozens of times its length
+                held = held_size(line)
+                if complete and not dropping and held <= MOST_LINE_HELD:
                     # Not an object: claude run for something else than a
                     # conversation, which is then shown as it is written
                     plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
                     found = json_object(line)
                     said = plain if found is None else found
-                    self.messages.put(said, len(line))
+                    self.messages.put(said, held)
                 # The rest of a line that was too long goes with its start
                 dropping = not complete
         finally:
@@ -179,23 +209,23 @@ class Agent:
             # Nobody listens any more, or not fast enough
             print(clean(text), file=sys.stderr)
 
-    def send(self, message: dict) -> None:
-        """Say something to claude, nothing to one that has ended."""
-        pipe = self._process.stdin
+    def send(self, message: dict) -> bool:
+        """Say something to claude, nothing to one that has ended. It is
+        said in its turn, see _write. Whether it is: not once as much
+        waits to be said as SAID_BACKLOG, to a session that does not
+        read it."""
         try:
-            # Whole lines: more than one thread speaks
-            with self._speaking:
-                if pipe:
-                    pipe.write(json.dumps(message).encode() + b"\n")
-                    pipe.flush()
-        except (OSError, ValueError):
-            pass
+            self._to_say.put_nowait(json.dumps(message).encode() + b"\n")
+        except queue.Full:
+            return False
+        return True
 
-    def prompt(self, text: str) -> None:
-        """Give claude what the user asks."""
+    def prompt(self, text: str) -> bool:
+        """Give claude what the user asks, whether it could be, see
+        send."""
         content = [{"type": "text", "text": text}]
         message = {"role": "user", "content": content}
-        self.send({"type": "user", "message": message})
+        return self.send({"type": "user", "message": message})
 
     def request(
         self, subtype: str, on_answer: Answer | None = None, **more: object
@@ -241,10 +271,11 @@ class Agent:
         self.send({"type": "control_response", "response": response})
 
     def close(self) -> None:
-        """Say that no more prompts come, which is how claude is left."""
-        with contextlib.suppress(OSError, ValueError):
-            if self._process.stdin:
-                self._process.stdin.close()
+        """Say that no more prompts come, which is how claude is left,
+        once what waits to be said was. Not waited for: a session that
+        does not read is ended by stopping it."""
+        with contextlib.suppress(queue.Full):
+            self._to_say.put_nowait(None)
 
     def drain(self) -> bool:
         """Let go of what claude still says, for it not to wait on a full

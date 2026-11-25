@@ -13,7 +13,15 @@ from pathlib import Path
 
 from ..errors import Fatal
 from ..events import Who, clean, flat
-from ..files import UNREADABLE, bounded_lines, json_object, line_entry, open_plain
+from ..files import (
+    MOST_LINE_HELD,
+    UNREADABLE,
+    bounded_lines,
+    held_size,
+    json_object,
+    line_entry,
+    open_plain,
+)
 from ..projects import transcript_dirs, transcript_files
 from ..settings import Host
 
@@ -39,6 +47,10 @@ MOST_COUNTED = 10**15
 # most (see recorder.py). What is said in the place of the rest.
 MOST_READ = 512 * 1024 * 1024
 NOT_ALL_READ = f"(the rest of the transcript, past {MOST_READ >> 20} MB, was not read)"
+# Nor more of it than takes this much once read, as held_size counts it:
+# about what a transcript of MOST_READ takes that Claude Code wrote
+MOST_HELD = 2 << 30
+NOT_ALL_HELD = "(the rest of the transcript was not read, it holds too much to keep)"
 # Of a session id, as much as names it in a line
 SHORT_ID = 8
 
@@ -77,20 +89,28 @@ def short_id(path: Path) -> str:
 
 def read_entries(path: Path) -> list[dict]:
     """The transcript's entries, none for one that cannot be read. Of one
-    longer than MOST_READ those of its start, then an entry that says the
-    rest was not read: a session can make its transcript as long as the
-    disk, and all of it is held here."""
+    longer than MOST_READ, or that holds more than MOST_HELD once it is
+    read, those of its start, then an entry that says the rest was not
+    read: a session can make its transcript as long as the disk, and all
+    of it is held here, a line of a few bytes as an entry of hundreds."""
     file = open_plain(path)
     if file is None:
         return []
     entries = []
+    held = 0
     with file:
         for line in bounded_lines(file):
+            held += held_size(line) if line else 0
+            if held > MOST_HELD:
+                entries.append({"type": UNREADABLE, "text": NOT_ALL_HELD})
+                break
             if line is None or line.endswith(b"\n"):
                 entry = line_entry(line)
-            else:
+            elif held_size(line) <= MOST_LINE_HELD:
                 # A last line may be half written by a running session
                 entry = json_object(line)
+            else:
+                entry = None
             if entry:
                 entries.append(entry)
             if file.tell() >= MOST_READ:

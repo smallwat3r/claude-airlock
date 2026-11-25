@@ -302,6 +302,23 @@ class TraceTest(LauncherTest):
         with unittest.mock.patch.object(entries_module, "MOST_READ", size):
             assert read_entries(path) == whole
 
+    def test_a_transcript_is_read_as_far_as_what_it_holds_may_take(self):
+        # Lines of a few bytes each, which take many times that once read
+        path = self.write_transcript("0a", prompts_at(1e9, 1e9 + 1, 1e9 + 2))
+        first = files.held_size(path.read_bytes().splitlines(keepends=True)[0])
+        with unittest.mock.patch.object(entries_module, "MOST_HELD", first):
+            cut = read_entries(path)
+        assert cut == [
+            read_entries(path)[0],
+            {"type": files.UNREADABLE, "text": entries_module.NOT_ALL_HELD},
+        ]
+        # And a line that would take too much alone is not read
+        with unittest.mock.patch.object(files, "MOST_LINE_HELD", 10):
+            assert files.line_entry(b'{"type": "user"}\n') == {
+                "type": files.UNREADABLE,
+                "text": "(a line too long to read)",
+            }
+
     def test_an_edit_is_compared_as_far_as_its_first_lines(self):
         # Comparing takes the square of the lines, a session's to write
         long = calls.DIFFED_LINES + 10

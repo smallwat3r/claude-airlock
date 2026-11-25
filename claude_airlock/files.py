@@ -22,6 +22,14 @@ from typing import IO, Any, BinaryIO
 # What a session can write is read a line at a time, and no line longer
 # than this is held in memory
 LINE_LIMIT = 32 << 20
+# What a line of JSON takes once read, see held_size: twice its bytes,
+# for a text of characters that take several, then so much for the line
+# and for each value in it (an empty object in a list takes less, one
+# nested in another about this). And how much one line may take: past
+# it a line is not read, as one that is too long is not.
+HELD_BY_LINE = 200
+HELD_BY_VALUE = 80
+MOST_LINE_HELD = 256 << 20
 # A settings file of Claude Code past this is not read, the project's
 # ones are a session's to write
 SETTINGS_BYTES = 1024 * 1024
@@ -234,13 +242,23 @@ def bounded_lines(file: BinaryIO, longest: int = LINE_LIMIT) -> Iterator[bytes |
         yield None
 
 
+def held_size(line: bytes) -> int:
+    """About how many bytes a line of JSON takes once it is read, and no
+    fewer: its own, and so many for each value it holds, counted by what
+    sets them apart. A line of nothing but small values takes dozens of
+    times its length, which is the session's to write: what is bounded
+    by the bytes read alone is not bounded in what it holds."""
+    values = sum(map(line.count, (b"{", b"[", b",", b":")))
+    return 2 * len(line) + HELD_BY_LINE + HELD_BY_VALUE * values
+
+
 def line_entry(line: bytes | None) -> dict | None:
     """A whole line of a transcript as the entry it holds, none for an
     empty one. A line that holds none, or was too long to read (see
     bounded_lines), is an entry that says so: Claude Code writes no such
     line, a session that writes half a line ahead of an entry does, and
     what it did there must not go without a word."""
-    if line is None:
+    if line is None or held_size(line) > MOST_LINE_HELD:
         return {"type": UNREADABLE, "text": "(a line too long to read)"}
     if not line.strip():
         return None

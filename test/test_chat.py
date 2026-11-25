@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from harness import LAUNCHER, ROOT, LauncherTest, Terminal, reads_proc
 
+from claude_airlock import files
 from claude_airlock.chat import (
     asking,
     commands,
@@ -1317,6 +1318,55 @@ class PipeTest:
         assert backlog.get(timeout=PATIENCE) == "large"
         waiting.join(PATIENCE)
         assert backlog.get(timeout=PATIENCE) == "next"
+
+    def test_a_session_that_does_not_read_holds_nobody(self):
+        # Claude played by what never reads what it is told
+        def run(*_args: str, **options) -> subprocess.Popen:
+            return subprocess.Popen(["sleep", "30"], **options)
+
+        agent = pipe.Agent([], lambda: None, run)
+        try:
+            started = time.monotonic()
+            large = {"text": "x" * (1 << 20)}
+            sent = [agent.send(large) for _ in range(pipe.SAID_BACKLOG + 50)]
+            agent.refuse("r1", "no")
+            agent.close()
+            assert time.monotonic() - started < PATIENCE
+            # Said to be unsent once as much waits as may
+            assert sent[0]
+            assert not sent[-1]
+        finally:
+            agent._process.kill()
+            agent.status()
+            for piped in (agent._process.stdout, agent._process.stderr):
+                if piped:
+                    piped.close()
+
+    def test_a_line_that_holds_too_much_once_read_is_not_taken_in(self):
+        small = b'{"type": "x"}\n'
+        assert files.held_size(small) >= len(small)
+        dense = b"[" + b"{}," * 1000 + b"{}]\n"
+        # No fewer bytes than it takes, dozens of times its length
+        assert files.held_size(dense) > 24 * len(dense)
+        ran: list[subprocess.Popen] = []
+
+        def run(*_args: str, **options) -> subprocess.Popen:
+            ran.append(subprocess.Popen(["cat"], **options))
+            return ran[-1]
+
+        agent = pipe.Agent([], lambda: None, run)
+        try:
+            with unittest.mock.patch.object(pipe, "MOST_LINE_HELD", 1000):
+                agent.send({"dense": [{} for _ in range(200)]})
+                agent.send({"type": "small"})
+                assert agent.messages.get(timeout=PATIENCE) == {"type": "small"}
+        finally:
+            agent.close()
+            agent.status()
+            agent.ended.wait(PATIENCE)
+            for piped in (ran[0].stdout, ran[0].stderr):
+                if piped:
+                    piped.close()
 
     def test_what_claude_is_told_is_a_line_each(self, agent: pipe.Agent):
         agent.prompt("hello")
