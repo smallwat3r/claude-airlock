@@ -42,7 +42,9 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   direct connections, DNS lookups and other protocols (a database, say)
   fail. A 403 from the proxy is a blocked domain, tell the user to add it
   to docker/allowed-domains.txt of their claude-airlock checkout.
-- CLAUDE_AIRLOCK_NET_ASK (off unless 1, with the filter). On, a request
+- CLAUDE_AIRLOCK_NET_ASK (off unless 1, with the filter, and listed only
+  where the user can be asked: not listed, a request for a domain that is
+  not listed is refused at once, as above). On, a request
   for a domain that is not listed waits while the user is asked, and goes
   through when they say yes: it can take as long as they do, do not cut
   it short or retry meanwhile. A 403 then says they refused that host for
@@ -101,7 +103,8 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   .env.*, .envrc, .netrc and .pypirc, and those this setting adds, read as
   empty: the secrets stay on the host. Not a bug, do not recreate or fill
   them, ask the user for a value you need. Templates such as .env.example
-  are readable.
+  are readable, and so are such files under node_modules and .git, which
+  are not looked into.
 - CLAUDE_AIRLOCK_FEATURES (not listed in the environment), the tools built
   into this image, named below. If one you need is missing and cannot be
   installed in /tmp or the project, say so: the user adds its feature and

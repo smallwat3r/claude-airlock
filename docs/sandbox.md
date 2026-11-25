@@ -50,6 +50,8 @@ What a session is given and what it is kept from.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty. Templates such as `.env.example` stay readable,
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
+  Not hidden: one under `node_modules` or `.git`, which are not looked
+  into for them, and one made after the session started.
 - **The history of other projects.** Their transcripts are covered by
   empty directories, and the prompt history, the paste cache and the file
   history are kept per project. So `claude` on the host cannot rewind the
@@ -213,8 +215,11 @@ only when what it holds is no longer what it was. Not looked into:
 whole project again.
 
 The check is bounded, a session can write any number of files of any
-size: 5000 files of each watched directory, 5000 build files, the
-submodules of 1000 git directories, and 1 GB read in all. What is past a
+size: 5000 files of each watched directory, 1000 of what Claude remembers
+of a project, 5000 build files, the submodules of 1000 git directories,
+and 1 GB read for what git and Claude follow, as much again for the build
+files. The plugins, thousands of files as they come, are not read: up to
+100 000 of them are told from one written since by when they changed. What is past a
 count is said as `the rest`, unwatched, when a session made it so, and
 so is a watched directory with more entries or more directories below it
 than that. A file
