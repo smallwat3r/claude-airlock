@@ -26,6 +26,11 @@ KEPT_USES = 5000
 # or another, did before. Past these a use is counted, see SessionUses.
 MOST_SESSION_USES = 1000
 MOST_ALIKE = 20
+# No more kinds than this are counted apart, the rest as one: a kind can
+# be the session's to name (the method of a call to the Docker socket),
+# and one counted for each name would grow with every call
+MOST_KINDS = 16
+OTHER_KINDS = "other"
 # In a line of the record: the uses that were counted and not noted one
 # by one, how many of each kind once the session is over
 UNRECORDED = "unrecorded"
@@ -87,7 +92,9 @@ class SessionUses:
             if crowded or self._alike[same] >= MOST_ALIKE:
                 if not self._unrecorded:
                     note_use(self._host, self._session, self._door, unrecorded=True)
-                self._unrecorded[kind] += 1
+                known = kind in self._unrecorded
+                counted = known or len(self._unrecorded) < MOST_KINDS
+                self._unrecorded[kind if counted else OTHER_KINDS] += 1
                 return
             self._noted += 1
             self._alike[same] += 1

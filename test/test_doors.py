@@ -278,6 +278,23 @@ class AgentDoorTest(LauncherTest):
         lines = Path(self.host.doors_file).read_text().splitlines()
         assert [json.loads(line)["path"] for line in lines] == ["2", "3", "4"]
 
+    def test_no_more_kinds_are_counted_than_a_few(self):
+        # The method of a call to the Docker socket is the session's to name
+        uses = doors.SessionUses(self.host, "s", doors.Door.DOCKER)
+        with mock.patch.object(doors, "MOST_SESSION_USES", 0):
+            for number in range(doors.MOST_KINDS + 30):
+                uses.note(f"M{number}", method=f"M{number}", path="/x", status=403)
+            uses.note("M0", method="M0", path="/x", status=403)
+        uses.close()
+        (counted,) = [
+            use["unrecorded"]
+            for use in doors.read_uses(self.host, 0, time.time() + 1)
+            if isinstance(use.get("unrecorded"), dict)
+        ]
+        assert len(counted) == doors.MOST_KINDS + 1
+        assert counted["M0"] == 2
+        assert counted[doors.OTHER_KINDS] == 30
+
     def test_a_session_cannot_fill_the_record_with_uses_that_cost_nothing(self):
         uses = doors.SessionUses(self.host, "s", doors.Door.SSH_AGENT)
         uses.note("sign", did="sign", key="SHA256:abc", what="a login as git")
