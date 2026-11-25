@@ -19,21 +19,20 @@ def in_background(work: Callable[..., None], *args: object) -> Iterator[None]:
     work has to return soon after, it is waited for.
 
     Work that fails ends alone, the session goes on without it: said
-    when the block is left, by the name of the work. What is done here
-    is what the launcher keeps of a session, its transcripts copied, its
-    address noted, its health, and a thread that ended on something
-    unforeseen would leave that record short without a word, for the
-    rest of the session."""
+    when the block is left, by the name of the work. A thread has
+    nowhere to raise what it ended on, and one that ended on something
+    unforeseen would leave its work undone without a word, for the rest
+    of the session."""
     stop = threading.Event()
-    failed: list[BaseException] = []
+    failed: Exception | None = None
 
     def run() -> None:
+        nonlocal failed
         try:
             work(*args, stop)
         except Exception as error:  # noqa: BLE001
-            # Whatever it is: kept to be said, a thread has nowhere to
-            # raise it
-            failed.append(error)
+            # Whatever it is: kept to be said
+            failed = error
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -42,13 +41,12 @@ def in_background(work: Callable[..., None], *args: object) -> Iterator[None]:
     finally:
         stop.set()
         thread.join()
-        for error in failed:
+        if failed is not None:
             name = getattr(work, "__name__", "work").replace("_", " ")
             warn(
                 f"what the launcher does next to a session FAILED ({name}) and"
-                " was not done for the rest of it, what it keeps of the"
-                " session may be incomplete:",
-                repr(error),
+                " was not done for the rest of it:",
+                repr(failed),
             )
 
 
