@@ -28,7 +28,6 @@ from contextlib import contextmanager, suppress
 from ..docker import env_arg, mount_arg
 from ..errors import Fatal
 from ..files import private_dir
-from ..notice import warn
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
 from ..settings import Host, Settings
@@ -218,8 +217,8 @@ class AgentDoor:
                     request = read_message(client)
                     if request is None:
                         return
+                    refusal = bytes([AgentMessage.FAILURE])
                     if not passed_on(request):
-                        refusal = bytes([AgentMessage.FAILURE])
                         self._note(request, refusal, refused_by=BY_LAUNCHER)
                         client.sendall(len(refusal).to_bytes(4, "big") + refusal)
                         continue
@@ -227,16 +226,20 @@ class AgentDoor:
                     answer = read_message(agent)
                     if answer is None:
                         return
-                    self._note(request, answer)
+                    if not self._note(request, answer):
+                        # Not given what could not be noted: a session
+                        # can fill the disk the record is on, and would
+                        # have its signatures unrecorded for it
+                        answer = refusal
                     client.sendall(len(answer).to_bytes(4, "big") + answer)
             except OSError:
                 return
 
-    def _note(self, request: bytes, answer: bytes, refused_by: str = "") -> None:
+    def _note(self, request: bytes, answer: bytes, refused_by: str = "") -> bool:
         """Note a request and how it was answered, by the agent unless
         refused_by names who refused it instead. What a session sends is
         the session's to choose: one that is not what it says it is is
-        noted as that."""
+        noted as that. Whether it could be noted, see _pass_on."""
         kind = kind_of(request)
         refused = kind_of(answer) == AgentMessage.FAILURE
         said: dict[str, object] = {"refused": True} if refused else {}
@@ -256,7 +259,7 @@ class AgentDoor:
                 said.update(did=AgentUse.LIST.value, keys=self._listed(answer))
             elif kind == AgentMessage.EXTENSION:
                 if not refused_by:
-                    return
+                    return True
                 said.update(did=AgentUse.OTHER.value, what="asked for an extension")
             else:
                 said.update(
@@ -270,8 +273,9 @@ class AgentDoor:
         try:
             self._uses.note(str(said["did"]), **said)
         except OSError:
-            # A full disk or the like: the agent goes on without the note
-            return
+            # A full disk or the like
+            return False
+        return True
 
     def _listed(self, answer: bytes) -> int:
         """How many keys the agent listed, their comments remembered."""
@@ -348,8 +352,9 @@ def ssh_agent_door(
     keys with ssh-add -c makes each use ask first. Gives the options the
     session is run with. What the session is given is a socket of the
     launcher's that notes each request and refuses those that are not a
-    session's to make (see passed_on), the agent's own where that is not
-    possible, which is then said."""
+    session's to make (see passed_on). The agent's own only where no
+    socket of the host can be listened on for it, on macOS, as the docs
+    say: where one can and that fails, the session is not started."""
     found = agent_socket(env) if settings.ssh_agent else None
     if found is None:
         yield []
@@ -360,9 +365,14 @@ def ssh_agent_door(
         try:
             door = AgentDoor(host, session, agent)
         except OSError as problem:
-            warn(
-                f"the use of the SSH agent is not recorded: {problem}",
-            )
+            # Not the agent's own socket in its place: that one takes
+            # what the door refuses, keys added and removed, and notes
+            # nothing
+            raise Fatal(
+                f"the SSH agent cannot be given to the session, the launcher"
+                f" could not listen in front of it: {problem}."
+                " CLAUDE_AIRLOCK_SSH_AGENT=0 runs without the agent."
+            ) from problem
     mount = (
         mount_arg(door.path, AGENT_TARGET, "z")
         if door

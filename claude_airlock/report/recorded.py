@@ -20,6 +20,7 @@ from ..recording.pcap import Capture
 from ..recording.processes import ProcessRecord, session_record
 from ..recording.recorder import Compared, compare
 from ..recording.records import TracedSession, recorded_sessions
+from ..recording.started import stay_between
 from ..settings import Host
 from .entries import read_entries, unreadable_lines
 
@@ -52,6 +53,26 @@ class Recorded:
         return cls(host, recorded_sessions(host, start, end), start, end)
 
     @cached_property
+    def stay(self) -> tuple[float, float]:
+        """From when to when the sessions were there, the span of time
+        itself and all of each session's stay: what a session did is
+        looked for over the whole of it. A span is that of a transcript,
+        from its first entry to its last, and a session does things
+        after the last: a command left running reaches the network, or
+        asks the SSH agent, while the user reads the reply. Cut at the
+        last entry, that would be in no trace. By when each session is
+        noted to have started and to be over (see stay_between), and by
+        the end the record of the network has of it: not by an end that
+        is only taken from the next session at its address, which may be
+        long after, and another project's."""
+        first, last = stay_between(self.host, self.start, self.end)
+        ends = [session.end for session in self.sessions if session.end is not None]
+        return (
+            min([first, *(session.start for session in self.sessions)]),
+            max([last, *ends]),
+        )
+
+    @cached_property
     def traced(self) -> list[Traced]:
         """Each session with its capture and the record of its
         processes."""
@@ -74,7 +95,7 @@ class Recorded:
         logged = logged_requests(stderr=subprocess.DEVNULL)
         if logged is None:
             return None
-        return list(requests_made(logged, self.filtered, self.start, self.end))
+        return list(requests_made(logged, self.filtered, *self.stay))
 
     @property
     def filtered(self) -> list[TracedSession]:

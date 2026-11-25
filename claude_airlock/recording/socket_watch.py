@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 from ..background import wait_for
 from ..docker import docker_popen
+from ..notice import warn
 from ..sandbox.networks import session_address
 from ..sandbox.socket_proxy import has_socket_proxy, socket_proxy_name
 from ..settings import Host, Settings
@@ -69,7 +70,10 @@ class SocketWatch:
         # is not followed once the watch is closed, nobody would end it
         self._starting = threading.Lock()
         self._closed = False
-        self._thread = threading.Thread(target=self._watch, daemon=True)
+        # Why the calls stopped being noted before the watch was closed,
+        # empty when they did not
+        self._stopped = ""
+        self._thread = threading.Thread(target=self._watched, daemon=True)
         self._thread.start()
 
     def close(self) -> None:
@@ -82,6 +86,11 @@ class SocketWatch:
                 self._log.terminate()
         self._thread.join()
         self._uses.close()
+        if self._stopped:
+            warn(
+                "the calls to the Docker socket were not all noted, the watch"
+                f" on its proxy ended before the session did: {self._stopped}"
+            )
 
     def _follow(self) -> subprocess.Popen | None:
         """Start following the proxy's log, none when that cannot be
@@ -102,11 +111,21 @@ class SocketWatch:
                 return None
             return self._log
 
+    def _watched(self) -> None:
+        """Watch, and keep why it ended when that was not for the watch
+        being closed: said then, see close."""
+        try:
+            self._watch()
+        except Exception as error:  # noqa: BLE001
+            self._stopped = repr(error)
+
     def _watch(self) -> None:
         # The address is only known once the container is up
         address = wait_for(lambda: session_address(self._owner), self._stop)
         log = self._follow() if address else None
         if log is None:
+            if address and not self._stop.is_set():
+                self._stopped = "the log of the proxy could not be followed"
             return
         with log:
             for line in log.stdout or ():
@@ -118,6 +137,8 @@ class SocketWatch:
                     self._uses.note(method, method=method, path=path, status=status)
                 except OSError:
                     continue
+        if not self._stop.is_set():
+            self._stopped = "the log of the proxy ended"
 
 
 @contextmanager

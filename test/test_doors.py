@@ -4,6 +4,7 @@ socket, and what --trace shows of it."""
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
@@ -24,7 +25,8 @@ from harness import (
     settings,
 )
 
-from claude_airlock.recording import doors, socket_watch, ssh_agent
+from claude_airlock import errors
+from claude_airlock.recording import doors, socket_watch, ssh_agent, started
 from claude_airlock.report import door_events
 from claude_airlock.sandbox import socket_proxy
 
@@ -187,6 +189,25 @@ class AgentDoorTest(LauncherTest):
             str(self.project),
             "claude-proj",
         )
+
+    def test_what_cannot_be_noted_is_not_given(self):
+        # A full disk, which a session can make of the one the record is on
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(doors, "note_use", side_effect=full):
+            answers = self.through_the_door(b"\x0b", sign_request(login("git")))
+        assert answers == [b"\x05", b"\x05"]
+        assert self.uses() == []
+
+    @mounts_host_sockets
+    def test_a_door_that_cannot_be_made_is_not_the_agents_own_instead(self):
+        asked = settings.Settings(ssh_agent=True)
+        env = {"SSH_AUTH_SOCK": os.path.join(self.directory, "agent.sock")}
+        failing = mock.patch.object(
+            ssh_agent, "AgentDoor", side_effect=OSError("AF_UNIX path too long")
+        )
+        door = ssh_agent.ssh_agent_door(asked, self.host, "claude-proj", env)
+        with failing, pytest.raises(errors.Fatal, match="could not listen"), door:
+            pytest.fail("the session was given the agent")
 
     def test_a_signature_of_a_file_says_what_for(self):
         self.through_the_door(sign_request(b"SSHSIG" + string(b"git") + b"rest"))
@@ -408,8 +429,13 @@ class SocketWatchTest(LauncherTest):
                     time.sleep(0.5)
         return doors.read_uses(host, 0, time.time() + 5)
 
-    def test_the_calls_of_the_session_are_noted_and_no_other(self):
+    def test_the_calls_of_the_session_are_noted_and_no_other(self, capsys):
         uses = self.watched()
+        # The fake's log ends at once, as that of a proxy that is gone:
+        # said, the calls made from then on are not noted
+        assert "ended before the session did: the log of the proxy ended" in (
+            capsys.readouterr().err
+        )
         assert [(use["method"], use["path"], use["status"]) for use in uses] == [
             ("GET", "/v1.47/containers/json", 200),
             ("POST", "/v1.47/containers/create", 403),
@@ -441,6 +467,26 @@ class SocketWatchTest(LauncherTest):
     def test_without_the_socket_nothing_is_watched(self):
         self.launch()
         assert not [call for call in self.calls() if call[0] == "logs"]
+
+    def test_a_door_used_after_the_last_line_of_the_transcript_is_shown(self):
+        # A command left running asks the agent while the user reads the
+        # reply: after all the transcript has, and while the session is there
+        host = self.host
+        record = started.start_record(host)
+        record.add(host.project_dir, "claude-proj", did=started.STARTED)
+        began = time.time()
+        self.write_transcript("0a", prompts_at(began - 5, began + 0.001))
+        time.sleep(0.05)
+        doors.note_use(host, "claude-proj", doors.Door.SSH_AGENT, did="list", keys=2)
+        started.note_end(host, "claude-proj")
+        # And one of the session that took the name after it is not its own
+        time.sleep(0.05)
+        record.add(host.project_dir, "claude-proj", did=started.STARTED)
+        doors.note_use(host, "claude-proj", doors.Door.DOCKER, method="GET", path="/z")
+        stdout = self.launch("--trace").stdout
+        assert "sandbox  ssh-agent   listed the keys, 2 of them" in stdout
+        assert "/z" not in stdout
+        assert started.stay_between(host, began - 5, began)[1] < time.time()
 
     def test_the_trace_shows_the_use_of_both_doors(self):
         now = time.time()

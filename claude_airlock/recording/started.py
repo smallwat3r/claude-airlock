@@ -13,6 +13,7 @@ the settings of a later day are not those a session ran with."""
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -278,6 +279,30 @@ def running_between(notes: list[dict], start: float) -> list[dict]:
         else:
             running.pop(note.get("session"), None)
     return [*running.values(), *since]
+
+
+def stay_between(host: Host, start: float, end: float) -> tuple[float, float]:
+    """The span of time from start to end, made as long as the stay of
+    this project's sessions that ran at some point of it: from when the
+    first was started to when the last was over. What a session did is
+    looked for over all of its stay, see Recorded.stay. Not past the
+    end for one that is not noted to be over: it still runs, or its
+    launcher was killed, and all that came since is not its own."""
+    began: dict[object, float] = {}
+    stays: list[tuple[float, float]] = []
+    for note in start_record(host).read(host.project_dir, 0.0, math.inf):
+        when, session = float(note["t"]), note.get("session")
+        if session in began:
+            # Over, or its name taken by the next one
+            stays.append((began.pop(session), when))
+        if note.get("did") == STARTED:
+            began[session] = when
+    stays += [(when, end) for when in began.values()]
+    there = [(first, last) for first, last in stays if first <= end and last >= start]
+    return (
+        min([start, *(first for first, _ in there)]),
+        max([end, *(last for _, last in there)]),
+    )
 
 
 def start_events(

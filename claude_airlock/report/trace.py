@@ -183,7 +183,8 @@ def session_events(
         net_lines, net_events = network(recorded, verbose)
         # The commands the record of the processes has nothing of
         net_lines += unseen_summary(mark_unseen(told, recorded.watched))
-        noted_rows, noted = noted_events(host, start, end)
+        # Over all of the sessions' stay, as the network is, see stay
+        noted_rows, noted = noted_events(host, *recorded.stay)
     header = [
         *session_header(own, subagents, project_dir, planted),
         *(
