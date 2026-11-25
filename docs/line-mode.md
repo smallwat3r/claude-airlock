@@ -90,9 +90,11 @@ A line can be typed at any time, claude takes it up when it can.
 | Tab | Completes the names of commands and of files (`@src/main.py`) |
 | Up, Down | The lines typed before |
 | `/help` | Says what there is |
-| `/model`, `/context`, `/compact`, `/clear`, your own commands and skills | Claude Code's commands that answer in text, as typed |
+| `/model`, `/context`, `/usage`, `/compact`, `/clear`, your own commands and skills | Claude Code's commands that answer in text, as typed |
 | `/mode plan` | Changes the permission mode |
 | `/resume` | Leaves this session for an earlier one of the project |
+| `/mcp` | The MCP servers of the session |
+| `/status`, `/statusline` | The model, context, limits, cost and sandbox |
 | `!make test` | Runs a command in the sandbox, claude is not told |
 | `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 
@@ -180,8 +182,8 @@ they made.
 native UI. With that setting in the config file every session has it,
 and `claude-airlock --line-mode` is then one session in line mode.
 
-What has no conversation runs as it always did: `-p`, a command of
-claude's (`claude-airlock mcp list`), `--version` and `--shell`.
+What has no conversation runs as it always did: `-p`, `--bg`, a command
+of claude's (`claude-airlock mcp list`), `--version` and `--shell`.
 
 ## How it works
 

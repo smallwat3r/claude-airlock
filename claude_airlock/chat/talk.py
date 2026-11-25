@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import enum
 import functools
 import math
 import os
@@ -112,6 +113,46 @@ STOP_WAIT = 15.0
 # The messages in a row that may fail to be taken in before the chat
 # gives up on showing what the session does
 MOST_FAILED = 5
+
+
+class Life(enum.Enum):
+    """How far a chat is, by who ended first: claude, which can end on
+    its own, or the user, who can leave. One value, changed in one place
+    (see Chat._becomes): which of the two came first is then not asked
+    of one thing while another changes the other."""
+
+    RUNNING = enum.auto()
+    # Claude has ended and the user has not left yet
+    ENDED = enum.auto()
+    # The user has left and claude has not ended yet
+    LEAVING = enum.auto()
+    # The user left, and claude ended for it
+    LEFT = enum.auto()
+    # Claude ended, and the chat is now being left
+    CLOSING = enum.auto()
+
+    @property
+    def over(self) -> bool:
+        """Whether claude has ended."""
+        return self in (Life.ENDED, Life.LEFT, Life.CLOSING)
+
+    @property
+    def leaving(self) -> bool:
+        """Whether the chat is being left, by the user or after claude."""
+        return self in (Life.LEAVING, Life.LEFT, Life.CLOSING)
+
+    @property
+    def left(self) -> bool:
+        """Whether it was the user who left, and not claude that ended."""
+        return self in (Life.LEAVING, Life.LEFT)
+
+    def ended(self) -> Life:
+        """What it is once claude has ended."""
+        return {Life.RUNNING: Life.ENDED, Life.LEAVING: Life.LEFT}.get(self, self)
+
+    def leave(self) -> Life:
+        """What it is once the chat is being left."""
+        return {Life.RUNNING: Life.LEAVING, Life.ENDED: Life.CLOSING}.get(self, self)
 
 
 class Chat:
@@ -212,10 +253,10 @@ class Chat:
         self._reading = False
         self._interrupt = False
         # Whether claude has ended, whether the user is leaving, and
-        # whether it was they who left and not claude that ended
-        self._over = False
-        self._leaving = False
-        self._left = False
+        # which of the two came first, see Life. Read as it is, from the
+        # handler of Ctrl-C too, and changed by _becomes alone.
+        self._life = Life.RUNNING
+        self._living = threading.Lock()
 
     def run(self) -> int:
         """Run the session and talk to it until the user leaves or it
@@ -256,19 +297,26 @@ class Chat:
             docker_ok("stop", self._name)
             self._agent.over_within(STOP_WAIT)
 
+    def _becomes(self, step: Callable[[Life], Life]) -> None:
+        """Take a step of the chat's life: one at a time, the thread that
+        reads claude says that it ended while the user leaves. Not called
+        from the handler of Ctrl-C, which could come while this is held."""
+        with self._living:
+            self._life = step(self._life)
+
     def _gone(self) -> bool:
         """Whether there is nobody left to ask, or to ask for."""
-        return self._leaving or self._over
+        return self._life.leaving or self._life.over
 
     def _on_interrupt(self, _number: int, _frame: object) -> None:
         """Ctrl-C: for the turn that runs when one does, and for a session
         that is slow to leave. Else it ends the wait for a line, which
         drops what was typed."""
-        if self._shell.running and not self._leaving:
+        if self._shell.running and not self._life.leaving:
             # For the command the user runs
             self._shell.interrupt()
             return
-        if self._leaving or (self._turns.running and not self._over):
+        if self._life.leaving or (self._turns.running and not self._life.over):
             # Acted on by the thread that listens, see _listen: what
             # claude asked is refused with it, which is not done from here
             self._interrupt = True
@@ -280,7 +328,7 @@ class Chat:
         """Told by the thread that reads claude. A wait for a line would
         go on until the user ends it: it is ended as Ctrl-C would. One
         that has not started yet sees that claude is over, see _read."""
-        self._over = True
+        self._becomes(Life.ended)
         self._wake.set()
         if self._reading:
             os.kill(os.getpid(), signal.SIGINT)
@@ -294,7 +342,7 @@ class Chat:
         try:
             # After _reading is set: an end that comes from here on is told
             # by _session_ended, one that came before is seen here
-            if self._over:
+            if self._life.over:
                 raise KeyboardInterrupt
             return self._console.read(prompt, lambda: not self._asker.asking, headed)
         except KeyboardInterrupt:
@@ -310,7 +358,7 @@ class Chat:
         lines: list[str] = []
         # When Ctrl-C last dropped the line, for the one that follows it
         dropped = -math.inf
-        while not self._over:
+        while not self._life.over:
             if not self._console.interactive:
                 self._wait_for_turn()
                 if self._guarded:
@@ -327,7 +375,7 @@ class Chat:
                 # Ctrl-C drops what was typed, unless the session is over.
                 # A second one right after it leaves, as Ctrl-D does
                 lines = []
-                if self._over:
+                if self._life.over:
                     return
                 now = time.monotonic()
                 if now - dropped <= LEAVE_WITHIN:
@@ -362,7 +410,7 @@ class Chat:
         while (
             (self._turns.running or self._agent.pending)
             and not self._asker.asking
-            and not self._over
+            and not self._life.over
         ):
             self._wake.wait(0.2)
             self._wake.clear()
@@ -429,7 +477,7 @@ class Chat:
                     self._page.say([labelled("chat", skipped)])
             self._replies.turn_over()
             self._followed.show(now=True)
-            if not self._left:
+            if not self._life.left:
                 self._page.note("chat", "the session ended")
         except Exception as error:  # noqa: BLE001
             # Whatever it is, the user is told and can leave: a chat that
@@ -563,9 +611,9 @@ class Chat:
         """Ctrl-C: claude is asked to end the turn that runs, and the
         second time the session is stopped. So is one that is slow to
         leave."""
-        if not self._leaving and self._interrupt_turn():
+        if not self._life.leaving and self._interrupt_turn():
             self._page.note("chat", "interrupting, Ctrl-C again stops the session")
-        elif self._leaving or self._turns.running:
+        elif self._life.leaving or self._turns.running:
             self._page.note("chat", "stopping the session")
             docker_ok("stop", self._name)
 
@@ -646,8 +694,7 @@ class Chat:
     def _leave(self, listener: threading.Thread) -> int:
         """End the session, which leaves when it is told no more prompts
         come. Ctrl-C stops one that does not, see _stop."""
-        self._left = not self._over
-        self._leaving = True
+        self._becomes(Life.leave)
         self._asker.give_up()
         # What claude asked is answered before it is told to leave, a
         # refusal that came too late would not be read
@@ -677,7 +724,7 @@ class Chat:
         """Say how the session that was left is gone on with, unless
         another one is about to be."""
         resumed = self._handover is not None and self._handover.session
-        if self._session.id and self._left and not resumed:
+        if self._session.id and self._life.left and not resumed:
             again = f"claude-airlock --line-mode --resume {self._session.id}"
             # Whole: a command to copy, and the id in it is one (see said.py)
             self._page.note("chat", f"to go on with this session: {again}", whole=True)

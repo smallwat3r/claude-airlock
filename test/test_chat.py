@@ -1319,6 +1319,36 @@ class PipeTest:
         waiting.join(PATIENCE)
         assert backlog.get(timeout=PATIENCE) == "next"
 
+    def test_a_chat_is_over_or_left_by_who_ended_first(self):
+        life = talk.Life
+        # The user leaves, then claude ends for it
+        left = life.RUNNING.leave()
+        assert (left.leaving, left.over, left.left) == (True, False, True)
+        assert (left.ended().over, left.ended().left) == (True, True)
+        # Claude ends on its own, and the chat is left after it
+        ended = life.RUNNING.ended()
+        assert (ended.leaving, ended.over, ended.left) == (False, True, False)
+        assert (ended.leave().leaving, ended.leave().left) == (True, False)
+        # Neither is undone, nor counted twice
+        for last in (left.ended(), ended.leave()):
+            assert last.ended() is last
+            assert last.leave() is last
+
+    def test_a_line_is_about_to_be_read_or_being_read_not_both(self):
+        screen = console.Console("/nowhere")
+        screen._entering = "> "
+        assert (screen._entering, screen._reading) == ("> ", None)
+        screen._reading = screen._entering
+        assert (screen._entering, screen._reading) == (None, "> ")
+        # A question has not come before the user until it is said to
+        screen._asked = "allow? "
+        screen._asked_at = 1.0
+        screen._asked = "another? "
+        assert screen._asked_at is None
+        screen._asked = None
+        screen._asked_at = 2.0
+        assert screen._asked_at is None
+
     def test_a_session_that_does_not_read_holds_nobody(self):
         # Claude played by what never reads what it is told
         def run(*_args: str, **options) -> subprocess.Popen:

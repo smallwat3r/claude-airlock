@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import enum
 import os
 import select
 import shutil
@@ -59,6 +60,7 @@ import termios
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TextIO
 
 from ..events import Event, clean, labelled
@@ -165,6 +167,41 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
     return found[:NAMES_OFFERED]
 
 
+class Wait(enum.Enum):
+    """How far the line being read is: none is, its prompt was given to
+    readline and is not on the screen yet, or it is and what is written
+    goes above it."""
+
+    IDLE = enum.auto()
+    ENTERING = enum.auto()
+    READING = enum.auto()
+
+
+@dataclass(frozen=True)
+class Prompting:
+    """The line being read as far as it is, with its prompt: one value,
+    a line is not about to be read and being read at once, and a prompt
+    is of one or the other."""
+
+    wait: Wait = Wait.IDLE
+    prompt: str = ""
+
+    def of(self, wait: Wait) -> str | None:
+        """Its prompt when it is that far, none when it is not."""
+        return self.prompt if self.wait is wait else None
+
+
+@dataclass(frozen=True)
+class Question:
+    """A question that takes the place of the usual prompt: what it
+    asks, and since when it is before the user, as the prompt of a line
+    being read. None while it is not: no answer can be read then, and
+    another question starts without one."""
+
+    prompt: str
+    since: float | None = None
+
+
 class Console:
     """Where a chat reads its lines and writes its own: to out, the
     standard output unless given, as wide as columns says, the terminal
@@ -184,18 +221,16 @@ class Console:
         self.columns = columns or (lambda: shutil.get_terminal_size().columns)
         # The style of a line once it is entered, none for as it was typed
         self._sent = sent
-        # The prompt of the line being read, none while none is
-        self._reading: str | None = None
-        # The prompt to read with instead of the one asked for, see ask,
-        # and the one asked for, to go back to
-        self._asked: str | None = None
+        # The line being read, as far as it is, see Prompting: had and
+        # set through _reading and _entering, its prompt at each stage
+        self._prompting = Prompting()
+        # The question that is read with instead of the prompt asked
+        # for, see ask and Question: had and set through _asked and
+        # _asked_at. And the prompt asked for, to go back to
+        self._question: Question | None = None
         self._usual = ""
-        # When the question asked came before the user, as the prompt of
-        # a line being read: none while it has not, nothing reads then
-        self._asked_at: float | None = None
-        # The prompt of a line readline is about to read, and whether it
-        # says when it has written it
-        self._entering: str | None = None
+        # Whether readline says when it has written the prompt of a line
+        # it is about to read
         self._hooked = False
         # What the next line read starts with, the start of a paste
         self._filled = ""
@@ -234,6 +269,55 @@ class Console:
         self._offered: list[str] = []
         if self._redrawn:
             self._set_up()
+
+    @property
+    def _reading(self) -> str | None:
+        """The prompt of the line being read, none while none is."""
+        return self._prompting.of(Wait.READING)
+
+    @_reading.setter
+    def _reading(self, prompt: str | None) -> None:
+        if prompt is not None:
+            self._prompting = Prompting(Wait.READING, prompt)
+        elif self._prompting.wait is Wait.READING:
+            self._prompting = Prompting()
+
+    @property
+    def _entering(self) -> str | None:
+        """The prompt of a line readline is about to read, none once it
+        has written it."""
+        return self._prompting.of(Wait.ENTERING)
+
+    @_entering.setter
+    def _entering(self, prompt: str | None) -> None:
+        if prompt is not None:
+            self._prompting = Prompting(Wait.ENTERING, prompt)
+        elif self._prompting.wait is Wait.ENTERING:
+            self._prompting = Prompting()
+
+    @property
+    def _asked(self) -> str | None:
+        """The prompt of the question asked, none without one."""
+        return self._question.prompt if self._question else None
+
+    @_asked.setter
+    def _asked(self, prompt: str | None) -> None:
+        # Another question has not come before the user yet
+        if prompt is None:
+            self._question = None
+        elif prompt != self._asked:
+            self._question = Question(prompt)
+
+    @property
+    def _asked_at(self) -> float | None:
+        """When the question asked came before the user, none while it
+        has not, or there is none."""
+        return self._question.since if self._question else None
+
+    @_asked_at.setter
+    def _asked_at(self, since: float | None) -> None:
+        if self._question is not None:
+            self._question = Question(self._question.prompt, since)
 
     @property
     def _typed_on(self) -> bool:
@@ -346,7 +430,7 @@ class Console:
                 if line is not None:
                     # Enter went to the next line
                     self._on_screen = False
-                self._reading = self._entering = None
+                self._prompting = Prompting()
                 self._begun = ""
             # One that came once the line was entered is not for the next
             self._interrupted = False
@@ -524,7 +608,7 @@ class Console:
             with self._lock:
                 if self._entering is None:
                     return
-                self._reading, self._entering = self._entering, None
+                self._reading = self._entering
                 prompt = self._reading if self._asked is None else self._asked
                 if self._asked is not None and self._asked_at is None:
                     # Put in the moment before, and written just below
@@ -580,9 +664,8 @@ class Console:
         that comes while the user is at the prompt, and for one that is
         over without a line: the line being read is not its answer."""
         with self._lock:
+            # One that differs starts as not yet before the user
             was, self._asked = self._asked, prompt
-            if prompt != was:
-                self._asked_at = None
             if self._reading is None or prompt == was:
                 return
             shown = self._usual if prompt is None else prompt
