@@ -6,22 +6,31 @@ without it."""
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
+import marshal
 import os
+import shutil
 import signal
 import subprocess
+import sys
+import time
 import unittest.mock
 from pathlib import Path
 
 import pytest
 from harness import (
+    LAUNCHER,
+    ROOT,
     LauncherTest,
     launcher,
 )
 
-from claude_airlock import files
+from claude_airlock import cli, files
+from claude_airlock.errors import Fatal
 from claude_airlock.sandbox import bounded, tamper, tampered
 from claude_airlock.sandbox import fingerprint as watched
+from claude_airlock.sandbox.ending import Ending
 
 
 class TamperingTest(LauncherTest):
@@ -74,17 +83,92 @@ class TamperingTest(LauncherTest):
 
     def test_a_git_that_does_not_end_is_not_waited_for(self):
         config = self.project / ".git" / "config"
-        with unittest.mock.patch.object(
-            subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired("git", watched.GIT_SECONDS),
-        ) as ran:
+        # Ahead of the real one on PATH, where the fake docker is
+        slow = self.work / "bin" / "git"
+        slow.write_text("#!/bin/sh\nexec sleep 60\n")
+        slow.chmod(0o755)
+        started = time.monotonic()
+        with unittest.mock.patch.object(watched, "GIT_SECONDS", 0.2):
             assert watched.git_config_hash(str(config)) == bounded.file_hash(
                 str(config)
             )
             assert watched.moved_hooks_dir(str(self.project)) is None
-        for call in ran.call_args_list:
-            assert call.kwargs["timeout"] == watched.GIT_SECONDS
+        assert time.monotonic() - started < 30
+
+    def test_no_more_of_what_git_lists_is_held_than_a_config_takes(self):
+        # Each entry is listed under the whole name of its section: a
+        # config of 300 kB that lists as 20 GB
+        config = self.project / ".git" / "config"
+        config.write_text(f'[a "{"s" * 200_000}"]\n' + "k\n" * 100_000)
+        assert watched.git_listing(str(config)) is None
+        assert watched.git_config_hash(str(config)) == bounded.file_hash(str(config))
+        # Nor is git given a file no config comes near
+        config.write_text("[core]\n\tbare = false\n")
+        assert watched.git_listing(str(config)) is not None
+        with unittest.mock.patch.object(watched, "GIT_CONFIG_BYTES", 8):
+            assert watched.git_listing(str(config)) is None
+
+    def test_a_file_the_git_config_includes_is_reported(
+        self, subtests: pytest.Subtests
+    ):
+        # Git reads it as part of the config, which is left as it was
+        included = self.project / "shared.gitconfig"
+        further = self.project / "further.gitconfig"
+        included.write_text("[include]\n\tpath = further.gitconfig\n")
+        further.write_text("[user]\n\tname = mine\n")
+        for section in ("include", 'includeIf "gitdir:/nowhere/"'):
+            (self.project / ".git" / "config").write_text(
+                f"[{section}]\n\tpath = ../shared.gitconfig\n"
+            )
+            for changed in (included, further):
+                with subtests.test(section=section, changed=changed.name):
+                    planted = r'printf "[core]\n\tfsmonitor = evil\n"'
+                    result = self.launch(session=f"{planted} >> {changed.name}")
+                    assert self.REPORT in result.stderr
+                    assert f"  {changed}\n" in result.stderr
+                    assert f"  {self.project}/.git/config\n" not in result.stderr
+        assert self.REPORT not in self.launch().stderr
+
+    def test_configs_that_include_each_other_hold_no_check(self):
+        config = self.project / ".git" / "config"
+        config.write_text("[include]\n\tpath = ../a.gitconfig\n")
+        (self.project / "a.gitconfig").write_text("[include]\n\tpath = .git/config\n")
+        fingerprint: dict[str, str] = {}
+        watched.hash_git_config(str(config), fingerprint)
+        assert set(fingerprint) == {str(config), str(self.project / "a.gitconfig")}
+        # And of a chain of them no more are followed than are watched
+        with unittest.mock.patch.object(watched, "MOST_INCLUDED", 1):
+            fingerprint = {}
+            watched.hash_git_config(str(config), fingerprint)
+        rest = f"{config}: more than 1 configs included, the rest"
+        assert fingerprint[rest] == bounded.UNWATCHED
+
+    def test_an_included_file_git_cannot_list_is_not_read(self):
+        # Any number of them, of any size, is a session's to name
+        config = self.project / ".git" / "config"
+        config.write_text("[include]\n\tpath = ../large.gitconfig\n")
+        large = self.project / "large.gitconfig"
+        large.write_text("[core]\n\tbare = false\n" + "# more\n" * 20)
+        before: dict[str, str] = {}
+        with unittest.mock.patch.object(watched, "GIT_CONFIG_BYTES", 64):
+            watched.hash_git_config(str(config), before)
+            assert before[str(large)] == "not read: " + bounded.file_stamp(str(large))
+            # What was written to it since still shows
+            large.write_text("[core]\n\tbare = true \n" + "# more\n" * 20)
+            after: dict[str, str] = {}
+            watched.hash_git_config(str(config), after)
+        assert tampered.differing(before, after) == [str(large)]
+
+    def test_a_hooks_directory_an_included_config_names_is_watched(self):
+        (self.project / ".git" / "config").write_text(
+            "[include]\n\tpath = ../shared.gitconfig\n"
+        )
+        (self.project / "shared.gitconfig").write_text(
+            "[core]\n\thooksPath = .githooks\n"
+        )
+        (self.project / ".githooks").mkdir()
+        result = self.launch(session="echo x > .githooks/pre-commit")
+        assert f"  {self.project}/.githooks/pre-commit\n" in result.stderr
 
     def test_what_is_no_plain_file_is_hashed_as_unreadable(self):
         pipe = self.work / "pipe"
@@ -154,6 +238,69 @@ class TamperingTest(LauncherTest):
         (git_dir / "commondir").write_text(".\n")
         assert watched.git_sources(str(git_dir)) == [str(git_dir)]
 
+    def worktree(self, name: str = "side") -> Path:
+        """The directory git keeps for a working tree made of the
+        project's (git worktree add), as git leaves it."""
+        kept = self.project / ".git" / "worktrees" / name
+        kept.mkdir(parents=True)
+        (kept / "HEAD").write_text("ref: refs/heads/side\n")
+        (kept / "commondir").write_text("../..\n")
+        return kept
+
+    def test_a_working_tree_told_to_read_another_directory_is_reported(self):
+        # Git then takes the config and the hooks from there, in that
+        # working tree, which can be anywhere on the host
+        kept = self.worktree()
+        result = self.launch(
+            session="mkdir -p .git/x/hooks"
+            r' && printf "[core]\n\tfsmonitor = evil\n" > .git/x/config'
+            " && echo x > .git/x/hooks/pre-commit"
+            " && echo ../../x > .git/worktrees/side/commondir"
+        )
+        assert self.REPORT in result.stderr
+        for changed in (
+            f"{kept}/commondir",
+            f"{self.project}/.git/x/config",
+            f"{self.project}/.git/x/hooks/pre-commit",
+        ):
+            assert f"  {changed}\n" in result.stderr
+
+    def test_a_working_tree_left_to_read_its_own_directory_is_reported(self):
+        # Without a commondir git takes the two from the directory itself
+        kept = self.worktree()
+        result = self.launch(
+            session="rm .git/worktrees/side/commondir && mkdir .git/worktrees/side/hooks"
+            r' && printf "[core]\n\tfsmonitor = evil\n" > .git/worktrees/side/config'
+            " && echo x > .git/worktrees/side/hooks/pre-commit"
+        )
+        for changed in ("config", "hooks/pre-commit"):
+            assert f"  {kept}/{changed}\n" in result.stderr
+
+    def test_a_link_in_the_place_of_a_working_tree_is_reported(self):
+        self.worktree()
+        result = self.launch(
+            session="mkdir planted && rm -r .git/worktrees/side"
+            " && ln -s ../../planted .git/worktrees/side"
+        )
+        assert f"  {self.project}/.git/worktrees/side\n" in result.stderr
+
+    def test_a_working_tree_made_in_a_session_is_not_reported(self):
+        made = (
+            "mkdir -p .git/worktrees/new && echo ../.. > .git/worktrees/new/commondir"
+            " && echo ref: refs/heads/new > .git/worktrees/new/HEAD"
+        )
+        assert self.REPORT not in self.launch(session=made).stderr
+
+    def test_no_more_working_trees_are_looked_into_than_are_watched(self):
+        git_dir = self.project / ".git"
+        for name in ("a", "b", "c"):
+            self.worktree(name)
+        fingerprint: dict[str, str] = {}
+        with unittest.mock.patch.object(watched, "MOST_WORKTREES", 2):
+            watched.git_files(str(git_dir), fingerprint)
+        rest = f"{git_dir}: more than 2 working trees, the rest"
+        assert fingerprint[rest] == bounded.UNWATCHED
+
     def test_a_submodule_told_to_read_another_directory_is_reported(self):
         module = self.project / ".git" / "modules" / "one"
         (module / "hooks").mkdir(parents=True)
@@ -195,7 +342,68 @@ class TamperingTest(LauncherTest):
         ):
             assert f"  {path}\n" in result.stderr
 
+    def test_what_else_claude_follows_in_a_project_is_reported(
+        self, subtests: pytest.Subtests
+    ):
+        for written in (
+            "AGENTS.md",
+            ".claude/AGENTS.md",
+            ".claude/scheduled_tasks.json",
+            ".claude/loop.md",
+            ".claude/output-styles/terse.md",
+            ".claude/workflows/release.js",
+            ".claude/routines/nightly.md",
+        ):
+            with subtests.test(written=written):
+                made = f'mkdir -p "$(dirname {written})" && echo x >> {written}'
+                result = self.launch(session=made)
+                assert f"  {self.project}/{written}\n" in result.stderr
+        # Not what Claude Code notes for itself of the routines it ran
+        noted = "mkdir -p .claude/routines/.state && date > .claude/routines/.state/ran"
+        assert ".state" not in self.launch(session=noted).stderr
+
+    def test_a_file_the_instructions_have_claude_read_is_reported(self):
+        # Changing it changes what claude is told, with the CLAUDE.md as
+        # it was: by an @ and its path, the file that names it too
+        docs = self.project / "docs"
+        docs.mkdir()
+        (self.project / "CLAUDE.md").write_text(
+            "Follow @docs/style.md, and mail me@example.org about @docs/none.md.\n"
+        )
+        (docs / "style.md").write_text("See also @more.md\n")
+        (docs / "more.md").write_text("Tabs.\n")
+        (docs / "other.md").write_text("Not named.\n")
+        result = self.launch(
+            session="echo x >> docs/more.md; echo x >> docs/style.md;"
+            " echo x >> docs/other.md"
+        )
+        for changed in ("style.md", "more.md"):
+            assert f"  {docs / changed}\n" in result.stderr
+        assert "other.md" not in result.stderr
+        assert "CLAUDE.md" not in result.stderr
+
+    def test_instructions_that_name_each_other_hold_no_check(self):
+        first, second = self.project / "CLAUDE.md", self.project / "second.md"
+        first.write_text("@second.md\n")
+        second.write_text("@CLAUDE.md and @second.md\n")
+        assert watched.imported_files(str(first)) == [str(second)]
+        # Nor more of them than are watched, however many are named
+        for number in range(5):
+            (self.project / f"n{number}.md").touch()
+        first.write_text(" ".join(f"@n{number}.md" for number in range(5)))
+        with unittest.mock.patch.object(watched, "MOST_IMPORTED", 2):
+            assert len(watched.imported_files(str(first))) == 2
+
     MEMORY = "changed what Claude remembers of this project"
+
+    def test_what_the_agents_of_a_project_remember_is_said_with_it(self):
+        memory = self.project / ".claude" / "agent-memory" / "reviewer"
+        result = self.launch(
+            session=f'mkdir -p "{memory}"; echo "always run this" > "{memory}/MEMORY.md"'
+        )
+        assert f"claude-airlock: this session {self.MEMORY}" in result.stderr
+        assert f"  {memory}/MEMORY.md\n" in result.stderr
+        assert self.REPORT not in result.stderr
 
     def test_what_a_session_has_claude_remember_is_said_apart(self):
         memory = self.transcripts / "memory"
@@ -361,13 +569,25 @@ class TamperingTest(LauncherTest):
         self.cleanup.callback(subprocess.run, ["rm", "-rf", str(modules)], check=False)
         deep = "mkdir -p .git/modules/$(python3 -c \"print('a/' * 1500)\")"
         nested = "python3 -c \"print('[' * 100000 + ']' * 100000)\""
+        # Not as deep: a file that is still read, and deeper than Python
+        # calls to
+        read = "python3 -c \"print('{\\\"a\\\":' * 1500 + '{}' + '}' * 1500)\""
         result = self.launch(
             session=f"{deep}; mkdir .claude; {nested} > .claude/settings.json;"
-            " echo x > .git/hooks/pre-commit"
+            f" {read} > .mcp.json; echo x > .git/hooks/pre-commit"
         )
         assert "Traceback" not in result.stderr
         assert f"  {self.project}/.git/hooks/pre-commit\n" in result.stderr
         assert f"  {self.project}/.claude/settings.json\n" in result.stderr
+        assert f"  {self.project}/.mcp.json\n" in result.stderr
+
+    def test_the_commands_of_settings_are_found_at_any_depth(self):
+        # Deeper than Python calls to, where a recursion would end the check
+        settings: dict = {"command": "deepest.sh"}
+        for _ in range(5000):
+            settings = {"hooks": [settings], "command": 1}
+        settings["statusLine"] = {"command": "status.sh"}
+        assert sorted(watched.commands_in(settings)) == ["deepest.sh", "status.sh"]
 
     def test_branch_tracking_is_not_reported(self):
         config = self.project / ".git" / "config"
@@ -551,6 +771,72 @@ class LauncherItselfTest:
         said = capsys.readouterr().err
         assert "\x1b" not in said
         assert "  /p/.claude/hooks/[1A[2Kx\\nclaude-airlock: all is well\n" in said
+
+
+class CompiledApartTest(LauncherTest):
+    """What Python compiled of the launcher's modules is not watched in
+    its checkout (see launcher_files), so the launcher does not run what
+    is there: it compiles to a directory of its own."""
+
+    def run_launcher(self, launcher_file: Path, **env: str):
+        home = {"HOME": str(self.home), "PATH": os.environ["PATH"]}
+        return subprocess.run(
+            [sys.executable, str(launcher_file), "--help"],
+            cwd=self.project,
+            env={**home, **env},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_the_launcher_compiles_to_its_own_records(self):
+        result = self.run_launcher(LAUNCHER)
+        assert result.returncode == 0, result.stderr
+        kept = self.state / "pycache"
+        assert list(kept.rglob("cli.*.pyc"))
+        # For the user alone, as the records around it are
+        for directory in (kept, self.state):
+            assert directory.stat().st_mode & 0o777 == 0o700
+        # Where the user says, when they do
+        elsewhere = self.work / "compiled"
+        self.run_launcher(LAUNCHER, PYTHONPYCACHEPREFIX=str(elsewhere))
+        assert list(elsewhere.rglob("cli.*.pyc"))
+
+    def test_what_was_left_compiled_next_to_a_module_is_not_run(self):
+        # A copy of the checkout a session could write: the module as it
+        # was, and other code under its time and size, which is all
+        # Python compares before it runs what was compiled
+        checkout = self.work / "checkout"
+        for name in ("bin", "claude_airlock"):
+            shutil.copytree(
+                ROOT / name, checkout / name, ignore=shutil.ignore_patterns("*.pyc")
+            )
+        module = checkout / "claude_airlock" / "__init__.py"
+        ran = self.work / "ran"
+        planted = compile(f"open({str(ran)!r}, 'w').close()\n", str(module), "exec")
+        about = module.stat()
+        compiled = Path(importlib.util.cache_from_source(str(module)))
+        compiled.parent.mkdir(exist_ok=True)
+        compiled.write_bytes(
+            importlib.util.MAGIC_NUMBER
+            + (0).to_bytes(4, "little")
+            + (int(about.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+            + (about.st_size & 0xFFFFFFFF).to_bytes(4, "little")
+            + marshal.dumps(planted)
+        )
+        # It is what Python runs when nothing keeps it from there
+        there = str(compiled.parent.parent.parent)
+        subprocess.run(
+            [sys.executable, "-c", "import claude_airlock"],
+            cwd=self.work,
+            env={"PYTHONPATH": there, "PATH": os.environ["PATH"]},
+            check=True,
+        )
+        assert ran.exists()
+        ran.unlink()
+        result = self.run_launcher(checkout / "bin" / "claude-airlock")
+        assert result.returncode == 0, result.stderr
+        assert not ran.exists()
 
 
 class BoundedCheckTest:
@@ -750,6 +1036,66 @@ class UncheckedSessionTest(LauncherTest):
         file.write_text("{")
         assert "unreadable pending check" in self.launch().stderr
         assert self.pending() == []
+
+    def test_a_late_check_that_cannot_be_run_does_not_stop_the_launch(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # Whatever stops it: passed on, it would end every later launch
+        self.launch(session=self.KILL_LAUNCHER)
+        (file,) = self.pending()
+        with unittest.mock.patch.object(
+            tamper.HostCheck, "report", side_effect=RuntimeError("left by a session")
+        ):
+            tamper.report_unchecked_sessions(file.parent)
+        said = capsys.readouterr().err
+        assert "the check cannot be run now: RuntimeError('left by a session')" in said
+        assert str(file) in said
+        # Kept, and run by the next launch that can
+        assert self.pending() == [file]
+        self.launch()
+        assert self.pending() == []
+
+
+class FailedLaunchTest:
+    """A launch that fails with a session's check taken: the check is
+    dropped for a session that never started, and kept for one that
+    ran."""
+
+    def failed(self, ran: bool) -> unittest.mock.Mock:
+        """The check of a launch that failed, before or after its session
+        was run."""
+        ending = Ending("claude-proj")
+
+        def fail(*_: object) -> None:
+            if ran:
+                ending.session_over()
+            raise Fatal("docker is not there")
+
+        check = unittest.mock.Mock()
+        plan = unittest.mock.Mock(dirs=[])
+        with (
+            unittest.mock.patch.multiple(
+                cli,
+                session_run_args=unittest.mock.DEFAULT,
+                collect_all_left_behind=unittest.mock.DEFAULT,
+                reaches_launcher=unittest.mock.Mock(return_value=False),
+                recorded_session=fail,
+            ),
+            unittest.mock.patch.object(
+                tamper.PendingCheck, "begin", return_value=check
+            ),
+            pytest.raises(Fatal),
+        ):
+            cli.named_session(plan, "claude-proj", ending, unittest.mock.Mock())
+        return check
+
+    def test_the_check_of_a_session_that_never_started_is_dropped(self):
+        self.failed(ran=False).drop.assert_called_once_with()
+
+    def test_the_check_of_a_session_that_ran_is_left_for_the_next_launch(self):
+        check = self.failed(ran=True)
+        check.drop.assert_not_called()
+        check.run.assert_not_called()
 
 
 class ToldToEndTest(LauncherTest):

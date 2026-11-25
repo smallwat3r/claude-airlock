@@ -348,8 +348,33 @@ class ConfigFileTest(LauncherTest):
 
     def test_what_a_session_is_told_of_itself_is_no_unknown_setting(self):
         # A launcher run in a session finds them in its environment
-        told = {"CLAUDE_AIRLOCK_SANDBOX": "claude-proj", "CLAUDE_AIRLOCK_DIRS": "/x"}
+        told = {
+            "CLAUDE_AIRLOCK_SANDBOX": "claude-proj",
+            "CLAUDE_AIRLOCK_DIRS": "/x",
+            "CLAUDE_AIRLOCK_KERNEL": "gVisor",
+        }
         assert self.launch(**told).status == 0
+
+    def test_a_value_written_as_a_shell_would_take_it_is_refused(
+        self, subtests: pytest.Subtests
+    ):
+        # Taken as it is, it would name nothing, and hide or protect
+        # nothing, without a word
+        for line in (
+            'CLAUDE_AIRLOCK_SHADOW="*.pem:.npmrc"',
+            "CLAUDE_AIRLOCK_SHADOW='*.pem'",
+            'CLAUDE_AIRLOCK_PROTECT="~/kit"',
+            "CLAUDE_AIRLOCK_SHADOW=*.pem ",
+            "CLAUDE_AIRLOCK_MEMORY= 8g",
+        ):
+            with subtests.test(line=line):
+                self.write_config(line)
+                refused = self.launch()
+                self.assert_refused(refused, "a value is taken as it is written")
+                assert line in refused.stderr
+        # A quote that is part of a value is one
+        self.write_config("CLAUDE_AIRLOCK_SHADOW=*.pem:it's")
+        assert self.launch().status == 0
 
     def test_rejects_per_project_settings(self):
         self.write_config("CLAUDE_AIRLOCK_EXTRA_DIRS=/tmp")

@@ -210,7 +210,9 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
   `CLAUDE_AIRLOCK_FEATURES` and `CLAUDE_AIRLOCK_SHARED_DIR`, where empty
   says none.
 - Values are taken literally, without quotes. A leading `~` is your home
-  directory in the settings that take a path.
+  directory in the settings that take a path. A value in quotes, or with
+  blanks around it, stops the launcher: taken as it is, it would hide or
+  protect nothing.
 - A name given twice stops the launcher, as an unknown one does.
 - The file is only read from your config directory, never from the
   project, which a session can write to.
@@ -281,6 +283,17 @@ do on its own, also when something it read told it to:
   another site of the same network.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
   are readable.
+- What Python compiled of a project's modules (`__pycache__`) is run in
+  the place of a module whose time and size it carries, and no diff
+  shows it. A session can leave such a file. The launcher does not run
+  its own from there, your tools still do: remove those directories
+  before you run a project's Python on the host after a session you do
+  not trust.
+- Claude Code names the directory of a project's transcripts after its
+  path, with every character that is no letter or digit as a dash. Two
+  projects whose paths differ in such characters alone (`my-app` and
+  `my_app`) share one, and a session of either reads what the other's
+  sessions said and remember.
 
 ## Reviewing a session
 

@@ -6,6 +6,7 @@ proxy. Made as needed and shared by the sessions of every project."""
 from __future__ import annotations
 
 import ipaddress
+from contextlib import suppress
 from dataclasses import dataclass
 
 from ..docker import (
@@ -172,3 +173,22 @@ def session_address(name: str) -> str:
         return str(ipaddress.ip_address(found.split()[0]))
     except (IndexError, ValueError):
         return ""
+
+
+def session_addresses(name: str) -> tuple[str, ...]:
+    """Every address docker gave the container on its networks, none
+    until it has one: the one of IPv4, and the one of IPv6 on a daemon
+    that gives its networks both. A session asks a proxy from whichever
+    of them it likes, and what it asked is told by the address it came
+    from: known by the first alone, what it asked from the other would be
+    nobody's."""
+    addresses = (
+        "{{range .NetworkSettings.Networks}}"
+        "{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"
+    )
+    said = docker_output("container", "inspect", f"--format={addresses}", name)
+    found: dict[str, None] = {}
+    for address in said.split():
+        with suppress(ValueError):
+            found[str(ipaddress.ip_address(address))] = None
+    return tuple(found)

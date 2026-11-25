@@ -18,7 +18,33 @@ from harness import (
 )
 
 from claude_airlock import docker, launcher
-from claude_airlock.sandbox import socket_proxy
+from claude_airlock.sandbox import session, socket_proxy
+
+
+class SessionUserTest(LauncherTest):
+    def test_a_user_the_image_does_not_know_is_given_an_entry_of_their_own(self):
+        # Without one ssh refuses to run, and git over SSH with it
+        passwd = self.state / "passwd"
+        with mock.patch.multiple(os, getuid=lambda: 501, getgid=lambda: 20):
+            args = session.user_args(self.host)
+        assert args == ["--user=501:20", f"--volume={passwd}:/etc/passwd:ro,z"]
+        entries = passwd.read_text().splitlines()
+        assert "sandbox:x:501:20::/home/sandbox:/bin/bash" in entries
+        assert "root:x:0:0:root:/root:/bin/bash" in entries
+        assert passwd.stat().st_mode & 0o777 == 0o600
+        # Made again for another user, and left alone for the same one
+        with mock.patch.multiple(os, getuid=lambda: 1001, getgid=lambda: 1001):
+            session.user_args(self.host)
+            written = passwd.stat().st_mtime_ns
+            session.user_args(self.host)
+        assert "sandbox:x:1001:1001::/home/sandbox:/bin/bash" in passwd.read_text()
+        assert passwd.stat().st_mtime_ns == written
+
+    def test_the_users_the_image_knows_are_left_to_it(self):
+        for uid in (0, session.IMAGE_UID):
+            with mock.patch.multiple(os, getuid=lambda uid=uid: uid, getgid=lambda: 7):
+                assert session.user_args(self.host) == [f"--user={uid}:7"]
+        assert not (self.state / "passwd").exists()
 
 
 class DefaultSessionTest(LauncherTest):

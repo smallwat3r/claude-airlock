@@ -38,6 +38,7 @@ from ..docker import env_arg, mount_arg, project_slug
 from ..files import bounded_lines, json_object, private_dir, write_whole
 from ..projects import project_roots, transcript_dirs
 from ..settings import CONTAINER_CLAUDE, Host, Settings
+from .mounts import empty_dir
 
 # What Claude Code names the transcripts of a worktree after: the project's
 # own name, then its path below the project (.claude/worktrees/NAME) dashed
@@ -149,7 +150,7 @@ def history_args(settings: Settings, host: Host) -> list[str]:
     others = other_projects(host)
     args = []
     if others:
-        empty = private_dir(os.path.join(host.history_dir, "empty"))
+        empty = empty_dir(host)
         args += [
             mount_arg(empty, f"{claude}/projects/{name}", "ro,z") for name in others
         ]

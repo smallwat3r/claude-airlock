@@ -15,9 +15,10 @@ from harness import ROOT, LauncherTest, settings
 from claude_airlock import errors
 
 NAMED = re.compile(r"CLAUDE_AIRLOCK_[A-Z_]+")
-# What a session is told that is not a setting: its container's name, and
-# the directories mounted next to its project
-TOLD_TO_A_SESSION = {"CLAUDE_AIRLOCK_SANDBOX", "CLAUDE_AIRLOCK_DIRS"}
+# What a session is told that is not a setting: its container's name, the
+# directories mounted next to its project, and the kernel it runs on when
+# that is its own
+TOLD_TO_A_SESSION = set(settings.SESSION_SAID)
 
 
 class SettingsListTest(LauncherTest):

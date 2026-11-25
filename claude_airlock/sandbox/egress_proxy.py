@@ -7,9 +7,13 @@ kept by asked_hosts.py."""
 from __future__ import annotations
 
 import os
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
+from ..background import in_background
 from ..docker import (
     docker_must,
     docker_ok,
@@ -29,13 +33,15 @@ SQUID_IMAGE = "ubuntu/squid:latest@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38c
 # as the current file and the one before it (logfile_rotate in squid.conf).
 # The current one is rotated out once it is over the limit, which bounds the
 # volume at about twice that. Squid only rotates when told to, the launcher
-# does so when a filtered session starts: one very long session can
-# overshoot, a cron in the sidecar would be the fix if that ever matters.
+# does so when a filtered session starts and every ROTATE_EVERY seconds for
+# as long as one runs: a session that floods the proxy with requests has
+# the log overshoot by what is logged in that time, and no further.
 EGRESS_LOG_VOLUME = "claude-egress-log"
 EGRESS_LOG_DIR = "/var/log/squid"
 # Where the proxy logs each request, in it
 EGRESS_ACCESS_LOG = f"{EGRESS_LOG_DIR}/access.log"
 EGRESS_LOG_LIMIT = 10 * 1024 * 1024
+ROTATE_EVERY = 10.0
 # How the proxy asks about a host that is not on its list, and where it
 # finds what the launchers of the sessions that ask keep for it (see
 # asked_hosts.py and docker/squid-ask-helper.sh)
@@ -121,3 +127,21 @@ def rotate_access_log() -> None:
     a session is not held up over its proxy's housekeeping."""
     over_limit = f'[ "$(stat -c %s {EGRESS_ACCESS_LOG})" -gt {EGRESS_LOG_LIMIT} ]'
     docker_ok("exec", EGRESS_PROXY, "sh", "-c", f"{over_limit} && squid -k rotate")
+
+
+def keep_access_log_rotated(stop: threading.Event) -> None:
+    """Rotate the proxy's log out whenever it is found over the limit,
+    every ROTATE_EVERY seconds until told to stop."""
+    while not stop.wait(ROTATE_EVERY):
+        rotate_access_log()
+
+
+@contextmanager
+def access_log_rotated() -> Iterator[None]:
+    """While a filtered session runs, keep the proxy's log within its
+    limit. The session is what the log grows by: one that has request
+    after request refused, each with a URL as long as the proxy takes,
+    would have it grow for as long as it runs, and every reader of the
+    log after it read all of that."""
+    with in_background(keep_access_log_rotated):
+        yield

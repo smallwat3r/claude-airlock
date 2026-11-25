@@ -25,11 +25,18 @@ from ..docker import (
     mount_arg,
     project_slug,
 )
-from ..files import expand_home, private_dir, settings_object, try_lock_file
+from ..files import (
+    expand_home,
+    private_dir,
+    settings_object,
+    try_lock_file,
+    write_whole,
+)
 from ..settings import (
     BIN_DIR,
     CONTAINER_CLAUDE,
     CONTAINER_HOME,
+    SESSION_KERNEL,
     SESSION_SANDBOX,
     Host,
     Settings,
@@ -125,6 +132,50 @@ def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
     return ["--dangerously-skip-permissions"]
 
 
+# The number of the one user the image has besides root, sandbox, which
+# its base image gave it
+IMAGE_UID = 1000
+# What a session whose user has another number is given as /etc/passwd:
+# root, the user of the session under the image's name and with its home,
+# and nobody
+KNOWN_USERS = (
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "sandbox:x:{uid}:{gid}::{home}:/bin/bash\n"
+    "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+)
+
+
+def users_file(host: Host, uid: int, gid: int) -> str:
+    """The passwd of a session whose user is not the image's, see
+    user_args: a file of the launcher's, made when it is not there or
+    says something else."""
+    path = os.path.join(private_dir(host.state_dir), "passwd")
+    content = KNOWN_USERS.format(uid=uid, gid=gid, home=CONTAINER_HOME)
+    try:
+        kept = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        kept = ""
+    if kept != content:
+        write_whole(path, content)
+    return path
+
+
+def user_args(host: Host) -> list[str]:
+    """Who a session runs as: the user of the launcher, so that what it
+    writes in the project is theirs. The image knows one user, by the
+    number IMAGE_UID. A session of a user with another number (501 on
+    macOS, a second account on Linux) would run as nobody the image has
+    heard of, and what asks who it is fails for it: ssh above all ("No
+    user exists for uid 501"), and with it git over SSH and the door of
+    the SSH agent. So such a session is given a passwd in which that
+    number is the image's user. Not root, which the image knows."""
+    uid, gid = os.getuid(), os.getgid()
+    args = [f"--user={uid}:{gid}"]
+    if uid not in (0, IMAGE_UID):
+        args.append(mount_arg(users_file(host, uid, gid), "/etc/passwd", "ro,z"))
+    return args
+
+
 def base_args(
     settings: Settings, host: Host, name: str, runtime: Runtime = DOCKERS_OWN
 ) -> list[str]:
@@ -141,7 +192,7 @@ def base_args(
         # an init, zombies accumulate and count toward --pids-limit
         "--init",
         f"--name={name}",
-        f"--user={os.getuid()}:{os.getgid()}",
+        *user_args(host),
         f"--workdir={host.project_dir}",
         # Run under the host home path (symlinked to /home/sandbox in the image)
         # so absolute paths in the config of ~/.claude resolve consistently
@@ -170,6 +221,9 @@ def base_args(
         env_arg("CLAUDE_AIRLOCK_MEMORY", settings.memory),
         env_arg("CLAUDE_AIRLOCK_PIDS", settings.pids),
         *([env_arg("CLAUDE_AIRLOCK_CPUS", settings.cpus)] if settings.cpus else []),
+        # And of a kernel of its own, under which it is ended as a whole
+        # at a limit and has to keep well below it, see runtime.py
+        *([env_arg(SESSION_KERNEL, runtime.KIND)] if runtime.KIND else []),
         # No gpg binary (or key) in the image, so a host gitconfig with
         # commit.gpgsign=true would make every commit fail. Sign the
         # sandbox's commits at review time, before pushing.

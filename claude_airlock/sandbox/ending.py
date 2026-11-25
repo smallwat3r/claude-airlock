@@ -63,6 +63,12 @@ class Ending:
     def session_over(self) -> None:
         self._over.set()
 
+    @property
+    def session_was_run(self) -> bool:
+        """Whether the session got as far as being run: until then
+        nothing of it can have changed a file."""
+        return self._over.is_set()
+
     def status(self, status: int) -> int:
         """What the launcher ends with: the session's status, or the way
         a shell reports the signal that ended it."""

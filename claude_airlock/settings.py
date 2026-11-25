@@ -34,11 +34,14 @@ CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
-# What a session is told of itself under that prefix, its container and
-# the directories mounted next to the project. Not settings, and not
-# taken for a misspelled one where a launcher runs in a session.
+# What a session is told of itself under that prefix: its container, the
+# directories mounted next to the project, and the kernel it runs on when
+# that is not the host's. Not settings, and not taken for a misspelled
+# one where a launcher runs in a session.
 SESSION_SANDBOX = SETTING_PREFIX + "SANDBOX"
 SESSION_DIRS = SETTING_PREFIX + "DIRS"
+SESSION_KERNEL = SETTING_PREFIX + "KERNEL"
+SESSION_SAID = frozenset((SESSION_SANDBOX, SESSION_DIRS, SESSION_KERNEL))
 # What the launcher is called, and says its own word under
 NAME = "claude-airlock"
 
@@ -407,7 +410,10 @@ def read_config_file(path: str) -> dict[str, str]:
     that take a path to expand). A line that is not a known setting
     aborts, and so does a name given twice: a typo must not silently
     leave a restriction off, nor a later line undo an earlier one. So
-    does a file that cannot be read, which would say nothing.
+    does a value in quotes or with blanks around it, written as a shell
+    would take it: taken as it is, it names nothing, and what it was to
+    hide or protect would be left open without a word. So does a file
+    that cannot be read, which would say nothing.
     Deliberately not read from the project, the session can write there
     and could switch its own sandboxing off for the next run."""
     values: dict[str, str] = {}
@@ -429,6 +435,12 @@ def read_config_file(path: str) -> dict[str, str]:
             raise Fatal(f"{path}: not a known setting: {line}")
         if name in values:
             raise Fatal(f"{path}: set twice: {name}")
+        quoted = len(value) > 1 and value[0] == value[-1] and value[0] in "\"'"
+        if quoted or value != value.strip():
+            raise Fatal(
+                f"{path}: a value is taken as it is written, without quotes"
+                f" and without blanks around it: {line}"
+            )
         values[name] = value
     return values
 
@@ -446,7 +458,7 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     is none aborts, as it does in the config file."""
     file_values = read_config_file(config_file)
     defaults = Settings()
-    known = {setting.variable for setting in SETTINGS} | {SESSION_SANDBOX, SESSION_DIRS}
+    known = {setting.variable for setting in SETTINGS} | SESSION_SAID
     named = sorted(name for name in env if name.startswith(SETTING_PREFIX))
     unknown = [name for name in named if name not in known]
     if unknown:

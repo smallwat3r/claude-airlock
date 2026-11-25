@@ -18,7 +18,12 @@ from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..projects import memory_dirs
 from ..settings import Host
-from .fingerprint import build_fingerprint, host_exec_fingerprint, project_names
+from .fingerprint import (
+    agent_memory_dirs,
+    build_fingerprint,
+    host_exec_fingerprint,
+    project_names,
+)
 from .history import own_names
 from .home import CONFIG
 from .tampered import (
@@ -27,6 +32,9 @@ from .tampered import (
     report_projects,
     report_tampering,
 )
+
+# How much is said of what stopped a check that could not be run
+PROBLEM_WIDTH = 200
 
 
 def texts(value: object) -> list[str]:
@@ -170,7 +178,7 @@ class PendingCheck:
         check = HostCheck.take(
             watched,
             host.claude_dir,
-            memory_dirs(host),
+            memory_dirs(host) + agent_memory_dirs(watched),
             shared_config,
             sorted(own_names(host)),
         )
@@ -207,5 +215,19 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         if session_alive(launcher, file.stem):
             continue
-        check.report(file.stem)
+        try:
+            check.report(file.stem)
+        except Exception as problem:  # noqa: BLE001
+            # Whatever a session left that the check does not get through:
+            # said, and kept for the next launch to try again. Passed on,
+            # it would end this launch and every one after it, of any
+            # project, and a session could have meant it to.
+            warn(
+                f"the session {file.stem} ended without its check, and the"
+                f" check cannot be run now: {repr(problem)[:PROBLEM_WIDTH]}",
+                f"What it left behind is not known. The check is kept in {file}"
+                " and tried again by the next launch, remove the file to be"
+                " rid of it.",
+            )
+            continue
         file.unlink(missing_ok=True)

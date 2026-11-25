@@ -185,23 +185,53 @@ def mount_arg(
 
 def hidden_arg(path: str) -> str:
     """Nothing mounted over a file, read-only: it reads as empty in the
-    container. A path with a colon is mounted the long way, where each
-    part is named and none is told from the next by a colon: a session
-    can make a file of such a name, and one that could not be hidden
-    would have every later launch refuse to start. Each part is a field
-    as CSV writes them, in quotes when it holds a comma or a quote. Not
-    with a line break in it, which that reader changes."""
+    container. A path with a colon is mounted the long way, see
+    long_mount_arg: a session can make a file of such a name, and one
+    that could not be hidden would have every later launch refuse to
+    start."""
     if ":" not in path:
         return mount_arg("/dev/null", path, "ro")
+    return long_mount_arg("/dev/null", path)
+
+
+def covered_arg(empty: str, path: str) -> str:
+    """An empty directory mounted over one, read-only: it holds nothing
+    in the container. A path with a colon the long way, as hidden_arg
+    and for the same reason."""
+    if ":" not in path:
+        return mount_arg(empty, path, "ro,z")
+    return long_mount_arg(empty, path)
+
+
+def held_arg(path: str) -> str:
+    """A directory mounted on itself, writable as it was: a mount cannot
+    be renamed or removed, which is what it is for (see held_in_place of
+    sandbox/mounts.py). One with a colon in its name the long way, as
+    hidden_arg and for the same reason: a session can make one above a
+    file that is hidden."""
+    if ":" not in path:
+        return mount_arg(path, path, "z")
+    return long_mount_arg(path, path, read_only=False)
+
+
+def long_mount_arg(source: str, path: str, read_only: bool = True) -> str:
+    """A bind mount over a path with a colon in it, read-only unless
+    told otherwise, written the long way, where each part is named and
+    none is told from the next by a colon. Each part is a field as CSV
+    writes them, in quotes when it holds a comma or a quote. Not with a
+    line break in it, which that reader changes."""
     if "\n" in path or "\r" in path:
         raise Fatal(
             f"cannot hide {path!r}: docker takes no path with a colon and a"
             " line break, rename or remove the file"
         )
-    target = f"target={path}"
-    if "," in target or '"' in target:
-        target = '"' + target.replace('"', '""') + '"'
-    return f"--mount=type=bind,source=/dev/null,{target},readonly"
+    fields = [f"source={source}", f"target={path}"]
+    quoted = [
+        '"' + field.replace('"', '""') + '"' if "," in field or '"' in field else field
+        for field in fields
+    ]
+    options = ["readonly"] if read_only else []
+    return "--mount=" + ",".join(["type=bind", *quoted, *options])
 
 
 @dataclass(frozen=True)

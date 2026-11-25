@@ -15,10 +15,16 @@ RUN apt-get update \
 # Defaults to /home/sandbox, keeping the build a no-op when they already match.
 # The launcher folds the home into the image tag, so an image built for
 # another home is never reused.
+# The home of root is there already, and a link made at a directory lands
+# inside it: a session of root would have a home it cannot write to. So
+# that one is removed first, nothing of the image is kept in it. At any
+# other directory that is there the build fails, which says more than a
+# link in the wrong place.
 ARG HOST_HOME=/home/sandbox
 RUN if [ "$HOST_HOME" != /home/sandbox ]; then \
     mkdir -p "$(dirname "$HOST_HOME")" \
-    && ln -s /home/sandbox "$HOST_HOME"; \
+    && if [ "$HOST_HOME" = /root ]; then rm -rf /root; fi \
+    && ln -sT /home/sandbox "$HOST_HOME"; \
     fi
 
 # Same dir as /home/sandbox/.local/bin via the symlink, but /doctor checks PATH for

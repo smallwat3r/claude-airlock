@@ -4,6 +4,7 @@ every call and can play a session."""
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import importlib
 import json
@@ -11,6 +12,7 @@ import os
 import pty
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +25,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-airlock"
+# Where the launchers the checks start keep what Python compiles of the
+# package, one place for all those of a worker: a launcher keeps it in the
+# home it is given (see compile_apart of bin/claude-airlock), and every
+# check has a home of its own, where all of it would be compiled again
+COMPILED = tempfile.mkdtemp(prefix="claude-airlock-compiled-")
+atexit.register(shutil.rmtree, COMPILED, ignore_errors=True)
 
 # Records its arguments, fails the "does it exist" queries so everything gets
 # created (but says the containers named in FAKE_RUNNING are up, and of every
@@ -333,6 +341,7 @@ class LauncherTest:
             "PATH": f"{self.work / 'bin'}{os.pathsep}{self._path}",
             "FAKE_LOG": str(self.work / "log"),
             "FAKE_OUT": str(self.work / "out"),
+            "PYTHONPYCACHEPREFIX": COMPILED,
         }
 
     def calls(self) -> list[list[str]]:

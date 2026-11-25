@@ -158,6 +158,9 @@ prepare() {
   git -C "${PROJECT}" init -q
   echo "SECRET=1" >"${PROJECT}/.env"
   echo "EXAMPLE=1" >"${PROJECT}/.env.example"
+  # One below the top: the directories above it are held where they are
+  mkdir -p "${PROJECT}/apps/api"
+  echo "SECRET=1" >"${PROJECT}/apps/api/.env"
   # The transcripts of another project, which a session must not see
   mkdir -p "${OTHER_PROJECT}"
   echo '{"type":"user"}' >"${OTHER_PROJECT}/session.jsonl"

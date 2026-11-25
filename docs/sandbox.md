@@ -15,6 +15,13 @@ What a session is given and what it is kept from.
   or inside another directory a session can write, that leads out of it
   through a link is refused: a session could have left the link there, to
   be given what it points to the next time.
+- Read-only wins. A directory asked for both ways, by `--add-dir` and
+  `--add-dir-ro` or their settings, the shared directory too, is mounted
+  read-only, whichever was said first. The project itself is always
+  writable: asked for read-only, it is refused.
+- A directory mounted inside another stays where it is: the directories
+  between the two cannot be renamed or removed in a session, as with a
+  protected path below.
 - As `~/.claude`, a directory of the launcher's that the sandboxed sessions
   share, not yours. Of your own `~/.claude` only the configuration listed
   below, `plugins` and `projects` (the transcripts) are mounted into it.
@@ -54,6 +61,15 @@ What a session is given and what it is kept from.
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
   Not hidden: one under `node_modules` or `.git`, which are not looked
   into for them, and one made after the session started.
+  - The directories above a hidden file cannot be renamed or removed in a
+    session (`Device or resource busy`). A session cannot read the file,
+    but it could otherwise move it under `node_modules`, where the next
+    launch would not hide it.
+  - A directory the launcher cannot look into for such files, and that a
+    session could open, is hidden whole: it is empty and read-only in the
+    session, and the launch names it. A session can take the right to
+    list a directory away and give it back the next time. Make it yours
+    to read again (`chmod u+rx`) to have it back.
 - **The history of other projects.** Their transcripts are covered by
   empty directories, and the prompt history, the paste cache and the file
   history are kept per project. So `claude` on the host cannot rewind the
@@ -66,7 +82,10 @@ What a session is given and what it is kept from.
 
 - Runs as your user, with a read-only root filesystem, all capabilities
   dropped, `no-new-privileges`, and PID and memory limits. A CPU limit with
-  `CLAUDE_AIRLOCK_CPUS`.
+  `CLAUDE_AIRLOCK_CPUS`. The image has one user, numbered 1000: with
+  another number (501 on macOS, a second account) the session is given
+  its own `/etc/passwd`, where that number is the image's user, or `ssh`
+  would refuse to run for a user it has no entry for.
 - No program of the image is setuid or setgid, and a process that crashes
   leaves no core dump.
 - What a session installs in `~/.cache` (`uv tool install`, `go install`)
@@ -139,6 +158,9 @@ prints what differs from Docker's own runtime:
   launcher says so when the session is over, and `--trace` has it. Raise
   `CLAUDE_AIRLOCK_PIDS` if that happens to a session that was not running
   away.
+- **The session is told.** Nothing in it fails first at a limit, so it
+  cannot find out by itself: it is told that it runs on gVisor, and to
+  keep its builds and tests to a few jobs (`docker/CLAUDE-airlock.md`).
 
 ## How Claude Code is started
 
@@ -164,11 +186,17 @@ Some files run commands on the host, or are followed by Claude there. They
 have to stay writable for git and claude to work, so they are checked
 rather than locked: the launcher warns when a session changed one.
 
-- In the project and every extra directory: `.git/config` and the git
-  hooks, also of the directory a `.git/commondir` has git read them from
-  in place of its own, `.claude/settings.json`, `settings.local.json` and `.mcp.json`
-  with the scripts they name, `CLAUDE.md`, and the `hooks`, `commands`,
-  `skills`, `agents` and `rules` of `.claude`.
+- In the project and every extra directory, for git: `.git/config` with
+  the files it includes, and the git hooks. Also those of the directory a
+  `.git/commondir` has git read them from in place of its own, and of
+  each working tree made of it (`git worktree add`), whose own
+  `commondir` can lead elsewhere too.
+- There too, for Claude: `.claude/settings.json`, `settings.local.json`
+  and `.mcp.json` with the scripts they name, `CLAUDE.md` and `AGENTS.md`
+  with the files they have Claude read (`@docs/style.md`), the prompts
+  Claude Code runs by itself (`.claude/scheduled_tasks.json`,
+  `.claude/loop.md`), and the `hooks`, `commands`, `skills`, `agents`,
+  `rules`, `output-styles`, `workflows` and `routines` of `.claude`.
 - In `~/.claude`: the plugins, and what `CLAUDE_AIRLOCK_RW_CONFIG=1` made
   writable.
 
@@ -186,7 +214,8 @@ Said apart, as something to read before you build, test or commit there:
 Said apart too, as something to read before the next session here:
 
 - What Claude remembers of the project, the `memory` directory next to its
-  transcripts in `~/.claude/projects`. A session writes there when you
+  transcripts in `~/.claude/projects`, and what its agents remember, in
+  `.claude/agent-memory` of the project. A session writes there when you
   tell it something to keep, and what is there is given to every later
   session as your own notes: something a session read can have it leave
   instructions for the next ones.
@@ -209,7 +238,8 @@ Said apart too, as something to read before the next session here:
   the next session, the allowlist of the egress filter and the rules of
   the socket proxy among it. The launch says so too. Not watched there:
   what Python compiled of the modules (`__pycache__`), which changes
-  without a session's doing.
+  without a session's doing. The launcher does not run it either: it
+  keeps what it compiles with its own records, where no session writes.
 
 All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:
@@ -219,8 +249,11 @@ whole project again.
 The check is bounded, a session can write any number of files of any
 size: 5000 files of each watched directory, 1000 of what Claude remembers
 of a project, 5000 build files, the submodules of 1000 git directories,
-and 1 GB read for what git and Claude follow, as much again for the build
-files. The plugins, thousands of files as they come, are not read: up to
+200 working trees of each, 100 files a git config includes and as many a
+`CLAUDE.md` has Claude read, and 1 GB read for what git and Claude
+follow, as much again for the build files. A git config past 1 MB, or
+one git lists as more than 4 MB, is told from one written since by what
+it holds as a file. The plugins, thousands of files as they come, are not read: up to
 100 000 of them are told from one written since by when they changed. What is past a
 count is said as `the rest`, unwatched, when a session made it so, and
 so is a watched directory with more entries or more directories below it
@@ -229,7 +262,9 @@ past 64 MB is read that far, one past what is read in all is not read:
 both are still told from one written since by when they changed.
 
 A session that ends without its launcher, a killed terminal say, is
-checked by the next `claude-airlock` launch instead.
+checked by the next `claude-airlock` launch instead. Should that check
+fail to run, the launch says so and goes on, and the launch after it
+tries again.
 
 ## The opt-in doors
 

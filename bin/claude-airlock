@@ -70,6 +70,35 @@ import sys
 OLDEST_PYTHON = (3, 13)
 
 
+def compile_apart() -> None:
+    """Have Python keep what it compiles of the package in a directory of
+    the launcher's own, and read none of it from next to the modules. A
+    session that has the checkout mounted, to work on the launcher itself,
+    could leave compiled code there for the next launch to run, with every
+    module as it was and nothing for the check of what it changed to name.
+    The directory is in the launcher's records, which no session is given
+    (see kept_out of sandbox/mounts.py), made for the user alone as they
+    are. Not when the user says where themselves (PYTHONPYCACHEPREFIX)."""
+    if sys.pycache_prefix is not None:
+        return
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+    kept = os.path.join(state, "claude-airlock", "pycache")
+    missing = []
+    directory = kept
+    while directory and not os.path.isdir(directory):
+        missing.append(directory)
+        directory = os.path.dirname(directory)
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+        except OSError:
+            # Another launcher was first, or it cannot be made: nothing
+            # compiled is kept then, and none is read either
+            continue
+    sys.pycache_prefix = kept
+
+
 def main() -> int:
     if sys.version_info < OLDEST_PYTHON:
         wanted = ".".join(map(str, OLDEST_PYTHON))
@@ -78,6 +107,7 @@ def main() -> int:
             f"claude-airlock: python3 is Python {found}, it takes {wanted} or later\n"
         )
         return 1
+    compile_apart()
     # The package sits next to bin/ in the checkout, it is not installed.
     # realpath, so this script can be symlinked into a directory on PATH.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))

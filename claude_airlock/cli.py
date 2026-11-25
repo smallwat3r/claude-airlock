@@ -12,6 +12,7 @@ import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import NamedTuple
 
 from .action import Action
@@ -46,12 +47,12 @@ from .sandbox.mounts import (
     add_extra_dir,
     configured_extra_dirs,
     extra_dir_args,
+    hidden_files,
     protect_args,
     protect_env_args,
     protected_dirs,
     refuse_links_out,
     refuse_unsafe_dir,
-    shadow_args,
 )
 from .sandbox.network import network_args, session_network
 from .sandbox.plugins import enabled_plugins
@@ -264,18 +265,19 @@ def session_run_args(
         plan.dirs,
         plan.protected,
     )
+    hidden = hidden_files(settings, host, dirs)
     return [
         *base_args(settings, host, name, runtime),
         *session_args(plan.action, os.environ),
         *protect_config_args(settings, host),
         *history_args(settings, host),
         *extra_dir_args(dirs),
-        *protect_args(protected, host, dirs),
+        *protect_args(protected, host, dirs, hidden.files),
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
         *git_config_args(host),
-        *shadow_args(settings, host, dirs),
+        *hidden.args(host),
     ]
 
 
@@ -305,6 +307,16 @@ def collect_all_left_behind(host: Host) -> None:
     collect_left_behind(host)
 
 
+class Ran(NamedTuple):
+    """How a session went, for what is said of it once it is over: its
+    exit status, what is to be said of the limits it ran into, and how
+    long each of the project's transcripts was when it started."""
+
+    status: int
+    limits: list[str]
+    lengths: dict[Path, int]
+
+
 def recorded_session(
     plan: Plan,
     name: str,
@@ -312,11 +324,10 @@ def recorded_session(
     runtime: Runtime,
     run_args: list[str],
     owner: str,
-) -> tuple[int, list[str]]:
+) -> Ran:
     """Run the session of a plan with its recorders around it, and its
     doors open. owner is the container whose network namespace the
-    session is in. Returns its exit status, and what is to be said of
-    the limits it ran into."""
+    session is in. Returns how it went, see Ran."""
     settings, host, image = plan.settings, plan.host, plan.image
     with contextlib.ExitStack() as running:
         # The capture first, a filtered session's address is its
@@ -326,10 +337,10 @@ def recorded_session(
             session_address_recorded(settings, host, name, owner),
             socket_proxy_watched(settings, host, name, owner),
             session_watched(plan, name, owner, runtime),
-            transcripts_copied(host),
-            login_shared(host),
         ):
             running.enter_context(recording)
+        copier = running.enter_context(transcripts_copied(host))
+        running.enter_context(login_shared(host))
         hit = running.enter_context(limits_watched(settings, name))
         hosts = running.enter_context(
             hosts_asked(settings, host, name, owner, plan.is_chat)
@@ -375,7 +386,7 @@ def recorded_session(
             remove_container(name)
             note_end(host, name)
     # Whole once the recorders are done
-    return status, hit.lines()
+    return Ran(status, hit.lines(), copier.lengths)
 
 
 def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> int:
@@ -403,14 +414,18 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     # From here to the end of the checks, see interrupts_held
     with interrupts_held():
         try:
-            status, limits = recorded_session(
+            status, limits, lengths = recorded_session(
                 plan, name, ending, runtime, run_args, capture or name
             )
         except Fatal:
-            check.drop()
+            # Of a session that never started there is nothing to check.
+            # One that was run keeps its check, whatever failed around
+            # it: the next launch runs it.
+            if not ending.session_was_run:
+                check.drop()
             raise
         try:
-            report_session(host, name, started, limits)
+            report_session(host, name, started, limits, lengths)
         finally:
             # Whatever became of the digest: this check matters more.
             # Of a session that is over: one whose container is still

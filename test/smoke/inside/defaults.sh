@@ -12,6 +12,9 @@ check "~/.cache is writable" touch "/home/sandbox/.cache/smoke-probe"
 check "project is mounted read-write" touch written-by-session
 check_fails ".env is shadowed" [ -s .env ]
 check ".env.example stays readable" [ -s .env.example ]
+check_fails "a .env below the top is shadowed" [ -s apps/api/.env ]
+check_fails "a directory above a shadowed file cannot be moved away" mv apps moved-apps
+check "the user of the session is one the image knows" id -un
 check_fails "settings.json is read-only" [ -w /home/sandbox/.claude/settings.json ]
 check_fails "skills are read-only" [ -w /home/sandbox/.claude/skills ]
 check "CLAUDE.md lists the installed tools" grep -q "^- Python 3 with uv" /etc/claude-code/CLAUDE.md

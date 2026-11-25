@@ -7,11 +7,13 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..docker import env_arg, hidden_arg, mount_arg
+from ..docker import covered_arg, env_arg, held_arg, hidden_arg, mount_arg
 from ..errors import Fatal
-from ..files import expand_home
+from ..files import expand_home, private_dir
+from ..notice import warn
 from ..settings import SESSION_DIRS, Host, Settings
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
@@ -104,12 +106,28 @@ def resolve_dir(raw: str, host: Host) -> str:
 def add_extra_dir(
     dirs: list[ExtraDir], raw: str, host: Host, read_only: bool = False
 ) -> None:
-    """Add a directory to mount. Duplicates and the project itself are
-    skipped: docker rejects a repeated mount destination, and the project is
-    already mounted. A directory already added read-write stays so."""
+    """Add a directory to mount. One that was added before is not added
+    again, docker rejects a repeated mount destination, and read-only
+    wins whichever way it was asked for first: what one setting keeps a
+    session from, another does not give back without a word. The project
+    is already mounted, and writable: asked for read-only it is refused,
+    there is no session that does not write to it."""
     path = resolve_dir(raw, host)
     refuse_unsafe_dir(path, host)
-    if path == host.project_dir or any(extra.path == path for extra in dirs):
+    if path == host.project_dir:
+        if read_only:
+            raise Fatal(
+                f"cannot mount {raw} read-only: it is the project of this"
+                " session, which is mounted writable"
+            )
+        return
+    for at, extra in enumerate(dirs):
+        if extra.path != path:
+            continue
+        if read_only:
+            dirs[at] = ExtraDir(path, read_only=True)
+        elif extra.read_only:
+            warn(f"{path} stays read-only: it was asked for read-only as well")
         return
     dirs.append(ExtraDir(path, read_only))
 
@@ -181,7 +199,9 @@ def protected_dirs(
     return dirs, inside
 
 
-def held_in_place(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[str]:
+def held_in_place(
+    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Sequence[str] = ()
+) -> list[str]:
     """The directories between each protected path and what it is mounted
     in, when that is writable. A session cannot write to a read-only
     mount, but it can rename a directory above one and make the path
@@ -190,11 +210,17 @@ def held_in_place(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[s
     these is mounted on itself, writable as before. None for a path in
     what is read-only anyway, a mounted directory or another protected
     path: there is nothing to rename there, and a writable mount would
-    open it."""
+    open it.
+
+    The same for a directory mounted inside another, read-only or not,
+    which is no more held by being a mount than what is above it. And
+    for each hidden file: a session cannot read it, but it could move a
+    directory above it to where the next launch does not look for files
+    to hide (see SHADOW_PRUNED_DIRS), and read it then."""
     writable = [host.project_dir, *(d.path for d in dirs if not d.read_only)]
     read_only = [*(d.path for d in dirs if d.read_only), *inside]
     held: dict[str, None] = {}
-    for path in inside:
+    for path in (*inside, *hidden, *(d.path for d in dirs)):
         above = [
             root
             for root in (*writable, *read_only)
@@ -210,11 +236,13 @@ def held_in_place(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[s
     return sorted(held)
 
 
-def protect_args(inside: list[str], host: Host, dirs: list[ExtraDir]) -> list[str]:
+def protect_args(
+    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Sequence[str] = ()
+) -> list[str]:
     """The read-only mounts of protected_dirs, on top of what they are
-    in, and the mounts that keep them where they are, see
-    held_in_place."""
-    held = [mount_arg(path, path, "z") for path in held_in_place(inside, host, dirs)]
+    in, and the mounts that keep them, the directories mounted inside
+    another and the hidden files where they are, see held_in_place."""
+    held = [held_arg(path) for path in held_in_place(inside, host, dirs, hidden)]
     return held + [mount_arg(path, path, "ro,z") for path in inside]
 
 
@@ -236,22 +264,74 @@ def protect_env_args(inside: list[str]) -> list[str]:
     return [env_arg("CLAUDE_AIRLOCK_PROTECT", ":".join(inside))] if inside else []
 
 
-def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[str]:
-    """Shadow .env files (and direnv's .envrc, which commonly exports
-    secrets, plus .netrc and .pypirc, which hold nothing but credentials) so
-    they are never visible inside the container. Template files (.env.example
-    and friends) stay readable, they exist to be read and hold no secrets.
-    Regular files only: a .env directory (some virtualenvs) cannot take a
-    /dev/null bind mount and would abort the run. CLAUDE_AIRLOCK_SHADOW adds
-    name globs, e.g. "*.pem:.npmrc". The whole tree is walked on purpose,
-    pruning more directories would be faster but could leave a real secret
-    visible."""
+@dataclass(frozen=True)
+class Hidden:
+    """What a session is kept from of what it has mounted: the files of
+    secrets, which read as empty, and the directories that could not be
+    looked into for any, which hold nothing for it."""
+
+    files: list[str]
+    covered: list[str]
+
+    def args(self, host: Host) -> list[str]:
+        """The mounts that hide them."""
+        hidden = [hidden_arg(path) for path in self.files]
+        if not self.covered:
+            return hidden
+        empty = empty_dir(host)
+        return hidden + [covered_arg(empty, path) for path in self.covered]
+
+
+def empty_dir(host: Host) -> str:
+    """A directory of the launcher's with nothing in it, to mount
+    read-only over one that a session is not to see into."""
+    return private_dir(os.path.join(host.history_dir, "empty"))
+
+
+def openable(directory: str) -> bool:
+    """Whether a directory the launcher cannot look into is one a session
+    could: the user's own, whose mode a session can change as the user
+    can. Not another user's, which stays closed to both."""
+    try:
+        about = os.lstat(directory)
+    except OSError:
+        return False
+    return stat.S_ISDIR(about.st_mode) and about.st_uid == os.getuid()
+
+
+def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden:
+    """What to shadow: .env files (and direnv's .envrc, which commonly
+    exports secrets, plus .netrc and .pypirc, which hold nothing but
+    credentials), so they are never visible inside the container. Template
+    files (.env.example and friends) stay readable, they exist to be read
+    and hold no secrets. Regular files only: a .env directory (some
+    virtualenvs) cannot take a /dev/null bind mount and would abort the
+    run. CLAUDE_AIRLOCK_SHADOW adds name globs, e.g. "*.pem:.npmrc". The
+    whole tree is walked on purpose, pruning more directories would be
+    faster but could leave a real secret visible.
+
+    A directory that cannot be looked into is not passed over: a session
+    can take the right to list one away, for the file in it to go
+    unhidden at the next launch, and give it back then. One a session
+    could open is hidden whole instead, and said."""
     patterns = SHADOWED_NAMES + settings.shadow
     # By path, in the order found: a directory mounted next to the project
     # can be inside it, and docker refuses to mount twice at one place
     hidden: dict[str, None] = {}
+    closed: dict[str, None] = {}
+
+    def not_listed(problem: OSError) -> None:
+        if isinstance(problem.filename, str):
+            closed[problem.filename] = None
+
     for root in [host.project_dir] + [extra.path for extra in dirs]:
-        for directory, subdirs, files in os.walk(root):
+        for directory, subdirs, files in os.walk(root, onerror=not_listed):
+            if not os.access(directory, os.X_OK):
+                # Listed, and not to be entered: neither what its files
+                # are nor what is below it can be told
+                closed[directory] = None
+                subdirs[:] = []
+                continue
             subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
             for name in sorted(files):
                 if name in SHADOW_EXEMPT:
@@ -266,4 +346,14 @@ def shadow_args(settings: Settings, host: Host, dirs: list[ExtraDir]) -> list[st
                     continue
                 if plain:
                     hidden[path] = None
-    return [hidden_arg(path) for path in hidden]
+    covered = [directory for directory in closed if openable(directory)]
+    if covered:
+        warn(
+            "these directories cannot be looked into for files of secrets to"
+            " hide, which a session can have made so: they hold nothing for"
+            " this session",
+            *(f"  {directory}" for directory in covered),
+            "Make them yours to read again (chmod u+rx) for a session to see"
+            " into them.",
+        )
+    return Hidden(list(hidden), covered)

@@ -130,6 +130,7 @@ class LaunchTest(LauncherTest):
         result = self.launch(CLAUDE_AIRLOCK_RUNTIME="runc", FAKE_INFO=INFO)
         assert "--pids-limit=512" in result.flags
         assert "gVisor" not in result.stderr
+        assert not [flag for flag in result.flags if "CLAUDE_AIRLOCK_KERNEL" in flag]
 
     def test_under_gvisor_the_launcher_says_what_a_session_lacks(self):
         result = self.launch(
@@ -145,14 +146,18 @@ class LaunchTest(LauncherTest):
         assert "ended as a whole" in result.stderr
         assert "do not resolve" not in result.stderr
         assert "--pids-limit=2176" in result.flags
-        # The session is still told the limit from the setting
+        # The session is still told the limit from the setting, and that
+        # it is ended as a whole at it, which nothing in it can find out
         assert "--env=CLAUDE_AIRLOCK_PIDS=512" in result.flags
+        assert "--env=CLAUDE_AIRLOCK_KERNEL=gVisor" in result.flags
         # No watcher is started: it would see gVisor's kernel, not the session
         assert result.sidecar("claude-proj.procs") is None
 
     def test_the_default_runtime_of_the_daemon_is_recognised_too(self):
         info = docker_info("runsc", runsc=HOSTNET)
-        assert "under gVisor (runsc)" in self.launch(FAKE_INFO=info).stderr
+        result = self.launch(FAKE_INFO=info)
+        assert "under gVisor (runsc)" in result.stderr
+        assert "--env=CLAUDE_AIRLOCK_KERNEL=gVisor" in result.flags
 
     def test_the_launcher_warns_that_names_do_not_resolve_on_gvisors_own_stack(self):
         result = self.launch(CLAUDE_AIRLOCK_RUNTIME="runsc", FAKE_INFO=INFO)

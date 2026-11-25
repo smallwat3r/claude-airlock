@@ -86,6 +86,14 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   limits. Exit code 137 without a reason of its own is the first,
   "Resource temporarily unavailable" or a failed fork the second. Say
   which limit and its value.
+- CLAUDE_AIRLOCK_KERNEL (not listed unless the session runs on a kernel of
+  its own, gVisor). Under it nothing fails first at either limit: the
+  session is ended as a whole, this conversation with it, and no command
+  gets to say why. The process limit counts what ran at the busiest
+  moment, and nproc counts all of the host's CPUs. So keep well below
+  both: give builds and tests a few jobs (make -j4, pytest -n 4), not one
+  for each CPU, and do not run several of them side by side, in subagents
+  either.
 - CLAUDE_AIRLOCK_CPUS (no limit unless listed), the CPUs the container can
   use. nproc still counts all of the host's and work beyond the limit is
   held back: give builds and tests that many jobs (make -j4 for 4).
@@ -104,7 +112,11 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   empty: the secrets stay on the host. Not a bug, do not recreate or fill
   them, ask the user for a value you need. Templates such as .env.example
   are readable, and so are such files under node_modules and .git, which
-  are not looked into.
+  are not looked into. A directory with such a file in it, and those
+  above it, cannot be renamed or removed ("Device or resource busy"):
+  they are held where they are, say so and do not work around it. A
+  directory the launcher could not look into for such files is empty and
+  read-only here, the user makes it readable on the host.
 - CLAUDE_AIRLOCK_FEATURES (not listed in the environment), the tools built
   into this image, named below. If one you need is missing and cannot be
   installed in /tmp or the project, say so: the user adds its feature and

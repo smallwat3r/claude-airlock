@@ -8,13 +8,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
+import threading
 from collections.abc import Iterator, Sequence
 from itertools import islice
-from pathlib import Path
 
-from ..files import expand_home, json_object, open_plain, settings_object
+from ..files import (
+    SETTINGS_BYTES,
+    expand_home,
+    json_object,
+    open_plain,
+    settings_object,
+)
 from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES
 from .bounded import (
     MOST_STAMPED_FILES,
@@ -22,6 +29,7 @@ from .bounded import (
     file_hash,
     file_stamp,
     hash_files,
+    listed,
     module_git_dirs,
     sha256_hex,
     tree_files,
@@ -38,6 +46,13 @@ PROJECT_FILES = (
     "CLAUDE.md",
     "CLAUDE.local.md",
     ".claude/CLAUDE.md",
+    # Read as a CLAUDE.md is, by a project that has none
+    "AGENTS.md",
+    ".claude/AGENTS.md",
+    # The prompts Claude Code runs at their times, and the one it runs
+    # over and over
+    ".claude/scheduled_tasks.json",
+    ".claude/loop.md",
 )
 PROJECT_TREES = (
     ".claude/hooks",
@@ -45,7 +60,31 @@ PROJECT_TREES = (
     ".claude/skills",
     ".claude/agents",
     ".claude/rules",
+    ".claude/output-styles",
+    ".claude/workflows",
+    ".claude/routines",
 )
+# What Claude Code notes for itself of the routines it ran, in their
+# directory: nothing follows it, and every session with one would be
+# reported
+ROUTINES_STATE = os.path.join(".claude", "routines", ".state")
+# What the agents of a project remember from one session to the next, in
+# the project itself. Said with what Claude remembers of the project, see
+# agent_memory_dirs.
+AGENT_MEMORY = (".claude/agent-memory", ".claude/agent-memory-local")
+# The files of instructions, by their name wherever they are. Each can
+# name others to be read with it, see imported_files.
+INSTRUCTION_NAMES = frozenset(("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"))
+# How a file of instructions names another to be read with it: an @ at
+# the start of a word, then its path
+_IMPORT = re.compile(r"(?:^|(?<=\s))@([^\s@]+)")
+# What can follow such a path in a sentence and is no part of it
+_AFTER_IMPORT = ".,;:!?)]}'\"`"
+# No more files are followed from one file of instructions than this, and
+# no further from it than Claude Code follows them: both are a session's
+# to write
+MOST_IMPORTED = 100
+IMPORT_DEPTH = 5
 # The same of ~/.claude is CONFIG_FILES and CONFIG_TREES of settings.py.
 # Most of it is mounted read-only and cannot differ, unless
 # CLAUDE_AIRLOCK_RW_CONFIG=1 leaves it writable.
@@ -105,7 +144,9 @@ WORKFLOWS = (".github", "workflows")
 # What tells that a directory below the top of a project is one Claude
 # follows instructions in, or one git runs hooks in: what the check above
 # watches at the top
-CLAUDE_MARKS = frozenset((".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"))
+CLAUDE_MARKS = frozenset(
+    (".claude", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json")
+)
 # What git takes a directory for one of its own by, whatever its name
 GIT_HEAD = "HEAD"
 # The directories that are not looked into for those: what git keeps for
@@ -125,7 +166,22 @@ MOST_MEMORY_FILES = 1000
 COMMAND_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
 # The seconds git is given to read a config, it takes a moment: a file a
 # session swapped for a pipe must not have the check wait on it
-GIT_SECONDS = 10
+GIT_SECONDS = 10.0
+# No larger config is given to git, and no more of what git says of one
+# is read: both are a session's to make large, and a config of a few
+# kilobytes can be written to list as gigabytes
+GIT_CONFIG_BYTES = 1024 * 1024
+GIT_SAID_BYTES = 4 * 1024 * 1024
+# The entries of a config that have git read another file with it, at all
+# times or on a condition, as git lists them
+_INCLUDES = re.compile(rb"include(if\..*)?\.path", re.DOTALL)
+# No more configs are followed from one config than this, a session can
+# have each include the next
+MOST_INCLUDED = 100
+# Where a git directory keeps one of its own for each working tree made of
+# it (git worktree add), and how many of those are looked into
+GIT_WORKTREES = "worktrees"
+MOST_WORKTREES = 200
 # What of its checkout the launcher runs and starts its sidecars from: its
 # programs, its modules, and the parts of the image with the rules of the
 # two proxies. Watched when a session can write them, see launcher_files.
@@ -152,33 +208,117 @@ SERVERS = "mcpServers"
 SERVERS_BYTES = 16 * 1024 * 1024
 
 
+def git_says(*args: str) -> bytes | None:
+    """What git says when it is asked about a config, none when that
+    cannot be had: no git, a config it cannot read, one it was not done
+    with within GIT_SECONDS, and one it says more of than GIT_SAID_BYTES.
+    No more than that is read, and git is ended there: a config is the
+    session's to write, and one of a few kilobytes can be made to list
+    as gigabytes, which would all be held here."""
+    try:
+        git = subprocess.Popen(
+            ["git", *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    # Ended when its time is up, which the read below then sees as the end
+    late = threading.Timer(GIT_SECONDS, git.kill)
+    late.start()
+    try:
+        with git:
+            said = git.stdout.read(GIT_SAID_BYTES + 1) if git.stdout else b""
+            if len(said) > GIT_SAID_BYTES:
+                git.kill()
+    finally:
+        late.cancel()
+    if git.returncode != 0 or len(said) > GIT_SAID_BYTES:
+        return None
+    return said
+
+
+def git_listing(file: str) -> bytes | None:
+    """The entries of a git config as git lists them with -z, none for
+    one that git is not asked about or has no answer for (see git_says).
+    Git is not given what is no plain file, a pipe a session of this
+    project that still runs can put there, nor a file past
+    GIT_CONFIG_BYTES, which no config a user keeps comes near."""
+    probe = open_plain(file, links=True)
+    if probe is None:
+        return None
+    with probe:
+        try:
+            large = os.fstat(probe.fileno()).st_size > GIT_CONFIG_BYTES
+        except OSError:
+            return None
+    if large:
+        return None
+    return git_says("config", "--file", file, "--list", "-z")
+
+
+def listing_hash(listing: bytes) -> str:
+    """Hash of the entries of a git config that last, see
+    lasting_entries."""
+    return sha256_hex(b"\0".join(lasting_entries(listing)))
+
+
 def git_config_hash(file: str) -> str:
     """Hash of a git config without its branch tracking entries, they change
     on every push -u or checkout and cannot run anything, see
     lasting_entries for those that are kept. One that cannot
     be read says so: the file is the session's, which can take the right
-    to read it away, and the check must not be made to fail. Nor to wait:
-    git is not given what is no plain file, a pipe a session of this
-    project that still runs can put there, and is given GIT_SECONDS for
-    one that was swapped in since."""
-    probe = open_plain(file, links=True)
-    if probe is None:
-        return file_hash(file)
-    probe.close()
-    try:
-        listing = subprocess.run(
-            ["git", "config", "--file", file, "--list", "-z"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            timeout=GIT_SECONDS,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        # Unparseable, no git, or one that did not end: fall back to the
-        # file as it is
-        return file_hash(file)
-    return sha256_hex(b"\0".join(lasting_entries(listing)))
+    to read it away, and the check must not be made to fail. Nor to wait,
+    nor to hold more than a config takes, see git_listing: one git has no
+    listing of is hashed as the file it is."""
+    listing = git_listing(file)
+    return file_hash(file) if listing is None else listing_hash(listing)
+
+
+def included_configs(listing: bytes, config: str) -> list[str]:
+    """The files a git config has git read with it, by its listing:
+    those of include.path, and of includeIf whatever its condition, which
+    holds in one place and not in another. A relative one is taken from
+    where the config is, as git takes it."""
+    home = os.path.expanduser("~")
+    found = []
+    for entry in listing.split(b"\0"):
+        name, _, value = entry.partition(b"\n")
+        if value and _INCLUDES.fullmatch(name):
+            path = expand_home(os.fsdecode(value), home)
+            found.append(os.path.normpath(os.path.join(os.path.dirname(config), path)))
+    return found
+
+
+def hash_git_config(config: str, fingerprint: dict[str, str]) -> None:
+    """Add a git config to a fingerprint as git_config_hash has it, and
+    the files it includes, theirs too, each by its own path. Git reads
+    them as part of the config, and one that is in the project is the
+    session's to write with the config itself left as it was. One that
+    is not there yet shows as a change once it is. No more of them than
+    MOST_INCLUDED: the rest is said to be left out. An included file git
+    has no listing of is not read, it is told from one written since as
+    file_stamp does: a config can name any number of files of any size."""
+    pending = [config]
+    seen: set[str] = set()
+    while pending:
+        file = pending.pop()
+        if file in seen:
+            continue
+        if len(seen) >= MOST_INCLUDED:
+            rest = f"{config}: more than {MOST_INCLUDED} configs included, the rest"
+            fingerprint[rest] = UNWATCHED
+            return
+        seen.add(file)
+        listing = git_listing(file)
+        if listing is None:
+            unread = "not read: " + file_stamp(file)
+            fingerprint[file] = file_hash(file) if file == config else unread
+            continue
+        fingerprint[file] = listing_hash(listing)
+        included = included_configs(listing, file)
+        pending += [path for path in reversed(included) if os.path.lexists(path)]
 
 
 def lasting_entries(listing: bytes) -> list[bytes]:
@@ -258,10 +398,11 @@ def is_plugin_use_marker(path: str, cache: str) -> bool:
 
 
 def git_configs(git_dir: str) -> list[str]:
-    """The config files of a git directory: its own, and the ones a
-    worktree reads on top once extensions.worktreeConfig is set."""
+    """The config files of a git directory: its own, and the one a
+    working tree reads on top once extensions.worktreeConfig is set.
+    Those of the working trees it keeps are read from their own
+    directories, see worktree_sources."""
     configs = [os.path.join(git_dir, name) for name in ("config", "config.worktree")]
-    configs += map(str, sorted(Path(git_dir, "worktrees").glob("*/config.worktree")))
     return [config for config in configs if os.path.isfile(config)]
 
 
@@ -295,14 +436,50 @@ def git_sources(git_dir: str) -> list[str]:
     return [git_dir] if common in (None, git_dir) else [git_dir, common]
 
 
+def worktree_sources(
+    git_dir: str, watched: list[str], fingerprint: dict[str, str]
+) -> list[str]:
+    """The directories git reads a config and hooks from in the working
+    trees a git directory keeps (git worktree add), besides the git
+    directory itself. Each working tree has a directory of its own in
+    there, with a commondir that leads back to the git directory. That
+    file is a session's to write: one that leads elsewhere has git take
+    the config and the hooks from there in that working tree, and
+    without one git takes them from the working tree's own directory. So
+    both are directories to watch, and a commondir that leads elsewhere
+    is added to what is hashed. One that leads back is not: a working
+    tree made in a session (--worktree) is then nothing to report. What
+    is there in the place of such a directory, a link, is hashed as it
+    is. No more of them than MOST_WORKTREES, the rest is said to be left
+    out."""
+    entries, more = listed(os.path.join(git_dir, GIT_WORKTREES), MOST_WORKTREES)
+    if more:
+        rest = f"{git_dir}: more than {MOST_WORKTREES} working trees, the rest"
+        fingerprint[rest] = UNWATCHED
+    sources = []
+    for entry in entries[:MOST_WORKTREES]:
+        if not entry.is_dir(follow_symlinks=False):
+            watched.append(entry.path)
+            continue
+        sources.append(entry.path)
+        elsewhere = common_dir(entry.path)
+        if elsewhere is not None and elsewhere not in (git_dir, entry.path):
+            watched.append(os.path.join(entry.path, COMMON_DIR))
+            sources.append(elsewhere)
+    return sources
+
+
 def git_files(git_dir: str, fingerprint: dict[str, str]) -> list[str]:
     """What is watched of one git directory: the files to hash, its
-    configs hashed as those are. The file that has git read another
-    directory, and the config and hooks of both."""
+    configs hashed as those are, with the files they include. The file
+    that has git read another directory, and the config and hooks of
+    both, then those of the working trees it keeps."""
     watched = [os.path.join(git_dir, COMMON_DIR)]
-    for source in git_sources(git_dir):
+    sources = git_sources(git_dir)
+    sources += worktree_sources(git_dir, watched, fingerprint)
+    for source in dict.fromkeys(sources):
         for config in git_configs(source):
-            fingerprint[config] = git_config_hash(config)
+            hash_git_config(config, fingerprint)
         watched += tree_files(os.path.join(source, "hooks")).into(fingerprint)
     return watched
 
@@ -317,20 +494,13 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
     if not os.path.isfile(config):
         # None, or a pipe a session left for git to wait on
         return None
-    try:
-        value = subprocess.run(
-            ["git", "config", "--file", config]
-            + ["--type=path", "--get", "core.hooksPath"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            text=True,
-            errors="replace",
-            timeout=GIT_SECONDS,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
+    # With what the config includes, where a project keeps such a setting
+    # as often as in the config itself
+    asked = ("--includes", "--type=path", "--get", "core.hooksPath")
+    said = git_says("config", "--file", config, *asked)
+    if said is None:
         return None
+    value = said.decode("utf-8", "replace").strip()
     hooks = os.path.realpath(os.path.join(directory, value))
     inside = hooks.startswith(os.path.realpath(directory) + os.sep)
     return (
@@ -340,16 +510,20 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
 
 def commands_in(value: object) -> Iterator[str]:
     """Every "command" in a settings file, of a hook, a statusline or a
-    server, at whatever depth."""
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            if key == "command" and isinstance(inner, str):
-                yield inner
-            else:
-                yield from commands_in(inner)
-    elif isinstance(value, list):
-        for inner in value:
-            yield from commands_in(inner)
+    server, at whatever depth. Without recursion: a file is read at a
+    depth Python cannot call to, and the check must not be made to
+    fail."""
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key == "command" and isinstance(inner, str):
+                    yield inner
+                else:
+                    pending.append(inner)
+        elif isinstance(value, list):
+            pending += value
 
 
 def named_files(settings_file: str, base: str) -> list[str]:
@@ -378,6 +552,46 @@ def named_files(settings_file: str, base: str) -> list[str]:
     return found
 
 
+def import_text(file: str) -> str:
+    """What a file of instructions says, nothing for one that is not
+    there, is no plain file or is past what is read of one, as
+    settings_object has it of a settings file."""
+    opened = open_plain(file, links=True)
+    if opened is None:
+        return ""
+    try:
+        with opened:
+            content = opened.read(SETTINGS_BYTES + 1)
+    except OSError:
+        return ""
+    return "" if len(content) > SETTINGS_BYTES else content.decode("utf-8", "replace")
+
+
+def imported_files(instructions: str) -> list[str]:
+    """The files a file of instructions has Claude read with it, theirs
+    too: each @path in it that is a file, a relative one from where the
+    file that names it is. Changing one of those changes what Claude is
+    told, with the CLAUDE.md as it was. As far from it as IMPORT_DEPTH
+    and no more than MOST_IMPORTED: taken by the word, which also takes
+    what only looks like one and misses nothing Claude Code would
+    read."""
+    home = os.path.expanduser("~")
+    found: dict[str, None] = {}
+    pending = [(instructions, 0)]
+    while pending and len(found) < MOST_IMPORTED:
+        file, depth = pending.pop()
+        for word in _IMPORT.findall(import_text(file)):
+            for named in dict.fromkeys((word, word.rstrip(_AFTER_IMPORT))):
+                path = expand_home(named, home)
+                path = os.path.normpath(os.path.join(os.path.dirname(file), path))
+                if path in found or path == instructions or not os.path.isfile(path):
+                    continue
+                found[path] = None
+                if depth + 1 < IMPORT_DEPTH:
+                    pending.append((path, depth + 1))
+    return list(found)[:MOST_IMPORTED]
+
+
 def claude_files(
     root: str,
     files: tuple[str, ...],
@@ -386,13 +600,33 @@ def claude_files(
     fingerprint: dict[str, str],
 ) -> list[str]:
     """What is watched of a project or of ~/.claude for Claude's sake,
-    what is not said in the fingerprint, see tree_files."""
+    what is not said in the fingerprint, see tree_files. With the files
+    its instructions name to be read with them, and without what Claude
+    Code notes for itself of its routines."""
     watched = [os.path.join(root, name) for name in files]
+    noted = os.path.join(root, ROUTINES_STATE) + os.sep
     for name in trees:
-        watched += tree_files(os.path.join(root, name)).into(fingerprint)
+        found = tree_files(os.path.join(root, name)).into(fingerprint)
+        watched += [path for path in found if not path.startswith(noted)]
     for name in command_files:
         watched += named_files(os.path.join(root, name), root)
+    for name in files:
+        if os.path.basename(name) in INSTRUCTION_NAMES:
+            watched += imported_files(os.path.join(root, name))
     return watched
+
+
+def agent_memory_dirs(directories: Sequence[str]) -> list[str]:
+    """Where the agents of a project keep what they remember, in each
+    mounted directory. A session writes there in the ordinary way of
+    things and every later one is told what is there, as with what
+    Claude remembers of the project: said with that, see
+    report_memory."""
+    return [
+        os.path.join(directory, name)
+        for directory in directories
+        for name in AGENT_MEMORY
+    ]
 
 
 def host_exec_fingerprint(

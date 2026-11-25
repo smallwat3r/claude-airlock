@@ -3,14 +3,22 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
+import unittest.mock
 from pathlib import Path
 
 import pytest
 from harness import LauncherTest
 
-from claude_airlock.docker import mount_arg
+from claude_airlock.docker import covered_arg, mount_arg
 from claude_airlock.errors import Fatal
+from claude_airlock.sandbox import mounts
+
+# Root lists and enters a directory whatever its mode says
+closed_to_its_owner = pytest.mark.skipif(
+    os.getuid() == 0, reason="no directory is closed to root"
+)
 
 
 class ExtraDirsTest(LauncherTest):
@@ -18,6 +26,12 @@ class ExtraDirsTest(LauncherTest):
     def directories(self, sandbox: None) -> None:
         self.ref = self.home / "ref"
         self.shared = self.home / "claude-shared"
+
+    def launch_anew(self, *args: str, **env: str):
+        """Launch with nothing noted of the launches before it, for a
+        check that looks at the session of more than one."""
+        (self.work / "log").unlink(missing_ok=True)
+        return self.launch(*args, **env)
 
     def test_read_only_dir(self):
         result = self.launch(
@@ -79,6 +93,96 @@ class ExtraDirsTest(LauncherTest):
             assert f"--volume={read_only}:{read_only}:z" not in flags
         # Nor on the project itself
         assert flags.count(f"--volume={self.project}:{self.project}:z") == 1
+
+    def test_the_directories_above_a_hidden_file_are_held_in_place(self):
+        # A session cannot read the file, but it could move a directory
+        # above it into one that is not looked into for files to hide
+        deep = self.project / "apps" / "api"
+        deep.mkdir(parents=True)
+        (deep / ".env").touch()
+        (self.ref / "kept" / "more").mkdir(parents=True)
+        (self.ref / "kept" / "more" / ".env").touch()
+        flags = self.launch("--add-dir-ro", "~/ref").flags
+        for hidden in (deep / ".env", self.ref / "kept" / "more" / ".env"):
+            assert f"--volume=/dev/null:{hidden}:ro" in flags
+        for above in (self.project / "apps", deep):
+            assert flags.count(f"--volume={above}:{above}:z") == 1
+        # Not what is read-only anyway, nor the project, held as a mount
+        for other in (self.ref / "kept", self.ref / "kept" / "more"):
+            assert f"--volume={other}:{other}:z" not in flags
+        assert flags.count(f"--volume={self.project}:{self.project}:z") == 1
+
+    def test_a_directory_with_a_colon_above_a_hidden_file_is_held_the_long_way(self):
+        # A session can make one: refused, every later launch would be
+        odd = self.project / 'a:b,"c"'
+        odd.mkdir()
+        (odd / ".env").touch()
+        result = self.launch()
+        assert result.status == 0, result.stderr
+        held = f'"source={self.project}/a:b,""c""","target={self.project}/a:b,""c"""'
+        assert f"--mount=type=bind,{held}" in result.flags
+        hidden = f'"target={self.project}/a:b,""c""/.env"'
+        assert f"--mount=type=bind,source=/dev/null,{hidden},readonly" in result.flags
+
+    def test_a_directory_held_for_two_reasons_is_mounted_once(self):
+        kit = self.project / "apps" / "kit"
+        kit.mkdir(parents=True)
+        (self.project / "apps" / ".env").touch()
+        (self.project / "apps" / "api").mkdir()
+        (self.project / "apps" / "api" / ".env").touch()
+        flags = self.launch(CLAUDE_AIRLOCK_PROTECT="apps/kit").flags
+        above = self.project / "apps"
+        assert flags.count(f"--volume={above}:{above}:z") == 1
+
+    def test_a_directory_mounted_inside_another_is_held_in_place(self):
+        # Read-only or not, what is above it could be renamed, and the
+        # path made again with other content
+        for name in ("lib", "data"):
+            (self.project / "vendor" / "deep" / name).mkdir(parents=True)
+        flags = self.launch(
+            "--add-dir-ro", "vendor/deep/lib", "--add-dir", "vendor/deep/data"
+        ).flags
+        deep = self.project / "vendor" / "deep"
+        assert f"--volume={deep / 'lib'}:{deep / 'lib'}:ro,z" in flags
+        assert f"--volume={deep / 'data'}:{deep / 'data'}:z" in flags
+        for above in (self.project / "vendor", deep):
+            assert flags.count(f"--volume={above}:{above}:z") == 1
+
+    @closed_to_its_owner
+    def test_a_directory_that_cannot_be_looked_into_is_hidden_whole(
+        self, subtests: pytest.Subtests
+    ):
+        # A session can make one so, for the file in it to go unhidden
+        # at the next launch, and open it again then
+        closed = self.project / "backend"
+        closed.mkdir()
+        (closed / ".env").touch()
+        (closed / "deeper").mkdir()
+        self.cleanup.callback(closed.chmod, 0o755)
+        empty = self.state / "history" / "empty"
+        # Not to be listed, then to be listed and not entered
+        for mode in (0o000, 0o400):
+            with subtests.test(mode=oct(mode)):
+                closed.chmod(mode)
+                result = self.launch_anew()
+                assert f"--volume={empty}:{closed}:ro,z" in result.flags
+                assert "cannot be looked into for files of secrets" in result.stderr
+                assert f"  {closed}\n" in result.stderr
+                assert list(empty.iterdir()) == []
+        closed.chmod(0o755)
+        result = self.launch_anew()
+        assert f"--volume=/dev/null:{closed / '.env'}:ro" in result.flags
+        assert "cannot be looked into" not in result.stderr
+
+    def test_a_closed_directory_of_another_user_is_left_as_it_is(self):
+        # Neither the launcher nor a session can open it, or change that
+        closed = self.project / "data"
+        closed.mkdir()
+        assert mounts.openable(str(closed))
+        with unittest.mock.patch.object(os, "getuid", return_value=os.getuid() + 1):
+            assert not mounts.openable(str(closed))
+        assert not mounts.openable(str(self.project / "none"))
+        assert not mounts.openable(str(self.project / ".env"))
 
     def test_a_protected_path_that_could_be_made_inside_is_refused(self):
         result = self.launch(CLAUDE_AIRLOCK_PROTECT="docs")
@@ -176,6 +280,35 @@ class ExtraDirsTest(LauncherTest):
         result = self.launch("--add-dir", "/")
         self.assert_refused(result, "it would defeat the sandbox")
 
+    def test_a_directory_asked_for_read_only_is_read_only_whoever_else_names_it(
+        self, subtests: pytest.Subtests
+    ):
+        # What one setting keeps a session from, another does not give back
+        self.shared.mkdir()
+        for args, env in (
+            (["--add-dir-ro", "~/claude-shared"], {}),
+            (["--add-dir", "~/claude-shared", "--add-dir-ro", "~/claude-shared"], {}),
+            (["--add-dir-ro", "~/claude-shared", "--add-dir", "~/claude-shared"], {}),
+            ([], {"CLAUDE_AIRLOCK_EXTRA_DIRS_RO": str(self.shared)}),
+            (
+                ["--add-dir", "~/claude-shared"],
+                {"CLAUDE_AIRLOCK_EXTRA_DIRS_RO": str(self.shared)},
+            ),
+        ):
+            with subtests.test(args=args, env=env):
+                result = self.launch_anew(*args, **env)
+                assert f"--volume={self.shared}:{self.shared}:ro,z" in result.flags
+                assert f"--volume={self.shared}:{self.shared}:z" not in result.flags
+                # Said to who asked for it writable after that
+                last = [*env, *args][-2:-1] == ["--add-dir"]
+                assert ("stays read-only" in result.stderr) == last
+
+    def test_the_project_asked_for_read_only_is_refused(self):
+        result = self.launch("--add-dir-ro", ".")
+        self.assert_refused(result, "cannot mount . read-only: it is the project")
+        # Asked for as it is mounted anyway, it is passed over
+        assert self.launch("--add-dir", ".").status == 0
+
     def test_default_shared_dir_is_mounted(self):
         self.shared.mkdir()
         flags = self.launch().flags
@@ -198,6 +331,15 @@ class ExtraDirsTest(LauncherTest):
 
 
 class MountArgTest:
+    def test_a_directory_with_a_colon_in_its_name_is_covered_the_long_way(self):
+        # A session can make one: refused, every later launch would be
+        with tempfile.TemporaryDirectory() as empty:
+            assert covered_arg(empty, "/p/a") == f"--volume={empty}:/p/a:ro,z"
+            long = f"--mount=type=bind,source={empty},target=/p/a:b,readonly"
+            assert covered_arg(empty, "/p/a:b") == long
+            with pytest.raises(Fatal):
+                covered_arg(empty, "/p/a:b\nc")
+
     def test_a_bind_source_that_is_not_there_is_refused(self):
         # Docker would make a directory of it, owned by root
         with tempfile.TemporaryDirectory() as directory:
