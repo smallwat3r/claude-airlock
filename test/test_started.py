@@ -261,7 +261,7 @@ class LaunchTest(LauncherTest):
         assert re.search(r"sandbox  started     recorded: nothing\n", trace)
         assert trace.index("limits: memory 16g") < trace.index("prompt      hello")
         as_json = self.launch("--trace", "--json").stdout.splitlines()
-        first = json.loads(as_json[0])
+        first = json.loads(as_json[1])
         assert (first["who"], first["what"]) == ("sandbox", "started")
         assert first["container"] == "claude-proj"
         assert (first["memory"], first["net_filter"]) == ("16g", True)

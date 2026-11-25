@@ -240,6 +240,13 @@ shortened, for `jq` or to load into a database:
 {"session": "3fa9c0de-...", "time": "2026-01-02T10:02:42.480+01:00", "who": "sandbox", "what": "net", "protocol": "tcp/https", "name": "registry.npmjs.org", "address": "104.16.3.35", "port": 443}
 ```
 
+The first object is of the trace itself, `what` being `record`: its
+`lines` are what the text has above its events. That is where the
+launcher says that a record is not all there (a transcript `CHANGED` or
+`NOT ALL COPIED`, a capture `STOPPED` or `INCOMPLETE`), which the events
+alone do not tell. `--follow` gives one whenever it has such a line to
+say. `--only` leaves them out unless it names `record`.
+
 Every object has `session`, `time`, `who` and `what`, the rest depends on
 the event. What happened on the network also has `during`, the ids of the
 tool calls running at that time. A command no process was seen of has

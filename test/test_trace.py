@@ -186,7 +186,7 @@ class TraceTest(LauncherTest):
             "# tokens      1.4k out, 182.0k in (180.0k from the cache), over 1 steps"
             in stdout
         )
-        used, _ = map(
+        _, used = map(
             json.loads, self.launch("--trace", "0b", "--json").stdout.split("\n")[:2]
         )
         assert (used["what"], used["output_tokens"]) == ("step", 1400)
@@ -215,7 +215,10 @@ class TraceTest(LauncherTest):
     def test_json_gives_an_object_per_event_with_its_values(self):
         result = self.launch("--trace", "--json")
         assert result.status == 0, result.stderr
-        prompt, bash, edit, write = map(json.loads, result.stdout.splitlines())
+        record, prompt, bash, edit, write = map(json.loads, result.stdout.splitlines())
+        # What the text has above its events, first
+        assert (record["who"], record["what"]) == ("sandbox", "record")
+        assert any(line.startswith("transcript  ") for line in record["lines"])
         for event in (prompt, bash, edit, write):
             assert event["session"] == self.SESSION
             assert re.search(
@@ -268,7 +271,7 @@ class TraceTest(LauncherTest):
             assert "out: " + expected in stdout
         assert "line 11\n" not in stdout
         assert "line 90\n" not in stdout
-        (ran,) = map(
+        _, ran = map(
             json.loads, self.launch("--trace", "0c", "--json").stdout.splitlines()
         )
         assert len(ran["output"].splitlines()) == 100

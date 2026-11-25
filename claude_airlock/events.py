@@ -90,6 +90,10 @@ class Kind(enum.StrEnum):
     # What the launchers noted, see noted.py
     STARTED = "started"
     CHANGED = "changed"
+    # What a trace says of itself and of how far its records go, the
+    # lines above its events: an event of its own where there are none,
+    # in --json
+    RECORD = "record"
 
 
 class Stage(enum.StrEnum):

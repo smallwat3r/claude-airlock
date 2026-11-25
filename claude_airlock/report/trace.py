@@ -27,6 +27,7 @@ import functools
 import os
 import pydoc
 import sys
+import time
 from pathlib import Path
 
 from ..errors import Fatal
@@ -55,7 +56,14 @@ from .layout import Layout, event_json
 from .net_events import network
 from .noted import noted_events
 from .recorded import ReadTranscript, Recorded
-from .stream import EVERYTHING, Filter, Timeline, ordered
+from .stream import (
+    EVERYTHING,
+    Filter,
+    Timeline,
+    ordered,
+    record_event,
+    wants_record,
+)
 from .summary import planted_shown, summary
 from .trace_args import picked_session, trace_options
 from .transcript import transcript_events
@@ -204,9 +212,12 @@ def render(
 def render_json(path: Path, host: Host, chosen: Filter = EVERYTHING) -> str:
     """The trace as JSON Lines, an object per event, nothing shortened.
     Every line names its session, so the traces of several can go into one
-    file or table."""
-    _, events = session_events(path, host, verbose=True, chosen=chosen)
-    return "".join(event_json(path.stem, event) + "\n" for event in events)
+    file or table. First what the text has above its events, see
+    record_event."""
+    header, events = session_events(path, host, verbose=True, chosen=chosen)
+    when = events[0].when if events else time.time()
+    told = [record_event(when, header), *events] if wants_record(chosen) else events
+    return "".join(event_json(path.stem, event) + "\n" for event in told)
 
 
 def session_rows(files: list[Path], host: Host | None = None) -> list[tuple[Path, str]]:

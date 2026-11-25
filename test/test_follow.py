@@ -252,7 +252,8 @@ class FollowTest(LauncherTest):
         following = Following(self, "--json")
         add(self.file, call("t1", "Bash", command="make"), result("t1", "done"))
         add(self.file, prompt(DONE, 4))
-        asked, issued, ended, _ = map(json.loads, following.until(DONE).splitlines())
+        said = map(json.loads, following.until(DONE).splitlines())
+        asked, issued, ended, _ = (event for event in said if event["what"] != "record")
         assert (asked["what"], asked["session"]) == ("prompt", self.SESSION)
         assert (issued["stage"], issued["id"]) == ("call", "t1")
         assert issued["input"] == {"command": "make"}
@@ -283,7 +284,11 @@ class FollowTest(LauncherTest):
         following = Following(self, "--json")
         add(self.file, prompt("one\n\ntwo", 4), prompt(DONE, 5))
         said = [json.loads(line) for line in following.until(DONE).splitlines()]
-        assert said[1]["text"] == "one\n\ntwo"
+        # What is said of the following and its records, then the events
+        assert said[0]["what"] == "record"
+        assert "no session of this project is recorded" in said[0]["lines"][0]
+        told = [event for event in said if event["what"] != "record"]
+        assert told[1]["text"] == "one\n\ntwo"
 
     def test_a_step_of_the_model_says_what_it_used_once_with_verbose(self):
         following = Following(self, "--verbose")

@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from ..events import Event, Kind, Stage, labelled
+from ..events import Event, Kind, Stage, Who, labelled
 from .calls import call_label
 from .layout import shown_what, went_wrong
 
@@ -162,3 +162,19 @@ def ordered[Found](
     for one in in_order:
         timeline.take(event(one))
     return [one for one in in_order if chosen.wants(event(one))]
+
+
+def record_event(when: float, lines: list[str]) -> Event:
+    """What is said above the events as one of them, for JSON Lines,
+    which has no other place for it: the lines as they are. Among them
+    is what says that a record is not all there (a transcript CHANGED or
+    NOT ALL COPIED, a capture STOPPED or INCOMPLETE), which the events
+    read as if nothing were missing do not tell."""
+    return Event(when, Who.SANDBOX, Kind.RECORD, [], {"lines": lines})
+
+
+def wants_record(chosen: Filter) -> bool:
+    """Whether the lines above the events are given with them: also
+    with --failed, they say what is missing, and not with --only unless
+    it names them."""
+    return not chosen.only or Kind.RECORD in chosen.only

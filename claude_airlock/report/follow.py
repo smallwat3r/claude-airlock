@@ -61,7 +61,14 @@ from .entries import read_entries, session_files, title
 from .layout import Layout, event_json
 from .net_events import capture_events, name_container, proxy_event
 from .noted import NewlyNoted
-from .stream import EVERYTHING, Filter, Timeline, ordered
+from .stream import (
+    EVERYTHING,
+    Filter,
+    Timeline,
+    ordered,
+    record_event,
+    wants_record,
+)
 from .trace_args import USAGE, picked_session, trace_options
 from .transcript import Walk, WalkOptions
 
@@ -646,8 +653,10 @@ class Output:
         self._layout = layout
         # The transcript of the event written last
         self._session: Path | None = None
+        self._chosen = EVERYTHING
 
     def start(self, project_dir: str, chosen: Filter) -> None:
+        self._chosen = chosen
         if self._layout:
             about = labelled("following", f"{flat(project_dir)}, until interrupted")
             self._say([about, *chosen.header(), self._layout.columns])
@@ -679,10 +688,14 @@ class Output:
         return [event_json(session, event) for event in events]
 
     def _say(self, notes: list[str]) -> None:
-        """Lines about the following itself, which JSON Lines has no
-        place for."""
+        """Lines about the following itself and about the records it
+        reads, in JSON Lines as an event of their own: among them is
+        what says that a record is LATE, INCOMPLETE or STOPPED."""
         if self._layout:
             self._put(self._layout.header(notes))
+        elif notes and wants_record(self._chosen):
+            session = self._session.stem if self._session else ""
+            self._put([event_json(session, record_event(time.time(), notes))])
 
     @staticmethod
     def _put(lines: Sequence[str]) -> None:
