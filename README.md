@@ -274,6 +274,11 @@ do on its own, also when something it read told it to:
   what it read can come with one of its own, to push to a repository or
   a gist, or to publish a package. With a forwarded SSH agent or a
   `GH_TOKEN` it does so as you.
+- The filter goes by the name a connection asks the proxy for, and does
+  not look into what is then sent over it. A name on the list that is
+  served by a network of many sites (npm, PyPI and GitHub's files are)
+  leads to that network's addresses, and a session can ask there for
+  another site of the same network.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
   are readable.
 
