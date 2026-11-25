@@ -196,9 +196,48 @@ class LoginPairTest(LauncherTest):
                 # Whichever was written last
                 os.utime(self.ours, (1, 1))
                 self.settled("host", "host")
-        fit = json.dumps({"claudeAiOauth": account, "mcpOAuth": {}})
+        fit = json.dumps({"claudeAiOauth": account, "other": {}})
         self.theirs.write_text(fit)
         self.settled(fit, fit)
+
+    def test_the_logins_to_the_mcp_servers_stay_where_they_are(self):
+        def held(file: Path) -> dict:
+            return json.loads(file.read_text())
+
+        account = {"accessToken": "a", "refreshToken": "r"}
+        of_host = {"github": {"accessToken": "the host's"}}
+        self.ours.write_text(
+            json.dumps({"claudeAiOauth": account, "mcpOAuth": of_host})
+        )
+        self.pair.settle()
+        # The session is logged in, and has nothing of the host's servers
+        assert held(self.theirs) == {"claudeAiOauth": account}
+        assert "the host's" not in self.theirs.read_text()
+        # What a session renews is the host's, what it logs into is not,
+        # and the host keeps its own
+        renewed = {**account, "accessToken": "b"}
+        of_session = {"evil": {"accessToken": "a session's"}}
+        self.theirs.write_text(
+            json.dumps({"claudeAiOauth": renewed, "mcpOAuth": of_session})
+        )
+        os.utime(self.ours, (1, 1))
+        self.pair.settle()
+        assert held(self.ours) == {"claudeAiOauth": renewed, "mcpOAuth": of_host}
+        assert held(self.theirs)["mcpOAuth"] == of_session
+        # One that only logs into a server changes nothing on the host
+        before = self.ours.stat().st_mtime_ns
+        self.theirs.write_text(json.dumps({"claudeAiOauth": renewed, "mcpOAuth": {}}))
+        self.pair.settle()
+        assert self.ours.stat().st_mtime_ns == before
+        # And a logout on the host leaves a session what it logged into
+        self.theirs.write_text(
+            json.dumps({"claudeAiOauth": renewed, "mcpOAuth": of_session})
+        )
+        self.pair.settle()
+        self.ours.write_text(json.dumps({"mcpOAuth": of_host}))
+        login.LoginPair(self.host).settle()
+        assert held(self.theirs) == {"mcpOAuth": of_session}
+        assert held(self.ours) == {"mcpOAuth": of_host}
 
     def test_what_is_no_login_in_the_sandbox_alone_is_dropped(self):
         self.theirs.write_text("not a login")

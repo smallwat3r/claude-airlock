@@ -30,6 +30,12 @@ does. security prints an item that is more than one line of text as hex
 digits, so a login goes into the Keychain as one line of JSON, and two
 logins are the same when they say the same, however they are written.
 
+Not all of the file is one for the two. Claude Code keeps the logins
+to the MCP servers in it too (KEPT_APART): those of the host stay on the
+host, a session is given none of the host's servers and is not to read
+what logs into them, and those of the sessions stay in the base, see
+taken_from.
+
 Not a boundary: a session can read and replace the login, as it could
 before, with that of another account too, which then is the host's.
 Hence the care with what is read from the base, which is a session's
@@ -67,6 +73,9 @@ MOST_READ = 1024 * 1024
 # always text
 ACCOUNT_LOGIN = "claudeAiOauth"
 TOKENS = ("accessToken", "refreshToken")
+# What a login file holds that is not carried between the host and the
+# sandbox, each side keeps its own: the logins to the MCP servers
+KEPT_APART = ("mcpOAuth",)
 # What is noted when the two last agreed that there is no login
 ABSENT = "absent"
 # What reads and writes the Keychain of macOS, and the item Claude Code
@@ -109,6 +118,51 @@ def as_one_line(content: bytes) -> bytes:
         return content
 
 
+def kept_apart(content: bytes | None) -> dict:
+    """What a store holds that is its own and not the other's, see
+    KEPT_APART: nothing when it holds no login, or one that is no JSON
+    object."""
+    held = json_object(content) if content is not None else None
+    return {key: held[key] for key in KEPT_APART if key in held} if held else {}
+
+
+def shared_of(content: bytes | None) -> bytes | None:
+    """What of a login is the host's and the sandbox's alike: all of it
+    but what is kept apart, as one line of JSON that is the same however
+    the login is written. None when nothing is left, one that is no JSON
+    object as it is."""
+    held = json_object(content) if content is not None else None
+    if held is None:
+        return content
+    shared = {key: value for key, value in held.items() if key not in KEPT_APART}
+    try:
+        said = json.dumps(shared, separators=(",", ":"), sort_keys=True)
+    except (ValueError, RecursionError):
+        # Nested too deep to write again, a session's doing: as it is
+        return content
+    return said.encode("ascii") if shared else None
+
+
+def taken_from(own: bytes | None, other: bytes | None) -> bytes | None:
+    """What a store is to hold once it takes the login of another: the
+    other's, but for what is kept apart, of which it keeps its own and
+    takes none. Where neither holds any of that, the other's as it is
+    written. None when nothing is left to hold."""
+    mine = kept_apart(own)
+    if not mine and not kept_apart(other):
+        return other
+    held = json_object(other) if other is not None else {}
+    if held is None:
+        # No JSON object, there is nothing to put its own into
+        return other
+    theirs = {key: value for key, value in held.items() if key not in KEPT_APART}
+    try:
+        kept = json.dumps({**theirs, **mine}, separators=(",", ":"))
+    except (ValueError, RecursionError):
+        kept = json.dumps(theirs, separators=(",", ":"))
+    return kept.encode("ascii") if theirs or mine else None
+
+
 def reads_as_login(content: bytes) -> bool:
     """Whether what a file holds is a login as Claude Code writes one: a
     JSON object, its account at claude.ai, when it has one, an object
@@ -149,10 +203,17 @@ class Login:
         return self.content is None or reads_as_login(self.content)
 
     @cached_property
+    def shared(self) -> bytes | None:
+        """What of it is carried between the host and the sandbox, see
+        shared_of: two logins are the same when this is."""
+        return shared_of(self.content)
+
+    @cached_property
     def noted(self) -> str:
-        """What the state directory keeps of it, not the login itself."""
-        said = self.said
-        return ABSENT if said is None else hashlib.sha256(said).hexdigest()
+        """What the state directory keeps of it, not the login itself:
+        of what the two have in common."""
+        shared = self.shared
+        return ABSENT if shared is None else hashlib.sha256(shared).hexdigest()
 
 
 class LoginStore(Protocol):
@@ -180,10 +241,11 @@ class Held:
     login: Login
 
     def take(self, other: Login) -> bool:
-        """Make the store hold another login in the place of this one.
-        Not when it was written since this one was read, the next look
-        settles that."""
-        return self.store.unchanged(self.login) and self.store.write(other.content)
+        """Make the store hold another login in the place of this one,
+        but for what is kept apart, see taken_from. Not when it was
+        written since this one was read, the next look settles that."""
+        kept = taken_from(self.login.content, other.content)
+        return self.store.unchanged(self.login) and self.store.write(kept)
 
 
 def version_of(found: os.stat_result) -> tuple[int, ...]:
@@ -426,8 +488,8 @@ def note_shared(host: Host, login: Login) -> None:
 def written_last(one: Held, other: Held) -> Held:
     """Of two that differ, the one to keep when nothing says which of
     them changed: a login over none, then the later one."""
-    if one.login.content is None or other.login.content is None:
-        return other if one.login.content is None else one
+    if one.login.shared is None or other.login.shared is None:
+        return other if one.login.shared is None else one
     return one if one.login.written >= other.login.written else other
 
 
@@ -449,7 +511,7 @@ class LoginPair:
         put back in its place."""
         ours = Held(self.ours, self.ours.read())
         theirs = Held(self.theirs, self.theirs.read())
-        if ours.login.said == theirs.login.said:
+        if ours.login.shared == theirs.login.shared:
             self.note(ours.login)
             return
         shared = last_shared(self.host)
