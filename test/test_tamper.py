@@ -442,6 +442,18 @@ class BuildFilesTest(LauncherTest):
         ):
             assert f"  {self.project}/{changed}\n" in result.stderr
 
+    def test_a_repository_without_a_dot_git_is_one_all_the_same(self):
+        # git takes a directory that holds these for one of its own
+        result = self.launch(
+            session="mkdir -p src/objects src/refs src/hooks src/deep;"
+            " echo 'ref: refs/heads/main' > src/HEAD;"
+            " printf '[core]\\n\\tfsmonitor = evil\\n' > src/config;"
+            " echo x > src/hooks/pre-commit"
+        )
+        assert self.REPORT in result.stderr
+        for changed in ("src/config", "src/hooks/pre-commit"):
+            assert f"  {self.project}/{changed}\n" in result.stderr
+
     def test_what_a_package_manager_and_a_worktree_bring_is_not_looked_into(self):
         result = self.launch(
             session="mkdir -p node_modules/x .claude/worktrees/w;"

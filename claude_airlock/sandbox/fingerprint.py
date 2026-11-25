@@ -106,6 +106,8 @@ WORKFLOWS = (".github", "workflows")
 # follows instructions in, or one git runs hooks in: what the check above
 # watches at the top
 CLAUDE_MARKS = frozenset((".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"))
+# What git takes a directory for one of its own by, whatever its name
+GIT_HEAD = "HEAD"
 # The directories that are not looked into for those: what git keeps for
 # itself, and what a package manager fills with thousands of other
 # projects' build files. What is in them can still run on the host, it is
@@ -458,6 +460,13 @@ def build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
         names = {*subdirs, *files}
         if directory != root:
             watched += below_the_top(directory, names, fingerprint)
+        if GIT_HEAD in files:
+            # A git directory by what it holds, without a .git to say so:
+            # git takes it for one from there on down, with the config
+            # and the hooks a session left in it (core.fsmonitor runs a
+            # command on git status). At the top too, where only the .git
+            # of the project is looked for.
+            watched += git_files(directory, fingerprint)
         watched += [os.path.join(directory, name) for name in BUILD_FILES & names]
         for name in sorted(BUILD_TREES.intersection(subdirs)):
             watched += tree_files(os.path.join(directory, name)).into(fingerprint)
