@@ -128,18 +128,42 @@ def open_locked(path: str | Path, mode: str) -> Iterator[IO[Any]]:
     """Open a file of the launcher's, made for the user alone as needed,
     with a mode of LOCKED_MODES, and lock it alone until it is closed:
     launchers of other sessions write there too. Text is UTF-8, what is
-    not is replaced."""
-    descriptor = os.open(path, LOCKED_MODES[mode] | os.O_CREAT, 0o600)
+    not is replaced. The file locked is the one of that name: one that
+    was given another's place while this waited (see append_kept) is let
+    go of, and the one there now is asked for."""
     encoding, errors = (None, None) if "b" in mode else ("utf-8", "replace")
-    with os.fdopen(descriptor, mode, encoding=encoding, errors=errors) as file:
-        fcntl.flock(file, fcntl.LOCK_EX)
+    while True:
+        descriptor = os.open(path, LOCKED_MODES[mode] | os.O_CREAT, 0o600)
+        file = os.fdopen(descriptor, mode, encoding=encoding, errors=errors)
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX)
+            if _still_named(file, path):
+                break
+        except BaseException:
+            file.close()
+            raise
+        file.close()
+    with file:
         yield file
+
+
+def _still_named(file: IO[Any], path: str | Path) -> bool:
+    """Whether an open file is the one its name leads to now."""
+    try:
+        named = os.stat(path)
+    except OSError:
+        return False
+    opened = os.fstat(file.fileno())
+    return (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
 
 
 def append_kept(path: str, line: str, kept: int) -> None:
     """Add a line to one of the launcher's records, a file of its state
     directory for the user alone, and let go of the oldest lines past
-    kept."""
+    kept. Those that stay are written under another name and given the
+    record's, see write_whole: cut short where it is, a record would be
+    left empty by a launcher that is killed, or a disk that is full,
+    before they are written back."""
     private_dir(os.path.dirname(path))
     with open_locked(path, "a+") as record:
         record.write(line + "\n")
@@ -147,8 +171,7 @@ def append_kept(path: str, line: str, kept: int) -> None:
         record.seek(0)
         lines = record.readlines()
         if len(lines) > kept:
-            record.truncate(0)
-            record.writelines(lines[-kept:])
+            write_whole(path, "".join(lines[-kept:]))
 
 
 def try_lock_file(path: str) -> int | None:

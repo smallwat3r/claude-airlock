@@ -4,8 +4,13 @@ what a session can write read without trusting it."""
 
 from __future__ import annotations
 
+import errno
 import os
+import threading
+import time
+import unittest.mock
 
+import pytest
 from harness import LauncherTest
 
 from claude_airlock import files
@@ -26,6 +31,45 @@ class FilesTest(LauncherTest):
         assert not files.write_whole(str(file), "second", replace=False)
         assert file.read_text() == "first"
         assert list(self.work.glob("record*")) == [file]
+
+    def test_a_record_keeps_its_latest_lines(self):
+        record = self.work / "state" / "record.jsonl"
+        for number in range(5):
+            files.append_kept(str(record), str(number), 3)
+        assert record.read_text() == "2\n3\n4\n"
+        assert list(record.parent.iterdir()) == [record]
+        assert record.stat().st_mode & 511 == 384
+
+    def test_a_record_that_cannot_be_cut_short_is_left_whole(self):
+        record = self.work / "state" / "record.jsonl"
+        for number in range(3):
+            files.append_kept(str(record), str(number), 3)
+        # A full disk as the lines that stay are written
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with (
+            unittest.mock.patch.object(files.os, "replace", side_effect=full),
+            pytest.raises(OSError, match="No space"),
+        ):
+            files.append_kept(str(record), "3", 3)
+        assert record.read_text() == "0\n1\n2\n3\n"
+        assert list(record.parent.iterdir()) == [record]
+        files.append_kept(str(record), "4", 3)
+        assert record.read_text() == "2\n3\n4\n"
+
+    def test_a_record_given_anothers_place_is_not_the_one_locked(self):
+        record = self.work / "state" / "record.jsonl"
+        files.append_kept(str(record), "0", 1)
+        with files.open_locked(record, "a+") as held:
+            waiting = threading.Thread(
+                target=files.append_kept, args=(str(record), "2", 9)
+            )
+            waiting.start()
+            time.sleep(0.2)
+            # As append_kept does past its lines, under the lock
+            files.write_whole(str(record), "1\n")
+            assert held.fileno()
+        waiting.join(10)
+        assert record.read_text() == "1\n2\n"
 
     def test_a_lock_is_held_until_it_is_let_go_of(self):
         path = str(self.work / "lock")
