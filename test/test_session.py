@@ -69,6 +69,10 @@ class DefaultSessionTest(LauncherTest):
         assert not [flag for flag in flags if "credentials" in flag]
         assert not [flag for flag in flags if flag.startswith(f"--volume={git}:")]
 
+    def test_docker_keeps_nothing_of_what_a_session_writes(self):
+        # Kept, docker logs would give it to a session of another project
+        assert "--log-driver=none" in self.flags
+
     def test_container_is_hardened(self):
         for flag in (
             "--cap-drop=ALL",

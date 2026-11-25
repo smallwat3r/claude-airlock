@@ -133,6 +133,10 @@ def base_args(
     return [
         "--rm",
         "--interactive",
+        # Docker keeps nothing of what the session writes: kept, it would
+        # be read by docker logs, which the Docker socket allows a session
+        # of another project (CLAUDE_AIRLOCK_DOCKER_SOCKET), a chat whole
+        "--log-driver=none",
         # Claude runs as PID 1 and does not reap orphaned children, without
         # an init, zombies accumulate and count toward --pids-limit
         "--init",
