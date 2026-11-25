@@ -147,6 +147,23 @@ def subagent_files(transcript: Path) -> list[Path]:
     return [directory / name for name in names[:MOST_SUBAGENTS]]
 
 
+def subagents_unread(transcript: Path) -> int:
+    """How many transcripts of subagents a session has past the
+    MOST_SUBAGENTS that subagent_files gives, by that of the session.
+    Those are neither copied nor read, and what tells of the session
+    says so: which ones they are goes by their names, the session's to
+    choose, and any number of names can be made to sort ahead of the one
+    a subagent wrote what it ran in."""
+    directory = transcript.with_suffix("") / SUBAGENTS_DIR
+    if directory.parent.is_symlink() or directory.is_symlink():
+        return 0
+    there = sum(
+        name.startswith(SUBAGENT_PREFIX) and name.endswith(TRANSCRIPT_SUFFIX)
+        for name in plain_files(directory)[0]
+    )
+    return max(0, there - MOST_SUBAGENTS)
+
+
 def session_transcripts(host: Host) -> list[Path]:
     """Every transcript the project's sessions write: their own and
     those of their subagents."""

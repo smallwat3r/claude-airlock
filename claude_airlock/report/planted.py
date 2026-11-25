@@ -114,15 +114,23 @@ _UNSHOWN_RUN = re.compile(f"[{_UNSHOWN}]{{{UNSHOWN_RUN},}}")
 # What splits a word or sets it off without a model reading it any
 # other way: the marks of emphasis, and the characters that are not shown
 _FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}]+")
+# The same but for what a path is written with, which is left where what
+# was found is shown (see as_shown): a ~ ahead of the first / of a path,
+# and a * next to a /
+_SET_OFF = re.compile(
+    f"(?:[`^\u00b7\u2022\u00a6{_UNSHOWN}]|~(?![\\w.-]{{0,64}}/)|(?<!/)\\*(?!/))+"
+)
 
-type Finder = Callable[[str], str | None]
+# What finds a sign in a text: where it is, for what is shown with the
+# lines around it, or what to say of it, none when it is not there
+type Finder = Callable[[str], re.Match[str] | str | None]
 
 
 @dataclass(frozen=True)
 class Sign:
     """A way of writing that tells of text meant to instruct who reads
-    it: what it is said as, and what finds it in a text, giving what is
-    shown of the first place it is at or none."""
+    it: what it is said as, and what finds the first place it is at in a
+    text."""
 
     name: str
     find: Finder
@@ -143,6 +151,13 @@ def as_read(text: str) -> str:
     splits a word (see _FILLERS). There is no end to such ways, these
     are the cheap ones."""
     return _FILLERS.sub("", unicodedata.normalize("NFKC", text))
+
+
+def as_shown(text: str) -> str:
+    """A text as it reads (see as_read), with what a path is written
+    with left in it: what is shown of a text is to say which file it
+    names, and ~/.ssh without its ~ names another."""
+    return _SET_OFF.sub("", unicodedata.normalize("NFKC", text))
 
 
 def _line_start(text: str, at: int) -> int:
@@ -191,15 +206,31 @@ def _around(text: str, found: re.Match[str]) -> str:
     return "\n".join(lines)
 
 
+def _excerpt(read: str, found: re.Match[str], shown: str) -> str:
+    """What was found in a text as it reads, with the lines around it
+    (see _around), as the same text with its paths left whole has them
+    (see as_shown). Looked for again there, which is a pass and no count
+    of what the two differ by: the same find on the same line, unless a
+    character of a path is within it, and then it is shown as it was
+    found."""
+    again = found.re.search(shown)
+    if (
+        again
+        and again.group() == found.group()
+        and shown.count("\n", 0, again.start()) == read.count("\n", 0, found.start())
+    ):
+        return _around(shown, again)
+    return _around(read, found)
+
+
 def _written(*patterns: str) -> Finder:
     """What finds the first place a text is written in one of some ways,
     whatever the case of its letters."""
     known = tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns)
 
-    def find(text: str) -> str | None:
+    def find(text: str) -> re.Match[str] | None:
         matches = filter(None, (pattern.search(text) for pattern in known))
-        first = min(matches, key=lambda match: match.start(), default=None)
-        return _around(text, first) if first else None
+        return min(matches, key=lambda match: match.start(), default=None)
 
     return find
 
@@ -336,19 +367,28 @@ class Planted:
 def planted(text: object, source: str = "") -> tuple[Planted, ...]:
     """The signs a text shows of being written to instruct who reads it,
     each once, with the first place it is found: in the text as it reads
-    (see as_read), which is how what was found is shown too. Each with
-    the file or the page the text was read in, when it is known. None
-    for what is no text."""
+    (see as_read), which is how what was found is shown too, but for the
+    paths it names (see as_shown). Each with the file or the page the
+    text was read in, when it is known. None for what is no text."""
     if not isinstance(text, str) or not text:
         return ()
     text = text[:MOST_SCANNED]
     read = as_read(text)
-    found = ((sign, sign.find(text if sign.as_written else read)) for sign in SIGNS)
-    return tuple(
-        Planted(sign.name, excerpt, sign.stops, source)
-        for sign, excerpt in found
-        if excerpt
-    )
+    # Made when the first sign is found: most texts show none
+    shown: str | None = None
+    signs = []
+    for sign in SIGNS:
+        found = sign.find(text if sign.as_written else read)
+        if found is None:
+            continue
+        if isinstance(found, str):
+            excerpt = found
+        else:
+            shown = as_shown(text) if shown is None else shown
+            excerpt = _excerpt(read, found, shown)
+        if excerpt:
+            signs.append(Planted(sign.name, excerpt, sign.stops, source))
+    return tuple(signs)
 
 
 def flagged(signs: Iterable[Planted]) -> dict:

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from ..events import Event
+from ..events import Event, Stage
 from ..recording.processes import ProcessRecord
 from ..recording.records import TracedSession
 
@@ -44,15 +44,19 @@ SAID = "processes: none seen while it ran"
 
 def ran_between(event: Event) -> tuple[float, float] | None:
     """From when to when the command of an event ran, as its transcript
-    has it, none for what is no command known to have run: another tool,
-    a call that was not let run, and one without a result or whose result
-    is said to have come before it."""
+    has it, none for what is no command known to have run: what is no
+    call, another tool, a call that was not let run, and one without a
+    result or whose result is said to have come before it. An event that
+    is the result alone (see Walk) is of when that came, and its command
+    ran up to then."""
     fields = event.fields
     seconds = fields.get("seconds")
-    if fields.get("tool") != COMMAND_TOOL or fields.get("refused"):
+    if not event.call or fields.get("tool") != COMMAND_TOOL or fields.get("refused"):
         return None
     if seconds is None or seconds < 0:
         return None
+    if fields.get("stage") == Stage.RESULT:
+        return event.when - seconds, event.when
     return event.when, event.when + seconds
 
 

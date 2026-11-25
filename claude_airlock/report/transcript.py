@@ -11,7 +11,8 @@ can be given stops the reading."""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat
 from ..files import UNREADABLE
@@ -19,12 +20,17 @@ from .brief import TALK_LINES, amount, between, clip, shortened
 from .calls import call_event, call_label, tell_result
 from .entries import (
     INPUT_TOKENS,
+    calls_issued,
     claude_of,
     content_blocks,
+    entry_times,
     is_prompt,
+    kept,
     local_time,
+    step_of,
     step_tokens,
     step_usage,
+    tool_results,
 )
 from .outcomes import Outcome, outcome, said_source
 from .told import Asides, typed_while_working
@@ -34,6 +40,16 @@ from .told import Asides, typed_while_working
 MOST_REMEMBERED = 10_000
 # Of the call a result is named after, when other things came between
 CALL_LABEL_WIDTH = 100
+# What a result is named after when its call is nowhere to be found, and
+# the tool it is then of, as a call without a name has it
+NO_CALL = "a call the transcript does not have"
+NO_TOOL = "?"
+# What is said, live, of a call the model went on without a result of
+WENT_ON = "result: none recorded, the session went on without one"
+# Of the entries that are no event of a trace, how many kinds are named
+# when they are counted, and how much of the name of one
+UNTOLD_KINDS = 8
+KIND_WIDTH = 40
 # How Claude Code records a command the user gave it (/model sonnet): its
 # name and its arguments in tags, and what the command said in others
 # Each is found by where it starts and where it then ends, see between
@@ -121,6 +137,21 @@ def unreadable_event(when: float, entry: dict) -> Event:
     )
 
 
+def untold_event(when: float, entries: list[dict]) -> Event:
+    """Entries of a transcript that add to no event, as one that counts
+    them by their kind: a step in which the model only thought, a title,
+    a mode or a model with nothing before it to have changed from. Said
+    of those that were taken out of a transcript (see taken_out_events),
+    where nothing is to go without a word. Each is whole in --json."""
+    kinds = Counter(flat(entry.get("type", "?"))[:KIND_WIDTH] for entry in entries)
+    named = [f"{count} {kind}" for kind, count in kinds.most_common(UNTOLD_KINDS)]
+    if len(kinds) > UNTOLD_KINDS:
+        named.append("...")
+    count = "1 line that is" if len(entries) == 1 else f"{len(entries)} lines that are"
+    detail = f"{count} no event of a trace ({', '.join(named)}), see --json"
+    return Event(when, Who.SANDBOX, Kind.TRANSCRIPT, [detail], {"entries": entries})
+
+
 def read_anew(used: dict[str, int], before: int) -> int:
     """How much of the conversation a step read at full price that the
     step before had left in the cache, 0 when the cache held: a step
@@ -172,6 +203,25 @@ class OpenCall:
     source: str = ""
 
 
+def open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
+    """A call as its result needs it, by its event, the entry it is in
+    and the call itself. Its result is added to the event when the two
+    are told as a whole, and is an event of its own when not."""
+    name = event.fields["tool"]
+    # Before the event has its number: a result shows that itself
+    label = (call_label(event) or name)[:CALL_LABEL_WIDTH]
+    started = {"timestamp": entry.get("timestamp")}
+    source = said_source(block.get("input"))
+    added_to = event if whole else None
+    return OpenCall(event.who, name, started, label, added_to, source=source)
+
+
+def side_of(who: Who, entry: dict) -> tuple[Who, str]:
+    """Whose side of a conversation an entry is of: claude's, or that of
+    one subagent, which Claude Code names in each entry of its."""
+    return who, kept(entry.get("agentId"))
+
+
 @dataclass(frozen=True)
 class WalkOptions:
     """How a transcript is walked, see Walk."""
@@ -184,6 +234,26 @@ class WalkOptions:
     name_results: bool = False
     # Whether what each step of the model used is told without verbose too
     steps: bool = False
+    # Whether the lines of the events are for anyone to read. They are not
+    # as JSON Lines, which has the values alone: what takes long to lay
+    # out and is no value, the diff of an Edit, is then left out.
+    lines: bool = True
+
+
+@dataclass(frozen=True)
+class OtherPart:
+    """Of a transcript that lines were taken out of, the part a walk is
+    not over: what is left of it for a walk over what was taken out, and
+    the other way round. A call can be in one part and its result in the
+    other, and neither is to go untold for it."""
+
+    # Each call there by its id, with the entry it is in: a result that
+    # has no call where it is walked is named after the one found here
+    calls: dict[str, tuple[dict, dict]] = field(default_factory=dict)
+    # Each result there the same way, for a walk over what was taken
+    # out: a call left without a result ended as the one found here says.
+    # None for a walk over what is left, which is told as it is.
+    results: dict[str, tuple[dict, dict]] = field(default_factory=dict)
 
 
 class Walk:
@@ -204,6 +274,19 @@ class Walk:
     shown. What a live walk remembers is bounded, the transcript is the
     session's to write.
 
+    Live, a call is taken to run until its result comes. One whose
+    result never does is told as that when the model takes its next
+    step, which it does once it has the results of the last: the session
+    was ended while the call ran, and went on later. Told by the ids of
+    the steps, since several calls of one step run side by side: an entry
+    that names no step tells nothing of the kind.
+
+    No result goes untold where a transcript is all there. One whose call
+    is not ahead of it is an event of its own as a live one is, named
+    after its call: a second result of a call that had one, the result of
+    a call in the other part of a transcript that lines were taken out of
+    (see OtherPart), and one whose call is nowhere, which says so.
+
     What a step used is only told when verbose: it is the cost of the
     session, not what it did, and the header of a trace sums it up."""
 
@@ -212,6 +295,7 @@ class Walk:
         project_dir: str,
         options: WalkOptions = WalkOptions(),
         usage: dict[str, dict] | None = None,
+        other: OtherPart | None = None,
     ):
         self._project_dir = project_dir
         self._verbose = options.verbose
@@ -219,6 +303,12 @@ class Walk:
         self._tell_steps = options.verbose or options.steps
         self._live = options.live
         self._name_results = options.name_results
+        self._diffed = options.lines
+        self._other = other or OtherPart()
+        # How many results were added to the event of their call: an
+        # entry that gives no event may have told of something all the
+        # same, see taken_out_events
+        self.added = 0
         # How many calls a live walk has seen
         self._calls = 0
         # What each step used when that is known ahead, else the entry
@@ -231,6 +321,9 @@ class Walk:
         self._last_call: str | None = None
         # The steps of the model whose usage was shown
         self._steps: dict[str, None] = {}
+        # Live, the step each side of the conversation is at, claude and
+        # each subagent, with the calls it issued in that step
+        self._at: dict[tuple[Who, str], tuple[str, list[str]]] = {}
         # How much the last step of each read, which the next one of
         # theirs finds in the cache or has missed
         self._read: dict[Who, int] = {}
@@ -249,7 +342,7 @@ class Walk:
             return self._aside(entry)
         by_claude = kind == "assistant"
         claude = claude_of(entry)
-        events = self._step(claude, entry)
+        events = self._went_on(claude, entry) + self._step(claude, entry)
         if not by_claude:
             events += self._beside(self._asides.prompted(entry, self._when))
         for block in content_blocks(entry):
@@ -263,16 +356,57 @@ class Walk:
         return events
 
     def end(self) -> None:
-        """Mark the calls that were left without a result."""
-        for call in self._open.values():
-            if call.event:
-                tell_result(call.event, None, self._verbose)
+        """Mark the calls that were left without a result. Not one whose
+        result the other part of the transcript has (see OtherPart): it
+        ended as that says."""
+        for call, issued in self._open.items():
+            if not issued.event:
+                continue
+            found = self._other.results.get(call)
+            if found is None:
+                tell_result(issued.event, None, self._verbose)
+                continue
+            ended = outcome(
+                issued.started, *found, self._project_dir, issued.name, issued.source
+            )
+            self._ended(issued.event, ended)
         self._open.clear()
 
     def _remember(self, kept: dict) -> None:
         """Let go of the oldest of what a live walk keeps."""
         while self._live and len(kept) > MOST_REMEMBERED:
             del kept[next(iter(kept))]
+
+    def _went_on(self, who: Who, entry: dict) -> list[Event]:
+        """Live, the calls the model went on without: those it issued in
+        the step before the one an entry starts that have no result yet,
+        each as an event in the place of its result, see Walk. Nothing
+        for a later entry of the same step, and for one that names none.
+        A call stays known all the same, should a result of it come."""
+        step = step_of(entry)
+        if not self._live or not step:
+            return []
+        side = side_of(who, entry)
+        before, issued = self._at.get(side, ("", []))
+        if before == step:
+            return []
+        self._at[side] = (step, [])
+        self._remember(self._at)
+        # Those still without a result, each by its id
+        left = ((name, self._open.get(name)) for name in issued)
+        return [
+            Event(
+                self._when,
+                call.who,
+                call.name.lower(),
+                ["of: " + call.label, WENT_ON],
+                {"stage": Stage.RESULT, "tool": call.name, "id": name},
+                call.number,
+                call=True,
+            )
+            for name, call in left
+            if call
+        ]
 
     def _step(self, who: Who, entry: dict) -> list[Event]:
         """What the step an entry starts used, nothing for a later entry
@@ -350,31 +484,75 @@ class Walk:
 
     def _call(self, who: Who, entry: dict, block: dict) -> Event:
         event = call_event(
-            self._when, who, entry, block, self._project_dir, self._verbose
+            self._when,
+            who,
+            entry,
+            block,
+            self._project_dir,
+            self._verbose,
+            self._diffed,
         )
         call = str(block.get("id"))
-        name = event.fields["tool"]
-        # Before the event has its number: a result shows that itself
-        label = (call_label(event) or name)[:CALL_LABEL_WIDTH]
-        started = {"timestamp": entry.get("timestamp")}
+        issued = open_call(event, entry, block, whole=not self._live)
         if self._live:
             self._calls += 1
-            event.number = self._calls
+            event.number = issued.number = self._calls
             event.fields = {"stage": Stage.CALL, **event.fields}
-        kept = None if self._live else event
-        source = said_source(block.get("input"))
-        self._open[call] = OpenCall(
-            who, name, started, label, kept, event.number, source
-        )
+            # Of the step its side is at, when the entry names it
+            _, in_step = self._at.get(side_of(who, entry), ("", []))
+            if step_of(entry) and len(in_step) < MOST_REMEMBERED:
+                in_step.append(call)
+        self._open[call] = issued
         self._remember(self._open)
         self._last_call = call
         return event
 
+    def _issued(self, call: str, entry: dict) -> OpenCall | None:
+        """The call a result is of, by its id and the entry of the
+        result. Live it is let go of with its result, and there is none
+        for a result whose call was not seen: that is of before the
+        following began. Else it is kept, for what else comes as its
+        result, and a call that was not seen is known all the same, see
+        _elsewhere."""
+        if self._live:
+            return self._open.pop(call, None)
+        issued = self._open.get(call)
+        if issued is None:
+            # Kept as the others are: found once, however many results
+            # are given as its own
+            issued = self._open[call] = self._elsewhere(call, entry)
+        return issued
+
+    def _elsewhere(self, call: str, entry: dict) -> OpenCall:
+        """A call that is not ahead of its result in what is walked, as
+        far as the result needs it: the one of that id in the other part
+        of the transcript (see OtherPart), named as its event names it,
+        or one that is nowhere, of which the result alone says by whom
+        it is."""
+        found = self._other.calls.get(call)
+        if found is None:
+            return OpenCall(claude_of(entry), NO_TOOL, {}, NO_CALL, None)
+        issued, block = found
+        # For what it is named by, not for its lines
+        event = call_event(
+            self._when,
+            claude_of(issued),
+            issued,
+            block,
+            self._project_dir,
+            verbose=False,
+            diffed=False,
+        )
+        return open_call(event, issued, block, whole=False)
+
     def _result(self, entry: dict, block: dict) -> list[Event]:
-        """How a call that was seen ended: added to its event, or live an
-        event of its own. Nothing for the result of any other call."""
+        """How a call ended: added to its event, or an event of its own
+        where there is none to add it to, which is so live, of a call
+        that had a result before, and of one this walk has not seen (see
+        _issued). Live nothing for the result of a call that was not
+        seen."""
         call = str(block.get("tool_use_id"))
-        issued = self._open.pop(call, None)
+        issued = self._issued(call, entry)
         if issued is None:
             return []
         ended = outcome(
@@ -387,8 +565,12 @@ class Walk:
         )
         if issued.event:
             self._ended(issued.event, ended)
+            # Once: what else comes as its result is told apart
+            issued.event = None
             return []
-        named = self._name_results or self._last_call != call
+        # Always where a transcript is all there: such a result is far
+        # from its call, or has none
+        named = not self._live or self._name_results or self._last_call != call
         self._last_call = None
         fields = {
             "stage": Stage.RESULT,
@@ -411,6 +593,7 @@ class Walk:
 
     def _ended(self, event: Event, ended: Outcome) -> None:
         """Add how a call ended to its event."""
+        self.added += 1
         tell_result(event, ended, self._verbose)
         # Whether it wrote outside the project stays the last value,
         # and is so when the call or what it ran did
@@ -422,13 +605,56 @@ class Walk:
             fields[key] = any(flags)
 
 
+def steps_used(entries: list[dict]) -> dict[str, dict]:
+    """What each step of the model used, by its id: as the last entry of
+    a step has it, should an earlier one be short."""
+    return dict(found for found in map(step_usage, entries) if found)
+
+
+def left_events(
+    entries: list[dict], gone: list[dict], project_dir: str, options: WalkOptions
+) -> list[Event]:
+    """The events of a transcript as it is now, next to the entries that
+    were taken out of it: a result whose call is among those is named
+    after it."""
+    other = OtherPart(calls_issued(gone))
+    walk = Walk(project_dir, options, steps_used(entries), other)
+    events = [event for entry in entries for event in walk.take(entry)]
+    walk.end()
+    return events
+
+
+def taken_out_events(
+    gone: list[dict], left: list[dict], project_dir: str, options: WalkOptions
+) -> list[Event]:
+    """The events of the entries that were taken out of a transcript,
+    next to what is left of it. A result that was taken out or altered
+    is named after its call, which may be left, and a call that was is
+    told with its result, which may be left too. Then one event for the
+    entries that add to none (see untold_event), at the time of the
+    first: nothing that was taken out goes without a word."""
+    if not gone:
+        return []
+    other = OtherPart(calls_issued(left), tool_results(left))
+    walk = Walk(project_dir, options, steps_used(gone), other)
+    events: list[Event] = []
+    untold: list[dict] = []
+    for entry in gone:
+        added = walk.added
+        found = walk.take(entry)
+        events += found
+        if not found and walk.added == added:
+            untold.append(entry)
+    walk.end()
+    if untold:
+        times = entry_times(untold) or entry_times(gone)
+        when = times[0].timestamp() if times else 0.0
+        events.append(untold_event(when, untold))
+    return events
+
+
 def transcript_events(
     entries: list[dict], project_dir: str, verbose: bool
 ) -> list[Event]:
     """The events of a transcript that is all there."""
-    # As the last entry of a step has it, should an earlier one be short
-    usage = dict(found for found in map(step_usage, entries) if found)
-    walk = Walk(project_dir, WalkOptions(verbose), usage)
-    events = [event for entry in entries for event in walk.take(entry)]
-    walk.end()
-    return events
+    return left_events(entries, [], project_dir, WalkOptions(verbose))

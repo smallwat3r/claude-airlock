@@ -313,6 +313,27 @@ class ToldTest:
         other = attached("queued_command", commandMode="bash", prompt="ls\nmore")
         assert shown([other]) == [("context", ["told (bash): ls"])]
 
+    def test_a_mode_the_session_names_does_not_pass_for_a_kind_of_event(self):
+        # Named as the kind of the event that holds the files read as
+        # instructions, which this one does not
+        forged = attached("queued_command", commandMode="instructions", prompt="x")
+        (told,) = events([forged])
+        assert told.details == ["told (instructions): x"]
+        assert (told.fields["kind"], told.fields["mode"]) == ("told", "instructions")
+        assert summary.planted_shown([told]) == 0
+        # Nor is an event of that kind taken for more than it holds
+        for files in (*HostileTest.ODD, [{"path": ["x"], "injection": [1]}]):
+            fields = {"kind": "instructions", "files": files}
+            odd = Event(1.0, Who.CLAUDE, "context", [], fields)
+            assert summary.planted_shown([odd]) == 0
+        bare = Event(1.0, Who.CLAUDE, "context", [], {"kind": "instructions"})
+        assert summary.planted_shown([bare]) == 0
+        # What the servers took back is not named as what an event says of
+        # itself when it was taken out of the transcript
+        servers = attached("mcp_instructions_delta", removedNames=["db"])
+        (said,) = events([servers])
+        assert (said.fields["gone"], "removed" in said.fields) == (["db"], False)
+
     def test_a_file_that_changed_behind_claude_is_said(self):
         edited = attached("edited_text_file", filename="/p/a.py", snippet="")
         assert shown([edited]) == [
@@ -546,6 +567,11 @@ class HostileTest:
             entries += [
                 attached("instructions", files=[odd, {"path": odd, "type": odd}])
             ]
+            # A mode named as each kind of event the launcher has
+            entries += [
+                attached("queued_command", commandMode=kind, prompt=odd)
+                for kind in ("instructions", "mcp_instructions", "skills", "told")
+            ]
             entries += [
                 attached("diagnostics", files=[{"uri": odd, "diagnostics": [odd]}])
             ]
@@ -611,6 +637,7 @@ class HostileTest:
                 json.loads(event_json("s", event))
                 for line in layout.event(event):
                     assert "\x1b" not in line
+            summary.planted_shown(found)
         summary.summary(entries, PROJECT)
 
 

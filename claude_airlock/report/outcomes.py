@@ -48,6 +48,11 @@ OUTSIDE_FLAG = "  OUTSIDE PROJECT"
 
 
 def outside(path: str, project_dir: str) -> bool:
+    """Whether a path a session wrote to is outside its project, by the
+    path as it is written. Not by where the links on it lead: the trace
+    is made later and on the host, where a link of the project may lead
+    somewhere else than it did for the session, or be gone, so a write
+    through one to a place outside is not told as that."""
     absolute = os.path.normpath(os.path.join(project_dir, path))
     return absolute != project_dir and not absolute.startswith(project_dir + os.sep)
 

@@ -87,17 +87,20 @@ def short_id(path: Path) -> str:
     return flat(path.stem)[:SHORT_ID]
 
 
-def read_entries(path: Path) -> list[dict]:
+def read_entries(path: Path, most: int | None = None) -> list[dict]:
     """The transcript's entries, none for one that cannot be read. Of one
     longer than MOST_READ, or that holds more than MOST_HELD once it is
     read, those of its start, then an entry that says the rest was not
     read: a session can make its transcript as long as the disk, and all
-    of it is held here, a line of a few bytes as an entry of hundreds."""
+    of it is held here, a line of a few bytes as an entry of hundreds.
+    With most, those of its first so many bytes and no word of the rest,
+    for what only asks how it starts."""
     file = open_plain(path)
     if file is None:
         return []
     entries = []
     held = 0
+    limit = MOST_READ if most is None else min(most, MOST_READ)
     with file:
         for line in bounded_lines(file):
             held += held_size(line) if line else 0
@@ -113,8 +116,8 @@ def read_entries(path: Path) -> list[dict]:
                 entry = None
             if entry:
                 entries.append(entry)
-            if file.tell() >= MOST_READ:
-                if file.read(1):
+            if file.tell() >= limit:
+                if most is None and file.read(1):
                     entries.append({"type": UNREADABLE, "text": NOT_ALL_READ})
                 break
     return entries
@@ -232,6 +235,13 @@ def tool_calls(entries: list[dict]) -> list[tuple[dict, dict]]:
     ]
 
 
+def calls_issued(entries: list[dict]) -> dict[str, tuple[dict, dict]]:
+    """Each tool call and the entry it is in, by its id."""
+    return {
+        str(block.get("id")): (entry, block) for entry, block in tool_calls(entries)
+    }
+
+
 def tool_results(entries: list[dict]) -> dict[str, tuple[dict, dict]]:
     """Each tool result and the entry it is in, by the id of its call."""
     return {
@@ -263,19 +273,25 @@ def title(entries: list[dict]) -> str:
     return lines[0][:70]
 
 
-def step_usage(entry: dict) -> tuple[str, dict] | None:
+def step_of(entry: dict) -> str | None:
     """The step of the model an entry of Claude's is part of, by its id,
-    and what the API said that step used, none for an entry without. A
-    step is one answer of the model: what it thought, said and called
-    before it was given results. Each of those is an entry of its own, and
-    each repeats the usage of the whole step."""
+    none for an entry that names none. A step is one answer of the
+    model: what it thought, said and called before it was given results.
+    Each of those is an entry of its own."""
     message = entry.get("message")
     if entry.get("type") != "assistant" or not isinstance(message, dict):
         return None
-    step, usage = message.get("id") or entry.get("requestId"), message.get("usage")
-    if not isinstance(step, str) or not isinstance(usage, dict):
-        return None
-    return step, usage
+    step = message.get("id") or entry.get("requestId")
+    return step if isinstance(step, str) else None
+
+
+def step_usage(entry: dict) -> tuple[str, dict] | None:
+    """The step an entry of Claude's is part of (see step_of) and what
+    the API said that step used, none for an entry without: each entry
+    of a step repeats the usage of the whole step."""
+    step = step_of(entry)
+    usage = entry["message"].get("usage") if step else None
+    return (step, usage) if step and isinstance(usage, dict) else None
 
 
 def tokens(usage: object, kind: str) -> int:

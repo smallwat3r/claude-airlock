@@ -58,10 +58,12 @@ def ssh_agent_event(when: float, said: dict) -> Event:
     else:
         detail = str(said.get("what", "sent a request"))
     fields = {
-        key: said[key]
-        for key in ("did", "key", "comment", "what", "keys")
-        if key in said
+        key: said[key] for key in ("did", "key", "comment", "keys") if key in said
     }
+    if "what" in said:
+        # What was signed or asked for, which the record names what: an
+        # event has that name for what it is, the use of a door
+        fields["request"] = said["what"]
     if refused:
         by = "launcher" if said.get("by") == BY_LAUNCHER else "agent"
         detail += f"  REFUSED by the {by}"

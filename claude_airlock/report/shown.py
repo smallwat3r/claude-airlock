@@ -51,6 +51,28 @@ def over(transport: str, port: int) -> str:
 # What is said of a capture that stopped before its session did, see
 # CaptureSidecar.stopped_early
 STOPPED = "its capture is INCOMPLETE, a recorder ended before the session did: {}"
+# What is said of a capture some of whose packets were not taken, see
+# dropped_packets of capture.py
+DROPPED = (
+    "its capture is INCOMPLETE, {} packets came faster than they were"
+    " taken: what they told of is missing"
+)
+# What is said of the egress proxy's log when it begins after a session
+# that asked it did, see Recorded.log_begins
+LOG_SHORT = (
+    "the egress proxy's log is INCOMPLETE, it goes back to {:%H:%M:%S}"
+    " only: what was asked before is missing"
+)
+# What is said of a record of processes whose watcher was slowed, with
+# the most its looks came apart and for how long in all, see Slowed of
+# processes.py. From a second on: under load a look comes a little late
+# all the time, and what is missed then lived for an instant.
+SLOWED = (
+    "the record of its processes has GAPS, its watcher was slowed: its"
+    " looks came up to {:.1f}s apart, for {:.0f}s in all, what ran for"
+    " less then may be missing"
+)
+SLOWED_FROM = 1.0
 # What is said of a record of processes whose watcher ended or hung
 # before its session did, with when it was last heard, see
 # ProcessRecord.silent_from

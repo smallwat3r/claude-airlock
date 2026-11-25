@@ -316,8 +316,10 @@ def headed(style: str, about: str) -> str:
 def event_json(session: str, event: Event) -> str:
     """An event as a JSON object on a line: the session, time (ISO 8601
     with its offset), who, what, then the values of that kind of event.
-    Escaped by the encoder, which leaves no control character to reach a
-    terminal."""
+    Those four are what the object is told apart by, and are never taken
+    from the values: one named as one of them is not written, what makes
+    an event gives it a name of its own. Escaped by the encoder, which
+    leaves no control character to reach a terminal."""
     when = datetime.fromtimestamp(event.when).astimezone()
     about = {
         "session": session,
@@ -325,13 +327,14 @@ def event_json(session: str, event: Event) -> str:
         "who": event.who.value,
         "what": event.what,
     }
+    values = {name: held for name, held in event.fields.items() if name not in about}
     try:
         try:
             # NaN and Infinity, which a transcript can hold, are not JSON
             # to most of what reads it
-            return json.dumps({**about, **event.fields}, allow_nan=False)
+            return json.dumps({**about, **values}, allow_nan=False)
         except ValueError:
-            return json.dumps({**about, **finite(event.fields)})
+            return json.dumps({**about, **finite(values)})
     except RecursionError:
         # Nested as deep as could just be read, by either of the two
         return json.dumps({**about, "unreadable": True})

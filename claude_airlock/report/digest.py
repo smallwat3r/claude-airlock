@@ -21,25 +21,34 @@ import ipaddress
 import json
 import time
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
 
 from ..errors import Fatal
 from ..events import flat
-from ..files import json_object, open_locked, private_dir
+from ..files import json_object, open_locked, private_dir, write_whole
 from ..notice import warn
-from ..projects import project_root, session_transcripts, subagent_session
+from ..projects import (
+    MOST_SUBAGENTS,
+    project_root,
+    session_transcripts,
+    subagent_session,
+    subagents_unread,
+)
 from ..recording.capture import parts_cut_short
 from ..recording.pcap import Capture
 from ..recording.recorder import copied_at, last_written, removed_transcripts
 from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
 from .calls import written_paths
-from .entries import short_id
+from .entries import read_entries, short_id, unreadable_lines
+from .net_events import slowed
 from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
 from .recorded import ReadTranscript, Recorded
-from .shown import SILENT, STOPPED, reached, size
+from .shown import DROPPED, LOG_SHORT, SILENT, STOPPED, reached, size
 from .summary import planted_reads
 
 # To one destination in one session, from this many bytes on it is said
@@ -132,9 +141,12 @@ def newly_reached(host: Host, found: dict[str, str]) -> list[str]:
         known.update(dict.fromkeys(found, round(time.time())))
         latest = sorted(known.items(), key=lambda item: last_reached(item[1]))
         projects[host.project_dir] = dict(latest[-KEPT_DESTINATIONS:])
-        record.seek(0)
-        record.truncate()
-        json.dump(projects, record)
+        # Under another name, then given the record's, see write_whole:
+        # cut short where it is, the record would be left empty by a
+        # launcher that is killed, or a disk that is full, before it is
+        # written back, and every project's next session would pass for
+        # its first, which has nothing new to say
+        write_whole(host.destinations_file, json.dumps(projects))
     return [] if first else new
 
 
@@ -163,6 +175,8 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
         silent = record.silent_from(kept.session.until) if record else None
         if silent is not None:
             lines.append(SILENT.format(datetime.fromtimestamp(silent)))
+        if record and slowed(record):
+            lines.append(slowed(record))
         if record:
             # Each place once, however often a server was started there
             waited = dict.fromkeys(
@@ -198,6 +212,8 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
             lines.append(f"its capture stopped at its packet limit ({cut})")
         if kept.session.stopped:
             lines.append(STOPPED.format(flat(kept.session.stopped)))
+        if kept.session.dropped:
+            lines.append(DROPPED.format(kept.session.dropped))
     new = newly_reached(host, found) if recorded.captured else []
     return [*headed("reached for the first time from this project:", new), *lines]
 
@@ -205,8 +221,10 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
 def denied_lines(recorded: Recorded) -> list[str]:
     """What the egress filter's log says of the session: where it sent
     a lot, and what it was refused."""
+    begins = recorded.log_begins
+    short = [] if begins is None else [LOG_SHORT.format(datetime.fromtimestamp(begins))]
     if not recorded.requests:
-        return []
+        return short
     made = [request for request, _ in recorded.requests]
     denied = Counter(flat(request.url) for request in made if request.denied)
     # How much went where through the filter, which a capture cannot tell
@@ -225,14 +243,33 @@ def denied_lines(recorded: Recorded) -> list[str]:
             "refused by the egress filter:",
             [f"{url} x{count}" for url, count in denied.most_common()],
         ),
+        *short,
     ]
 
 
-def transcript_lines(host: Host, start: float) -> list[str]:
+def added_since(read: ReadTranscript, length: int) -> list[dict]:
+    """The entries a transcript has gained since it was so long, all of
+    them when it was not there then. A session that is resumed goes on in
+    the transcript of the one before, and what that one did was said when
+    it ended: it is not said again with every session after it. All of
+    them too for a transcript that lines were taken out of, or that was
+    rewritten, since: where its entries then are says nothing of when
+    they came."""
+    compared = read.compared
+    if not length or compared.gone or compared.rewritten:
+        return read.entries
+    return read.entries[len(read_entries(read.path, most=length)) :]
+
+
+def transcript_lines(
+    host: Host, start: float, lengths: Mapping[Path, int] | None = None
+) -> list[str]:
     """What the transcripts written to since a time say: the files
     written outside the project, how much of what was read shows signs of
-    being written to instruct the session, and what was taken out of
-    them."""
+    being written to instruct the session, what was taken out of them,
+    and how many of a session's subagents have theirs go unread. With
+    lengths, how long each was at that time, of what each has gained
+    since (see added_since)."""
     lines: list[str] = []
     written: list[str] = []
     # Those of the subagents too, what one wrote is in its own
@@ -241,17 +278,23 @@ def transcript_lines(host: Host, start: float) -> list[str]:
             continue
         project_dir = project_root(path, host)
         read = ReadTranscript.read(host, path)
+        added = added_since(read, (lengths or {}).get(path, 0))
         written.extend(
-            flat(file)
-            for file in written_paths(read.entries)
-            if outside(file, project_dir)
+            flat(file) for file in written_paths(added) if outside(file, project_dir)
         )
         compared = read.compared
         # A subagent's is named by its session
         session = subagent_session(path)
         whose = "a subagent of " if session else ""
         named = f"the transcript of {whose}{short_id(session or path)}"
-        signs = planted_reads(read.entries)
+        unread = 0 if session else subagents_unread(path)
+        if unread:
+            lines.append(
+                f"{unread} transcripts of subagents of {short_id(path)} were"
+                f" neither copied nor read, past the first {MOST_SUBAGENTS}:"
+                " what those subagents did is not told"
+            )
+        signs = planted_reads(added)
         if signs:
             said = f"{FLAG} in {named}: {read_said(signs)}"
             lines.append(f"{said}, see --trace --failed")
@@ -260,8 +303,9 @@ def transcript_lines(host: Host, start: float) -> list[str]:
                 f"{named} was changed:"
                 f" {compared.missing} lines the launcher copied are gone or altered"
             )
-        if read.unreadable:
-            lines.append(f"{named} has {read.unreadable} lines that cannot be read")
+        unreadable = unreadable_lines(added)
+        if unreadable:
+            lines.append(f"{named} has {unreadable} lines that cannot be read")
         if compared.cut_short:
             lines.append(f"{named} was not all copied, it is past the launcher's limit")
         if compared.uncompared:
@@ -283,9 +327,12 @@ def transcript_lines(host: Host, start: float) -> list[str]:
     ]
 
 
-def session_digest(host: Host, session: str, start: float) -> list[str]:
+def session_digest(
+    host: Host, session: str, start: float, lengths: Mapping[Path, int] | None = None
+) -> list[str]:
     """The lines about a session of this project that has just ended:
-    the container of that name, started at that time."""
+    the container of that name, started at that time. lengths as for
+    transcript_lines."""
     end = time.time()
     sessions = [
         found
@@ -297,20 +344,26 @@ def session_digest(host: Host, session: str, start: float) -> list[str]:
     return [
         *network_lines(host, recorded),
         *denied_lines(recorded),
-        *transcript_lines(host, start),
+        *transcript_lines(host, start, lengths),
         *(f"{about} {said}" for about, said in noted_rows),
     ]
 
 
 def report_session(
-    host: Host, session: str, start: float, heard: list[str] | None = None
+    host: Host,
+    session: str,
+    start: float,
+    heard: list[str] | None = None,
+    lengths: Mapping[Path, int] | None = None,
 ) -> None:
     """Say what is worth a look about a session that has just ended, with
-    what the launcher heard of it while it ran (see limits.py). What
-    cannot be read is passed over: this runs as a session ends, and what
-    is left to do then (the check of tamper.py) matters more."""
+    what the launcher heard of it while it ran (see limits.py), and how
+    long each transcript was when it started, for what is said to be of
+    what came since. What cannot be read is passed over: this runs as a
+    session ends, and what is left to do then (the check of tamper.py)
+    matters more."""
     try:
-        lines = session_digest(host, session, start)
+        lines = session_digest(host, session, start, lengths)
     except (OSError, Fatal):
         lines = []
     except Exception as problem:  # noqa: BLE001

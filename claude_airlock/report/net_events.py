@@ -21,7 +21,18 @@ from ..recording.pcap import Capture, Connection, Flow, Request, Went
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
 from .recorded import Recorded, Traced
-from .shown import SILENT, STOPPED, over, reached, size, verdict
+from .shown import (
+    DROPPED,
+    LOG_SHORT,
+    SILENT,
+    SLOWED,
+    SLOWED_FROM,
+    STOPPED,
+    over,
+    reached,
+    size,
+    verdict,
+)
 
 # Of the command line of a process seen to run
 PROCESS_WIDTH = 200
@@ -35,9 +46,11 @@ def proxy_summary(
     """Each destination with its number of requests and bytes, the
     refused ones first, then the busiest."""
     lines = []
-    if len(sessions) > 1:
-        names = ", ".join(sorted({clean(session.name) for session in sessions}))
-        lines.append(f"  from {names}, which ran in this time, each line says which")
+    # By name: a session that has two addresses is there once for each
+    names = sorted({clean(session.name) for session in sessions})
+    if len(names) > 1:
+        said = ", ".join(names)
+        lines.append(f"  from {said}, which ran in this time, each line says which")
     if not requests:
         lines.append("  no request in the egress proxy's log")
     count: Counter[tuple[bool, str]] = Counter()
@@ -104,7 +117,11 @@ def proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
         name_container([event], by.name, recorded.several)
         requests.append(request)
         events.append(event)
-    return proxy_summary(requests, recorded.filtered), events
+    lines = proxy_summary(requests, recorded.filtered)
+    begins = recorded.log_begins
+    if begins is not None:
+        lines.append(f"  {LOG_SHORT.format(datetime.fromtimestamp(begins))}")
+    return lines, events
 
 
 def how_it_went(connection: Connection, outcome: Went) -> str:
@@ -375,6 +392,17 @@ def limit_lines(record: ProcessRecord) -> list[str]:
     return [said]
 
 
+def slowed(record: ProcessRecord) -> str:
+    """What is said of a record whose watcher was slowed enough to tell
+    (see SLOWED), empty for one that was not: how long a look takes is
+    the session's to set, by what it has the watcher read."""
+    late = [noted for noted in record.slowed if noted.longest >= SLOWED_FROM]
+    if not late:
+        return ""
+    longest = max(noted.longest for noted in late)
+    return SLOWED.format(longest, sum(noted.seconds for noted in late))
+
+
 def watched_summary(
     record: ProcessRecord, verbose: bool, until: float = math.inf
 ) -> list[str]:
@@ -402,6 +430,8 @@ def watched_summary(
     silent = record.silent_from(until)
     if silent is not None:
         lines.append(f"  {SILENT.format(datetime.fromtimestamp(silent))}")
+    if slowed(record):
+        lines.append(f"  {slowed(record)}")
     if record.unreadable:
         lines.append("  which process made a connection could not be seen")
     return lines + health_summary(record.samples, record.ended)
@@ -427,6 +457,8 @@ def captured_connections(
         name_processes(events, record)
     name_container(events, session.name, recorded.several)
     stopped = [f"  {STOPPED.format(flat(session.stopped))}"] if session.stopped else []
+    if session.dropped:
+        stopped.append(f"  {DROPPED.format(session.dropped)}")
     return [heading, *capture_summary(capture, verbose), *stopped], events
 
 

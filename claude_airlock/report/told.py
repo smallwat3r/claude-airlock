@@ -32,8 +32,11 @@ PROMPT_MODE = "prompt"
 # Any other file of instructions came with the project or was written in
 # a session.
 OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
-# The kind of the event that tells of the files read as instructions
+# The kind of the event that tells of the files read as instructions, and
+# of the one that tells what Claude Code said in the place of a prompt.
+# Each kind is a name given here, never a value of the transcript.
 INSTRUCTIONS = "instructions"
+TOLD = "told"
 
 type Reader = Callable[[dict, float, Who], list[Event]]
 
@@ -238,7 +241,9 @@ class Asides:
             lines.append("MCP server instructions: " + ", ".join(added))
         if removed:
             lines.append("MCP server instructions gone: " + ", ".join(removed))
-        fields = {"kind": "mcp_instructions", "added": added, "removed": removed}
+        # Not named removed: that is what an event says of itself when it
+        # was taken out of the transcript, see removed_events of trace.py
+        fields = {"kind": "mcp_instructions", "added": added, "gone": removed}
         return [Event(when, who, Kind.CONTEXT, lines, fields)] if lines else []
 
     def _skills_listed(self, given: dict, when: float, who: Who) -> list[Event]:
@@ -266,9 +271,11 @@ class Asides:
             first = (text.strip().splitlines() or [""])[0]
             first = shortened(first)
             line = f"told ({mode})" + (f": {first}" if first else "")
-            return [
-                Event(when, who, Kind.CONTEXT, [line], {"kind": mode, "text": said})
-            ]
+            # The mode under a name of its own: it is the session's to
+            # give, and as the kind it could pass for one of those here,
+            # which are the launcher's and say what else an event holds
+            fields = {"kind": TOLD, "mode": mode, "text": said}
+            return [Event(when, who, Kind.CONTEXT, [line], fields)]
         status = flat((between(text, "<status>", "</status>") or "ended").strip())
         summary = flat((between(text, "<summary>", "</summary>") or "").strip())
         line = shortened(f"{status}: {summary}" if summary else status)

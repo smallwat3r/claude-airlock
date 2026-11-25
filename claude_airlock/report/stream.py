@@ -71,7 +71,14 @@ class Timeline:
     the call did it, a connection is known by its container and not by the
     command that opened it, but a connection made while one command ran is
     as a rule that command's, and one made while none ran is Claude Code's
-    own or that of something left running."""
+    own or that of something left running.
+
+    Live, a call runs until its result comes, and one whose session was
+    ended meanwhile has none: it would run for ever, and everything on
+    the network from then on be said to be made during it. What follows
+    the sessions says what it knows of that: a call the model went on
+    without (see Walk), and when the container of each session was
+    started (see began), which no call from before runs in."""
 
     def __init__(self) -> None:
         self._calls: dict[str, RunningCall] = {}
@@ -80,6 +87,21 @@ class Timeline:
         # From when the calls are next looked through for those to let
         # go of, not with every one of them
         self._next_look = 0.0
+        # When the container of each session was started, by its name
+        self._began: dict[str, float] = {}
+
+    def began(self, container: str, when: float) -> None:
+        """Note when the container of a session was started. A call that
+        was issued before is not what anything in that container was
+        made during: it is of an earlier one, whose transcript the
+        session goes on in, and has no result when that one was ended
+        while it ran."""
+        self._began[container] = when
+
+    def let_go(self) -> None:
+        """Let go of every call, for what goes on in another transcript:
+        when the containers were started is still known."""
+        self._calls.clear()
 
     def take(self, event: Event) -> None:
         """Note a tool call or its result, or mark an event of the
@@ -131,10 +153,12 @@ class Timeline:
         if event.when < self._now - TIMELINE_SLACK:
             # Too long ago to tell: the calls of then are forgotten
             return
+        container = event.fields.get("container")
+        since = self._began.get(container, 0.0) if isinstance(container, str) else 0.0
         running = {
             call: ran
             for call, ran in self._calls.items()
-            if ran.started <= event.when <= ran.ended
+            if since <= ran.started <= event.when <= ran.ended
         }
         event.fields["during"] = list(running)
         if not running:

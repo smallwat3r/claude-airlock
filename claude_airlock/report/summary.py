@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
-from ..events import Event, flat, labelled
+from ..events import Event, Kind, flat, labelled
 from .brief import PREVIEW_WIDTH, amount
 from .calls import written_paths
 from .entries import (
@@ -21,6 +21,7 @@ from .entries import (
     block_text,
     call_input,
     entry_times,
+    every,
     measured,
     prompts,
     step_tokens,
@@ -57,17 +58,20 @@ def planted_reads(entries: list[dict]) -> int:
 def planted_shown(events: Iterable[Event]) -> int:
     """The same count as planted_reads, by the events of a transcript
     that tell of the signs: what was looked through to make them is not
-    looked through again for the header of their trace."""
+    looked through again for the header of their trace. An event is
+    taken for what it is, not for what a value of it says, and its values
+    for no more than they hold: most of them are the session's to give."""
     results = 0
-    files: set[object] = set()
+    files: set[str] = set()
     for event in events:
         fields = event.fields
         if event.call:
             results += bool(fields.get(INJECTION))
-        elif fields.get("kind") == INSTRUCTIONS:
-            files.update(
-                file.get("path") for file in fields["files"] if file.get(INJECTION)
-            )
+        elif event.kind is Kind.CONTEXT and fields.get("kind") == INSTRUCTIONS:
+            for file in every(fields.get("files")):
+                path = file.get("path") if isinstance(file, dict) else None
+                if isinstance(path, str) and file.get(INJECTION):
+                    files.add(path)
     return results + len(files)
 
 

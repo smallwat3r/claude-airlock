@@ -35,6 +35,15 @@ from .shown import size
 # without: only the start of a diff is shown then
 DIFFED_LINES = 5000
 DIFFED_LINES_BRIEF = 500
+# And the steps comparing them may take, see Sides: about a tenth of a
+# second of them. An edit of a few hundred lines takes some thousands, one
+# of five thousand that is changed in many places a hundred thousand.
+DIFF_STEPS = 1_000_000
+# What is said of two sides that were not compared within them
+NOT_COMPARED = (
+    "... alike in too many places to compare line by line,"
+    " shown as all taken out and all put in"
+)
 # Of the output of a call, how many lines of its start and of its end are
 # shown: when it failed, and with --verbose. The end comes first in worth, it
 # is where a command says what went wrong. All of it is in --json.
@@ -53,13 +62,28 @@ def file_path(tool_input: dict) -> str | None:
     return path if isinstance(path, str) else None
 
 
+def command_lines(command: object) -> list[str]:
+    """A command as the lines a shell reads it in, each as it was
+    written: cut at a line feed and nowhere else. A text has more places
+    it can be cut at, a carriage return, a form feed, the separators
+    Unicode has for lines, which are all part of a word to a shell: cut
+    there, a line would start that the shell never read as one."""
+    text = command if isinstance(command, str) else clean(command)
+    lines = text.split("\n")
+    # What ends the last line starts no other
+    return lines[:-1] if len(lines) > 1 and not lines[-1] else lines
+
+
 def bash_details(
     tool_input: dict, cwd: object, project_dir: str, verbose: bool
 ) -> list[str]:
     """A command: what ran, why (the reason Claude gave for it) and where,
-    when that is not the project directory."""
-    lines = clean(tool_input.get("command", "")).splitlines() or [""]
-    command = clip(lines if verbose else without_heredocs(lines), verbose)
+    when that is not the project directory. Its here-documents are told
+    by its lines as the shell has them, see command_lines, and each of
+    those is then shown on a line of its own, cleaned."""
+    lines = command_lines(tool_input.get("command", ""))
+    held = lines if verbose else without_heredocs(lines)
+    command = clip([flat(line) for line in held], verbose)
     details = ["$ " + command[0], *("$   " + line for line in command[1:])]
     if tool_input.get("description"):
         details.append("why: " + flat(tool_input["description"]))
@@ -68,19 +92,106 @@ def bash_details(
     return details
 
 
+class TooAlike(Exception):
+    """Two sides have more places in common than there are steps to
+    compare them in, see Sides."""
+
+
+class Sides(difflib.SequenceMatcher[int]):
+    """The two sides of an Edit held against each other as difflib does,
+    in no more than so many steps. Its look for the longest run that two
+    stretches share takes a step for each line of the one and for each
+    place the other has that line at, and it looks again in what is left
+    on either side of the run. Sides written to be alike in many places
+    make that the cube of their lines, seconds for one call, and both
+    are the session's to write: a look past the steps there are raises
+    TooAlike.
+
+    The lines are compared by a number that stands for each, so that a
+    step takes as long whatever a line holds."""
+
+    # What difflib keeps of the two sides, which its types do not say:
+    # the first, and the places each line it looks for is at in the second
+    a: list[int]
+    b2j: dict[int, list[int]]
+
+    def __init__(self, old: list[str], new: list[str], steps: int = DIFF_STEPS):
+        numbers: dict[str, int] = {}
+        super().__init__(
+            None,
+            [numbers.setdefault(line, len(numbers)) for line in old],
+            [numbers.setdefault(line, len(numbers)) for line in new],
+        )
+        self._steps = steps
+        # The steps a look takes from the first line of the old side up
+        # to each: one for a line, and one for each place the new side
+        # has it at
+        self._taken = [0]
+        for line in self.a:
+            places = len(self.b2j.get(line, ()))
+            self._taken.append(self._taken[-1] + 1 + places)
+
+    def find_longest_match(
+        self, alo: int = 0, ahi: int | None = None, blo: int = 0, bhi: int | None = None
+    ) -> difflib.Match:
+        """As difflib looks, once the steps it takes are counted."""
+        end = len(self.a) if ahi is None else ahi
+        self._steps -= self._taken[end] - self._taken[alo]
+        if self._steps < 0:
+            raise TooAlike
+        return super().find_longest_match(alo, ahi, blo, bhi)
+
+
+def _span(start: int, end: int) -> str:
+    """Where the lines from one place of a side up to another are, as a
+    unified diff says it: the first and how many, the number left out
+    when it is one, and the line before for none."""
+    length = end - start
+    if length == 1:
+        return str(start + 1)
+    return f"{start + 1 if length else start},{length}"
+
+
+def unified(old: list[str], new: list[str]) -> list[str]:
+    """What changed from one side to the other, as the lines of a unified
+    diff with a line around each change: as difflib writes one, without
+    the two lines that name the files. Sides that are not compared within
+    bounds (see Sides) are shown as one change of all of the first to all
+    of the second, which is true of any two, and a line says so."""
+    try:
+        hunks = list(Sides(old, new).get_grouped_opcodes(1))
+        said = []
+    except TooAlike:
+        hunks = [[("replace", 0, len(old), 0, len(new))]]
+        said = [NOT_COMPARED]
+    lines = []
+    for hunk in hunks:
+        (_, start, _, start_new, _), (_, _, end, _, end_new) = hunk[0], hunk[-1]
+        lines.append(f"@@ -{_span(start, end)} +{_span(start_new, end_new)} @@")
+        for change, low, high, low_new, high_new in hunk:
+            if change == "equal":
+                lines += [" " + line for line in old[low:high]]
+                continue
+            if change != "insert":
+                lines += ["-" + line for line in old[low:high]]
+            if change != "delete":
+                lines += ["+" + line for line in new[low_new:high_new]]
+    return lines + said
+
+
 def edit_diff(tool_input: dict, verbose: bool = True) -> list[str]:
-    """What an Edit call changes, as the lines of a unified diff. Of the
-    first DIFFED_LINES of each side, fewer when only the start of the diff
-    is shown: comparing takes the square of the lines, which are the
-    session's to write, and a line says so when there were more."""
+    """What an Edit call changes, as the lines of a unified diff, see
+    unified: the file is named with the call. Of the first DIFFED_LINES
+    of each side, fewer when only the start of the diff is shown:
+    comparing takes the square of the lines, which are the session's to
+    write, and a line says so when there were more."""
     most = DIFFED_LINES if verbose else DIFFED_LINES_BRIEF
     sides = [
         clean(tool_input.get(side, "")).splitlines()
         for side in ("old_string", "new_string")
     ]
     old, new = (side[:most] for side in sides)
-    # Without the --- and +++ lines, the file is named with the call
-    diff = list(difflib.unified_diff(old, new, lineterm="", n=1))[2:]
+    diff = unified(old, new)
     longest = max(map(len, sides))
     if longest > most:
         hint = "" if verbose else ", more of it with --verbose"
@@ -89,13 +200,19 @@ def edit_diff(tool_input: dict, verbose: bool = True) -> list[str]:
 
 
 def file_details(
-    name: str, path: str, tool_input: dict, project_dir: str, verbose: bool
+    name: str,
+    path: str,
+    tool_input: dict,
+    project_dir: str,
+    verbose: bool,
+    diffed: bool = True,
 ) -> list[str]:
     """A call on a file: which one, flagged when it is written outside the
-    project, and what an Edit changes or a Write puts there."""
+    project, and what an Edit changes or a Write puts there. Not what an
+    Edit changes unless diffed, see call_details."""
     about = "file: " + flat(path)
     changes: list[str] = []
-    if name == "Edit":
+    if name == "Edit" and diffed:
         diff = edit_diff(tool_input, verbose)
         changes = ["diff: " + line for line in clip(diff, verbose)]
     elif name == "Write":
@@ -137,16 +254,23 @@ def question_details(questions: list) -> list[str]:
 
 
 def call_details(
-    name: str, tool_input: dict, cwd: object, project_dir: str, verbose: bool
+    name: str,
+    tool_input: dict,
+    cwd: object,
+    project_dir: str,
+    verbose: bool,
+    diffed: bool = True,
 ) -> list[str]:
-    """The lines that describe a tool call."""
+    """The lines that describe a tool call. Without diffed, not those of
+    what an Edit changes: comparing its sides is what takes time here,
+    and is not done for lines that no one is shown."""
     path = file_path(tool_input)
     if name == "Bash":
         return bash_details(tool_input, cwd, project_dir, verbose)
     if name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
         return todo_details(tool_input["todos"], verbose)
     if path is not None:
-        return file_details(name, path, tool_input, project_dir, verbose)
+        return file_details(name, path, tool_input, project_dir, verbose, diffed)
     if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
         return question_details(tool_input["questions"])
     # Any other tool: its arguments as they are
@@ -283,21 +407,28 @@ def tell_result(event: Event, ended: Outcome | None, verbose: bool) -> None:
 
 
 def call_event(
-    when: float, who: Who, entry: dict, block: dict, project_dir: str, verbose: bool
+    when: float,
+    who: Who,
+    entry: dict,
+    block: dict,
+    project_dir: str,
+    verbose: bool,
+    diffed: bool = True,
 ) -> Event:
     """A tool call as it was issued, how it ended is added by the walk
-    that finds its result."""
+    that finds its result. diffed as for call_details."""
     # On one line: it is what the event is, and stays in its column
     name = flat(block.get("name", "?"))
     tool_input = call_input(block)
-    details = call_details(name, tool_input, entry.get("cwd"), project_dir, verbose)
+    cwd = entry.get("cwd")
+    details = call_details(name, tool_input, cwd, project_dir, verbose, diffed)
     # A call without arguments is a call all the same, and has its line
     details = details or ["(no arguments)"]
     fields = {
         "tool": name,
         "id": str(block.get("id")),
         "input": tool_input,
-        "cwd": entry.get("cwd"),
+        "cwd": cwd,
     }
     alerts: set[int] = set()
     path = file_path(tool_input)

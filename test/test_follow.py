@@ -17,9 +17,10 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LAUNCHER, LauncherTest, follow, pcap
+from harness import LAUNCHER, LauncherTest, follow, pcap, transcript
 from test_capture import answer, dns_response, pcap_file, sample_capture, tcp
 
+from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
 from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import stream
@@ -217,6 +218,25 @@ class FollowTest(LauncherTest):
         assert "$ echo during the follow" in shown
         assert "$ echo before the follow" not in shown
 
+    def test_subagents_past_those_that_are_followed_are_said_once(self):
+        theirs = self.file.with_suffix("") / "subagents"
+        theirs.mkdir(parents=True)
+        for name in ("agent-!1.jsonl", "agent-!2.jsonl", "agent-a1.jsonl"):
+            (theirs / name).touch()
+        host = Host(str(self.home), str(self.project), "", str(self.state))
+        follower = follow.Follower(host, verbose=False)
+        with (
+            mock.patch.object(follow.CaptureSidecar, "running", return_value=[]),
+            mock.patch.object(projects, "MOST_SUBAGENTS", 2),
+            mock.patch.object(follow, "MOST_SUBAGENTS", 2),
+        ):
+            looks = [follower.poll() for _ in range(2 * follow.LOOK_EVERY + 1)]
+        (said,) = (note for look in looks for note in look.notes if "past" in note)
+        assert said == (
+            f"subagents   NOT ALL FOLLOWED: 1 transcripts of {self.SESSION} past"
+            " the first 2, what those subagents do is not shown"
+        )
+
     def test_the_calls_remembered_are_bounded_without_a_capture(self):
         timeline = stream.Timeline()
         now = time.time()
@@ -240,6 +260,82 @@ class FollowTest(LauncherTest):
         late = Event(now, Who.SANDBOX, Kind.NET, ["tcp"], {})
         timeline.take(late)
         assert "during" in late.fields
+
+    def test_a_call_the_session_went_on_without_does_not_run_for_ever(self):
+        now = time.time()
+        walk = transcript.Walk("/p", WalkOptions(live=True))
+        timeline = stream.Timeline()
+
+        def taken(ago: float, *entries: dict, step: str = "") -> list[Event]:
+            """The events of entries of so long ago, each of that step of
+            the model when one is named."""
+            events = []
+            for entry in entries:
+                entry["timestamp"] = datetime.fromtimestamp(now - ago, UTC).isoformat()
+                entry["message"].update({"id": step} if step else {})
+                events += walk.take(entry)
+            for event in events:
+                timeline.take(event)
+            return events
+
+        def reached(ago: float) -> list[str]:
+            """What a connection of so long ago is said to be made during."""
+            made = Event(now - ago, Who.SANDBOX, Kind.NET, ["tcp"], {})
+            timeline.take(made)
+            return made.notes
+
+        # Two calls of one step run side by side, and the result of one
+        # says nothing of the other
+        first = [call(name, "Bash", command=f"run {name}") for name in ("t1", "t2")]
+        taken(86400, *first, step="m1")
+        taken(86390, result("t2", "ok"))
+        assert reached(86380) == ["during: [1] $ run t1"]
+        # The session was ended there. A day later it goes on, and the
+        # model takes its next step: no result of the call comes any more
+        left, issued = taken(120, call("t3", "Bash", command="ls"), step="m2")
+        assert (left.number, left.details) == (1, ["of: $ run t1", transcript.WENT_ON])
+        assert left.fields == {"stage": Stage.RESULT, "tool": "Bash", "id": "t1"}
+        assert issued.details == ["$ ls"]
+        assert reached(110) == ["during: [3] $ ls"]
+        taken(100, result("t3", "ok"))
+        assert reached(60) == ["(no call running)"]
+        # Said once, and a result that comes after all is still told
+        assert len(taken(50, call("t4", "Read", file_path="a"), step="m3")) == 1
+        (late,) = taken(40, result("t1", "done"))
+        assert late.details[0] == "of: $ run t1"
+        # An entry that names no step tells nothing of the calls before
+        taken(30, call("t5", "Bash", command="make"))
+        assert len(taken(20, call("t6", "Bash", command="ls"))) == 1
+        assert reached(10) == ["during: [6] $ ls (+2 more)"]
+
+    def test_a_call_from_before_a_container_was_started_does_not_run_in_it(self):
+        now = time.time()
+        timeline = stream.Timeline()
+
+        def issued(number: int, ago: float) -> Event:
+            values = {"id": f"t{number}", "tool": "Bash", "stage": Stage.CALL}
+            ran = ["$ make"]
+            return Event(now - ago, Who.CLAUDE, "bash", ran, values, number, call=True)
+
+        def reached(container: str) -> list[str]:
+            values = {"container": container}
+            made = Event(now - 5, Who.SANDBOX, Kind.NET, ["tcp"], values)
+            timeline.take(made)
+            return made.notes
+
+        # Left without a result by a session that was ended while it ran
+        timeline.take(issued(1, 86400))
+        timeline.began("claude-proj", now - 60)
+        assert reached("claude-proj") == ["(no call running)"]
+        # In a container whose start is not known it may run
+        assert reached("claude-proj-2") == ["during: [1] $ make"]
+        timeline.take(issued(2, 30))
+        assert reached("claude-proj") == ["during: [2] $ make"]
+        # What goes on in another transcript has none of these calls
+        timeline.let_go()
+        assert reached("claude-proj-2") == ["(no call running)"]
+        timeline.take(issued(3, 86400))
+        assert reached("claude-proj") == ["(no call running)"]
 
     def test_a_named_session_is_followed_alone(self):
         other = self.write_transcript("0a", [prompt("the other one")])
@@ -320,6 +416,14 @@ class FollowTest(LauncherTest):
         following.until("# no session of this project yet")
         self.write_transcript("0b", [prompt("the first")])
         assert "# session     0b  the first" in following.until("the first")
+
+    def test_as_json_lines_the_events_are_walked_for_their_values_alone(self):
+        host = Host(str(self.home), str(self.project), "", str(self.state))
+        for form, lines in (("--json", False), ("--verbose", True)):
+            with mock.patch.object(follow, "Follower") as made:
+                made.return_value.poll.side_effect = KeyboardInterrupt
+                assert follow.follow(host, [form]) == 0
+            assert made.call_args.kwargs["lines"] is lines
 
     def test_a_list_cannot_be_followed(self):
         result = self.launch("--trace", "--follow", "list")
@@ -476,6 +580,21 @@ class FollowNetworkTest(LauncherTest):
             )
         shown = following.until("198.51.100.7")
         assert "198.51.100.7:443  during: [1] $ curl good.test\n" in shown
+
+    def test_a_call_from_before_the_session_was_started_is_not_running_in_it(self):
+        # Left without a result by a session that was ended while it ran,
+        # in a transcript the session of now goes on in
+        add(self.file, call("t0", "Bash", command="npm install"))
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(pcap_file([]))
+        following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
+        following.until("$ npm install")
+        with open(captured, "ab") as growing:
+            growing.write(
+                pcap_file([(time.time(), tcp("198.51.100.7", 443), True)])[24:]
+            )
+        shown = following.until("198.51.100.7")
+        assert "198.51.100.7:443  (no call running)\n" in shown
 
     def test_verbose_adds_the_lookups(self):
         captured = self.work / "capture.pcap"
@@ -659,6 +778,70 @@ class TranscriptTailTest:
                 " what is shown of it is LATE"
             )
         ]
+
+    def test_what_came_before_is_looked_for_in_the_end_of_a_transcript(self):
+        texts = [f"before {number}" for number in range(200)]
+        add(self.file, *map(prompt, texts))
+        lines = self.file.read_bytes().splitlines(keepends=True)
+        options = WalkOptions(live=True)
+        # From within a line: the rest of that one is let go of, and is
+        # no line that cannot be read
+        within = sum(map(len, lines[-7:])) + 20
+        with mock.patch.object(follow, "MOST_HISTORY", within):
+            tail = follow.TranscriptTail.latest(self.file, "/proj", options)
+        assert tail.cut
+        assert self.said(tail) == texts[-7:]
+        # From where a line starts, that line is whole
+        with mock.patch.object(follow, "MOST_HISTORY", within - 20):
+            tail = follow.TranscriptTail.latest(self.file, "/proj", options)
+        assert self.said(tail) == texts[-7:]
+        add(self.file, prompt("now"))
+        assert self.said(tail) == ["now"]
+        # One that is no longer than is looked at is read from its start
+        whole = follow.TranscriptTail.latest(self.file, "/proj", options)
+        assert not whole.cut
+        assert len(whole.poll(None)) == len(texts) + 1
+
+    def test_a_follower_says_when_it_looked_at_the_end_of_a_transcript_alone(self):
+        host = mock.Mock(project_dir="/proj")
+        add(self.file, *(prompt(f"before {number}") for number in range(300)))
+        with (
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=[]),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+            mock.patch.object(follow, "MOST_HISTORY", 3 << 10),
+        ):
+            follower = follow.Follower(host, False, only=self.file)
+            follower._docker = False
+            first = follower.poll()
+        assert first.events[-1][1].details == ["before 299"]
+        assert len(first.events) == follow.HISTORY
+        (note,) = first.notes
+        assert re.search(
+            r"^\d\d earlier events and what the transcript holds before its last"
+            r" 0 MB, see claude-airlock --trace$",
+            note,
+        )
+
+    def test_the_title_is_read_from_the_start_of_a_transcript_alone(self):
+        late = {"type": "ai-title", "aiTitle": "named later"}
+        add(self.file, prompt("the first prompt"), *map(prompt, "x" * 50), late)
+        options = WalkOptions(live=True)
+        ended = follow.TranscriptTail(
+            self.file, "/proj", options, self.file.stat().st_size
+        )
+        with (
+            mock.patch.object(follow, "TITLE_BYTES", 300),
+            mock.patch.object(
+                follow, "read_entries", wraps=follow.read_entries
+            ) as read,
+        ):
+            assert ended.title == "the first prompt"
+        read.assert_called_once_with(self.file, 300)
+        # One that an entry it followed gave a title has that one
+        followed = follow.TranscriptTail(self.file, "/proj", options)
+        followed.poll(None)
+        assert followed.title == "named later"
 
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
         tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))

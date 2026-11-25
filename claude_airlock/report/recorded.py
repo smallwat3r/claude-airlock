@@ -15,7 +15,7 @@ from functools import cached_property
 from pathlib import Path
 
 from ..recording.capture import session_capture
-from ..recording.egress_log import ProxyRequest, logged_requests, requests_made
+from ..recording.egress_log import ProxyLog, ProxyRequest, proxy_log, requests_made
 from ..recording.pcap import Capture
 from ..recording.processes import ProcessRecord, session_record
 from ..recording.recorder import Compared, compare
@@ -86,16 +86,35 @@ class Recorded:
         ]
 
     @cached_property
+    def proxy_log(self) -> ProxyLog | None:
+        """The egress proxy's log, read once. None without a filtered
+        session, whose requests are all it is read for, and when it
+        cannot be read."""
+        return proxy_log(stderr=subprocess.DEVNULL) if self.filtered else None
+
+    @cached_property
     def requests(self) -> list[tuple[ProxyRequest, TracedSession]] | None:
         """What the filtered sessions asked the egress proxy for in that
         time, each request with the session that made it. Empty without a
         filtered session, none when the proxy's log cannot be read."""
         if not self.filtered:
             return []
-        logged = logged_requests(stderr=subprocess.DEVNULL)
-        if logged is None:
+        if self.proxy_log is None:
             return None
+        logged = self.proxy_log.requests
         return list(requests_made(logged, self.filtered, *self.stay))
+
+    @property
+    def log_begins(self) -> float | None:
+        """When what is left of the proxy's log begins, where that is
+        after a filtered session of these started: what the session asked
+        before then is not in it, see ProxyLog. None when the log holds
+        all of their time, as far as is known."""
+        begins = self.proxy_log.begins if self.proxy_log else None
+        started = min((session.start for session in self.filtered), default=None)
+        if begins is None or started is None or begins <= started:
+            return None
+        return begins
 
     @property
     def filtered(self) -> list[TracedSession]:

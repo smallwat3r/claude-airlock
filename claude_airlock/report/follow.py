@@ -21,6 +21,11 @@ that only its TLS hello gives, to an address that was not looked up, comes
 too late for the line. A tunnel through the egress proxy is logged when it
 closes, so it shows then, at the time it began.
 
+Of what the latest transcript held before the following began, the last
+few events are shown, and no more than its end is read for them (see
+TranscriptTail.latest): a transcript is the session's to make as long as
+the disk.
+
 What is said in transcript.py of whom to trust holds here too: the transcript is
 the session's own word, the capture and the proxy's log are the launcher's."""
 
@@ -35,12 +40,19 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import Self
 
 from ..docker import running_containers
 from ..errors import Fatal
 from ..events import Event, clean, flat, labelled
 from ..files import LINE_LIMIT, line_entry, open_plain
-from ..projects import project_root, subagent_files, transcript_files
+from ..projects import (
+    MOST_SUBAGENTS,
+    project_root,
+    subagent_files,
+    subagents_unread,
+    transcript_files,
+)
 from ..recording.capture import (
     PARTS,
     CaptureSidecar,
@@ -98,6 +110,15 @@ MOST_POLLED = 1 << 20
 # The looks in a row that leave some of a transcript unread before it is
 # said to be late: a result with a picture in it takes a few
 LATE_AFTER = 10
+# How much of the end of a transcript is looked at for what happened
+# before the following began: the last few events are shown of it, and
+# the calls still running are in it. A session can make its transcript as
+# long as the disk, and every megabyte of small entries is a quarter of a
+# second and a dozen megabytes to hold: all of it would keep whoever
+# starts to follow waiting, a chat that resumes a session too.
+MOST_HISTORY = 4 << 20
+# And of its start for a title, when nothing that was followed gave one
+TITLE_BYTES = 1 << 20
 
 
 class TranscriptTail:
@@ -120,11 +141,34 @@ class TranscriptTail:
         # that was said, see newly_behind
         self._behind = 0
         self._said_behind = False
+        # Whether it is read from within and not from its start, see
+        # latest: what it holds before is not looked at
+        self.cut = False
+
+    @classmethod
+    def latest(cls, path: Path, project_dir: str, options: WalkOptions) -> Self:
+        """A transcript read from where its last MOST_HISTORY bytes
+        begin, for what happened before it was followed. A call from
+        before that is not known: its result is not shown when it comes,
+        as of a transcript that is followed from where it ends."""
+        tail = cls(path, project_dir, options)
+        try:
+            start = path.lstat().st_size - MOST_HISTORY
+        except OSError:
+            start = 0
+        if start > 0:
+            # From the byte before: what is read first is let go of up to
+            # the end of its line, as the rest of one too long to hold is,
+            # and a line that starts right there is whole
+            tail._offset, tail._dropping, tail.cut = start - 1, True, True
+        return tail
 
     @property
     def title(self) -> str:
+        """The title of its session: the one an entry that was followed
+        gave, else as the start of the transcript has it."""
         if self._title is None:
-            self._title = title(read_entries(self.path))
+            self._title = title(read_entries(self.path, TITLE_BYTES))
         return self._title
 
     def poll(self, most: int | None = MOST_POLLED) -> list[Event]:
@@ -321,7 +365,8 @@ class Follower:
     when only names it, and gives of what they do the events chosen. With
     container, of the network and the doors only what the session in the
     container of that name does, as a chat wants of its own. With steps,
-    what each step of the model used is told without verbose too."""
+    what each step of the model used is told without verbose too. Without
+    lines, the events are for their values alone, see WalkOptions."""
 
     def __init__(
         self,
@@ -331,13 +376,14 @@ class Follower:
         chosen: Filter = EVERYTHING,
         container: str | None = None,
         steps: bool = False,
+        lines: bool = True,
     ):
         self._host = host
         self._verbose = verbose
         # How the transcripts are walked. With events left out a result
         # may come without its call, so it names it.
         self._walked = WalkOptions(
-            verbose, live=True, name_results=bool(chosen), steps=steps
+            verbose, live=True, name_results=bool(chosen), steps=steps, lines=lines
         )
         self._only = only
         self._chosen = chosen
@@ -352,6 +398,8 @@ class Follower:
         # and each of the subagents of one when the following began
         self._sizes: dict[Path, int] = {}
         self._subagent_sizes: dict[Path, int] = {}
+        # The sessions said to have more subagents than are followed
+        self._unfollowed: set[Path] = set()
         self._captures: dict[tuple[str, float], CaptureTail] = {}
         self._health: dict[tuple[str, float], HealthTail] = {}
         self._proxy = ProxyTail()
@@ -379,7 +427,7 @@ class Follower:
             self._tails.clear()
             self._subagents.clear()
             # The calls of the one before are not running in this one
-            self._timeline = Timeline()
+            self._timeline.let_go()
             self._tail(path)
 
     def _ours(self, session: str) -> bool:
@@ -389,10 +437,11 @@ class Follower:
         found = Round()
         if self._rounds % LOOK_EVERY == 0:
             self._look_for_transcripts(found)
-            self._look_for_subagents()
+            self._look_for_subagents(found)
             self._look_for_sessions(found)
-        # At first all that the latest transcript holds, for the events
-        # before now: later no more of any than a look is to take
+        # At first all that the end of the latest transcript holds, for
+        # the events before now (see TranscriptTail.latest): later no
+        # more of any than a look is to take
         most = None if self._rounds == 0 else MOST_POLLED
         for tail in self._tails.values():
             found.events += [(tail.path, event) for event in tail.poll(most)]
@@ -421,15 +470,21 @@ class Follower:
             )
             found.notes.append(labelled("transcript", late))
 
-    def _tail(self, path: Path, offset: int = 0) -> None:
+    def _tail(self, path: Path, offset: int | None = None) -> None:
+        """Start to follow a transcript from a place in it, without one
+        from where its latest events are, see TranscriptTail.latest."""
         project_dir = project_root(path, self._host)
-        self._tails[path] = TranscriptTail(path, project_dir, self._walked, offset)
+        if offset is None:
+            tail = TranscriptTail.latest(path, project_dir, self._walked)
+        else:
+            tail = TranscriptTail(path, project_dir, self._walked, offset)
+        self._tails[path] = tail
         self._sizes.pop(path, None)
 
     def _look_for_transcripts(self, found: Round) -> None:
         """Start to follow the transcripts that were written to. At first
-        the latest one from its start, for the events before now, the
-        others from where they end."""
+        the latest one from where its latest events are, for those
+        before now, the others from where they end."""
         if self._only:
             if not self._tails:
                 self._tail(self._only)
@@ -456,16 +511,21 @@ class Follower:
                 # Grown, or new and so read from its start
                 self._tail(path, self._sizes.get(path, 0))
 
-    def _look_for_subagents(self) -> None:
+    def _look_for_subagents(self, found: Round) -> None:
         """Start to follow what the subagents of the followed sessions
         do. Claude Code keeps a transcript of each next to that of its
         session, in SESSION/subagents. At first from where they end, as
         of a session that is not the latest. Later from where they ended
         when the following began, as their session is, see
         _note_subagents: what a subagent did before that is not shown as
-        done now. One that is new is read from its start."""
+        done now. One that is new is read from its start. A session with
+        more of them than are followed is said to have them, once."""
         for session in list(self._tails):
-            for path in subagent_files(session):
+            theirs = subagent_files(session)
+            # Only one that has as many as are given can have more
+            if len(theirs) >= MOST_SUBAGENTS and session not in self._unfollowed:
+                self._note_unfollowed(session, found)
+            for path in theirs:
                 if path in self._subagents:
                     continue
                 try:
@@ -482,6 +542,20 @@ class Follower:
                     size if self._rounds == 0 else min(noted, size),
                 )
                 self._subagents[path] = (session, tail)
+
+    def _note_unfollowed(self, session: Path, found: Round) -> None:
+        """Say that a session has more transcripts of subagents than are
+        followed, when it has: what those subagents do is in no line."""
+        unread = subagents_unread(session)
+        if not unread:
+            return
+        self._unfollowed.add(session)
+        said = (
+            f"NOT ALL FOLLOWED: {unread} transcripts of {flat(session.stem)}"
+            f" past the first {MOST_SUBAGENTS}, what those subagents do is not"
+            " shown"
+        )
+        found.notes.append(labelled("subagents", said))
 
     def _note_subagents(self, session: Path) -> None:
         """Note how long the transcripts of the subagents of a session
@@ -514,6 +588,8 @@ class Follower:
             if (sidecar, started) not in self._captures:
                 tail = CaptureTail(sidecar, self._verbose)
                 self._captures[(sidecar, started)] = tail
+                # No call from before it was started runs in it
+                self._timeline.began(tail.session, started)
                 name = clean(tail.session)
                 found.notes.append(
                     labelled("network", f"following the capture of {name}")
@@ -573,11 +649,15 @@ class Follower:
         # A filtered session has the address of its sidecar when it is
         # captured, either way it runs while a container of its name does
         running = running_containers()
-        return {
-            session.ip: session.name
+        filtered = [
+            session
             for session in recorded
             if session.name in running and self._ours(session.name)
-        }
+        ]
+        for session in filtered:
+            # As of a captured one: no call from before it runs in it
+            self._timeline.began(session.name, session.start)
+        return {session.ip: session.name for session in filtered}
 
     def _several(self) -> bool:
         """Whether more than one of the project's sessions is followed on
@@ -635,13 +715,19 @@ class Follower:
         chats found."""
         found.events += [(None, event) for event in self._noted.poll()]
 
-    @staticmethod
-    def _keep_latest(found: Round) -> None:
-        """Of what happened before the following began, the last few."""
+    def _keep_latest(self, found: Round) -> None:
+        """Of what happened before the following began, the last few.
+        Said too when not all of a transcript was looked at for them."""
         earlier = len(found.events) - HISTORY
+        said = []
         if earlier > 0:
             del found.events[:earlier]
-            found.notes.append(f"{earlier} earlier events, see claude-airlock --trace")
+            said.append(f"{earlier} earlier events")
+        if any(tail.cut for tail in self._tails.values()):
+            size = f"{MOST_HISTORY >> 20} MB"
+            said.append(f"what the transcript holds before its last {size}")
+        if said:
+            found.notes.append(f"{' and '.join(said)}, see claude-airlock --trace")
 
 
 class Output:
@@ -714,7 +800,8 @@ def follow(host: Host, args: list[str]) -> int:
         raise Fatal(USAGE)
     as_json = "--json" in options
     only = picked_session(session_files(host), names[0]) if names else None
-    follower = Follower(host, as_json or "--verbose" in options, only, chosen)
+    verbose = as_json or "--verbose" in options
+    follower = Follower(host, verbose, only, chosen, lines=not as_json)
     output = Output(follower, None if as_json else Layout.for_output(os.environ))
     try:
         output.start(host.project_dir, chosen)
