@@ -31,9 +31,10 @@ from harness import (
 )
 
 from claude_airlock.reader import NotThis
-from claude_airlock.recording import payloads
+from claude_airlock.recording import address, egress_log, payloads, sidecar
 from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import net_events
+from claude_airlock.sandbox import egress_proxy
 
 
 def unnamed_port() -> int:
@@ -479,6 +480,33 @@ class CaptureFileTest:
         assert request.url == "http://plain.test/a?b=1"
         assert (request.method, request.address) == ("GET", "198.51.100.7")
 
+    def test_what_a_packet_carries_is_read_whatever_else_the_packet_is(self):
+        there, fast = "198.51.100.7", "203.0.113.9"
+        asked = b"POST /upload?x=1 HTTP/1.1\r\nHost: plain.test\r\n\r\n"
+        found = self.read(
+            pcap_file(
+                [
+                    (1.0, tcp(there, 80, sequence=1000), True),
+                    (1.1, answer(there, 80, sequence=5000, acknowledged=1001), False),
+                    # Sent whole with the end of its connection, as what is
+                    # written and shut in one go is
+                    (
+                        1.2,
+                        tcp(there, 80, 0x19, asked, sequence=1001, acknowledged=5001),
+                        True,
+                    ),
+                    # And a hello with the start of one, opened fast
+                    (2.0, tcp(fast, 443, 0x02, client_hello("fast.test")), True),
+                ]
+            )
+        )
+        (request,) = found.requests
+        assert (request.method, request.url) == ("POST", "http://plain.test/upload?x=1")
+        assert found.names == {fast: "fast.test"}
+        closed, opened = found.connections
+        assert (closed.outcome, closed.sent) == ("closed", len(asked))
+        assert (opened.address, opened.outcome) == (fast, "")
+
     def test_a_lookup_says_what_was_asked_and_what_came_back(self):
         found = self.read(pcap_file([(1.0, dns_failure("nope.test", 28), False)]))
         assert found.lookups == [
@@ -563,6 +591,64 @@ class DnsTrustTest:
         assert (
             "  dns 6 more messages NOT READ, past the 2 lookups that are kept" in said
         )
+
+    def test_no_more_messages_are_read_than_a_capture_may_have(self):
+        def over(payload: bytes, sent: bool = True) -> bytes:
+            ports, ends = (40053, 53), ("172.20.0.5", "9.9.9.9")
+            if not sent:
+                ports, ends = ports[::-1], ends[::-1]
+            header = struct.pack("!HHIIBBHHH", *ports, 0, 0, 0x50, 0x18, 0, 0, 0)
+            return ipv4(6, *ends, header + payload)
+
+        query = dns_message_of(dns_query("after.test"))
+        response = dns_message_of(dns_response("after.test", "198.51.100.7"))
+        # A hundred messages of no length at all ahead of a query: a
+        # resolver passes them over and answers the query
+        none = b"\0" * 200
+        packets = [
+            (1.0, over(none + struct.pack("!H", len(query)) + query), True),
+            (1.1, over(struct.pack("!H", len(response)) + response, sent=False), False),
+        ]
+        found = self.read(packets, asked=False)
+        assert found.name_of("198.51.100.7") == "after.test"
+        assert found.dns_unread == 0
+        # Past as many as are read, what is left of a packet is counted
+        # as one message that was not, and no longer looked into
+        with unittest.mock.patch.object(pcap, "MOST_DNS_READ", 50):
+            found = self.read(packets, asked=False)
+            assert (found.lookups, found.dns_unread) == ([], 2)
+            flood = pcap.parse_packet(
+                1.0, 276, pcap_file([(1.0, over(none), True)])[40:]
+            )
+            capture = pcap.Capture()
+            with unittest.mock.patch.object(
+                pcap, "dns_message", wraps=payloads.dns_message
+            ) as read:
+                for _ in range(300):
+                    capture.add(flood)
+        assert read.call_count == 50
+        assert capture.dns_unread == 300
+        said = net_events.capture_summary(capture, False)
+        assert (
+            "  dns 300 more messages NOT READ, past the 0 lookups that are kept" in said
+        )
+
+    def test_the_addresses_of_an_answer_are_read_once_it_is_one_that_was_asked(self):
+        response = dns_response("a.test", "6.6.6.6")
+        message = dns_message_of(response)
+        assert payloads.dns_message(1.0, message).lookup.addresses == ("6.6.6.6",)
+        unread = payloads.dns_message(1.0, message, answered=False)
+        assert (unread.lookup.name, unread.lookup.addresses) == ("a.test", ())
+        with unittest.mock.patch.object(
+            pcap, "dns_message", wraps=payloads.dns_message
+        ) as read:
+            # A session can send any number of answers nobody asked for
+            self.read([(1.0, response, False)], asked=False)
+            assert [call.kwargs for call in read.call_args_list] == [
+                {"answered": False}
+            ]
+            found = self.read([(1.0, response, False)])
+        assert found.name_of("6.6.6.6") == "a.test"
 
     def test_an_answer_nobody_asked_for_names_nothing(self):
         found = self.read(
@@ -964,7 +1050,9 @@ class CaptureSessionTest(LauncherTest):
         assert session["project"] == str(self.project)
         ending = [c[0] for c in result.calls if self.SIDECAR in c[-1] or c[0] == "cp"]
         stopped = ending.index("stop")
-        assert ending[stopped + 1 : -1] == ["cp"] * (len(ending) - stopped - 2)
+        # Copied out and asked what its tcpdumps said, once it is stopped
+        after = ending[stopped + 1 : -1]
+        assert sorted(after) == ["cp"] * (len(after) - 1) + ["logs"]
         assert ending[-1] == "rm"
 
     def test_the_other_parts_are_copied_out_beside_the_main_one(self):
@@ -1001,6 +1089,49 @@ class CaptureSessionTest(LauncherTest):
         stdout = self.launch("--trace").stdout
         assert "INCOMPLETE, a recorder ended before the session did" in stdout
         assert "dns (status 137)" in stdout
+
+    def test_packets_the_kernel_dropped_are_counted_in_the_record(self):
+        # What each tcpdump says as it ends, the four of them together
+        said = (
+            "tcpdump: listening on any, link-type LINUX_SLL2 (Linux cooked v2),"
+            " snapshot length 1024 bytes\n"
+            "812 packets captured\n830 packets received by filter\n"
+            "12 packets dropped by kernel\n"
+            "3 packets captured\n3 packets received by filter\n"
+            # One whose end came after the start of the next one's line
+            "0 packets dropped by kernel40 packets captured\n\n"
+            "41 packets received by filter\n1 packet dropped by kernel\n"
+            "0 packets captured\n0 packets received by filter\n"
+            "0 packets dropped by kernel\n"
+        )
+        assert capture_module.dropped_packets(said) == 13
+        assert capture_module.dropped_packets("") == 0
+        assert capture_module.dropped_packets("7 packets dropped by interface\n") == 0
+        output = self.work / "said"
+        output.write_text(said)
+        self.captured(FAKE_PROXY_LOG=str(output))
+        (session,) = records.read_traced_sessions(self.host)
+        assert session.dropped == 13
+        # Said in a trace of the session, and when it ends
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        said = "its capture is INCOMPLETE, 13 packets came faster than they were taken"
+        assert f"#   {said}: what they told of is missing\n" in (
+            self.launch("--trace").stdout
+        )
+        (asked,) = (call for call in self.calls() if call[0] == "logs")
+        assert asked[1:] == [f"--tail={capture_module.SAID_LINES}", self.SIDECAR]
+        # Nothing of it for a capture that took all there was
+        output.write_text("0 packets dropped by kernel\n" * 4)
+        self.captured(FAKE_PROXY_LOG=str(output))
+        line = (self.state / "net-sessions.jsonl").read_text().splitlines()[-1]
+        assert "dropped" not in line
+        # Nor from a line of the record that does not hold up
+        for dropped in ('"many"', "-5", "true", "[13]"):
+            kept = records.TracedSession.from_line(
+                line[:-1] + f', "dropped": {dropped}' + "}"
+            )
+            assert kept is not None
+            assert kept.dropped == 0
 
     def test_a_tcpdump_that_ended_at_its_limit_is_not_a_death(self):
         self.captured(FAKE_CAPTURE_DIED="dns:0")
@@ -1046,6 +1177,44 @@ class CaptureSessionTest(LauncherTest):
     def test_another_process_with_the_id_of_a_launcher_is_not_taken_for_it(self):
         assert launcher.process_started(os.getpid())
         self.assert_collected(self.left_behind(pid=os.getpid(), launched="earlier"))
+
+    def test_a_capture_left_behind_ends_when_it_was_last_written_to(self):
+        # Over an hour before the next launcher ran and collected it: its
+        # last connection, then a last lookup
+        ended = float(round(self.now - 3600))
+        dns = self.work / "dns.pcap"
+        dns.write_bytes(
+            pcap_file([(ended, dns_response("a.test", "192.0.2.9"), False)])
+        )
+        os.utime(self.capture_file, (ended - 50, ended - 50))
+        os.utime(dns, (ended, ended))
+        docker_ok = sidecar.docker_ok
+
+        def copied_as_docker_does(*args: str) -> bool:
+            # With the time the file has in the sidecar, which docker cp
+            # keeps and the fake docker does not
+            done = docker_ok(*args)
+            if done and args[0] == "cp":
+                source = dns if args[1].endswith("/dns.pcap") else self.capture_file
+                shutil.copystat(source, args[-1])
+            return done
+
+        about = {"project": str(self.project), "start": ended - 200, "pid": 2**22 - 7}
+        environment = {
+            "FAKE_PS": f"claude-old.capture\t{json.dumps(about)}",
+            "FAKE_CAPTURE": str(self.capture_file),
+            "FAKE_CAPTURE_DNS": str(dns),
+        }
+        with (
+            unittest.mock.patch.dict(os.environ, environment),
+            unittest.mock.patch.object(sidecar, "docker_ok", copied_as_docker_does),
+            unittest.mock.patch.object(
+                capture_module, "docker_ok", copied_as_docker_does
+            ),
+        ):
+            capture_module.CaptureSidecar.collect_left_behind(self.host)
+        (session,) = records.read_traced_sessions(self.host)
+        assert (session.name, session.end) == ("claude-old", ended)
 
     def test_only_the_latest_sessions_stay_in_the_record(self):
         host = settings.detect_host({"HOME": str(self.home)})
@@ -1212,3 +1381,163 @@ class CaptureSessionTest(LauncherTest):
         ]
         (lookup,) = (e for e in events if e["what"] == "dns")
         assert (lookup["who"], lookup["name"]) == ("sandbox", "good.test")
+
+
+class EgressLogTest(LauncherTest):
+    """The egress proxy's log: read within bounds, and kept within its
+    limit for as long as a filtered session adds to it."""
+
+    @pytest.fixture(autouse=True)
+    def access_log(self, sandbox: None) -> None:
+        self.log = self.work / "access.log"
+        self.lines = [
+            f"{1000 + n}.000 0 172.20.0.5 TCP_DENIED/403 9 CONNECT n{n}.test:443 - -\n"
+            for n in range(40)
+        ]
+        self.log.write_text("".join(self.lines[20:]))
+        self.rotated = self.work / "access.log.0"
+        self.rotated.write_text("".join(self.lines[:20]))
+
+    def end_of_log(self, most: int) -> subprocess.CompletedProcess:
+        """What the proxy's container would give of the log."""
+        script = egress_log.end_of_log(str(self.log), most)
+        return subprocess.run(["sh", "-c", script], capture_output=True, check=False)
+
+    def test_no_more_than_the_end_of_the_log_is_read(self):
+        whole = "".join(self.lines).encode()
+        assert self.end_of_log(len(whole) + 1).stdout == whole
+        # The end of the two files together, the rotated one first
+        most = len(whole) // 2 + 30
+        assert self.end_of_log(most).stdout == whole[-most:]
+        self.rotated.unlink()
+        assert self.end_of_log(len(whole)).stdout == self.log.read_bytes()
+        self.log.unlink()
+        assert self.end_of_log(len(whole)).returncode != 0
+
+    def test_the_proxy_is_asked_for_no_more_than_is_read(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        with unittest.mock.patch.dict(os.environ, {"FAKE_ACCESS_LOG": str(self.log)}):
+            requests = egress_log.logged_requests()
+        assert [request.host for request in requests] == [
+            f"n{n}.test" for n in range(20, 40)
+        ]
+        (asked,) = (call for call in self.calls() if call[0] == "exec")
+        assert asked[-1].endswith(f"| tail -c {egress_log.MOST_READ + 1}")
+        assert capsys.readouterr().err == ""
+
+    def test_a_log_longer_than_is_read_is_said_to_be(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        most = len("".join(self.lines)) // 2 + 30
+        # A byte more than is read is asked for, which tells
+        given = self.end_of_log(most + 1).stdout
+        with unittest.mock.patch.object(egress_log, "MOST_READ", most):
+            read = egress_log.whole_lines(given)
+            assert egress_log.whole_lines(given[1:]) == given[1:].decode()
+        # From the first line that is all there
+        assert read.splitlines(keepends=True) == self.lines[-len(read.splitlines()) :]
+        assert 15 < len(read.splitlines()) < 25
+        said = capsys.readouterr().err
+        assert said.count("the egress proxy's log is longer than") == 1
+
+    def test_what_was_logged_since_is_read_a_bounded_piece_at_a_time(self):
+        logged = self.log.read_bytes()
+
+        def since(*offset: str, most: int = 10**6) -> bytes:
+            script = egress_log.log_since(most)
+            asked = ["sh", "-c", script, "sh", str(self.log), *offset]
+            return subprocess.run(asked, capture_output=True, check=True).stdout
+
+        assert since() == f"{len(logged)}\n".encode()
+        assert since("100") == b"100\n" + logged[100:]
+        assert since("100", most=250) == b"100\n" + logged[100:350]
+        # Rotated since: from its start
+        assert since(str(len(logged) + 5), most=250) == b"0\n" + logged[:250]
+
+        with (
+            unittest.mock.patch.object(egress_log, "MOST_READ", 250),
+            unittest.mock.patch.object(egress_log, "docker_bytes") as given,
+        ):
+            given.return_value = b"100\n" + logged[100:350]
+            offset, requests = egress_log.logged_since(100)
+            # As far as the last line that is all there
+            assert offset == 100 + logged[100:350].rfind(b"\n") + 1
+            assert len(requests) == logged[100:offset].count(b"\n") - 1
+            # What is no line at all is passed over, not asked for again
+            given.return_value = b"100\n" + b"x" * 250
+            assert egress_log.logged_since(100) == (350, [])
+            given.return_value = b"100\n" + b"x" * 249
+            assert egress_log.logged_since(100) == (100, [])
+
+    def test_a_log_that_was_rotated_says_so_ahead_of_what_it_holds(self):
+        whole = "".join(self.lines).encode()
+        script = egress_log.end_of_log(str(self.log), len(whole), marked=True)
+
+        def given(_stderr: int | None = None) -> bytes:
+            asked = ["sh", "-c", script]
+            return subprocess.run(asked, capture_output=True, check=True).stdout
+
+        assert given() == b"# rotated\n" + whole
+        with unittest.mock.patch.object(egress_log, "raw_log", given):
+            read = egress_log.proxy_log()
+        assert (len(read.requests), read.shortened) == (40, True)
+        assert read.begins == 1000.0
+        # One that was not holds all that was logged, as far as is known
+        self.rotated.unlink()
+        assert given() == self.log.read_bytes()
+        with unittest.mock.patch.object(egress_log, "raw_log", given):
+            read = egress_log.proxy_log()
+        assert (len(read.requests), read.shortened, read.begins) == (20, False, None)
+
+    def rotations(self) -> list[list[str]]:
+        return [call for call in self.calls() if "squid -k rotate" in call[-1]]
+
+    def test_the_log_is_kept_within_its_limit_while_a_filtered_session_runs(self):
+        often = unittest.mock.patch.object(egress_proxy, "ROTATE_EVERY", 0.1)
+        address_given = unittest.mock.patch.dict(os.environ, {"FAKE_IP": "172.20.0.5"})
+        session = ("claude-proj", "claude-proj")
+        # Not for a session the proxy logs nothing of
+        unfiltered = settings.Settings(net_filter=False)
+        recorded = address.session_address_recorded(unfiltered, self.host, *session)
+        with often, address_given, recorded:
+            time.sleep(0.4)
+        assert self.rotations() == []
+        filtered = settings.Settings(net_filter=True)
+        recorded = address.session_address_recorded(filtered, self.host, *session)
+        with often, address_given, recorded:
+            deadline = time.monotonic() + 20
+            while len(self.rotations()) < 3 and time.monotonic() < deadline:
+                time.sleep(0.05)
+        # Again and again for as long as it runs, when over the limit
+        assert len(self.rotations()) >= 3
+        assert f"-gt {egress_proxy.EGRESS_LOG_LIMIT} ]" in self.rotations()[0][-1]
+
+    def test_a_session_is_known_by_every_address_it_was_given(self):
+        # On a daemon that gives its networks IPv6 too a session has an
+        # address of each kind, and asks the proxy from the one it likes
+        began = time.time()
+        self.launch(CLAUDE_AIRLOCK_NET_FILTER="1", FAKE_IP="172.20.0.5 FD00:0:0::5")
+        sessions = records.recorded_sessions(self.host, began - 1, time.time() + 1)
+        assert [(session.name, session.ip) for session in sessions] == [
+            ("claude-proj", "172.20.0.5"),
+            ("claude-proj", "fd00::5"),
+        ]
+        callers = {
+            "172.20.0.5": "four",
+            "fd00::5": "six",
+            "fd00:0:0:0::5": "six-written-long",
+            "fd00::9": "theirs",
+        }
+        logged = [
+            egress_log.parse_proxy_request(
+                f"{began + 1:.3f} 0 {caller} TCP_DENIED/403 9 CONNECT {name}.test:443 - -"
+            )
+            for caller, name in callers.items()
+        ]
+        made = egress_log.requests_made(logged, sessions, began - 1, began + 60)
+        assert [request.host for request, _ in made] == [
+            "four.test",
+            "six.test",
+            "six-written-long.test",
+        ]

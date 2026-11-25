@@ -5,6 +5,8 @@ what a session can write read without trusting it."""
 from __future__ import annotations
 
 import errno
+import hashlib
+import io
 import os
 import threading
 import time
@@ -14,6 +16,19 @@ import pytest
 from harness import LauncherTest
 
 from claude_airlock import background, files
+
+
+class Pieces(io.BytesIO):
+    """A file that keeps how much each read of a line gave."""
+
+    def __init__(self, content: bytes) -> None:
+        super().__init__(content)
+        self.taken: list[int] = []
+
+    def readline(self, size: int | None = -1) -> bytes:
+        line = super().readline(size)
+        self.taken.append(len(line))
+        return line
 
 
 class FilesTest(LauncherTest):
@@ -109,6 +124,26 @@ class FilesTest(LauncherTest):
             assert file.read() == b"x"
         for name in ("link", "pipe", "missing", "bin"):
             assert files.open_plain(self.work / name) is None, name
+
+    def test_a_line_too_long_to_hold_still_has_what_stands_for_it(self):
+        lines = [
+            b"short\n",
+            b"x" * 5000 + b"\n",
+            # As long as a line may be, with its end
+            b"y" * 1000 + b"\n",
+            b"\n",
+            b"z" * 3000,
+        ]
+        read = Pieces(b"".join(lines))
+        with unittest.mock.patch.object(files, "PIECE", 64):
+            found = list(files.digested_lines(read, 1000))
+        # Not the last one, which has no end
+        assert [line for _, line in found] == [lines[0], None, lines[2], lines[3]]
+        assert [digest for digest, _ in found] == [
+            hashlib.sha256(line).digest() for line in lines[:4]
+        ]
+        # Never more of a line at a time than may be held of one
+        assert max(read.taken) == 1001
 
     def test_only_a_json_object_is_one(self):
         assert files.json_object('{"a": 1}\n') == {"a": 1}

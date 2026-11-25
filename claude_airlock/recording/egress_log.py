@@ -3,12 +3,17 @@ for, and what it refused them.
 
 The proxy logs each request with the address it came from, which a
 container without capabilities cannot forge: that is what tells the
-sessions in the one log apart (see address.py). Read for --net-log, for --trace and for the lines said when
-a session ends. The proxy itself, and the volume its log is kept in, are
-egress_proxy.py's."""
+sessions in the one log apart (see address.py). Read for --net-log, for
+--trace and for the lines said when a session ends. The proxy itself, and
+the volume its log is kept in, are egress_proxy.py's.
+
+How much the log holds is a session's doing, a request it is refused is
+a line too: no more of it is read than MOST_READ, its end, and a reader
+that was given less than all of it says so."""
 
 from __future__ import annotations
 
+import ipaddress
 import subprocess
 from collections import Counter
 from collections.abc import Iterator
@@ -17,6 +22,7 @@ from urllib.parse import urlsplit
 
 from ..docker import docker, docker_bytes, docker_ok
 from ..errors import Fatal
+from ..notice import warn
 from ..sandbox.egress_proxy import (
     EGRESS_ACCESS_LOG,
     EGRESS_LOG_DIR,
@@ -28,6 +34,16 @@ from .records import TracedSession
 
 # The fields of a line that says how much the session sent, the last of them
 SENT_FIELDS = 11
+# No more of the log is read than this, its end: of the rotated file and
+# the current one together, which hold less as a rule (see EGRESS_LOG_LIMIT
+# of egress_proxy.py). A session can have the proxy log faster than a
+# launcher rotates, and what it made of the log would be held here whole,
+# by every --trace and at the end of every session.
+MOST_READ = 32 * 1024 * 1024
+# What the proxy's log is said to be, ahead of what it holds, when it has
+# a rotated file: no line of the log, which starts with when it was
+# written
+ROTATED = "# rotated"
 
 
 @dataclass(frozen=True)
@@ -71,6 +87,21 @@ class ProxyRequest:
             return 0
 
 
+def as_recorded(address: str) -> str:
+    """The address a request came from, written the way the record of a
+    session has the addresses it was given (see session_addresses of
+    networks.py): one of IPv6 can be written in more ways than one, and
+    one of IPv4 inside IPv6 is the IPv4 address it is. As it stands when
+    it is neither."""
+    if ":" not in address:
+        return address
+    try:
+        found = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    return str(getattr(found, "ipv4_mapped", None) or found)
+
+
 def parse_proxy_request(line: str) -> ProxyRequest | None:
     """A line of the proxy's log, none for anything else: squid's native
     format, then the bytes the session sent (see docker/squid.conf)."""
@@ -80,7 +111,7 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
         return ProxyRequest(
             float(ended),
             float(milliseconds) / 1000,
-            address,
+            as_recorded(address),
             "DENIED" in result,
             method,
             url,
@@ -95,7 +126,8 @@ def made_by(
     request: ProxyRequest, session: TracedSession, start: float, end: float
 ) -> bool:
     """Whether a session made a request between start and end: it came
-    from the session's address and was open at some point of that time.
+    from the address this line of the session has (one that has several
+    has a line for each) and was open at some point of that time.
     The proxy logs a tunnel when it closes, which can be much later."""
     return (
         session.ip == request.address
@@ -115,15 +147,69 @@ def requests_made(
             yield request, by
 
 
-def access_log(stderr: int | None = None) -> str | None:
-    """The egress proxy's log, the rotated file then the current one, None
-    when it cannot be read. Read through the proxy's container, the volume
-    it is in is not reachable from the host otherwise, and when the proxy
-    is not running (no filtered session is) through one made for it."""
-    current = EGRESS_ACCESS_LOG
-    read = ("sh", "-c", f"cat {current}.0 2>/dev/null; cat {current}")
+def end_of_log(log: str, most: int, marked: bool = False) -> str:
+    """What a shell in the proxy's container runs to give the end of its
+    log: the rotated file then the current one, and of the two together
+    the last so many bytes. It fails without a current file. When marked,
+    a log that has a rotated file says so first, on a line of its own
+    (see ROTATED)."""
+    mark = f" [ -e {log}.0 ] && echo '{ROTATED}';" if marked else ""
+    return (
+        f"[ -r {log} ] || exit 1;{mark}"
+        f" {{ cat {log}.0 2>/dev/null; cat {log}; }} | tail -c {most}"
+    )
+
+
+def whole_lines(log: bytes) -> str:
+    """The lines of what end_of_log gave, as text. A log that is longer
+    than is read does not start with the start of a line: what there is
+    of that one is left out, and it is said that not all was read, a
+    session then has nothing in it of what it asked before."""
+    if len(log) > MOST_READ:
+        warn(
+            f"the egress proxy's log is longer than the {MOST_READ >> 20} MB"
+            " that are read of it: what was asked before those is not shown"
+        )
+        log = log[log.find(b"\n") + 1 :]
+    return log.decode("utf-8", "replace")
+
+
+@dataclass(frozen=True)
+class ProxyLog:
+    """What was read of the egress proxy's log: its requests, and whether
+    it may hold less than was logged. The proxy keeps one file besides
+    the one it writes to, so what was logged before those two is gone,
+    and no more than MOST_READ is read of them. A session has the log
+    rotated by what it asks, as often as it likes: where the log begins
+    after a session did, what the session asked before is not known."""
+
+    requests: list[ProxyRequest]
+    # Whether it was rotated, or is longer than was read
+    shortened: bool = False
+
+    @property
+    def begins(self) -> float | None:
+        """When the first request that is left of it ended, none for a
+        log that holds no request or is all there, as far as is known."""
+        if not self.shortened or not self.requests:
+            return None
+        return self.requests[0].ended
+
+
+def raw_log(stderr: int | None = None) -> bytes | None:
+    """The end of the egress proxy's log as end_of_log gives it, marked,
+    None when it cannot be read. Read through the proxy's container, the
+    volume it is in is not reachable from the host otherwise, and when
+    the proxy is not running (no filtered session is) through one made
+    for it."""
+    # A byte more than is read, which tells a log that is longer
+    script = end_of_log(EGRESS_ACCESS_LOG, MOST_READ + 1, marked=True)
+    read = ("sh", "-c", script)
     log = docker(
-        "exec", EGRESS_PROXY, *read, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        *("exec", EGRESS_PROXY, *read),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=False,
     )
     if log.returncode == 0:
         return log.stdout
@@ -140,32 +226,56 @@ def access_log(stderr: int | None = None) -> str | None:
         *read[1:],
         stdout=subprocess.PIPE,
         stderr=stderr,
+        text=False,
     )
     return log.stdout if log.returncode == 0 else None
+
+
+def proxy_log(stderr: int | None = None) -> ProxyLog | None:
+    """The egress proxy's log, the rotated file then the current one, as
+    far back as MOST_READ (see whole_lines), None when it cannot be
+    read."""
+    raw = raw_log(stderr)
+    if raw is None:
+        return None
+    mark = ROTATED.encode() + b"\n"
+    rotated = raw.startswith(mark)
+    raw = raw[len(mark) :] if rotated else raw
+    shortened = rotated or len(raw) > MOST_READ
+    lines = whole_lines(raw).splitlines()
+    return ProxyLog([r for r in map(parse_proxy_request, lines) if r], shortened)
 
 
 def logged_requests(stderr: int | None = None) -> list[ProxyRequest] | None:
     """Every request in the egress proxy's log, None when the log cannot
     be read."""
-    log = access_log(stderr)
-    if log is None:
-        return None
-    return [r for r in map(parse_proxy_request, log.splitlines()) if r]
+    log = proxy_log(stderr)
+    return None if log is None else log.requests
+
+
+def log_since(most: int) -> str:
+    """What a shell in the proxy's container runs to give what its log,
+    the first thing it is given, holds past so many bytes, the second: the
+    place it is read from, on a line, then no more than most bytes from
+    there. From where the log ends when it is given no place, and from
+    its start when it is shorter than the place, it was rotated since."""
+    return (
+        'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
+        ' [ "$size" -lt "$from" ] && from=0;'
+        f' echo "$from"; tail -c +"$((from + 1))" "$1" | head -c {most}'
+    )
 
 
 def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
     """The requests the egress proxy logged past the first offset bytes of
     its current log file, and the offset to ask with next time. Without an
     offset none, just where the log ends now. A log that was rotated since
-    is read from its start. None when the log cannot be read."""
-    script = (
-        'size=$(stat -c %s "$1") || exit 1; from=${2:-$size};'
-        ' [ "$size" -lt "$from" ] && from=0;'
-        ' echo "$from"; tail -c +"$((from + 1))" "$1"'
-    )
+    is read from its start. No more than MOST_READ at a time, the rest is
+    for the next. None when the log cannot be read."""
     asked = [] if offset is None else [str(offset)]
     said = docker_bytes(
-        "exec", EGRESS_PROXY, "sh", "-c", script, "sh", EGRESS_ACCESS_LOG, *asked
+        *("exec", EGRESS_PROXY, "sh", "-c", log_since(MOST_READ)),
+        *("sh", EGRESS_ACCESS_LOG, *asked),
     )
     if said is None:
         return None
@@ -174,8 +284,12 @@ def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
         start = int(first)
     except ValueError:
         return None
-    # A line still being written is left for the next time
+    # A line still being written is left for the next time. Not what
+    # holds no end of a line in all that is read at a time: that is no
+    # line of the log, and would be asked for again without end
     whole = log[: log.rfind(b"\n") + 1]
+    if not whole and len(log) >= MOST_READ:
+        return start + len(log), []
     lines = whole.decode("utf-8", "replace").splitlines()
     return start + len(whole), [r for r in map(parse_proxy_request, lines) if r]
 

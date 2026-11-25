@@ -1,5 +1,6 @@
 """Noting the address a filtered session was given, which is how --trace
-tells the sessions in the proxy's shared log apart."""
+tells the sessions in the proxy's shared log apart, and keeping that log
+within its limit while such a session adds to it."""
 
 from __future__ import annotations
 
@@ -9,7 +10,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from ..background import in_background, wait_for
-from ..sandbox.networks import session_address
+from ..sandbox.egress_proxy import access_log_rotated
+from ..sandbox.networks import session_addresses
 from ..settings import Host, Settings
 from .records import TracedSession, record_traced_session
 
@@ -17,8 +19,10 @@ from .records import TracedSession, record_traced_session
 def record_address(
     name: str, owner: str, host: Host, started: float, stop: threading.Event
 ) -> None:
-    address = wait_for(lambda: session_address(owner), stop)
-    if address:
+    """Note each address the session has, a line of the record for each:
+    it has one of IPv6 too where the daemon gives its networks those, and
+    asks the proxy from either."""
+    for address in wait_for(lambda: session_addresses(owner), stop) or ():
         record_traced_session(
             host, TracedSession(name, host.project_dir, started, ip=address)
         )
@@ -34,9 +38,13 @@ def session_address_recorded(
     --trace tell the sessions in the shared log apart. The address is only
     known once the container is up, by when the launcher is waiting on it,
     hence the thread. owner is the container the address belongs to: the
-    session, or its capture sidecar."""
+    session, or its capture sidecar. For as long as it runs the log is
+    kept within its limit too, see access_log_rotated."""
     if not settings.net_filter:
         yield
         return
-    with in_background(record_address, name, owner, host, time.time()):
+    with (
+        in_background(record_address, name, owner, host, time.time()),
+        access_log_rotated(),
+    ):
         yield

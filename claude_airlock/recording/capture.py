@@ -25,11 +25,12 @@ launcher copies it out."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -161,6 +162,15 @@ PARTS = (
 # What is added to the file of a part for the one it leaves its exit status
 # in, when tcpdump ends before it is told to, see CAPTURE_SCRIPT
 STATUS_SUFFIX = ".status"
+# What a tcpdump says when it ends of the packets it was to take and did
+# not get: they came faster than it took them, the kernel had no room left
+# to hold them for it. A session can send that fast, and what the dropped
+# ones told of, a connection it made meanwhile, is then in no part. Not
+# by the line: the tcpdumps end together and write a line in pieces, the
+# one of another can come before its end. Among the last lines of the
+# sidecar's output, each tcpdump says a few when it starts and ends.
+_DROPPED = re.compile(r"(?<!\d)(\d{1,15}) packets? dropped by kernel")
+SAID_LINES = 100
 # What the sidecar runs: a tcpdump for each part, with the filters it is
 # given in the order of PARTS, then a look every second at whether each is
 # still there, until it is told to stop. The sidecar owns the session's
@@ -227,6 +237,7 @@ class CaptureSidecar(Sidecar):
             capture=file,
             end=end,
             stopped=self.stopped_early(),
+            dropped=dropped_packets(self.last_said(SAID_LINES)),
         )
 
     def stopped_early(self) -> str:
@@ -258,6 +269,16 @@ class CaptureSidecar(Sidecar):
                 target.unlink(missing_ok=True)
         return main
 
+    def last_wrote(self, copied: Path) -> float:
+        """By the part that was written to last: each has the packets of
+        its kind as they came, the last of the session in any of them."""
+        latest = super().last_wrote(copied)
+        for part in PARTS[1:]:
+            with suppress(OSError):
+                other = copied.with_name(copied.name + part.suffix)
+                latest = max(latest, super().last_wrote(other))
+        return latest
+
     def pruned(self, directory: Path) -> None:
         """Let go of the parts whose main capture is gone, and keep the
         others by the same count: they go with it, not on their own."""
@@ -265,6 +286,13 @@ class CaptureSidecar(Sidecar):
             for file in directory.glob(f"*.{self.EXTENSION}{part.suffix}"):
                 if not file.with_suffix("").exists():
                     file.unlink(missing_ok=True)
+
+
+def dropped_packets(said: str) -> int:
+    """How many packets were dropped before a tcpdump took them, by what
+    the sidecar wrote to its output: each tcpdump says how many of its
+    own as it ends. None when they did not get to say."""
+    return sum(int(count) for count in _DROPPED.findall(said))
 
 
 def died(statuses: dict[str, str]) -> str:

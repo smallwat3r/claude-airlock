@@ -15,6 +15,7 @@ missed. What it does note is what was there.
     {"t": 2.0, "limit": "pids", "hits": 3}
     {"t": 3.0, "health": {"mem": [used, limit], "cpu": 240.0, "pids": [87, 512], ...}}
     {"t": 4.0, "oom": 1, "gone": [[812, 9876543210, "node"]]}
+    {"t": 5.0, "slow": {"looks": 12, "seconds": 2.6, "longest": 0.31}}
     {"t": 9.0, "note": "..."}
 
 The first when a process is first seen or has become another program, the
@@ -28,7 +29,11 @@ its largest processes, as its cgroup says (version 2, of version 1 only
 what /proc gives). The sixth when a process of it was ended for want of
 memory, with the large ones that are gone since. Those two are written to
 the watcher's output as well, for what follows a session as it runs: the
-record stays in the sidecar until the session is over.
+record stays in the sidecar until the session is over. The seventh when
+looks came much later than they are meant to, which is the session's
+doing: how many did since it was last said, how long after the look before
+them in all, and the longest of those. What lived shorter than that, then,
+was not seen.
 
 It runs as root, so that the session, which shares its process namespace,
 can neither stop it nor reach its file. To read what a process of the
@@ -49,6 +54,15 @@ from collections.abc import Callable, Sequence
 
 # Seconds between two looks
 INTERVAL = 0.04
+# A look that comes later than this after the one before it is late. What
+# a look takes is the session's to set: its sockets are read at each, and
+# the descriptors of all its processes when a socket is new, so a session
+# with enough of either has the looks come as far apart as it likes, and
+# what it runs between two of them goes unseen. That cannot be kept from
+# it, so it is noted: at once when a look first comes late, then no more
+# often than every SLOW_EVERY seconds.
+SLOW = 3 * INTERVAL
+SLOW_EVERY = 10.0
 # A process is looked at each time while it is this young, it is as a rule
 # right after it was made that it becomes another program, then this often
 YOUNG = 2.0
@@ -605,6 +619,14 @@ class Watch:
         self._limits_seen = 0.0
         self._beat = time.monotonic()
         self._health = Health(self.say, self.name_of)
+        # When the look before began, and of the looks that came late
+        # since that was last said, and when: how many, the seconds each
+        # came after the one before it in all, and the most of those
+        self._looked = 0.0
+        self._late = 0
+        self._late_seconds = 0.0
+        self._latest = 0.0
+        self._late_said = 0.0
 
     def name_of(self, pid: int) -> str:
         """What a process is called for short: its program, else what it
@@ -655,6 +677,7 @@ class Watch:
 
     def look(self) -> None:
         now = time.monotonic()
+        self._keep_pace(now)
         pids = [
             int(name)
             for name in os.listdir("/proc")
@@ -671,6 +694,27 @@ class Watch:
             self._limits_seen = now
             self._look_at_limits(pids)
             self._health.look(pids, now)
+
+    def _keep_pace(self, now: float) -> None:
+        """Note that looks came late, see SLOW, by when this one begins:
+        how many did since it was last said, how long after the look
+        before them in all, and the longest of those. A word of the
+        watcher's own, on what the record does not hold for it."""
+        apart = now - self._looked if self._looked else 0.0
+        self._looked = now
+        if apart > SLOW:
+            self._late += 1
+            self._late_seconds += apart
+            self._latest = max(self._latest, apart)
+        if self._late and now - self._late_said >= SLOW_EVERY:
+            said = {
+                "looks": self._late,
+                "seconds": round(self._late_seconds, 2),
+                "longest": round(self._latest, 2),
+            }
+            self.note(reserved=True, slow=said)
+            self._late, self._late_seconds, self._latest = 0, 0.0, 0.0
+            self._late_said = now
 
     def _look_at_processes(self, pids: list[int], now: float) -> None:
         for pid in set(self._processes).difference(pids):

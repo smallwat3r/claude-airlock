@@ -14,7 +14,9 @@ than that can be missed, and a connection without a process falls back on
 the clock. It comes up a moment after the session, so the very first
 moment of one is not covered either. A command of the transcript in whose
 time it saw no process is said to be one in a trace, see unseen.py of
-report.
+report. How long a look takes is the session's to set, by what it has the
+sidecar read: looks that came much later than they are meant to are noted
+by the sidecar, see Slowed.
 
 It runs as root, the session can neither stop it nor reach the record,
 which stays in the sidecar until the launcher copies it out. The session
@@ -250,6 +252,20 @@ class Listener:
         return f"tcp {address}:{self.port}"
 
 
+@dataclass(frozen=True)
+class Slowed:
+    """What a watcher noted of its looks that came much later than they
+    are meant to: by when, how many did since it last said so, how many
+    seconds after the look before them in all, and the longest of those.
+    What lived shorter than that in that time may not be in the record,
+    which a session can bring about."""
+
+    when: float
+    looks: int
+    seconds: float
+    longest: float
+
+
 @dataclass
 class ProcessRecord:
     """What a watcher noted of one session."""
@@ -272,6 +288,8 @@ class ProcessRecord:
     ended: list[Ended] = field(default_factory=list)
     # Whether it could not see which process holds a socket
     unreadable: bool = False
+    # Each time it said that its looks came late, in the order it did
+    slowed: list[Slowed] = field(default_factory=list)
     # When the watcher got to watch, none for one that did not, and when
     # it stopped noting processes at its size limit, none for one that
     # never did
@@ -344,6 +362,15 @@ class ProcessRecord:
         elif health:
             self.ended.append(health)
 
+    def _slowed(self, when: float, said: dict) -> None:
+        slow = said["slow"]
+        found = Slowed(
+            when, int(slow["looks"]), float(slow["seconds"]), float(slow["longest"])
+        )
+        # Not one that says nothing, or what is no length of time
+        if found.looks > 0 and 0 < found.longest <= found.seconds < math.inf:
+            self.slowed.append(found)
+
     def _listener(self, when: float, said: dict) -> None:
         pids = tuple(int(pid) for pid in said["pids"])
         self.listeners.append(
@@ -374,6 +401,7 @@ class ProcessRecord:
         ("limit", _limit),
         ("health", _health),
         ("oom", _health),
+        ("slow", _slowed),
         ("listen", _listener),
         ("port", _connection),
     )

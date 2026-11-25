@@ -88,12 +88,15 @@ class DnsMessage:
     lookup: Lookup
 
 
-def dns_message(when: float, message: bytes) -> DnsMessage:
+def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessage:
     """A DNS query or response as a lookup: the name and kind of record it
     is about, and of a response the addresses it gives and the error it
     reports. A response that was captured only in part, as one longer than
     the capture takes is, gives the addresses that came before the cut.
-    Raises NotThis for anything that is not about exactly one name."""
+    Without answered the addresses are not read, for what first asks which
+    question a response is to: they are what takes long to read, and a
+    session can send any number of answers nobody asked for. Raises
+    NotThis for anything that is not about exactly one name."""
     reader = Cursor(message)
     ident = reader.number(2)
     flags, questions, answers = (reader.number(2) for _ in range(3))
@@ -108,7 +111,7 @@ def dns_message(when: float, message: bytes) -> DnsMessage:
     response = bool(flags & DNS_IS_RESPONSE)
     addresses = []
     try:
-        for _ in range(answers if response else 0):
+        for _ in range(answers if response and answered else 0):
             dns_name(message, reader)
             kind = reader.number(2)
             reader.skip(6)  # class, time to live

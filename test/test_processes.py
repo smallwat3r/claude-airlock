@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,11 +21,11 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LauncherTest, prompts_at, reads_proc
+from harness import LauncherTest, prompts_at, reads_proc, records
 from test_capture import pcap_file, tcp
 
 from claude_airlock.events import Event, Who
-from claude_airlock.recording import health, processes, procwatch
+from claude_airlock.recording import health, processes, procwatch, sidecar
 from claude_airlock.recording.records import TracedSession
 from claude_airlock.report import follow, net_events, unseen
 
@@ -195,6 +196,48 @@ class WatcherTest:
         assert [line["hits"] for line in said] == [2, 5]
         assert noted(*said).process_limit == 5
 
+    def test_looks_that_come_late_are_noted_with_how_late(self):
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+
+        def slow() -> list[dict]:
+            lines = map(json.loads, out.getvalue().splitlines())
+            return [line["slow"] for line in lines if "slow" in line]
+
+        # In time twice, then held up by what the session has it read
+        now = 1000.0
+        for apart in (0.0, procwatch.INTERVAL, 0.05, 0.5):
+            now += apart
+            watch._keep_pace(now)
+        # Said at once
+        assert slow() == [{"looks": 1, "seconds": 0.5, "longest": 0.5}]
+        said_at = now
+        for apart in (0.3, procwatch.INTERVAL, 0.9):
+            now += apart
+            watch._keep_pace(now)
+        assert len(slow()) == 1
+        # Then no more often than every so many seconds, with how many
+        # came late since, and nothing more once they come in time
+        while now < said_at + 2 * procwatch.SLOW_EVERY:
+            now += procwatch.INTERVAL
+            watch._keep_pace(now)
+        assert slow()[1:] == [{"looks": 2, "seconds": 1.2, "longest": 0.9}]
+        record = noted(*map(json.loads, out.getvalue().splitlines()))
+        assert [(found.looks, found.seconds) for found in record.slowed] == [
+            (1, 0.5),
+            (2, 1.2),
+        ]
+
+    @reads_proc
+    def test_every_look_is_held_against_the_one_before_it(self):
+        watch = procwatch.Watch(io.StringIO())
+        with mock.patch.object(watch, "_keep_pace") as paced:
+            before = time.monotonic()
+            watch.look()
+            watch.look()
+        first, second = (began for ((began,), _) in paced.call_args_list)
+        assert before <= first <= second <= time.monotonic()
+
     @reads_proc
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
         with socket.socket() as server:
@@ -278,6 +321,38 @@ class RecordTest:
         record = noted(ran(1.0, 5, 5, "loop"))
         assert len(record.lineage(5, 2.0)) == 1
 
+    def test_what_a_watcher_says_of_its_late_looks_is_read(self):
+        record = noted(
+            {"t": 5.0, "slow": {"looks": 3, "seconds": 1.5, "longest": 0.9}},
+            # What does not hold up is passed over
+            {"t": 6.0, "slow": {"looks": "many", "seconds": 1, "longest": 1}},
+            {"t": 7.0, "slow": [3, 1.5, 0.9]},
+            {"t": 8.0, "slow": {"looks": 1, "seconds": float("nan"), "longest": 1}},
+            {"t": 9.0, "slow": {"looks": 0, "seconds": 0.0, "longest": 0.0}},
+            {"t": 9.5, "slow": {"looks": 1, "seconds": 0.5, "longest": 0.9}},
+        )
+        assert record.slowed == [processes.Slowed(5.0, 3, 1.5, 0.9)]
+        # A word of the watcher, as any other line is
+        assert record.last_line == 9.5
+
+    def test_a_watcher_that_was_slowed_is_said_once_it_tells(self):
+        # A little late is how looks come under load, and is not said
+        late = noted({"t": 5.0, "slow": {"looks": 3, "seconds": 1.5, "longest": 0.9}})
+        assert net_events.slowed(late) == ""
+        slowed = noted(
+            ran(1.0, 812, 7, "make"),
+            {"t": 5.0, "slow": {"looks": 3, "seconds": 1.5, "longest": 0.9}},
+            {"t": 15.0, "slow": {"looks": 9, "seconds": 8.0, "longest": 2.25}},
+            {"t": 25.0, "slow": {"looks": 4, "seconds": 6.0, "longest": 1.5}},
+        )
+        said = (
+            "the record of its processes has GAPS, its watcher was slowed: its"
+            " looks came up to 2.2s apart, for 14s in all, what ran for less"
+            " then may be missing"
+        )
+        assert net_events.slowed(slowed) == said
+        assert f"  {said}" in net_events.watched_summary(slowed, False)
+
 
 GIB = 2**30
 
@@ -286,9 +361,9 @@ def command(when: float, seconds: float | None = 1.0, **fields: object) -> Event
     """A command of a transcript, issued at a time, whose result came so
     many seconds later, none for one without a result."""
     took = {} if seconds is None else {"seconds": seconds}
-    return Event(
-        when, Who.CLAUDE, "bash", ["$ true"], {"tool": "Bash", **took, **fields}
-    )
+    said = {"tool": "Bash", **took, **fields}
+    # The call of a tool, as the transcript's side of a trace makes them
+    return Event(when, Who.CLAUDE, "bash", ["$ true"], said, call=True)
 
 
 class UnseenTest:
@@ -828,6 +903,49 @@ class SidecarTest(LauncherTest):
         )
         assert ["rm", "--force", "claude-old.procs"] in result.calls
         assert (self.state / "processes" / "claude-old.procs-5.jsonl").exists()
+
+    def test_a_record_left_behind_ends_when_its_watcher_last_wrote(self):
+        # Over an hour before the next launcher ran and collected it
+        ended = float(round(self.now - 3600))
+        said = [
+            {"t": ended - 200, "note": "started", "beat": 30.0},
+            ran(ended - 100, 7, 1, "claude"),
+            {"t": ended, "note": "alive"},
+        ]
+        self.record_file.write_text("".join(json.dumps(line) + "\n" for line in said))
+        os.utime(self.record_file, (ended, ended))
+        docker_ok = sidecar.docker_ok
+
+        def copied_as_docker_does(*args: str) -> bool:
+            # With the time the file has in the sidecar, which docker cp
+            # keeps and the fake docker does not
+            done = docker_ok(*args)
+            if done and args[0] == "cp":
+                shutil.copystat(self.record_file, args[-1])
+            return done
+
+        about = {"project": str(self.project), "start": ended - 200, "pid": 2**22 - 7}
+        environment = {
+            "FAKE_PS": f"claude-old.procs\t{json.dumps(about)}",
+            "FAKE_PROCESSES": str(self.record_file),
+        }
+        with (
+            mock.patch.dict(os.environ, environment),
+            mock.patch.object(sidecar, "docker_ok", copied_as_docker_does),
+        ):
+            processes.Watcher.collect_left_behind(self.host)
+            (session,) = records.read_traced_sessions(self.host)
+            assert (session.name, session.end) == ("claude-old", ended)
+            # Its watcher is not said to have gone silent before the end
+            record = processes.session_record(self.host, session)
+            assert record is not None
+            assert record.silent_from(session.end) is None
+            # One collected by the launcher of its session ends with it
+            mine = processes.Watcher.for_session("claude-proj", str(self.project))
+            mine.collect(self.host)
+        ends = [session.end or 0 for session in records.read_traced_sessions(self.host)]
+        assert ends[0] == ended
+        assert ends[1] >= self.now
 
     def trace(self, *args: str) -> str:
         self.watched(CLAUDE_AIRLOCK_NET_LOG="1", FAKE_CAPTURE=str(self.capture_file))

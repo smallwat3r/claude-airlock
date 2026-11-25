@@ -10,6 +10,7 @@ not what it should be is no line."""
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -22,6 +23,9 @@ from typing import IO, Any, BinaryIO
 # What a session can write is read a line at a time, and no line longer
 # than this is held in memory
 LINE_LIMIT = 32 << 20
+# Of a line longer than that, what is read at a time by what takes it in
+# without holding it, see digested_lines
+PIECE = 1 << 20
 # What a line of JSON takes once read, see held_size: twice its bytes,
 # for a text of characters that take several, then so much for the line
 # and for each value in it (an empty object in a list takes less, one
@@ -240,6 +244,32 @@ def bounded_lines(file: BinaryIO, longest: int = LINE_LIMIT) -> Iterator[bytes |
         while line and not line.endswith(b"\n"):
             line = file.readline(longest)
         yield None
+
+
+def digested_lines(
+    file: BinaryIO, longest: int = LINE_LIMIT
+) -> Iterator[tuple[bytes, bytes | None]]:
+    """The whole lines of a file a session can write, each as what stands
+    for it, its SHA-256, and the line itself. None in the place of a line
+    longer than longest, as bounded_lines has it: that one is taken in a
+    piece at a time for what stands for it and never held, so what
+    compares two files line by line still tells it from any other. Not a
+    last line without its end."""
+    while True:
+        line: bytes | None = file.readline(longest + 1)
+        if not line:
+            return
+        digest = hashlib.sha256(line)
+        whole = line.endswith(b"\n")
+        if len(line) > longest and not whole:
+            line = None
+            while piece := file.readline(PIECE):
+                digest.update(piece)
+                if piece.endswith(b"\n"):
+                    whole = True
+                    break
+        if whole:
+            yield digest.digest(), line
 
 
 def held_size(line: bytes) -> int:

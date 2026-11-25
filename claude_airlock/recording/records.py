@@ -63,6 +63,10 @@ class TracedSession:
     # Of a capture that a tcpdump of it ended before it was told to, which
     # of them and how, empty when none did
     stopped: str = ""
+    # Of a capture, how many packets were dropped before a tcpdump of it
+    # took them, as far as each said when it ended: what they told of is
+    # missing from it
+    dropped: int = 0
 
     def as_line(self) -> str:
         """The session as its line of the record."""
@@ -77,6 +81,8 @@ class TracedSession:
             kept["end"] = self.end
         if self.stopped:
             kept["stopped"] = self.stopped
+        if self.dropped:
+            kept["dropped"] = self.dropped
         return json.dumps(kept)
 
     @classmethod
@@ -107,7 +113,19 @@ class TracedSession:
             return None
         stopped = said.get("stopped", "")
         stopped = stopped[:200] if isinstance(stopped, str) else ""
-        return cls(name, project, start, ip, capture, processes, end, stopped=stopped)
+        dropped = said.get("dropped", 0)
+        dropped = dropped if type(dropped) is int and dropped > 0 else 0
+        return cls(
+            name,
+            project,
+            start,
+            ip,
+            capture,
+            processes,
+            end,
+            stopped=stopped,
+            dropped=dropped,
+        )
 
 
 def record_traced_session(host: Host, session: TracedSession) -> None:

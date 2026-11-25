@@ -261,7 +261,7 @@ class AgentDoor:
         a full disk or the like."""
         kind = kind_of(request)
         refused = kind_of(answer) == AgentMessage.FAILURE
-        said: dict[str, object] = {"refused": True} if refused else {}
+        said: dict[str, object] = {}
         if refused_by:
             said["by"] = refused_by
         try:
@@ -289,7 +289,7 @@ class AgentDoor:
             said.update(
                 did=AgentUse.OTHER.value, what="sent a request that could not be read"
             )
-        self._uses.note(str(said["did"]), **said)
+        self._uses.note(str(said["did"]), refused=refused, **said)
 
     def _listed(self, answer: bytes) -> int:
         """How many keys the agent listed, their comments remembered."""

@@ -28,7 +28,7 @@ from harness import (
 from claude_airlock import errors
 from claude_airlock.recording import doors, socket_watch, ssh_agent, started
 from claude_airlock.report import door_events
-from claude_airlock.sandbox import socket_proxy
+from claude_airlock.sandbox import networks, socket_proxy
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
 PROXY_LOG = (
@@ -352,6 +352,83 @@ class AgentDoorTest(LauncherTest):
         ]
         assert "error" in events[4].fields
 
+    def test_what_was_refused_does_not_use_up_the_lines_of_what_was_let_through(self):
+        uses = doors.SessionUses(self.host, "s", doors.Door.SSH_AGENT)
+        # A signature asked with a key the agent does not have costs
+        # nothing, and each is another line
+        asked = doors.MOST_SESSION_USES + 50
+        for number in range(asked):
+            uses.note(
+                "sign",
+                refused=True,
+                did="sign",
+                key=f"SHA256:bogus{number}",
+                what="a signature",
+            )
+        uses.note("sign", did="sign", key="SHA256:real", what="a login as root")
+        uses.close()
+        noted = doors.read_uses(self.host, 0, time.time() + 1)
+        (signed,) = (use for use in noted if use.get("key") == "SHA256:real")
+        assert (signed["what"], signed.get("refused")) == ("a login as root", None)
+        refused = [use for use in noted if use.get("refused") and "did" in use]
+        assert len(refused) == doors.MOST_REFUSED
+        # That the refusals were no longer noted is said as it began, and
+        # how many there were once the session is over, as refused ones
+        counted = asked - doors.MOST_REFUSED
+        assert noted[doors.MOST_REFUSED]["unrecorded"] is True
+        assert noted[doors.MOST_REFUSED]["refused"] is True
+        assert noted[-1]["unrecorded"] == {"refused sign": counted}
+        rows, events = door_events.door_events(self.host, 0, time.time() + 1)
+        requests = f"{doors.MOST_REFUSED + 1} requests, 1 signatures"
+        assert rows == [
+            ("ssh agent", f"{requests}, {counted} more NOT RECORDED one by one")
+        ]
+        assert events[-1].details == [
+            f"{counted} more uses NOT RECORDED one by one: {counted} refused sign"
+        ]
+
+    def test_refusals_and_what_was_let_through_are_counted_apart(self):
+        uses = doors.SessionUses(self.host, "s", doors.Door.DOCKER)
+        with (
+            mock.patch.object(doors, "MOST_SESSION_USES", 1),
+            mock.patch.object(doors, "MOST_REFUSED", 1),
+        ):
+            for number in range(3):
+                uses.note("GET", method="GET", path=f"/a{number}", status=200)
+                uses.note(
+                    "POST", refused=True, method="POST", path=f"/d{number}", status=403
+                )
+        uses.close()
+        noted = doors.read_uses(self.host, 0, time.time() + 1)
+        assert [use.get("path", use.get("refused", False)) for use in noted[:4]] == [
+            "/a0",
+            "/d0",
+            # That each of the two is counted from here, as it began
+            False,
+            True,
+        ]
+        assert noted[-1]["unrecorded"] == {"GET": 2, "refused POST": 2}
+
+    def test_what_the_launcher_refused_leaves_room_for_a_signature(self):
+        # Requests no agent knows, each refused and each another line
+        junk = [bytes([kind]) for kind in range(100, 110)]
+        with (
+            mock.patch.object(doors, "MOST_SESSION_USES", 1),
+            mock.patch.object(doors, "MOST_REFUSED", 3),
+        ):
+            answers = self.through_the_door(*junk, sign_request(login("git")))
+            self.door.close()
+        assert answers[-1] == b"\x0e" + string(b"a signature")
+        uses = self.uses()
+        refused = [use["what"] for use in uses if use.get("refused") and "did" in use]
+        assert refused == ["sent request 100", "sent request 101", "sent request 102"]
+        (signed,) = (use for use in uses if use.get("did") == "sign")
+        assert (signed["key"], signed["what"]) == (
+            ssh_agent.fingerprint(KEY),
+            "a login as git",
+        )
+        assert uses[-1]["unrecorded"] == {"refused other": 7}
+
     def test_the_uses_of_one_session_can_be_told_from_another(self):
         for session in ("claude-proj", "claude-proj-2"):
             doors.note_use(self.host, session, doors.Door.DOCKER)
@@ -416,13 +493,13 @@ class SocketWatchTest(LauncherTest):
             == "fd00::5"
         )
 
-    def watched(self) -> list[dict]:
+    def watched(self, addresses: str = "172.20.0.5") -> list[dict]:
         """The uses noted of a session whose proxy logged PROXY_LOG. Called
         directly, the socket path is a constant of the socket_proxy module."""
         host = self.host
         environment = {
             **self.fake_docker_env(),
-            "FAKE_IP": "172.20.0.5",
+            "FAKE_IP": addresses,
             "FAKE_PROXY_LOG": str(self.proxy_log),
         }
         with mock.patch.object(socket_proxy, "DOCKER_SOCK", self.docker_sock):  # noqa: SIM117
@@ -456,8 +533,32 @@ class SocketWatchTest(LauncherTest):
             ("GET", "/v1.47/containers/json", 200),
             ("POST", "/v1.47/containers/create", 403),
         ]
+        # The one the proxy denied as refused, which is counted apart
+        assert [use.get("refused") for use in uses] == [None, True]
         (followed,) = (call for call in self.calls() if call[0] == "logs")
         assert (followed[1], followed[-1]) == ("--follow", "claude-airlock-ps-proxy")
+
+    def test_calls_from_any_address_of_the_session_are_noted(self):
+        # On a daemon that gives its networks IPv6 too a session has an
+        # address of each kind, and calls from the one it likes
+        first = PROXY_LOG.splitlines()[0]
+        with open(self.proxy_log, "a") as log:
+            for caller in ("fd00::5", "fd00::9"):
+                log.write(first.replace("172.20.0.5", caller).replace("/json", "/six"))
+                log.write("\n")
+        uses = self.watched("172.20.0.5 FD00:0:0::5")
+        assert [use["path"].rpartition("/")[2] for use in uses] == [
+            "json",
+            "create",
+            "six",
+        ]
+        asked = mock.patch.dict(os.environ, {"FAKE_IP": "172.20.0.5 FD00:0:0::5 x"})
+        with asked:
+            assert networks.session_addresses("claude-proj") == (
+                "172.20.0.5",
+                "fd00::5",
+            )
+        assert networks.session_addresses("claude-proj") == ()
 
     def test_an_address_found_after_the_watch_closed_follows_no_log(self):
         """The proxy outlives the session: a log followed once nobody
@@ -468,11 +569,11 @@ class SocketWatchTest(LauncherTest):
             # Asked once, and answered after the watch stopped waiting
             closing.wait(5)
             time.sleep(1.3)
-            return "172.20.0.5"
+            return ("172.20.0.5",)
 
         host = settings.Host(str(self.home), str(self.project), "", "")
         with (
-            mock.patch.object(socket_watch, "session_address", slow_address),
+            mock.patch.object(socket_watch, "session_addresses", slow_address),
             mock.patch.object(socket_watch, "docker_popen") as followed,
         ):
             watch = socket_watch.SocketWatch(host, "claude-proj", "claude-proj", "p")

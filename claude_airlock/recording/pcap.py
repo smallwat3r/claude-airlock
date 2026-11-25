@@ -76,6 +76,13 @@ DNS_LENGTH = 2
 # can hold dozens of messages, and a session can send any number of them
 # to a port of its own.
 MOST_LOOKUPS = 100_000
+# Nor are more DNS messages read than this, whatever comes of them: one
+# that is none, an answer nobody asked for and a query asked again leave
+# no lookup to count, and over TCP a packet can hold hundreds, each as
+# short as it says it is, down to the two bytes of its length alone. A
+# lookup takes two messages, so this is twice what MOST_LOOKUPS of them
+# take. Past it the messages are counted and not read, the same.
+MOST_DNS_READ = 4 * MOST_LOOKUPS
 # A connection that one side has ended is followed until the other has
 # too, for what went over it meanwhile: no more of them than this, a
 # session can leave any number half open
@@ -309,7 +316,8 @@ class Capture:
     lookups: list[Lookup] = field(default_factory=list)
     # The lookups that stand out, each with what for, see DNS_MANY_NAMES
     flagged: list[tuple[str, Lookup]] = field(default_factory=list)
-    # The DNS messages that were not read, past MOST_LOOKUPS
+    # The DNS messages that were not read, past MOST_LOOKUPS or
+    # MOST_DNS_READ: of a packet over TCP that was not looked into, one
     dns_unread: int = 0
     # Each plain HTTP request
     requests: list[Request] = field(default_factory=list)
@@ -350,6 +358,8 @@ class Capture:
     )
     _silent: set[tuple[int, str, int]] = field(default_factory=set, repr=False)
     _expired_at: float = field(default=0.0, repr=False)
+    # How many DNS messages were read, see MOST_DNS_READ
+    _dns_read: int = field(default=0, repr=False)
 
     def marks(self) -> tuple[int, int, int, int, int, int]:
         """How much of each kind there is, for a reader that follows to
@@ -404,9 +414,19 @@ class Capture:
             known = self._open.get(key) or self._closing.get(key)
             if known:
                 known.count(packet)
-            if packet.sent:
-                self._add_server_name(packet)
-                self._add_request(packet)
+        # Whatever else the packet is: the one that starts a connection
+        # can carry its first bytes, and the one that ends it its last, a
+        # request sent whole with the end of the connection it is on
+        if packet.sent and packet.payload:
+            self._add_server_name(packet)
+            self._add_request(packet)
+
+    def _dns_left(self) -> int:
+        """How many more DNS messages are read: none once MOST_LOOKUPS
+        are kept, else what is left of MOST_DNS_READ."""
+        if len(self.lookups) >= MOST_LOOKUPS:
+            return 0
+        return max(MOST_DNS_READ - self._dns_read, 0)
 
     def _dns_over_tcp(self, packet: Packet) -> list[bytes]:
         """The DNS messages a packet of TCP completes. Over TCP a message
@@ -415,16 +435,24 @@ class Capture:
         left without its end is kept for the next packet of the same
         stream. A packet that was not captured whole gives what there is
         of its last message, and nothing is kept: where the next one
-        starts is not known."""
+        starts is not known. No more messages than are still read, see
+        _dns_left: what is left of the packet then counts as one that was
+        not, and is not looked into."""
+        left = self._dns_left()
         stream = (packet.source, packet.source_port, packet.destination, packet.port)
         data = self._dns_held.pop(stream, b"") + packet.payload
-        messages = []
-        while len(data) >= DNS_LENGTH:
-            end = DNS_LENGTH + int.from_bytes(data[:DNS_LENGTH], "big")
+        messages: list[bytes] = []
+        at = 0
+        while len(data) - at >= DNS_LENGTH and len(messages) < left:
+            end = at + DNS_LENGTH + int.from_bytes(data[at : at + DNS_LENGTH], "big")
             if len(data) < end:
                 break
-            messages.append(data[DNS_LENGTH:end])
-            data = data[end:]
+            messages.append(data[at + DNS_LENGTH : end])
+            at = end
+        data = data[at:]
+        if data and len(messages) >= left:
+            self.dns_unread += 1
+            return messages
         if len(packet.payload) < packet.length:
             return [*messages, data[DNS_LENGTH:]] if data[DNS_LENGTH:] else messages
         if data and len(data) <= DNS_HELD_BYTES:
@@ -452,11 +480,13 @@ class Capture:
         on loopback, is nothing the resolver said."""
         if not self._is_dns(packet):
             return
-        if len(self.lookups) >= MOST_LOOKUPS:
+        if not self._dns_left():
             self.dns_unread += 1
             return
+        self._dns_read += 1
         try:
-            found = dns_message(packet.when, message)
+            # Its question alone at first, see dns_message
+            found = dns_message(packet.when, message, answered=False)
         except NotThis:
             return
         self._expire(packet.when)
@@ -474,7 +504,7 @@ class Capture:
             return
         del self._pending[key]
         self._silent.discard(key)
-        self._take_lookup(found.lookup)
+        self._take_lookup(dns_message(packet.when, message).lookup)
 
     def _ask(self, key: tuple[int, str, int], when: float) -> None:
         """Keep a query to match its answer with. Past DNS_MOST_PENDING the

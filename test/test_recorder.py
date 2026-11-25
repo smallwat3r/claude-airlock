@@ -44,6 +44,18 @@ class RecorderTest(LauncherTest):
     def rewrite(self, entries: list[dict]) -> None:
         self.transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
 
+    def decoy(self, name: str, size: int) -> Path:
+        """Leave a transcript that is none: a hole of a length, which
+        takes no room on the disk it is made on."""
+        file = self.transcripts / f"{name}.jsonl"
+        with open(file, "wb") as hole:
+            hole.truncate(size)
+        return file
+
+    def host_copy(self, transcript: Path) -> Path:
+        """Where the launcher keeps its copy of a transcript."""
+        return recorder.copy_path(self.host, transcript)
+
     def test_a_transcript_is_copied_whenever_it_says_it_was_written(self):
         # A session that started later than the transcript was written
         copier = recorder.Copier(self.host, time.time() + 60)
@@ -286,6 +298,216 @@ class RecorderTest(LauncherTest):
         assert compared.cut_short
         assert "NOT ALL COPIED" in compared.header()[0]
         assert "as the launcher copied it" not in "".join(compared.header())
+
+    def test_a_line_too_long_to_hold_is_compared_like_any_other(self):
+        # Half a line ahead of the entry Claude Code writes next, of more
+        # than is held of a line
+        glued = b"x" * 2000 + json.dumps(call(3, self.now + 3, "id")[0]).encode()
+        with unittest.mock.patch.object(recorder, "LINE_LIMIT", 1000):
+            with open(self.transcript, "ab") as transcript:
+                transcript.write(glued + b"\n")
+            recorder.catch_up(self.transcript, self.copy)
+            as_copied = recorder.compare(self.host, self.transcript)
+            assert (as_copied.lines, as_copied.gone) == (len(self.entries) + 1, [])
+            # Taken out again, with blank lines for the length it had
+            self.rewrite(self.entries)
+            with open(self.transcript, "ab") as transcript:
+                transcript.write(b"\n" * (len(glued) + 1))
+            recorder.catch_up(self.transcript, self.copy)
+            compared = recorder.compare(self.host, self.transcript)
+        assert (compared.rewritten, compared.lines) == (0, len(self.entries) + 1)
+        assert compared.gone == [
+            {"type": "unreadable-line", "text": "(a line too long to read)"}
+        ]
+        assert "CHANGED: 1 lines the launcher copied" in compared.header()[0]
+
+    def test_a_transcript_that_was_never_copied_is_not_read_to_be_compared(self):
+        with unittest.mock.patch.object(recorder, "line_digests") as read:
+            compared = recorder.compare(self.host, self.transcript)
+        read.assert_not_called()
+        assert (compared.copied, compared.lines) == (False, 0)
+
+    def test_a_look_adds_no_more_to_a_copy_than_a_turn_takes(self):
+        with unittest.mock.patch.object(recorder, "MOST_A_TURN", 100):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            # More is left, which the next look is to take at once
+            assert copier.look()
+            assert self.copy.stat().st_size == 100
+            other = self.decoy("0b", 1000)
+            assert copier.look()
+            sizes = [self.copy.stat().st_size, self.host_copy(other).stat().st_size]
+            assert sizes == [200, 100]
+            # A copy that is behind its transcript is not one that stopped
+            behind = recorder.compare(self.host, self.transcript)
+            assert not behind.no_room
+            assert "NOT ALL COPIED" not in "\n".join(behind.header())
+            # All there is of each once the session is over
+            assert not copier.look(whole=True)
+        assert self.copy.read_bytes() == self.transcript.read_bytes()
+        assert self.host_copy(other).stat().st_size == 1000
+        assert copier.stopped == 0
+
+    def test_a_transcript_has_its_turn_in_the_order_it_was_first_written_to(self):
+        size = self.transcript.stat().st_size
+        added = json.dumps(prompts_at(self.now + 5)[0]) + "\n"
+        with unittest.mock.patch.object(recorder, "MOST_A_SESSION", size + len(added)):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            copier.look()
+            # Made by what the session ran, after its transcript was there
+            decoys = [self.decoy(name, 4000) for name in ("00", "zz")]
+            with open(self.transcript, "a") as transcript:
+                transcript.write(added)
+            # However they are listed, the one seen first is served first
+            listed = [*decoys, self.transcript]
+            with unittest.mock.patch.object(
+                recorder, "session_transcripts", return_value=listed
+            ):
+                copier.look()
+        assert self.copy.read_bytes() == self.transcript.read_bytes()
+        assert [self.host_copy(decoy).exists() for decoy in decoys] == [False, False]
+
+    def test_no_more_is_copied_in_a_session_than_the_launcher_has_room_for(self):
+        size = self.transcript.stat().st_size
+        with unittest.mock.patch.object(recorder, "MOST_A_SESSION", size + 1000):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            copier.look()
+            decoys = [self.decoy(f"d{number}", 4000) for number in range(5)]
+            assert not copier.look()
+            copies = [self.host_copy(decoy) for decoy in decoys]
+            assert sum(recorder.length(copy) or 0 for copy in copies) == 1000
+            # Noted of each once its copy is found no longer by the next
+            # look, nobody else is adding to it
+            assert copier.stopped == 0
+            assert not copier.look()
+            assert sum(recorder.length(copy) or 0 for copy in copies) == 1000
+            assert copier.stopped == len(decoys)
+            # Said of each that stopped short, and of no other
+            short = recorder.compare(self.host, decoys[0])
+            assert short.no_room
+            assert "NOT ALL COPIED: a launcher copies no more than" in "\n".join(
+                short.header()
+            )
+            whole = recorder.compare(self.host, self.transcript)
+            assert not whole.no_room
+            assert whole.header() == [
+                f"transcript  as the launcher copied it ({len(self.entries)} lines)"
+            ]
+            # What the session's own transcript gains from then on is not
+            # copied either, which is said of it
+            with open(self.transcript, "a") as transcript:
+                transcript.write(json.dumps(call(3, self.now + 3, "id")[0]) + "\n")
+            copier.look()
+            copier.look(whole=True)
+        assert self.copy.stat().st_size == size
+        assert copier.stopped == len(decoys) + 1
+        said = recorder.compare(self.host, self.transcript).header()
+        assert "transcript  NOT ALL COPIED: a launcher copies no more than" in said[0]
+        assert "as the launcher copied it" not in "\n".join(said)
+
+    def test_a_rewrite_is_still_kept_once_there_is_no_room(self):
+        size = self.transcript.stat().st_size
+        with unittest.mock.patch.object(recorder, "MOST_A_SESSION", size):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            copier.look()
+            self.rewrite(self.entries[:1])
+            for _ in range(3):
+                copier.look()
+        compared = recorder.compare(self.host, self.transcript)
+        assert (compared.rewritten, len(compared.gone)) == (1, len(self.entries) - 1)
+        # The copy that started anew has nothing of what is there now
+        assert compared.no_room
+        assert "NOT ALL COPIED" in "\n".join(compared.header())
+
+    def test_a_copy_that_stopped_short_is_not_taken_up_by_a_later_session(self):
+        size = self.transcript.stat().st_size
+        with unittest.mock.patch.object(recorder, "MOST_A_SESSION", size + 100):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            copier.look()
+            decoy = self.decoy("d0", 4000)
+            copier.look()
+            copier.look()
+        copy = self.host_copy(decoy)
+        assert (copy.stat().st_size, copier.stopped) == (100, 1)
+        # Neither for being behind, nor for when it says it was written:
+        # what one session left would use up the room of those after it
+        for since in (time.time() + 60, time.time() - 60):
+            later = recorder.Copier(self.host, since)
+            later.look()
+            assert (copy.stat().st_size, later.stopped) == (100, 0)
+        # Once it is written to again, as any other
+        later = recorder.Copier(self.host, time.time() + 60)
+        with open(decoy, "ab") as written:
+            written.write(b"x")
+        later.look()
+        assert copy.stat().st_size == 4001
+        assert recorder.compare(self.host, decoy).no_room
+
+    def test_a_copy_another_launcher_adds_to_is_not_said_to_stop_short(self):
+        def gains() -> None:
+            with open(self.transcript, "a") as transcript:
+                transcript.write(json.dumps(prompts_at(time.time())[0]) + "\n")
+
+        with unittest.mock.patch.object(recorder, "MOST_A_SESSION", 0):
+            copier = recorder.Copier(self.host, time.time() - 60)
+        # A session of the project whose launcher has room copies it too,
+        # between the looks of the one that has none
+        for _ in range(3):
+            gains()
+            copier.look()
+            recorder.catch_up(self.transcript, self.copy)
+        assert copier.stopped == 0
+        compared = recorder.compare(self.host, self.transcript)
+        assert (compared.no_room, compared.gone) == (False, [])
+        assert "NOT ALL COPIED" not in "\n".join(compared.header())
+        # Until nobody does any more
+        gains()
+        copier.look()
+        assert copier.stopped == 0
+        copier.look()
+        assert copier.stopped == 1
+        assert recorder.compare(self.host, self.transcript).no_room
+
+    def test_a_launcher_that_ran_out_of_room_says_so_when_the_session_ends(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        with (
+            unittest.mock.patch.object(recorder, "MOST_A_SESSION", 10),
+            recorder.transcripts_copied(self.host),
+            open(self.transcript, "a") as transcript,
+        ):
+            transcript.write(json.dumps(prompts_at(self.now + 5)[0]) + "\n")
+        said = capsys.readouterr().err
+        assert "1 transcripts were not all copied" in said
+        assert "--trace says NOT ALL COPIED of each" in said
+        assert self.copy.stat().st_size == 10
+        # Nothing of it to compare with, and why
+        why = (
+            "transcript  NOT ALL COPIED: a launcher copies no more than"
+            f" {recorder.MOST_A_SESSION >> 20} MB in one session, what was taken"
+            " out of it after that is not known"
+        )
+        assert recorder.compare(self.host, self.transcript).header() == [
+            "transcript  as it is now, the launcher has no copy of it to compare",
+            why,
+        ]
+
+    def test_a_transcript_that_gained_more_than_a_turn_takes_is_not_waited_on(self):
+        added = json.dumps(prompts_at(self.now + 5)[0]) + "\n"
+        with (
+            unittest.mock.patch.object(recorder, "MOST_A_TURN", 20),
+            unittest.mock.patch.object(recorder, "LOOK_EVERY", 0.3),
+            recorder.transcripts_copied(self.host),
+        ):
+            with open(self.transcript, "a") as transcript:
+                transcript.write(added)
+            # Dozens of turns: with the wait between two looks ahead of
+            # each, they would take far longer than this
+            size = self.transcript.stat().st_size
+            assert size > 30 * 20
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and recorder.length(self.copy) != size:
+                time.sleep(0.05)
+            assert self.copy.read_bytes() == self.transcript.read_bytes()
 
     def test_looks_that_failed_are_counted(self):
         copier = recorder.Copier(self.host, time.time() - 60)

@@ -27,9 +27,11 @@ def note_change(host: Host, session: str, what: str) -> None:
 def change_event(said: dict) -> Event:
     """A note of the record as an event. The record is the launcher's
     own, what it holds still comes from a session: it is cleaned like the
-    rest."""
-    what = clean(said.get("what", ""))
-    return Event(float(said["t"]), Who.CLAUDE, Kind.CHANGED, [what], {"what": what})
+    rest. What changed is among its values as the change, the record's
+    name for it is the one an event has for what it is."""
+    change = clean(said.get("what", ""))
+    fields = {"change": change}
+    return Event(float(said["t"]), Who.CLAUDE, Kind.CHANGED, [change], fields)
 
 
 def change_events(

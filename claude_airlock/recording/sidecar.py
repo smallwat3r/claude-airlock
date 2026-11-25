@@ -171,7 +171,7 @@ class Sidecar:
         """Collect what sessions that ended without their launcher left
         behind: their sidecar is still there, with what it recorded."""
         for sidecar in cls.left_behind():
-            sidecar.collect(host)
+            sidecar.collect(host, left_behind=True)
 
     def directory(self, host: Host) -> str:
         """Where the launcher keeps what sidecars of this kind recorded."""
@@ -206,17 +206,29 @@ class Sidecar:
             return target
         return None
 
-    def collect(self, host: Host) -> None:
+    def last_wrote(self, copied: Path) -> float:
+        """When the sidecar last wrote to a file that was copied out of
+        it: docker cp keeps the time of a file. Not before the sidecar
+        started nor later than now, whatever the file says. Raises
+        OSError for a file that is not there."""
+        return min(max(copied.stat().st_mtime, self.start), time.time())
+
+    def collect(self, host: Host, left_behind: bool = False) -> None:
         """Stop the sidecar, copy what it recorded to the host, note
         which project and time that covers for --trace to find it by, let
-        go of the oldest copies and remove the sidecar."""
+        go of the oldest copies and remove the sidecar. The time ends
+        now, with the session. Not that of a sidecar that was left
+        behind, which is collected when a launcher next runs, hours or a
+        reboot later: its time ends when it last wrote, there is nothing
+        of its session after that."""
         patience = [] if self.STOP_SECONDS is None else [f"--time={self.STOP_SECONDS}"]
         docker_ok("stop", *patience, self.name)
         try:
             directory = self.directory(host)
             copied = self.copy_out(directory)
             if copied and self.recorded(copied):
-                record_traced_session(host, self.noted(copied.name, time.time()))
+                end = self.last_wrote(copied) if left_behind else time.time()
+                record_traced_session(host, self.noted(copied.name, end))
             else:
                 if copied:
                     copied.unlink(missing_ok=True)

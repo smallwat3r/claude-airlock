@@ -3,7 +3,7 @@
 
 The socket proxy logs every call it is asked for, with the address it came
 from. While a session runs, the launcher reads that log and notes the
-calls of the session's address, in the record of doors.py."""
+calls of the session's addresses, in the record of doors.py."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from ..background import wait_for
 from ..docker import docker_popen
 from ..notice import warn
-from ..sandbox.networks import session_address
+from ..sandbox.networks import session_addresses
 from ..sandbox.socket_proxy import has_socket_proxy, socket_proxy_name
 from ..settings import Host, Settings
 from .doors import Door, SessionUses
@@ -29,6 +29,8 @@ _PROXY_LINE = re.compile(
     r"^(?P<address>[0-9a-fA-F.:]+):\d+ \[[^\]]*\] \S+ \S+ \S+ (?P<status>\d{3}) .*"
     r'"(?P<method>[A-Z]+) (?P<path>\S+)'
 )
+# The status of a call the proxy did not let through to the socket
+DENIED = 403
 
 
 def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
@@ -42,7 +44,7 @@ def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
     except ValueError:
         return None
     # The proxy listens on IPv4 and IPv6 with one socket, so it logs an
-    # IPv4 caller as ::ffff:172.20.0.5. session_address gives 172.20.0.5.
+    # IPv4 caller as ::ffff:172.20.0.5. session_addresses gives 172.20.0.5.
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
     return (
@@ -55,7 +57,7 @@ def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
 
 class SocketWatch:
     """Reads the socket proxy's log while a session runs and notes the
-    calls that came from the session's address."""
+    calls that came from one of the session's addresses."""
 
     def __init__(self, host: Host, session: str, owner: str, proxy: str) -> None:
         self._uses = SessionUses(host, session, Door.DOCKER)
@@ -131,9 +133,11 @@ class SocketWatch:
         """Note the calls of the session until the watch is closed.
         Returns why it ended when that was for something else, nothing
         when it was closed."""
-        # The address is only known once the container is up
-        address = wait_for(lambda: session_address(self._owner), self._stop)
-        if not address:
+        # Its addresses are only known once the container is up. Any of
+        # them: it has one of IPv6 too where the daemon gives its networks
+        # those, and calls from whichever it likes
+        addresses = wait_for(lambda: session_addresses(self._owner), self._stop)
+        if not addresses:
             return ""
         log = self._follow()
         if log is None:
@@ -141,11 +145,19 @@ class SocketWatch:
         with log:
             for line in log.stdout or ():
                 call = parse_proxy_call(line)
-                if call is None or call[0] != address:
+                if call is None or call[0] not in addresses:
                     continue
                 _, method, path, status = call
                 try:
-                    self._uses.note(method, method=method, path=path, status=status)
+                    # A call that was denied costs a session nothing, and
+                    # is kept apart from those it was let make
+                    self._uses.note(
+                        method,
+                        refused=status == DENIED,
+                        method=method,
+                        path=path,
+                        status=status,
+                    )
                 except OSError as problem:
                     # A full disk or the like. The call was already
                     # answered, all that is left is to say so, see close
