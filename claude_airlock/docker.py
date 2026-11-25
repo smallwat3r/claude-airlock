@@ -10,8 +10,22 @@ from dataclasses import dataclass
 from typing import IO, Any
 
 from .errors import Fatal
+from .notice import warn
 
 NOT_FOUND = "docker was not found on PATH"
+# The seconds a docker command is given to end: a daemon that hangs must
+# not hold the launcher, least of all once a session is over and what it
+# left behind is yet to be checked. Longer for what may have an image
+# fetched first, the sidecars and what is run to read a volume. What
+# runs for as long as it has to, a session or a build, is given none.
+DOCKER_SECONDS = 60.0
+SLOW_SECONDS = 900.0
+SLOW_COMMANDS = frozenset(("run", "pull", "rmi"))
+# What a command that did not end in its time is said to have ended
+# with, as timeout(1) has it
+TIMED_OUT = 124
+# For a command given the time of its kind, see patience
+ITS_KIND = -1.0
 # What every container the launcher starts is confined by: no capability
 # but those it is given back by name, and nothing it runs gains what it
 # was not started with
@@ -19,14 +33,25 @@ DROP_CAPABILITIES = "--cap-drop=ALL"
 NO_NEW_PRIVILEGES = "--security-opt=no-new-privileges"
 
 
+def patience(args: tuple[str, ...]) -> float:
+    """The seconds a docker command is given, by what it does."""
+    return SLOW_SECONDS if args[:1] and args[0] in SLOW_COMMANDS else DOCKER_SECONDS
+
+
 def docker(
     *args: str,
     stdout: int | IO | None = None,
     stderr: int | IO | None = None,
     text: bool = True,
+    timeout: float | None = ITS_KIND,
 ) -> subprocess.CompletedProcess:
     """Run a docker command, its output going where stdout and stderr say
-    (the launcher's own by default), read as text unless told not to."""
+    (the launcher's own by default), read as text unless told not to. It
+    is given the time of its kind to end (see patience), another when
+    told, or with None as long as it takes. One that does not end in its
+    time is ended and said to have failed, with TIMED_OUT: whoever asked
+    goes on as after any docker command that failed."""
+    seconds = patience(args) if timeout == ITS_KIND else timeout
     try:
         return subprocess.run(
             ["docker", *args],
@@ -35,9 +60,18 @@ def docker(
             text=text,
             errors="replace" if text else None,
             check=False,
+            timeout=seconds,
         )
     except FileNotFoundError:
         raise Fatal(NOT_FOUND) from None
+    except subprocess.TimeoutExpired:
+        warn(
+            f"docker {' '.join(args[:2])} did not end within {seconds:.0f} seconds,"
+            " it is taken to have failed: is the daemon answering?"
+        )
+        return subprocess.CompletedProcess(
+            ["docker", *args], TIMED_OUT, "" if text else b"", "" if text else b""
+        )
 
 
 def docker_popen(*args: str, **options: Any) -> subprocess.Popen:

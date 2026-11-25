@@ -10,6 +10,9 @@ from pathlib import Path
 
 from .docker import docker_ok
 
+# The seconds ps is given to say when a process started
+PS_SECONDS = 10
+
 
 def process_started(pid: int) -> str:
     """When a process started, as text that is only good to compare, empty
@@ -29,8 +32,9 @@ def process_started(pid: int) -> str:
             text=True,
             errors="replace",
             check=False,
+            timeout=PS_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return ""
     return " ".join(listed.stdout.split())
 

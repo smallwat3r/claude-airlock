@@ -276,6 +276,8 @@ def build_image(image: Image, host: Host, *build_options: str) -> int:
             f"--build-arg=HOST_HOME={host.home}",
             context,
             stdout=sys.stderr,
+            # For as long as it takes: every feature, without a cache
+            timeout=None,
         ).returncode
 
 

@@ -309,6 +309,10 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
     return args
 
 
+# The seconds git is given to list what the global config pulls in
+GIT_CONFIG_SECONDS = 10
+
+
 def git_include_paths() -> list[str]:
     """The files the global git config pulls in with include or includeIf."""
     try:
@@ -320,8 +324,10 @@ def git_include_paths() -> list[str]:
             text=True,
             errors="replace",
             check=False,
+            # It reads the user's own config, of the host: a moment
+            timeout=GIT_CONFIG_SECONDS,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
     # Each pair ends in a NUL, the key on a line ahead of its value: the
     # condition of an includeIf is part of the key and can hold a space
@@ -386,7 +392,8 @@ def run_session(
         if through:
             status = through(command)
         else:
-            status = docker(*command).returncode
+            # For as long as the session runs
+            status = docker(*command, timeout=None).returncode
     finally:
         ending.session_over()
     # Killed by a signal: report it the way a shell would

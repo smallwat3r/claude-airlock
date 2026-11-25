@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +16,7 @@ from harness import (
     settings,
 )
 
+from claude_airlock import docker
 from claude_airlock.sandbox import socket_proxy
 
 
@@ -68,6 +70,22 @@ class DefaultSessionTest(LauncherTest):
         assert f"--volume={git / 'work'}:{git / 'work'}:ro,z" in flags
         assert not [flag for flag in flags if "credentials" in flag]
         assert not [flag for flag in flags if flag.startswith(f"--volume={git}:")]
+
+    def test_a_docker_that_does_not_answer_holds_the_launcher_no_longer(self, capsys):
+        hung = self.work / "bin" / "docker"
+        hung.write_text("#!/bin/sh\nexec sleep 30\n")
+        started = time.monotonic()
+        with mock.patch.object(docker, "DOCKER_SECONDS", 0.3):
+            assert not docker.docker_ok("container", "inspect", "claude-proj")
+            assert docker.docker_output("ps") == ""
+            assert docker.docker_bytes("exec", "x", "cat", "y") is None
+        assert time.monotonic() - started < 10
+        said = capsys.readouterr().err
+        assert "docker container inspect did not end within 0 seconds" in said
+        # What may have an image fetched first is given longer, and what
+        # runs for as long as it has to is given all the time it takes
+        assert docker.patience(("run", "--detach", "x")) == docker.SLOW_SECONDS
+        assert docker.patience(("ps",)) == docker.DOCKER_SECONDS
 
     def test_docker_keeps_nothing_of_what_a_session_writes(self):
         # Kept, docker logs would give it to a session of another project
