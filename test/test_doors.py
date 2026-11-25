@@ -190,13 +190,18 @@ class AgentDoorTest(LauncherTest):
             "claude-proj",
         )
 
-    def test_what_cannot_be_noted_is_not_given(self):
+    def test_what_cannot_be_noted_is_not_given(self, capsys):
         # A full disk, which a session can make of the one the record is on
         full = OSError(errno.ENOSPC, "No space left on device")
         with mock.patch.object(doors, "note_use", side_effect=full):
             answers = self.through_the_door(b"\x0b", sign_request(login("git")))
         assert answers == [b"\x05", b"\x05"]
         assert self.uses() == []
+        # Said once the door is closed, ssh in the session only fails
+        self.door.close()
+        said = capsys.readouterr().err
+        assert "the record of its use could not be written" in said
+        assert "No space left on device" in said
 
     @mounts_host_sockets
     def test_a_door_that_cannot_be_made_is_not_the_agents_own_instead(self):
@@ -429,13 +434,24 @@ class SocketWatchTest(LauncherTest):
                     time.sleep(0.5)
         return doors.read_uses(host, 0, time.time() + 5)
 
-    def test_the_calls_of_the_session_are_noted_and_no_other(self, capsys):
-        uses = self.watched()
+    def test_a_watch_that_ends_before_the_session_is_said(self, capsys):
         # The fake's log ends at once, as that of a proxy that is gone:
-        # said, the calls made from then on are not noted
+        # the calls made from then on are not noted
+        self.watched()
         assert "ended before the session did: the log of the proxy ended" in (
             capsys.readouterr().err
         )
+
+    def test_calls_that_cannot_be_noted_are_said(self, capsys):
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(doors, "note_use", side_effect=full):
+            assert self.watched() == []
+        said = capsys.readouterr().err
+        assert "the record of them could not be written" in said
+        assert "No space left on device" in said
+
+    def test_the_calls_of_the_session_are_noted_and_no_other(self):
+        uses = self.watched()
         assert [(use["method"], use["path"], use["status"]) for use in uses] == [
             ("GET", "/v1.47/containers/json", 200),
             ("POST", "/v1.47/containers/create", 403),

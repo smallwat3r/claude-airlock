@@ -73,6 +73,9 @@ class SocketWatch:
         # Why the calls stopped being noted before the watch was closed,
         # empty when they did not
         self._stopped = ""
+        # Why a call could not be noted, the last of them, empty when
+        # they all were
+        self._unnoted = ""
         self._thread = threading.Thread(target=self._watched, daemon=True)
         self._thread.start()
 
@@ -90,6 +93,11 @@ class SocketWatch:
             warn(
                 "the calls to the Docker socket were not all noted, the watch"
                 f" on its proxy ended before the session did: {self._stopped}"
+            )
+        if self._unnoted:
+            warn(
+                "the calls to the Docker socket were not all noted, the record"
+                f" of them could not be written: {self._unnoted}"
             )
 
     def _follow(self) -> subprocess.Popen | None:
@@ -115,18 +123,21 @@ class SocketWatch:
         """Watch, and keep why it ended when that was not for the watch
         being closed: said then, see close."""
         try:
-            self._watch()
+            self._stopped = self._watch()
         except Exception as error:  # noqa: BLE001
             self._stopped = repr(error)
 
-    def _watch(self) -> None:
+    def _watch(self) -> str:
+        """Note the calls of the session until the watch is closed.
+        Returns why it ended when that was for something else, nothing
+        when it was closed."""
         # The address is only known once the container is up
         address = wait_for(lambda: session_address(self._owner), self._stop)
-        log = self._follow() if address else None
+        if not address:
+            return ""
+        log = self._follow()
         if log is None:
-            if address and not self._stop.is_set():
-                self._stopped = "the log of the proxy could not be followed"
-            return
+            return self._ended_by("the log of the proxy could not be followed")
         with log:
             for line in log.stdout or ():
                 call = parse_proxy_call(line)
@@ -135,10 +146,15 @@ class SocketWatch:
                 _, method, path, status = call
                 try:
                     self._uses.note(method, method=method, path=path, status=status)
-                except OSError:
-                    continue
-        if not self._stop.is_set():
-            self._stopped = "the log of the proxy ended"
+                except OSError as problem:
+                    # A full disk or the like. The call was already
+                    # answered, all that is left is to say so, see close
+                    self._unnoted = str(problem)
+        return self._ended_by("the log of the proxy ended")
+
+    def _ended_by(self, reason: str) -> str:
+        """The reason the watch ended, nothing when it was closed."""
+        return "" if self._stop.is_set() else reason
 
 
 @contextmanager

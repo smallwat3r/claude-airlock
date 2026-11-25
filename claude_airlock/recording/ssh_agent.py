@@ -28,6 +28,7 @@ from contextlib import contextmanager, suppress
 from ..docker import env_arg, mount_arg
 from ..errors import Fatal
 from ..files import private_dir
+from ..notice import warn
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
 from ..settings import Host, Settings
@@ -67,6 +68,11 @@ class AgentMessage(enum.IntEnum):
     ADD_SMARTCARD_CONSTRAINED = 26
     # By its name, see SESSION_BIND
     EXTENSION = 27
+
+
+# What the agent, or the launcher in its place, answers a request it
+# refuses
+REFUSAL = bytes([AgentMessage.FAILURE])
 
 
 # What else an agent can be asked than to list its keys and to sign
@@ -159,6 +165,9 @@ class AgentDoor:
         # The comment of each key the agent has listed, by its fingerprint
         self._comments: dict[str, str] = {}
         self._free = threading.BoundedSemaphore(AGENT_CONNECTIONS)
+        # Why a request could not be noted and was refused for it, the
+        # last of them, empty when they all were
+        self._unnoted = ""
         directory = private_dir(host.agent_sockets_dir)
         # A short name: the path of a socket cannot be long
         name = hashlib.sha256(session.encode()).hexdigest()[:12]
@@ -183,6 +192,12 @@ class AgentDoor:
         with suppress(OSError):
             os.unlink(self.path)
         self._uses.close()
+        if self._unnoted:
+            warn(
+                "the SSH agent was refused to the session for some of what it"
+                " asked, the record of its use could not be written:"
+                f" {self._unnoted}"
+            )
 
     def _serve(self) -> None:
         while True:
@@ -217,29 +232,33 @@ class AgentDoor:
                     request = read_message(client)
                     if request is None:
                         return
-                    refusal = bytes([AgentMessage.FAILURE])
-                    if not passed_on(request):
-                        self._note(request, refusal, refused_by=BY_LAUNCHER)
-                        client.sendall(len(refusal).to_bytes(4, "big") + refusal)
-                        continue
-                    agent.sendall(len(request).to_bytes(4, "big") + request)
-                    answer = read_message(agent)
-                    if answer is None:
-                        return
-                    if not self._note(request, answer):
+                    refused_by = "" if passed_on(request) else BY_LAUNCHER
+                    answer = REFUSAL
+                    if not refused_by:
+                        agent.sendall(framed(request))
+                        answered = read_message(agent)
+                        if answered is None:
+                            return
+                        answer = answered
+                    try:
+                        self._note(request, answer, refused_by)
+                    except OSError as problem:
                         # Not given what could not be noted: a session
                         # can fill the disk the record is on, and would
-                        # have its signatures unrecorded for it
-                        answer = refusal
-                    client.sendall(len(answer).to_bytes(4, "big") + answer)
+                        # have its signatures unrecorded for it. Said
+                        # when the door is closed
+                        self._unnoted = str(problem)
+                        answer = REFUSAL
+                    client.sendall(framed(answer))
             except OSError:
                 return
 
-    def _note(self, request: bytes, answer: bytes, refused_by: str = "") -> bool:
+    def _note(self, request: bytes, answer: bytes, refused_by: str = "") -> None:
         """Note a request and how it was answered, by the agent unless
         refused_by names who refused it instead. What a session sends is
         the session's to choose: one that is not what it says it is is
-        noted as that. Whether it could be noted, see _pass_on."""
+        noted as that. Raises OSError when the record cannot be written,
+        a full disk or the like."""
         kind = kind_of(request)
         refused = kind_of(answer) == AgentMessage.FAILURE
         said: dict[str, object] = {"refused": True} if refused else {}
@@ -259,7 +278,7 @@ class AgentDoor:
                 said.update(did=AgentUse.LIST.value, keys=self._listed(answer))
             elif kind == AgentMessage.EXTENSION:
                 if not refused_by:
-                    return True
+                    return
                 said.update(did=AgentUse.OTHER.value, what="asked for an extension")
             else:
                 said.update(
@@ -270,12 +289,7 @@ class AgentDoor:
             said.update(
                 did=AgentUse.OTHER.value, what="sent a request that could not be read"
             )
-        try:
-            self._uses.note(str(said["did"]), **said)
-        except OSError:
-            # A full disk or the like
-            return False
-        return True
+        self._uses.note(str(said["did"]), **said)
 
     def _listed(self, answer: bytes) -> int:
         """How many keys the agent listed, their comments remembered."""
@@ -287,6 +301,11 @@ class AgentDoor:
             key = fingerprint(text(reader))
             self._comments[key] = named(text(reader))
         return count
+
+
+def framed(message: bytes) -> bytes:
+    """A message of the agent protocol as it is sent, after its length."""
+    return len(message).to_bytes(4, "big") + message
 
 
 def read_message(connection: socket.socket) -> bytes | None:
