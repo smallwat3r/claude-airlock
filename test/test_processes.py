@@ -645,6 +645,11 @@ class HealthShownTest:
         # Short of a CPU for some of the time, said with what it used
         busy = self.sample(cpu=348.0, stalled={"memory": 0.0, "cpu": 10.2}).event()
         assert busy.details == ["cpu 348%, short of it 10% of the time"]
+        # And by its name when there is no figure of what was used
+        bare = self.sample(stalled={"memory": 12.0, "cpu": 2.0}).event()
+        assert bare.details[0].endswith(
+            "short of memory 12% of the time  short of cpu 2% of the time"
+        )
         assert event.what == "health"
         assert "flagged" not in event.fields
         assert event.fields["memory"] == {
