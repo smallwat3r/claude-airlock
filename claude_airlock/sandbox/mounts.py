@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from ..docker import env_arg, hidden_arg, mount_arg
 from ..errors import Fatal
 from ..files import expand_home
-from ..settings import Host, Settings
+from ..settings import SESSION_DIRS, Host, Settings
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
@@ -226,7 +226,7 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
     if dirs:
         # Read by bin/claude-statusline to list the mounted extra directories
         shown = ":".join(d.path + ("(ro)" if d.read_only else "") for d in dirs)
-        args.append(env_arg("CLAUDE_AIRLOCK_DIRS", shown))
+        args.append(env_arg(SESSION_DIRS, shown))
     return args
 
 

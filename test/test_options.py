@@ -339,6 +339,15 @@ class ConfigFileTest(LauncherTest):
         self.write_config("CLAUDE_AIRLOCK_NET_FILTR=1")
         self.assert_refused(self.launch(), "not a known setting")
 
+    def test_rejects_an_unknown_setting_of_the_environment(self):
+        refused = self.launch(CLAUDE_AIRLOCK_NET_FILTR="1")
+        self.assert_refused(refused, "not a known setting: CLAUDE_AIRLOCK_NET_FILTR")
+
+    def test_what_a_session_is_told_of_itself_is_no_unknown_setting(self):
+        # A launcher run in a session finds them in its environment
+        told = {"CLAUDE_AIRLOCK_SANDBOX": "claude-proj", "CLAUDE_AIRLOCK_DIRS": "/x"}
+        assert self.launch(**told).status == 0
+
     def test_rejects_per_project_settings(self):
         self.write_config("CLAUDE_AIRLOCK_EXTRA_DIRS=/tmp")
         self.assert_refused(self.launch(), "not a known setting")

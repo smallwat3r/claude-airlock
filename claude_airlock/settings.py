@@ -34,6 +34,11 @@ CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
+# What a session is told of itself under that prefix, its container and
+# the directories mounted next to the project. Not settings, and not
+# taken for a misspelled one where a launcher runs in a session.
+SESSION_SANDBOX = SETTING_PREFIX + "SANDBOX"
+SESSION_DIRS = SETTING_PREFIX + "DIRS"
 # What the launcher is called, and says its own word under
 NAME = "claude-airlock"
 
@@ -437,9 +442,17 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     empty variable must not switch off a restriction the file switched on.
     What is hidden and what is protected are the lists of both, for the
     same reason: what one hides or protects, the other does not take
-    back."""
+    back. A name of the environment that starts as a setting does and
+    is none aborts, as it does in the config file."""
     file_values = read_config_file(config_file)
     defaults = Settings()
+    known = {setting.variable for setting in SETTINGS} | {SESSION_SANDBOX, SESSION_DIRS}
+    named = sorted(name for name in env if name.startswith(SETTING_PREFIX))
+    unknown = [name for name in named if name not in known]
+    if unknown:
+        # As in the config file: CLAUDE_AIRLOCK_NETFILTER=1 would
+        # otherwise start a session without its filter, and say nothing
+        raise Fatal(f"not a known setting: {', '.join(unknown)}, see {NAME} --help")
 
     def items(said: str) -> tuple[str, ...]:
         return tuple(dict.fromkeys(item for item in said.split(":") if item))

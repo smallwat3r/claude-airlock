@@ -30,6 +30,7 @@ from ..settings import (
     BIN_DIR,
     CONTAINER_CLAUDE,
     CONTAINER_HOME,
+    SESSION_SANDBOX,
     Host,
     Settings,
 )
@@ -153,7 +154,7 @@ def base_args(
         *connector_args(settings),
         # Read by bin/claude-statusline to show a sandbox badge and the
         # network mode in the Claude UI
-        env_arg("CLAUDE_AIRLOCK_SANDBOX", name),
+        env_arg(SESSION_SANDBOX, name),
         env_arg("CLAUDE_AIRLOCK_NET_FILTER", int(settings.net_filter)),
         # The session is told its settings, so that Claude can name the one
         # behind something it could not do (see docker/CLAUDE-airlock.md).
