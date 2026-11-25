@@ -415,7 +415,7 @@ from outside the session.
 
 ```
 sandbox  health  mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512  top: [812] node 2g
-sandbox  health  ALMOST OUT OF memory  mem 15g of 16g (93%)  cpu 96%  pids 91 of 512  waited for: memory 35%  top: [812] node 13g
+sandbox  health  ALMOST OUT OF memory  mem 15g of 16g (93%), short of it 35% of the time  cpu 96%  pids 91 of 512  top: [812] node 13g
 sandbox  health  OUT OF MEMORY, a process was ended for it  gone since: [812] node 14g
 ```
 
@@ -427,9 +427,16 @@ session itself, along with the time it waited for memory, CPU or disk.
   memory, its processes or a tmpfs (`running low on`), and 90% (`ALMOST
   OUT OF`). At 90%, and when it spent a tenth of the time waiting for
   memory (`STALLED`), the line is one of those `--failed` keeps.
-- `waited for` is the share of the time something in the session stood
-  still for want of memory, CPU or disk, as the kernel counts it. High
-  use alone is often harmless, this says whether it hurt.
+- `short of it` follows the memory or the CPU the session used, and is
+  the share of the time in which something in it was ready to run and
+  could not: no CPU was free for it, or memory had to be made room for
+  first. `cpu 348%, short of it 10% of the time` is a session that kept
+  three and a half CPUs busy and would have used more for a tenth of the
+  time. `waiting on the disk` is the same of a read or a write. The
+  kernel counts these. High use alone is often harmless, this says
+  whether it cost time: a few percent of CPU is what a build that runs
+  many jobs has, tens of percent of memory is a session that crawls.
+  `--json` has the three as `stalled`.
 - `held back` is the time the session was slowed at `CLAUDE_AIRLOCK_CPUS`.
 - When the kernel ends a process for want of memory it does not say
   which. `gone since` names the large ones that were there a second

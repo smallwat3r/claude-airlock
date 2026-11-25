@@ -639,8 +639,12 @@ class HealthShownTest:
         event = sample.event()
         assert (
             event.details[0] == "mem 3.1g of 16g (19%)  cpu 240%  pids 87 of 512"
-            "  /home/sandbox/.npm 50%  waited for: io 3%  top: [812] node 2g"
+            "  /home/sandbox/.npm 50%  waiting on the disk 3% of the time"
+            "  top: [812] node 2g"
         )
+        # Short of a CPU for some of the time, said with what it used
+        busy = self.sample(cpu=348.0, stalled={"memory": 0.0, "cpu": 10.2}).event()
+        assert busy.details == ["cpu 348%, short of it 10% of the time"]
         assert event.what == "health"
         assert "flagged" not in event.fields
         assert event.fields["memory"] == {
@@ -665,8 +669,8 @@ class HealthShownTest:
         assert (
             reached.details[0]
             == "ALMOST OUT OF memory, /tmp, STALLED for want of memory"
-            "  mem 15g of 16g (93%)  cpu 150% of 1.5 cpus, held back 12.0s"
-            "  /tmp 97%  waited for: memory 35%"
+            "  mem 15g of 16g (93%), short of it 35% of the time"
+            "  cpu 150% of 1.5 cpus, held back 12.0s  /tmp 97%"
         )
         assert reached.fields["flagged"]
 

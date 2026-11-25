@@ -26,6 +26,8 @@ STALLED = 10
 # wait
 TMPFS_SHOWN = 50
 WAIT_SHOWN = 1
+# What the kernel calls io, as a line says it
+DISK = "the disk"
 # The percent of a limit from which a session is near it and at it, the
 # watcher's own. Of the header: what was used of a limit other than
 # memory is left out below the first
@@ -152,22 +154,37 @@ class Sample:
         said = [wrong] if wrong else []
         return said + ([f"running low on {', '.join(nearer)}"] if nearer else [])
 
+    def _short_of(self, what: str) -> str:
+        """That the session was short of something for a share of the
+        time, as it is said after the figure of what it used of it:
+        nothing for a share not worth a word. The kernel counts the time
+        in which something of the session was ready to run and could
+        not, for want of a free CPU, of memory, or of an answer from the
+        disk."""
+        percent = self.stalled.get(what, 0.0)
+        return (
+            f"short of it {percent:.0f}% of the time" if percent >= WAIT_SHOWN else ""
+        )
+
     def _said_of_memory(self) -> list[str]:
+        short = self._short_of("memory")
         if not self.memory:
-            return []
+            return [f"mem {short}"] if short else []
         used, most = self.memory
         limit = None if most is None else amount(most)
-        return ["mem " + of_limit(amount(used), limit, procwatch.percent(used, most))]
+        said = "mem " + of_limit(amount(used), limit, procwatch.percent(used, most))
+        return [", ".join(filter(None, (said, short)))]
 
     def _said_of_cpu(self) -> list[str]:
+        short = self._short_of("cpu")
         if self.cpu is None:
-            return []
+            return [f"cpu {short}"] if short else []
         said = f"cpu {self.cpu:.0f}%"
         if self.cpus is not None:
             said += f" of {self.cpus:g} cpus"
         if self.throttled:
             said += f", held back {self.throttled:.1f}s"
-        return [said]
+        return [", ".join(filter(None, (said, short)))]
 
     def _said_of_processes(self) -> list[str]:
         if not self.pids:
@@ -183,12 +200,15 @@ class Sample:
         ]
 
     def _said_of_waits(self) -> list[str]:
-        waits = [
-            f"{flat(what)} {percent:.0f}%"
+        """What the session waited for that has no figure of its own to
+        be said with, see _short_of: the disk, and whatever else the
+        watcher names."""
+        return [
+            f"waiting on {DISK if what == 'io' else flat(what)}"
+            f" {percent:.0f}% of the time"
             for what, percent in self.stalled.items()
-            if percent >= WAIT_SHOWN
+            if what not in ("memory", "cpu") and percent >= WAIT_SHOWN
         ]
-        return [f"waited for: {', '.join(waits)}"] if waits else []
 
     def _said_of_the_largest(self) -> list[str]:
         return [f"top: {self.largest[0].shown}"] if self.largest else []
