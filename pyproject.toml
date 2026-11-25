@@ -69,8 +69,10 @@ testpaths = ["test"]
 # The checks are classes named for what they check, as BuildFilesTest
 python_classes = ["*Test"]
 # Each check on a core of its own: most of what one takes is waiting for
-# the launcher it started. One that hangs is ended and says where it was,
-# so that it fails the run instead of holding it.
+# the launcher it started. Fewer inside a sandbox, which has a limit of
+# processes that every core's worth would run into, see test/conftest.py.
+# One that hangs is ended and says where it was, so that it fails the run
+# instead of holding it.
 addopts = ["--numprocesses=auto", "--strict-markers", "--strict-config"]
 timeout = 300
 filterwarnings = [

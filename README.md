@@ -366,7 +366,8 @@ make upgrade        # refresh the pins, then rebuild the image
 ```
 
 - **The unit tests** (`test/test_*.py`, by topic) are run by pytest, side
-  by side on every core. They run the launcher against a fake `docker`
+  by side on every core, on fewer inside a sandbox to keep within its
+  process limit. They run the launcher against a fake `docker`
   that records every call, and check what is mounted, shadowed and
   switched off by default, the tamper check, the records of a session,
   `--trace` and line mode.

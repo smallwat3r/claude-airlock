@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
+import conftest
 import pytest
 from harness import LauncherTest, prompts_at, settings
 from test_processes import GIB, FakeSession
@@ -96,6 +97,32 @@ class RuntimeTest:
         assert [n for n in recording if "processes are not recorded" in n]
         silent = gvisor().notes(settings.Settings(proc_log=False))
         assert not [n for n in silent if "processes are not recorded" in n]
+
+
+class WorkersTest:
+    """How many workers these checks run on, see conftest.py."""
+
+    def workers(self, monkeypatch: pytest.MonkeyPatch, limit: str | None) -> int | None:
+        monkeypatch.delenv("CLAUDE_AIRLOCK_PIDS", raising=False)
+        if limit is not None:
+            monkeypatch.setenv("CLAUDE_AIRLOCK_PIDS", limit)
+        monkeypatch.setattr(conftest.os, "process_cpu_count", lambda: 24)
+        return conftest.pytest_xdist_auto_num_workers(mock.Mock())
+
+    def test_a_sandbox_gets_the_workers_its_process_limit_has_room_for(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        assert self.workers(monkeypatch, "512") == 8
+        # Never more than there are cores, and never none
+        assert self.workers(monkeypatch, "4096") == 24
+        assert self.workers(monkeypatch, "16") == 1
+
+    def test_outside_a_sandbox_the_cores_are_counted_as_ever(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # None leaves the count to pytest-xdist
+        assert self.workers(monkeypatch, None) is None
+        assert self.workers(monkeypatch, "-1") is None
 
 
 class LaunchTest(LauncherTest):
