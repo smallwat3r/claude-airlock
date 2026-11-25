@@ -35,7 +35,7 @@ from ..projects import project_root, subagent_files
 from ..recording.recorder import (
     Compared,
     compare,
-    copied_at,
+    last_written,
     removed_subagents,
     removed_transcripts,
 )
@@ -43,7 +43,6 @@ from ..recording.started import start_summary
 from ..settings import Host
 from .entries import (
     entry_times,
-    modified,
     prompts,
     read_entries,
     session_files,
@@ -87,10 +86,9 @@ def traced_files(host: Host) -> list[Path]:
             raise
         files = []
 
-    def last_written(path: Path) -> float:
-        return modified(path) or copied_at(host, path)
-
-    return sorted([*files, *removed], key=last_written, reverse=True)
+    return sorted(
+        [*files, *removed], key=functools.partial(last_written, host), reverse=True
+    )
 
 
 def subagents_header(compared: list[Compared]) -> list[str]:

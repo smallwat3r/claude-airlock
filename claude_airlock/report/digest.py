@@ -30,11 +30,11 @@ from ..notice import warn
 from ..projects import project_root, session_transcripts, subagent_session
 from ..recording.capture import parts_cut_short
 from ..recording.pcap import Capture
-from ..recording.recorder import copied_at, removed_transcripts
+from ..recording.recorder import copied_at, last_written, removed_transcripts
 from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
 from .calls import written_paths
-from .entries import modified, short_id
+from .entries import short_id
 from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
@@ -234,7 +234,7 @@ def transcript_lines(host: Host, start: float) -> list[str]:
     written: list[str] = []
     # Those of the subagents too, what one wrote is in its own
     for path in session_transcripts(host):
-        if modified(path) < start:
+        if last_written(host, path) < start:
             continue
         project_dir = project_root(path, host)
         read = ReadTranscript.read(host, path)

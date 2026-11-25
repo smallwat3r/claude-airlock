@@ -123,6 +123,19 @@ class DigestTest(LauncherTest):
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
         assert "  written outside the project:\n    /home/me/.bashrc\n" in said
 
+    def test_a_transcript_whose_time_is_set_back_is_still_the_sessions(self):
+        stamp = prompts_at(time.time())[0]["timestamp"]
+        write = {"type": "tool_use", "id": "c1", "name": "Write"}
+        write["input"] = {"file_path": "/home/me/.bashrc", "content": "x"}
+        entry = {"type": "assistant", "timestamp": stamp}
+        entry["message"] = {"content": [write]}
+        transcript = self.write_transcript("0a", [])
+        said = self.session(
+            session=f"echo '{json.dumps(entry)}' >> '{transcript}';"
+            f" touch -d 2000-01-01 '{transcript}'"
+        )
+        assert "  written outside the project:\n    /home/me/.bashrc\n" in said
+
     def test_something_read_that_may_instruct_the_session_is_said(self):
         stamp = prompts_at(time.time())[0]["timestamp"]
         fetch = {"type": "tool_use", "id": "c1", "name": "WebFetch"}

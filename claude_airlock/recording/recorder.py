@@ -394,6 +394,18 @@ def copied_at(host: Host, transcript: Path) -> float:
         return 0.0
 
 
+def last_written(host: Host, transcript: Path) -> float:
+    """When a transcript was last written, 0 for one that is gone and was
+    never copied: by the time of the file or by that of the launcher's
+    copy, whichever is later. The first is the session's to set, and one
+    set back would have its transcript pass for an older session's."""
+    try:
+        written = transcript.stat().st_mtime
+    except OSError:
+        written = 0.0
+    return max(written, copied_at(host, transcript))
+
+
 @dataclass
 class Compared:
     """A transcript next to the launcher's copies of it."""
