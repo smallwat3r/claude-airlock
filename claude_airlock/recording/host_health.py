@@ -14,6 +14,12 @@ it waited for memory, CPU or disk. It does not give the session's processes,
 the use of each tmpfs (tmpfs counts as memory), or a meaningful process
 count, because the cgroup also counts the runtime's own threads.
 
+The cgroup also says when the session ran into its process limit, which
+under gVisor ends the session as a whole. The cgroup is removed with the
+container, about a tenth of a second later, so a look every second would
+miss it: the launcher waits for the kernel to say that the count changed
+and reads it at once (see watch_process_limit).
+
 The readings come from CgroupHealth in procwatch.py and are written in the
 watcher's line format, to a file in the same directory, so --trace reads
 both kinds of record the same way. While the session runs, the file name
@@ -27,14 +33,15 @@ session ends."""
 from __future__ import annotations
 
 import os
+import select
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..background import in_background, wait_for
+from ..background import ASK_EVERY, in_background, wait_for
 from ..docker import docker_output
 from ..files import json_object, private_dir
 from ..launcher import Launcher, session_alive
@@ -51,6 +58,11 @@ CGROUPS = "/sys/fs/cgroup"
 # The suffix of a record's file name while its session runs
 PART = ".part"
 EXTENSION = Watcher.EXTENSION
+# The file of a cgroup that counts how often its process limit kept a
+# process or thread from starting, on its line max
+PIDS_EVENTS = "pids.events"
+# The most that is read of it, it holds a line or two
+EVENTS_BYTES = 4096
 
 
 def container_process(container: str) -> tuple[int, str] | None:
@@ -96,6 +108,11 @@ class HealthRecord:
     start: float
     launcher: Launcher
     _written: int = 0
+    # Lines come from the thread that reads the health and from the one
+    # that waits on the process limit
+    _writing: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
 
     @classmethod
     def begin(cls, host: Host, session: str, runtime: str) -> HealthRecord:
@@ -133,11 +150,12 @@ class HealthRecord:
         """Add a line to the record, in the format the watcher of
         procwatch.py uses. Lines past the size limit are dropped."""
         line = stamped(**said)
-        if self._written + len(line) > MOST_BYTES:
-            return
-        with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
-            file.write(line)
-            self._written += len(line)
+        with self._writing:
+            if self._written + len(line) > MOST_BYTES:
+                return
+            with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
+                file.write(line)
+                self._written += len(line)
 
     def keep(self, host: Host, end: float) -> None:
         """Finish the record: remove the .part suffix, add the session
@@ -199,6 +217,49 @@ def collect_left_behind(host: Host) -> None:
         record.keep(host, end)
 
 
+def process_limit_hits(events: int) -> int | None:
+    """How often the process limit of a cgroup was run into, read from
+    its open pids.events file. None when the count cannot be read, which
+    is the case once the cgroup is removed."""
+    try:
+        said = os.pread(events, EVENTS_BYTES, 0).split()
+        return int(said[said.index(b"max") + 1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def watch_process_limit(
+    cgroup: str, note: Callable[..., None], stop: threading.Event
+) -> None:
+    """Note each time the cgroup in the given directory runs into its
+    process limit, as soon as it happens, in the watcher's format. The
+    kernel reports a change of pids.events to whoever waits on the file,
+    so the count is read before the cgroup of a session that was ended by
+    its limit is removed. Returns when the cgroup is gone, or soon after
+    stop is set."""
+    try:
+        events = os.open(f"{cgroup}/{PIDS_EVENTS}", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        changed = select.poll()
+        changed.register(events, select.POLLPRI)
+        noted = 0
+        while True:
+            hits = process_limit_hits(events)
+            if hits is None:
+                return
+            if hits > noted:
+                noted = hits
+                note(limit="pids", hits=hits)
+            # After the read, so that what was counted last is noted too
+            if stop.is_set():
+                return
+            changed.poll(ASK_EVERY * 1000)
+    finally:
+        os.close(events)
+
+
 def watch(
     host: Host,
     session: str,
@@ -207,8 +268,9 @@ def watch(
     stop: threading.Event,
 ) -> None:
     """Wait for the session's container, then record its memory and CPU
-    use for as long as its cgroup exists. The record is appended to
-    records, which stays empty when the cgroup was not found."""
+    use for as long as its cgroup exists, and each time it runs into its
+    process limit. The record is appended to records, which stays empty
+    when the cgroup was not found."""
     found = wait_for(lambda: container_process(session), stop)
     cgroup = cgroup_of(*found) if found else ""
     if not cgroup:
@@ -219,16 +281,18 @@ def watch(
         return
     records.append(record)
     health = CgroupHealth(record.note)
-    while os.path.isdir(cgroup):
-        health.look_at(cgroup, time.monotonic())
-        if stop.wait(LIMITS_EVERY):
-            return
+    with in_background(watch_process_limit, cgroup, record.note):
+        while os.path.isdir(cgroup):
+            health.look_at(cgroup, time.monotonic())
+            if stop.wait(LIMITS_EVERY):
+                return
 
 
 @contextmanager
 def health_recorded(host: Host, session: str, runtime: str) -> Iterator[None]:
-    """Record the memory and CPU use of a session while it runs, from
-    the cgroup of its container. runtime is the runtime's name as shown to
+    """Record the memory and CPU use of a session while it runs, and
+    whether it ran into its process limit, from the cgroup of its
+    container. runtime is the runtime's name as shown to
     the user. When the cgroup was not found, this is reported once the
     session is over, unless the session ended within a few seconds."""
     records: list[HealthRecord] = []

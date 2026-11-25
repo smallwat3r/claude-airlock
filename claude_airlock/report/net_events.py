@@ -359,6 +359,17 @@ def listener_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
+def limit_lines(record: ProcessRecord) -> list[str]:
+    """The line of the header on a session that ran into its process
+    limit, nothing for one that did not."""
+    if not record.process_limit:
+        return []
+    said = f"  its limit of processes was RUN INTO {record.process_limit} times"
+    if record.limit_ends_session:
+        said += ", which ends the session as a whole"
+    return [said]
+
+
 def watched_summary(
     record: ProcessRecord, verbose: bool, until: float = math.inf
 ) -> list[str]:
@@ -368,13 +379,14 @@ def watched_summary(
     if record.outside:
         under = clean(record.outside)
         said = f"  processes not recorded under {under}, only memory and CPU use"
-        return [said, *health_summary(record.samples, record.ended)]
+        return [
+            said,
+            *limit_lines(record),
+            *health_summary(record.samples, record.ended),
+        ]
     hint = "" if verbose else ", each one shown with --verbose"
     lines = [f"  processes {len(record.processes)} seen to run{hint}"]
-    if record.process_limit:
-        lines.append(
-            f"  its limit of processes was RUN INTO {record.process_limit} times"
-        )
+    lines += limit_lines(record)
     reachable = sum(listener.open for listener in record.listeners)
     if reachable:
         lines.append(

@@ -146,13 +146,20 @@ class Gvisor(Runtime):
     PROGRAM: ClassVar[str] = "runsc"
     # How many of the host's process slots gVisor uses for itself, and for
     # each process of the session. gVisor does not report these numbers.
-    # They are estimates, rounded up from counts on one machine with
-    # gVisor's systrap platform: 36 for an idle session, 250 with 100
-    # sleeping processes, 653 with 300. Idle threads within one process
-    # cost almost nothing: 300 of them added 3. CLAUDE_AIRLOCK_PIDS is the
-    # setting to raise when the estimate is too low for a workload.
-    OWN_SLOTS: ClassVar[int] = 64
-    SLOTS_PER_PROCESS: ClassVar[int] = 2
+    # They are estimates from counts on one machine with gVisor's systrap
+    # platform: 30 to 70 for an idle session, and between 2 and 2.5 for
+    # each sleeping process on top. Idle threads within one process cost
+    # almost nothing: 300 of them added 3. Processes that start and end
+    # fast cost more, and gVisor does not give back the slots of those
+    # that ended, so the count only grows, to what the busiest moment of
+    # the session took: three runs at once of this project's checks, on
+    # 24 cores each, took 990. The estimates are well above the counts,
+    # because a session that runs out of slots is ended as a whole: a
+    # session gets room for the processes of its setting or more, never
+    # fewer. CLAUDE_AIRLOCK_PIDS is the setting to raise when the
+    # estimate is still too low for a workload.
+    OWN_SLOTS: ClassVar[int] = 128
+    SLOTS_PER_PROCESS: ClassVar[int] = 4
     # The values of --host-uds that allow connecting to a socket of the host
     OPEN_SOCKETS: ClassVar[tuple[str, ...]] = ("open", "all")
 

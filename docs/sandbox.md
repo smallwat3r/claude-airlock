@@ -125,9 +125,14 @@ prints what differs from Docker's own runtime:
   Docker's own runtime the kernel ends one process. Under gVisor the
   host's kernel sees a single program, gVisor itself.
 - **The process limit is an estimate.** The host counts gVisor's own
-  threads: a few dozen, plus about two for each process of the session. The
-  launcher therefore gives Docker twice `CLAUDE_AIRLOCK_PIDS` plus 64. A
-  session that reaches that limit is also ended as a whole, so raise
+  threads: a few dozen, plus two to three for each process of the session,
+  more for processes that start and end fast. gVisor keeps them once a
+  process has ended, so the count only grows, to what the busiest moment
+  of the session took. The launcher gives Docker four times
+  `CLAUDE_AIRLOCK_PIDS` plus 128, which leaves a session room for more
+  processes than the setting says, never fewer. A session that reaches
+  that limit is also ended as a whole, with an exit status of 2. The
+  launcher says so when the session is over, and `--trace` has it. Raise
   `CLAUDE_AIRLOCK_PIDS` if that happens to a session that was not running
   away.
 

@@ -8,7 +8,9 @@ outside it, and says what it heard when the session is over.
 
 That a session ran into its limit of processes (CLAUDE_AIRLOCK_PIDS) is no
 event of docker's. The sidecar that notes the processes reads it from the
-session's own count, see procwatch.py."""
+session's own count, see procwatch.py. Under a runtime where no sidecar
+can, the launcher reads it from the cgroup of the container, see
+host_health.py."""
 
 from __future__ import annotations
 

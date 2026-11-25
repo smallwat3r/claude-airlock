@@ -311,6 +311,14 @@ class ProcessRecord:
         """Whether it stopped at its size limit."""
         return self.full_at is not None
 
+    @property
+    def limit_ends_session(self) -> bool:
+        """Whether running into the process limit ends the session as a
+        whole. That is so under the runtimes the launcher records from
+        outside, where the host's kernel sees a single program. Under
+        Docker's own, what the session tried to start did not."""
+        return bool(self.outside)
+
     def _note(self, when: float, said: dict) -> None:
         note = said["note"]
         self.unreadable |= note == Note.UNREADABLE

@@ -173,10 +173,14 @@ def network_lines(host: Host, recorded: Recorded) -> list[str]:
                 list(waited),
             )
         if record and record.process_limit:
+            then = (
+                f"which under {flat(record.outside)} ends the session as a whole"
+                if record.limit_ends_session
+                else "what it tried to start then did not"
+            )
             lines.append(
                 f"ran into its limit of processes {record.process_limit} times,"
-                " what it tried to start then did not: CLAUDE_AIRLOCK_PIDS sets"
-                " the limit"
+                f" {then}: CLAUDE_AIRLOCK_PIDS sets the limit"
             )
         if capture is None:
             continue

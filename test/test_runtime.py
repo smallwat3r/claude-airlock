@@ -87,7 +87,7 @@ class RuntimeTest:
         assert not [n for n in shim.notes(settings.Settings()) if "resolve" in n]
 
     def test_gvisor_raises_the_process_limit_by_what_it_uses_itself(self):
-        assert gvisor().process_limit("512") == "1088"
+        assert gvisor().process_limit("512") == "2176"
         # Docker reads anything that is not a positive number itself
         for unlimited in ("-1", "0", "many"):
             assert gvisor().process_limit(unlimited) == unlimited
@@ -144,7 +144,7 @@ class LaunchTest(LauncherTest):
         assert "processes are not recorded" in result.stderr
         assert "ended as a whole" in result.stderr
         assert "do not resolve" not in result.stderr
-        assert "--pids-limit=1088" in result.flags
+        assert "--pids-limit=2176" in result.flags
         # The session is still told the limit from the setting
         assert "--env=CLAUDE_AIRLOCK_PIDS=512" in result.flags
         # No watcher is started: it would see gVisor's kernel, not the session
@@ -198,6 +198,14 @@ class LaunchTest(LauncherTest):
         assert "seen to run" not in shown
         assert "sandbox  health      mem 2g of 16g (12%)  cpu 80%" in shown
         assert "#   memory 2g of 16g (12%) at most" in shown
+        assert "RUN INTO" not in shown
+
+    def test_the_trace_says_that_the_process_limit_ended_the_session(self):
+        shown = self.trace_of([{"limit": "pids", "hits": 2}])
+        assert (
+            "#   its limit of processes was RUN INTO 2 times, which ends the"
+            " session as a whole" in shown
+        )
 
 
 class HostHealthTest(LauncherTest):
@@ -279,6 +287,55 @@ class HostHealthTest(LauncherTest):
         # and nothing that is only visible from inside the session
         assert sample.pids is None
         assert (sample.tmpfs, sample.largest) == ({}, ())
+
+    def test_running_into_the_process_limit_is_noted_in_the_record(self):
+        self.session.set("pids.events", "max 3")
+        read = processes.read_record(self.watched(looks=1).path)
+        assert read.process_limit == 3
+        assert read.limit_ends_session
+        # Under Docker's own runtime it does not, the watcher's record says
+        assert not processes.ProcessRecord().limit_ends_session
+
+    def test_the_process_limit_is_noted_as_soon_as_it_is_run_into(self):
+        events = self.cgroup / "pids.events"
+        events.write_text("max 0\n")
+
+        def count(hits: int) -> None:
+            # In one write over what was there, as the kernel changes it:
+            # the file is never seen empty
+            with open(events, "r+b", buffering=0) as file:
+                file.write(b"max %d\n" % hits)
+
+        noted: list[dict] = []
+        stop = threading.Event()
+        watcher = threading.Thread(
+            target=host_health.watch_process_limit,
+            args=(str(self.cgroup), lambda **said: noted.append(said), stop),
+            daemon=True,
+        )
+        watcher.start()
+        count(1)
+        for _ in range(100):
+            if noted:
+                break
+            time.sleep(0.05)
+        # Counted once more as the session ends, and nothing new after that
+        count(2)
+        stop.set()
+        watcher.join(5)
+        assert not watcher.is_alive()
+        assert noted == [{"limit": "pids", "hits": 1}, {"limit": "pids", "hits": 2}]
+
+    def test_a_cgroup_that_does_not_count_them_is_not_waited_on(self):
+        never = threading.Event()
+        # No pids.events, as without the controller: returns at once
+        host_health.watch_process_limit(str(self.cgroup), self.fail, never)
+        self.session.set("pids.events", "nothing of use")
+        host_health.watch_process_limit(str(self.cgroup), self.fail, never)
+
+    @staticmethod
+    def fail(**said: object) -> None:
+        raise AssertionError(said)
 
     def test_a_finished_record_is_listed_for_the_trace(self):
         record = self.watched(looks=1)
