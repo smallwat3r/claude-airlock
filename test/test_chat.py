@@ -350,14 +350,15 @@ class ChatTest(LauncherTest):
 
     def at_a_terminal(
         self,
-        *steps: tuple[str, str | tuple[str, ...]],
+        *steps: tuple[str | tuple[str, ...], str | tuple[str, ...]],
         term: str = "xterm",
         **settings: str,
     ) -> str:
         """Run a chat at a terminal: for each step, wait for something to
-        be written, then type, in bunches a moment apart when several, as
-        Emacs sends what is long, and after a pause when Paused. What
-        was written in all."""
+        be written, one thing or the other when several are given, then
+        type, in bunches a moment apart when several, as Emacs sends
+        what is long, and after a pause when Paused. What was written
+        in all."""
         environment = {**self.environment(), "TERM": term, "COLUMNS": "100"}
         environment.update(settings)
         environment["NO_COLOR"] = "1"
@@ -601,10 +602,13 @@ class ChatTest(LauncherTest):
     def test_at_a_terminal_enter_pressed_twice_answers_one_question(self):
         said = self.at_a_terminal(
             ("> ", "twice\r"),
+            ("[y/a/N] ", Paused("y\r")),
             # The second y comes as claude asks again, or a moment before:
             # sooner than that question is read, and too soon after the
-            # first for a prompt
-            ("allow bash", (Paused("y\r"), "y\r")),
+            # first for a prompt. Once the next line is read, whichever
+            # of the two it is for: sooner it would be a paste that came
+            # with the first, however slow the machine
+            (("\n> ", "[y/a/N] "), "y\r"),
             ("it is dropped", ""),
             ("[y/a/N] ", Paused("n\r")),
             ("was told: allow, deny", "\x04"),

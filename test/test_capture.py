@@ -1529,13 +1529,15 @@ class EgressLogTest(LauncherTest):
             "fd00:0:0:0::5": "six-written-long",
             "fd00::9": "theirs",
         }
+        # Asked once the session had started, however long that took
+        asked = time.time()
         logged = [
             egress_log.parse_proxy_request(
-                f"{began + 1:.3f} 0 {caller} TCP_DENIED/403 9 CONNECT {name}.test:443 - -"
+                f"{asked:.3f} 0 {caller} TCP_DENIED/403 9 CONNECT {name}.test:443 - -"
             )
             for caller, name in callers.items()
         ]
-        made = egress_log.requests_made(logged, sessions, began - 1, began + 60)
+        made = egress_log.requests_made(logged, sessions, began - 1, asked + 60)
         assert [request.host for request, _ in made] == [
             "four.test",
             "six.test",

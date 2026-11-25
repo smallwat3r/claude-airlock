@@ -249,13 +249,21 @@ class Terminal:
     def type(self, text: str) -> None:
         os.write(self._terminal, text.encode())
 
-    def read_until(self, wanted: str, start: int = 0) -> int:
-        """Read until something is written after a place. The place after
-        it, or what AssertionError says was written instead."""
-        while wanted.encode() not in self.seen[start:]:
+    def read_until(self, wanted: str | tuple[str, ...], start: int = 0) -> int:
+        """Read until something is written after a place, the first of
+        several when it can be one or the other. The place after it, or
+        what AssertionError says was written instead."""
+        either = (wanted,) if isinstance(wanted, str) else wanted
+        while True:
+            found = [
+                (at, at + len(one))
+                for one in either
+                if (at := self.seen.find(one.encode(), start)) >= 0
+            ]
+            if found:
+                return min(found)[1]
             if not self._read():
                 raise AssertionError(f"never wrote {wanted!r}: {self.seen!r}")
-        return self.seen.index(wanted.encode(), start) + len(wanted)
 
     def read_to_the_end(self) -> None:
         """Read until the command leaves its terminal."""
