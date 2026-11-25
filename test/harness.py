@@ -45,13 +45,21 @@ if args[1:2] == ["inspect"] and "Running" in args[2]:
     if args[3].endswith(".capture") or args[3] in up:
         print("true")
         sys.exit(0)
-if args[:2] == ["container", "inspect"] and args[2:] == [os.environ.get("FAKE_LEFT")]:
-    # A container that is still there once it was removed
-    with open(os.environ["FAKE_LOG"]) as log:
-        if any(json.loads(line) == ["rm", "--force", args[2]] for line in log):
-            sys.exit(0)
+# A container that is still there once it was removed
+left = os.environ.get("FAKE_LEFT", "")
+with open(os.environ["FAKE_LOG"]) as log:
+    left = left if ["rm", "--force", left] in map(json.loads, log) else ""
+if args[:2] == ["container", "inspect"] and args[2:] == [left]:
+    sys.exit(0)
 if args[1:2] == ["inspect"]:
     sys.exit(1)
+if args[:2] == ["ps", "--all"] and args[2].startswith("--filter=name="):
+    # Whether a container is still there, FAKE_DOWN is a daemon that
+    # does not say
+    if "FAKE_DOWN" in os.environ:
+        sys.exit(1)
+    print(left)
+    sys.exit(0)
 if args[0] == "ps":
     print(os.environ.get("FAKE_PS", ""))
 if args[0] == "images":

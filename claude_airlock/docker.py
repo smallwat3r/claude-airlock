@@ -115,12 +115,19 @@ def remove_container(name: str) -> None:
 
 
 def container_gone(name: str) -> bool:
-    """Whether no container of that name is there any more, as far as
-    docker says: not when it says there is one, nor when it does not
-    answer."""
-    quiet = subprocess.DEVNULL
-    asked = docker("container", "inspect", name, stdout=quiet, stderr=quiet)
-    return asked.returncode not in (0, TIMED_OUT)
+    """Whether no container of that name is there any more, running or
+    not: only when docker answers and does not list it. Not when it does
+    not answer, or fails, a daemon that is down or being restarted says
+    nothing of the containers it will have again. Asked as a list and
+    not with inspect, which fails alike for a container that is gone and
+    for a daemon that cannot be reached."""
+    asked = docker(
+        *("ps", "--all", f"--filter=name={name}", "--format={{.Names}}"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    # The filter takes every name that has this one in it
+    return asked.returncode == 0 and name not in asked.stdout.split()
 
 
 def docker_bytes(*args: str) -> bytes | None:

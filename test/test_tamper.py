@@ -663,8 +663,6 @@ class UncheckedSessionTest(LauncherTest):
         following = self.launch()
         assert self.LATE in following.stderr
         assert f"  {self.project}/.git/hooks/pre-commit\n" in following.stderr
-        assert self.pending() == []
-        assert self.LATE not in self.launch().stderr
 
     def test_the_memory_of_a_killed_session_is_checked_too(self):
         memory = self.transcripts / "memory"
@@ -700,12 +698,23 @@ class UncheckedSessionTest(LauncherTest):
             session="echo x > .git/hooks/pre-commit", FAKE_LEFT="claude-proj"
         )
         assert ["rm", "--force", "claude-proj"] in left.calls
-        assert "claude-proj could not be removed, it may still run" in left.stderr
+        assert "claude-proj is not known to be gone, it may still run" in left.stderr
         assert "pre-commit" not in left.stderr
         assert len(self.pending()) == 1
         # Left alone while it is there, and checked once it is gone
         still = self.launch(FAKE_LEFT="claude-proj")
         assert self.LATE not in still.stderr
+        following = self.launch()
+        assert self.LATE in following.stderr
+        assert f"  {self.project}/.git/hooks/pre-commit\n" in following.stderr
+
+    def test_a_session_docker_says_nothing_of_is_checked_later(self):
+        # A daemon that is down or being restarted: it fails the same for
+        # a container that is gone and for one it will have again
+        down = self.launch(session="echo x > .git/hooks/pre-commit", FAKE_DOWN="1")
+        assert "claude-proj is not known to be gone" in down.stderr
+        assert "pre-commit" not in down.stderr
+        assert len(self.pending()) == 1
         following = self.launch()
         assert self.LATE in following.stderr
         assert f"  {self.project}/.git/hooks/pre-commit\n" in following.stderr

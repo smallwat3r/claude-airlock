@@ -420,8 +420,8 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
                 check.run()
             else:
                 warn(
-                    f"the container of the session {name} could not be removed,"
-                    " it may still run: what it left behind is checked by the"
+                    f"the container of the session {name} is not known to be"
+                    " gone, it may still run: what it left behind is checked by the"
                     f" next launch, once docker rm --force {name} has ended it"
                 )
     return status

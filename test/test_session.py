@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from unittest import mock
@@ -16,7 +17,7 @@ from harness import (
     settings,
 )
 
-from claude_airlock import docker
+from claude_airlock import docker, launcher
 from claude_airlock.sandbox import socket_proxy
 
 
@@ -86,6 +87,25 @@ class DefaultSessionTest(LauncherTest):
         # runs for as long as it has to is given all the time it takes
         assert docker.patience(("run", "--detach", "x")) == docker.SLOW_SECONDS
         assert docker.patience(("ps",)) == docker.DOCKER_SECONDS
+
+    def test_a_container_is_gone_only_when_docker_says_so(self):
+        def answering(code: int, listed: str = "") -> mock._patch:
+            answer = subprocess.CompletedProcess(["docker"], code, listed, "")
+            return mock.patch.object(docker, "docker", return_value=answer)
+
+        with answering(0):
+            assert docker.container_gone("claude-proj")
+        # The filter takes every name that has this one in it
+        with answering(0, "claude-proj-2\n"):
+            assert docker.container_gone("claude-proj")
+        with answering(0, "claude-proj-2\nclaude-proj\n"):
+            assert not docker.container_gone("claude-proj")
+        # A daemon that is down, and one that does not answer
+        for failed in (1, docker.TIMED_OUT):
+            with answering(failed):
+                assert not docker.container_gone("claude-proj")
+                gone = launcher.Launcher(0)
+                assert launcher.session_alive(gone, "claude-proj")
 
     def test_docker_keeps_nothing_of_what_a_session_writes(self):
         # Kept, docker logs would give it to a session of another project

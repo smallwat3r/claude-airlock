@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .docker import docker_ok
+from .docker import container_gone
 
 # The seconds ps is given to say when a process started
 PS_SECONDS = 10
@@ -83,5 +83,6 @@ class Launcher:
 
 def session_alive(launcher: Launcher, container: str) -> bool:
     """Whether a session is still going: its launcher or its container is
-    there. The container can outlive a killed launcher."""
-    return launcher.alive or docker_ok("container", "inspect", container)
+    there. The container can outlive a killed launcher. One docker says
+    nothing of is taken to be there, see container_gone."""
+    return launcher.alive or not container_gone(container)
