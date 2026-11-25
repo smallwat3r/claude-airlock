@@ -42,7 +42,7 @@ def in_background(work: Callable[..., None], *args: object) -> Iterator[None]:
         stop.set()
         thread.join()
         if failed is not None:
-            name = getattr(work, "__name__", "work").replace("_", " ")
+            name = getattr(work, "__name__", "work").strip("_").replace("_", " ")
             warn(
                 f"what the launcher does next to a session FAILED ({name}) and"
                 " was not done for the rest of it:",
