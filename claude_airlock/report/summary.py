@@ -22,12 +22,12 @@ from .entries import (
     call_input,
     entry_times,
     every,
+    every_result,
     measured,
     prompts,
     step_tokens,
     step_usage,
     tool_calls,
-    tool_results,
 )
 from .outcomes import outside_flag, refused, result_planted
 from .planted import INJECTION, read_said
@@ -38,13 +38,19 @@ def planted_reads(entries: list[dict]) -> int:
     """How many of the results of its calls and of the files it read as
     instructions show signs of being written to instruct the session,
     see planted.py. A file of instructions is read again as the session
-    goes, and counts once."""
-    tools = {
-        str(block.get("id")): block.get("name") for _, block in tool_calls(entries)
-    }
+    goes, and counts once. Every result counts, and by every tool its
+    call is named as: the transcript is the session's to add to, and a
+    second result under the id of a call, or a second call under it
+    named as a tool whose results are not read, takes no sign away."""
+    tools: dict[str, set[str]] = {}
+    for _, block in tool_calls(entries):
+        tools.setdefault(str(block.get("id")), set()).add(str(block.get("name")))
     results = sum(
-        bool(result_planted(str(tools.get(call, "")), block_text(block.get("content"))))
-        for call, (_, block) in tool_results(entries).items()
+        any(
+            result_planted(tool, block_text(block.get("content")))
+            for tool in tools.get(str(block.get("tool_use_id")), {""})
+        )
+        for _, block in every_result(entries)
     )
     files = {
         file.path
@@ -129,7 +135,9 @@ def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str,
     by_tool = Counter(flat(block.get("name", "?")) for _, block in calls)
     counts = ", ".join(f"{name} {count}" for name, count in by_tool.most_common())
     rows.append(("tool calls", f"{len(calls)} ({counts})" if calls else "0"))
-    results = tool_results(entries).values()
+    # Each of them: a result added under the id of a call that failed
+    # does not make it one that did not
+    results = every_result(entries)
     rows.append(("failed", str(sum(bool(b.get("is_error")) for _, b in results))))
     not_run = sum(refused(entry) for entry, _ in results)
     if not_run:

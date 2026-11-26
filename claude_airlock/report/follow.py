@@ -164,6 +164,9 @@ MOST_POLLED = 1 << 20
 # The looks in a row that leave some of a transcript unread before it is
 # said to be late: a result with a picture in it takes a few
 LATE_AFTER = 10
+# And the looks in a row that find a transcript no file that can be read
+# before that is said: one that is written anew is gone for a moment
+UNREAD_AFTER = 3
 # How much of the end of a transcript is looked at for what happened
 # before the following began: the last few events are shown of it, and
 # the calls still running are in it. A session can make its transcript as
@@ -201,6 +204,10 @@ class TranscriptTail:
         # that was said, see newly_behind
         self._behind = 0
         self._said_behind = False
+        # The looks in a row that found it no file that can be read, and
+        # whether that was said, see newly_unread
+        self._unread = 0
+        self._said_unread = False
         # Whether it is read from within and not from its start, see
         # latest: what it holds before is not looked at
         self.cut = False
@@ -253,15 +260,31 @@ class TranscriptTail:
         said, self._said_behind = self._said_behind, True
         return not said
 
+    def newly_unread(self) -> bool:
+        """Whether UNREAD_AFTER looks in a row found it no file that can
+        be read, said once until it can be again: it was moved, removed,
+        or a link was put in its place, which is not followed (see
+        open_plain). A session can do that to its own transcript and go
+        on writing through the link: what it does from then on is in no
+        line, and is not to pass for nothing done."""
+        if self._unread < UNREAD_AFTER:
+            self._said_unread = self._said_unread and bool(self._unread)
+            return False
+        said, self._said_unread = self._said_unread, True
+        return not said
+
     def _new_lines(self, most: int | None) -> Iterator[bytes | None]:
         """The lines completed since the last time, none while it is not
-        a plain file that can be read (see open_plain). None in the place
-        of a line that was too long to hold. No further than the file
-        went when it was opened, and than most bytes when there is a
-        most: what is written meanwhile does not keep the look going."""
+        a plain file that can be read (see open_plain), which is counted
+        for newly_unread. None in the place of a line that was too long
+        to hold. No further than the file went when it was opened, and
+        than most bytes when there is a most: what is written meanwhile
+        does not keep the look going."""
         file = open_plain(self.path)
         if file is None:
+            self._unread += 1
             return
+        self._unread = 0
         with file:
             size = os.fstat(file.fileno()).st_size
             if size < self._offset:
@@ -893,13 +916,21 @@ class Follower:
     @staticmethod
     def _note_behind(tail: TranscriptTail, found: Round) -> None:
         """Say that a transcript is written faster than it is read, when
-        a look first leaves some of it unread."""
+        a look first leaves some of it unread, and that one can no
+        longer be read at all, when it first cannot."""
         if tail.newly_behind():
             late = (
                 f"{flat(tail.path.name)} is written faster than it is read,"
                 " what is shown of it is LATE"
             )
             found.notes.append(labelled("transcript", late))
+        if tail.newly_unread():
+            gone = (
+                f"{flat(tail.path.name)} is no longer a file that can be read"
+                " (moved, removed, or a link put in its place): what its"
+                " session does from here on is NOT SHOWN"
+            )
+            found.notes.append(labelled("transcript", gone))
 
     def _tail(self, path: Path, offset: int | None = None) -> None:
         """Start to follow a transcript from a place in it, without one

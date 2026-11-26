@@ -1086,6 +1086,10 @@ it, so it can be started and stopped at any time.
   (`result: none recorded, the session went on without one`), and a call
   from before the container of a session was started is not what a
   connection in that container is said to be made `during`.
+- A transcript that is no longer a file that can be read, moved,
+  removed, or with a link put in its place, says so once (`NOT SHOWN`):
+  a link is not followed, and what its session does from there on is in
+  no line.
 - Of what happened before, the last 10 events are shown, looked for in
   the last 4 MB of the latest transcript: a line says so when that is
   not all of it, and the result of a call from before them is not shown

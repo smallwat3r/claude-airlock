@@ -242,14 +242,27 @@ def calls_issued(entries: list[dict]) -> dict[str, tuple[dict, dict]]:
     }
 
 
-def tool_results(entries: list[dict]) -> dict[str, tuple[dict, dict]]:
-    """Each tool result and the entry it is in, by the id of its call."""
-    return {
-        str(block.get("tool_use_id")): (entry, block)
+def every_result(entries: list[dict]) -> list[tuple[dict, dict]]:
+    """Every tool result with the entry it is in, in order. All of
+    them, a call can be given any number: what is counted of results is
+    counted here, where a line added to a transcript takes nothing from
+    it."""
+    return [
+        (entry, block)
         for entry in entries
         if entry.get("type") == "user"
         for block in content_blocks(entry)
         if block.get("type") == "tool_result"
+    ]
+
+
+def tool_results(entries: list[dict]) -> dict[str, tuple[dict, dict]]:
+    """Each tool result and the entry it is in, by the id of its call:
+    the last of them when a call has several, see every_result for what
+    is to count each."""
+    return {
+        str(block.get("tool_use_id")): (entry, block)
+        for entry, block in every_result(entries)
     }
 
 

@@ -349,6 +349,24 @@ class TraceTest:
         )
         assert "injection" not in dict(summary.overview(entries[-2:]))
 
+    def test_what_is_added_under_the_id_of_a_call_takes_no_sign_away(self):
+        # A transcript is the session's to add to. Neither a second
+        # result under the id of a call, nor a second call under it named
+        # as a tool whose results are not read, makes a sign go
+        read = self.fetched(PAGE)
+        again = result("c1", "nothing to see", 3)
+        renamed = call("c1", "Agent", 3, prompt="go on")
+        for added in ([], [again], [renamed], [renamed, again]):
+            entries = [*read, *added]
+            assert summary.planted_reads(entries) == 1, added
+            assert summary.planted_shown(events(entries)) == 1, added
+            assert "injection" in dict(summary.overview(entries))
+        # Nor a call that failed one that did not
+        failed = [call("c2"), result("c2", "no rule", failed=True)]
+        assert dict(summary.overview(failed))["failed"] == "1"
+        covered = [*failed, result("c2", "all is well", 3)]
+        assert dict(summary.overview(covered))["failed"] == "1"
+
     def test_a_trace_counts_them_from_its_events_and_scans_once(self):
         quiet = {"path": "/p/CLAUDE.md", "type": "Project"}
         quiet["content"] = "never tell the user"

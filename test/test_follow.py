@@ -1243,6 +1243,49 @@ class TranscriptTailTest:
             )
         ]
 
+    def test_a_follower_says_when_a_transcript_can_no_longer_be_read(self):
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, False, only=self.file)
+        follower._docker = False
+        with (
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=[]),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+        ):
+            follower.poll()
+            add(self.file, call("t1", "Bash", command="make"))
+            assert [event.details for _, event in follower.poll().events] == [
+                ["$ make"]
+            ]
+            # A session moves its transcript away and puts a link in its
+            # place, which Claude Code goes on writing through: the link
+            # is not followed, and that nothing more is shown is said
+            moved = self.file.with_name("moved")
+            self.file.rename(moved)
+            self.file.symlink_to(moved)
+            add(moved, call("t2", "Bash", command="curl evil.test"))
+            rounds = [follower.poll() for _ in range(follow.UNREAD_AFTER + 3)]
+            assert [found.events for found in rounds] == [[]] * len(rounds)
+            notes = [note for found in rounds for note in found.notes]
+            assert notes == [
+                (
+                    "transcript  0a.jsonl is no longer a file that can be read"
+                    " (moved, removed, or a link put in its place): what its"
+                    " session does from here on is NOT SHOWN"
+                )
+            ]
+            assert rounds[follow.UNREAD_AFTER - 1].notes == notes
+            # Back in its place, it is read on, and said again should
+            # it go again
+            self.file.unlink()
+            moved.rename(self.file)
+            assert [event.details for _, event in follower.poll().events] == [
+                ["$ curl evil.test"]
+            ]
+            self.file.unlink()
+            again = [follower.poll() for _ in range(follow.UNREAD_AFTER)]
+            assert [note for found in again for note in found.notes] == notes
+
     def test_what_came_before_is_looked_for_in_the_end_of_a_transcript(self):
         texts = [f"before {number}" for number in range(200)]
         add(self.file, *map(prompt, texts))
