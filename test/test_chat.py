@@ -1207,9 +1207,10 @@ class ChatTest(LauncherTest):
         )
         assert "# chat        interrupting, Ctrl-C again stops" in said
         # No more of it is on the screen than can be read, the rest is
-        # counted
+        # counted. However it got there: what the session left on its
+        # errors as it ended is written past what counts, a few lines
         shown = re.findall(r"(?:^|\x1b\[J)y$", said, re.MULTILINE)
-        assert 0 < len(shown) <= plain.MOST + plain.FEW
+        assert 0 < len(shown) <= plain.MOST + plain.FEW + pipe.LAST_WORDS
         assert re.search(r"# chat        left out \d+ more lines of the session", said)
 
     def test_ctrl_c_twice_at_the_prompt_leaves(self):
@@ -2009,6 +2010,38 @@ class PipeTest:
             while agent.drain():
                 pass
             agent._errors.join(PATIENCE)
+            for piped in (agent._process.stdout, agent._process.stderr):
+                if piped:
+                    piped.close()
+
+    def test_what_a_session_leaves_on_its_errors_as_it_ends_is_not_all_shown(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # claude has ended, its output is closed, and a process of the
+        # session wrote more to its errors than was listened to
+        def run(*_args: str, **options) -> subprocess.Popen:
+            flood = "exec >&-; yes | head -n 5000 >&2"
+            return subprocess.Popen(["sh", "-c", flood], **options)
+
+        agent = pipe.Agent([], lambda: None, run)
+        try:
+            assert agent.status() == 0
+            agent._errors.join(PATIENCE)
+            assert not agent._errors.is_alive()
+            # As many as may wait were passed on, for whoever listens to
+            # count. Of the rest the first are shown, and a line says
+            # that there was more
+            assert agent.ended.is_set()
+            assert len(agent.messages._held) <= pipe.BACKLOG
+            written = capsys.readouterr().err.splitlines()
+            assert written.count("y") == pipe.LAST_WORDS
+            assert written[pipe.LAST_WORDS :] == [f"claude-airlock: {pipe.NO_MORE}"]
+        finally:
+            agent._process.kill()
+            agent.status()
+            # What waits is let go of, for what reads the output to end
+            while agent.drain():
+                pass
             for piped in (agent._process.stdout, agent._process.stderr):
                 if piped:
                     piped.close()

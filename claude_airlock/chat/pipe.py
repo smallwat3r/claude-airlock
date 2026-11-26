@@ -27,6 +27,7 @@ from ..docker import NOT_FOUND, docker_popen
 from ..errors import Fatal
 from ..events import clean
 from ..files import MOST_LINE_HELD, held_size, json_object
+from ..notice import warn
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
 # about permissions asked over the same pipe, and a reply told as it is made
@@ -50,6 +51,14 @@ BACKLOG_BYTES = 256 << 20
 SAID_BACKLOG = 256
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
+# No more lines than this are shown of what a session still writes to its
+# errors once claude has ended, when nobody listens to them any more: a
+# session that wrote there faster than it was listened to leaves as much
+# behind as its pipe and what reads it hold, tens of thousands of lines.
+# Enough for what docker says of how the session ended
+LAST_WORDS = 20
+# What is said of the rest of them, once
+NO_MORE = "the session wrote more to its errors as it ended, which is not shown"
 # What is told the answer claude gives to a request of the chat's
 type Answer = Callable[[dict], None]
 
@@ -221,16 +230,24 @@ class Agent:
         and whatever a process of the session writes there, which is not
         to reach the terminal as it is."""
         errors = self._process.stderr
+        # How many lines came once nobody listened any more
+        late = 0
         while errors:
             line = errors.readline(PLAIN_WIDTH)
             if not line:
                 return
             text = line.decode("utf-8", "replace").rstrip("\n")
-            if not text.strip():
+            if not text.strip() or self._passed_on(text, len(line)):
                 continue
-            if not self._passed_on(text, len(line)):
-                # Nobody listens any more
+            # Nobody listens any more, and nothing counts what is left
+            # out as PlainLines does: the first of them are shown, the
+            # rest is said to be there. Read to the end all the same,
+            # for docker not to wait on a pipe that is full
+            late += 1
+            if late <= LAST_WORDS:
                 print(clean(text), file=sys.stderr)
+            elif late == LAST_WORDS + 1:
+                warn(NO_MORE)
 
     def _passed_on(self, text: str, size: int) -> bool:
         """Have a line of the errors wait to be taken in with what claude

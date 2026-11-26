@@ -66,7 +66,9 @@ and CPU the sandbox uses](img/line-mode.png)
 - What the session writes besides, to its errors or as a line that is no
   message of Claude Code's. No more of it than can be read: past 500
   lines within 5 seconds a line says how many more were left out, and
-  while it goes on that fast 5 lines of every 5 seconds are shown.
+  while it goes on that fast 5 lines of every 5 seconds are shown. Of
+  what is left on its errors once it has ended, the first 20 lines are
+  shown, and a line says that there was more.
 - That a line of Claude Code's was too long to be read: nothing is known
   of what it said, and claude may wait for an answer to it that cannot be
   given. Ctrl-C stops the turn.
