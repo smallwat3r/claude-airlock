@@ -217,6 +217,12 @@ def _network_lines(host: Host, recorded: Recorded) -> list[str]:
         if capture.dns_unread:
             unread = f"{capture.dns_unread} DNS messages of its capture were not read"
             lines.append(f"{unread}, more than are kept")
+        if capture.dns_cut:
+            lines.append(
+                f"{capture.dns_cut} times what it sent to a resolver over TCP"
+                " was too long for its capture to read: a lookup may be"
+                " missing each time"
+            )
         cut = ", ".join(parts_cut_short(capture))
         if cut:
             lines.append(f"its capture stopped at its packet limit ({cut})")

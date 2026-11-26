@@ -430,6 +430,10 @@ class Capture:
     # The DNS messages that were not read, past MOST_LOOKUPS or
     # MOST_DNS_READ: of a packet over TCP that was not looked into, one
     dns_unread: int = 0
+    # And how many times what was sent to a resolver over TCP could not
+    # be read to its end, see _dns_over_tcp: a query may have gone unseen
+    # each time, which is the session's to arrange
+    dns_cut: int = 0
     # Each plain HTTP request
     requests: list[Request] = field(default_factory=list)
     # Each place something was sent to by another protocol than TCP
@@ -574,7 +578,16 @@ class Capture:
         of its last message, and nothing is kept: where the next one
         starts is not known. No more messages than are still read, see
         _dns_left: what is left of the packet then counts as one that was
-        not, and is not looked into."""
+        not, and is not looked into.
+
+        Where a stream cannot be read to its end, that is counted (see
+        dns_cut), never passed over: a packet of the session's that is
+        longer than the capture keeps, with whatever follows its first
+        message out of sight, and the start of a message that is let go
+        of, for being longer than is held or for more streams than are.
+        A session chooses all three, a query sent behind padding or in
+        a message of many kilobytes is otherwise in no lookup and in no
+        count."""
         left = self._dns_left()
         stream = (packet.source, packet.source_port, packet.destination, packet.port)
         data = self._dns_held.pop(stream, b"") + packet.payload
@@ -591,12 +604,26 @@ class Capture:
             self.dns_unread += 1
             return messages
         if len(packet.payload) < packet.length:
+            self._dns_lost(stream)
             return [*messages, data[DNS_LENGTH:]] if data[DNS_LENGTH:] else messages
-        if data and len(data) <= DNS_HELD_BYTES:
+        if len(data) > DNS_HELD_BYTES:
+            self._dns_lost(stream)
+        elif data:
             while len(self._dns_held) >= DNS_MOST_HELD:
-                del self._dns_held[next(iter(self._dns_held))]
+                oldest = next(iter(self._dns_held))
+                del self._dns_held[oldest]
+                self._dns_lost(oldest)
             self._dns_held[stream] = data
         return messages
+
+    def _dns_lost(self, stream: tuple[str, int, str, int]) -> None:
+        """Count a stream of DNS over TCP that could not be read to its
+        end, by where it is from and where it goes, see dns_cut: one
+        that goes to a resolver. What comes back cut short is the answer
+        to a query that was seen, which is then a lookup without one."""
+        _, _, destination, port = stream
+        if destination == RESOLVER or port == DNS_PORT:
+            self.dns_cut += 1
 
     @staticmethod
     def _is_dns(packet: Packet) -> bool:
@@ -970,7 +997,7 @@ class Capture:
             host = host.strip("[]").lower()
             return "" if name == host else host
         said = self._answered.get(connection.address)
-        whole = self.lookups_whole and not self.dns_unread
+        whole = self.lookups_whole and not self.dns_unread and not self.dns_cut
         if not said or not whole or connection.port == EGRESS_PORT:
             return ""
         return "" if said.had(name, when) else (said.as_of(when) or "").lower()

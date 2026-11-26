@@ -399,6 +399,12 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
             f"  dns {capture.dns_unread} more messages NOT READ, past the"
             f" {len(capture.lookups)} lookups that are kept"
         )
+    if capture.dns_cut:
+        lines.append(
+            f"  dns {capture.dns_cut} times what was sent to a resolver over TCP"
+            " was NOT READ to its end, too long for the capture: a lookup may"
+            " be missing each time"
+        )
     cut = ", ".join(parts_cut_short(capture))
     if cut:
         lines.append(

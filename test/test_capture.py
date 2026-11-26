@@ -4,6 +4,7 @@ and what --trace shows of it."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -1267,6 +1268,64 @@ class DnsTrustTest:
             packet = pcap.parse_packet(1.0, 276, pcap_file([(1.0, frame, True)])[40:])
             capture.add(packet)
         assert len(capture._dns_held) == pcap.DNS_MOST_HELD
+        # And each one let go of is counted: its query went unread
+        assert capture.dns_cut == 50
+
+    def test_dns_over_tcp_that_cannot_be_read_to_its_end_is_counted(self):
+        def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
+            header = struct.pack("!HHIIBBHHH", *ports, 0, 0, 0x50, 0x18, 0, 0, 0)
+            return ipv4(6, at, to, header + payload)
+
+        def packet_of(frame: bytes, sent: bool) -> pcap.Packet:
+            return pcap.parse_packet(1.0, 276, pcap_file([(1.0, frame, sent)])[40:])
+
+        me, server = "172.20.0.5", "9.9.9.9"
+        query = dns_message_of(dns_query("harmless.test"))
+        hidden = dns_message_of(dns_query("secret.evil.test", ident=8))
+        first = struct.pack("!H", len(query) + 900) + query + b"\0" * 900
+        second = struct.pack("!H", len(hidden)) + hidden
+        # A query behind one that is padded past what the capture keeps
+        # of a packet: only the first is seen, and that is said
+        whole = packet_of(over(first + second, (40053, 53), me, server), True)
+        kept = dataclasses.replace(whole, payload=whole.payload[:950])
+        capture = pcap.Capture()
+        capture.add(kept)
+        capture.finish()
+        assert [lookup.name for lookup in capture.lookups] == ["harmless.test"]
+        assert capture.dns_cut == 1
+        said = net_events.capture_summary(capture, False)
+        assert (
+            "  dns 1 times what was sent to a resolver over TCP was NOT READ to"
+            " its end, too long for the capture: a lookup may be missing each time"
+        ) in said
+        # And a message longer than is held until its rest comes, sent a
+        # little at a time
+        long = struct.pack("!H", 6000) + hidden + b"\0" * (6000 - len(hidden))
+        capture = pcap.Capture()
+        for at in range(0, len(long), 900):
+            capture.add(
+                packet_of(over(long[at : at + 900], (40053, 53), me, server), True)
+            )
+        assert capture.lookups == []
+        assert capture.dns_cut >= 1
+        # Not what comes back too long: its query was seen, and is a
+        # lookup that says it has no answer
+        capture = pcap.Capture()
+        capture.add(packet_of(dns_over(me, server, query, (40053, 53)), True))
+        back = packet_of(over(b"\x20\x00" + b"x" * 990, (53, 40053), server, me), False)
+        capture.add(dataclasses.replace(back, payload=back.payload[:950]))
+        capture.finish()
+        assert capture.dns_cut == 0
+        assert [(found.name, found.error) for found in capture.lookups] == [
+            ("harmless.test", "no answer")
+        ]
+        # A hello is not held against lookups that are not all there
+        assert (
+            pcap.Capture(dns_cut=1)._reached_otherwise(
+                pcap.Connection(1.0, "198.51.100.7", 443, 40443, 0), "x.test", 2.0
+            )
+            == ""
+        )
 
     def test_each_part_of_a_capture_counts_its_own_packets(self):
         capture = pcap.Capture()

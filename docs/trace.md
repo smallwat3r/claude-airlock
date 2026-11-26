@@ -393,6 +393,12 @@ address is what was reached. Trust the address where the two matter.
 - No more than 400,000 DNS messages of a capture are read, whatever
   comes of them, the rest are counted as `NOT READ`: a session can send
   any number that are none, or that nobody asked for.
+- What is sent to a resolver over TCP and cannot be read to its end is
+  counted too, and said (`NOT READ to its end`): a packet longer than
+  the capture keeps of one (1024 bytes), with whatever follows its first
+  message out of sight, and a message of more than 4 kB sent a little at
+  a time. A lookup may be missing each time, which a session can
+  arrange, and a hello is then held against no name.
 - The proxy keeps its log in two files of about 10 MB, the one it writes
   to and the one before, and the launcher of a filtered session has it
   start a new one every 10 seconds once it is over that. The last 32 MB
