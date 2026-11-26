@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from ..events import Event, Kind, Who, Wrong, clean, flat
 from .brief import PREVIEW_WIDTH, amount, between, shortened
-from .entries import MOST_LISTED, claude_of, counted, kept, listed, seconds
+from .entries import MOST_LISTED, claude_of, counted, every, kept, listed, seconds
 from .planted import Planted, flagged, planted
 
 # What a line of a language server's report is about, in the order of the
@@ -36,6 +36,11 @@ OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
 # of the one that tells what Claude Code said in the place of a prompt.
 # Each kind is a name given here, never a value of the transcript.
 INSTRUCTIONS = "instructions"
+# What Claude Code attaches for a file of instructions it read later on
+NESTED = "nested_memory"
+# Of those, how many are remembered as they were last told: what one
+# says again is told once
+MOST_NESTED = 1000
 TOLD = "told"
 
 type Reader = Callable[[dict, float, Who], list[Event]]
@@ -80,11 +85,27 @@ def _instructions_planted(
     return () if kind in OWN_INSTRUCTIONS else planted(content, path)
 
 
+def _instructions_given(given: dict) -> list:
+    """The files an attachment gives as read as instructions: all those of
+    the instructions of a session, or the one Claude Code read later, as
+    the model read a file in its directory (a CLAUDE.md below the top of
+    the project), which the attachment names as its own when it does not
+    say. All of them: a file past those shown is looked at all the same,
+    a repository can come with a file of instructions past any count."""
+    kind = given.get("type")
+    if kind == NESTED:
+        read = given.get("content")
+        if not isinstance(read, dict):
+            return []
+        return [{"path": given.get("path"), **read}]
+    return every(given.get("files")) if kind == INSTRUCTIONS else []
+
+
 def instruction_files(given: dict, scan: bool = True) -> tuple[Instructions, ...]:
     """The files an entry says were read as instructions, each with the
     signs it shows unless told not to look: for what only names them."""
     files = []
-    for file in listed(given.get("files")):
+    for file in _instructions_given(given):
         if not isinstance(file, dict) or not isinstance(file.get("path"), str):
             continue
         kind, content = kept(file.get("type")) or "?", file.get("content")
@@ -129,6 +150,32 @@ def instructions_read(entries: list[dict]) -> list[str]:
     return lines
 
 
+def _instructions_event(
+    files: tuple[Instructions, ...], when: float, who: Who
+) -> Event:
+    """The event of files read as instructions: each named, no more than
+    MOST_LISTED of them and how many more there are, and the signs of
+    every one, past those named too."""
+    fields = {
+        "kind": INSTRUCTIONS,
+        "files": [file.fields for file in files],
+        **flagged(sign for file in files for sign in file.planted),
+    }
+    event = Event(when, who, Kind.CONTEXT, [], fields)
+    if any(file.planted for file in files):
+        event.went_wrong()
+    named, rest = files[:MOST_LISTED], files[MOST_LISTED:]
+    for file in named:
+        event.say(f"instructions: {file.shown}")
+        for sign in file.planted:
+            event.say(sign.shown, alert=True)
+    if rest:
+        event.say(f"instructions: ... {len(rest)} more files")
+    for sign in (sign for file in rest for sign in file.planted):
+        event.say(sign.shown, alert=True)
+    return event
+
+
 def _diagnostic_lines(file: dict) -> list[str]:
     """What a language server reported of one file: how many of each
     severity, then each message with its line."""
@@ -163,6 +210,7 @@ class Asides:
     def __init__(self, verbose: bool):
         self._verbose = verbose
         self._instructions: tuple[Instructions, ...] = ()
+        self._nested: dict[str, Instructions] = {}
         self._skills: tuple[int, tuple[str, ...]] = (0, ())
         self._mode = ""
         # The model and the effort last asked for, by what asked
@@ -170,7 +218,8 @@ class Asides:
         # Why the model was last made to think anew, until a step is told
         self._dropped = ""
         self._attached: dict[str, Reader] = {
-            "instructions": self._instructions_read,
+            INSTRUCTIONS: self._instructions_read,
+            NESTED: self._nested_read,
             "mcp_instructions_delta": self._server_instructions,
             "skill_listing": self._skills_listed,
             "queued_command": self._told,
@@ -217,19 +266,19 @@ class Asides:
         if not files or files == self._instructions:
             return []
         self._instructions = files
-        fields = {
-            "kind": INSTRUCTIONS,
-            "files": [file.fields for file in files],
-            **flagged(sign for file in files for sign in file.planted),
-        }
-        event = Event(when, who, Kind.CONTEXT, [], fields)
-        if any(file.planted for file in files):
-            event.went_wrong()
-        for file in files:
-            event.say(f"instructions: {file.shown}")
-            for sign in file.planted:
-                event.say(sign.shown, alert=True)
-        return [event]
+        return [_instructions_event(files, when, who)]
+
+    def _nested_read(self, given: dict, when: float, who: Who) -> list[Event]:
+        """A file of instructions Claude Code read later on, on top of
+        those of the session: told when it is new or says other than it
+        did."""
+        files = instruction_files(given)
+        if not files or self._nested.get(files[0].path) == files[0]:
+            return []
+        self._nested[files[0].path] = files[0]
+        while len(self._nested) > MOST_NESTED:
+            del self._nested[next(iter(self._nested))]
+        return [_instructions_event(files, when, who)]
 
     def _server_instructions(self, given: dict, when: float, who: Who) -> list[Event]:
         added, removed = (

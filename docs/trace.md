@@ -250,7 +250,11 @@ claude   task     completed: Agent "review" finished
 
 - A file of instructions steers a session as a prompt does, and a
   `Project` one came with the repository. The header lists them all
-  (`instructions read`), a line comes when the set of them changes.
+  (`instructions read`), a line comes when the set of them changes, and
+  when Claude Code reads one later on: a `CLAUDE.md` below the top of
+  the project, once claude reads a file next to it. Of a set, the first
+  50 are named and how many more there are, and every one is looked at
+  for [what it read](#what-it-read).
 - `--json` says which of these a `context` event is as `kind`:
   `instructions`, `mcp_instructions` (with the servers `added` and
   `gone`), `skills`, `edited_file`, `diagnostics`, or `told` for what
