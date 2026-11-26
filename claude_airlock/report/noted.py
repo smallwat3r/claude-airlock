@@ -1,8 +1,9 @@
 """What the launchers noted of the sessions as they ran, as --trace, what
 follows the sessions and the lines said when one ends show it: how the
 sandbox of each was started (see started.py), the uses of the doors (see
-door_events.py) and what a chat found changed in what Claude Code says
-(see changes.py). One more such record is added here."""
+door_events.py), what a chat found changed in what Claude Code says (see
+changes.py) and the requests to the model (see api_events.py). One more
+such record is added here."""
 
 from __future__ import annotations
 
@@ -10,11 +11,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..events import Event
+from ..recording.api_calls import call_record
 from ..recording.changes import change_event, change_events, change_record
 from ..recording.doors import door_record
 from ..recording.notes import NewNotes, Notes
 from ..recording.started import start_event, start_events, start_record
 from ..settings import Host
+from .api_events import call_event, call_events
 from .door_events import door_events, use_event
 
 # Summary rows, each what it is about and what is said of it, and events
@@ -38,6 +41,7 @@ KINDS = (
     NoteKind(start_record, start_event, start_events),
     NoteKind(door_record, use_event, door_events),
     NoteKind(change_record, change_event, change_events),
+    NoteKind(call_record, call_event, call_events),
 )
 
 

@@ -105,6 +105,9 @@ class Start:
             # Under a runtime no sidecar can see into, see host_health.py
             seen = runtime.JOINABLE
             recorded.append("processes" if seen else "memory and CPU use")
+        if settings.api_log:
+            # The session's own word, kept as it comes, see api_log.py
+            recorded.append("requests to the model")
         socket = (
             settings.docker_socket if has_socket_proxy(settings) else SocketAccess.OFF
         )

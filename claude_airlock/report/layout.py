@@ -82,6 +82,9 @@ STYLES = {
     Kind.HEALTH: DIM,
     # Nor is how its sandbox was started
     Kind.STARTED: DIM,
+    # A request to the model comes with every step, and is how the
+    # session thinks, not what it does
+    Kind.REQUEST: DIM,
     Kind.NET: CYAN,
     Kind.DNS: CYAN,
     # The tools, each by its name in small letters: the one that runs

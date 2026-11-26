@@ -73,6 +73,10 @@ and CPU the sandbox uses](img/line-mode.png)
   given. Ctrl-C stops the turn.
 - What each step of the model used: the tokens it wrote and read, and
   whether it missed the cache.
+- With `CLAUDE_AIRLOCK_API_LOG=1`, each request to the model once it
+  is answered: how much was sent and what of, the tokens the API counted
+  and why the model stopped, see
+  [The requests to the model](trace.md#the-requests-to-the-model).
 - Every connection the session opens, and how it ended: closed after how
   long and how much it carried, or what went wrong (`REFUSED`,
   `NO ANSWER`).

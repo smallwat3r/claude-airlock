@@ -54,6 +54,10 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   for the user's review every connection, UDP send, ping and name lookup,
   and the processes that run. They block nothing. The root-owned python3
   process is that recorder, not yours to stop.
+- CLAUDE_AIRLOCK_API_LOG (off unless 1). On, Claude Code writes every
+  request it sends to the model and each answer to ~/.local/state/api-log,
+  and the launcher takes them from there for the user's review: the files
+  go as they are taken, not a bug. Leave the directory alone.
 - CLAUDE_AIRLOCK_SHARED_HISTORY (off unless 1). Off, what Claude Code
   remembers of other projects is not here: their directories under
   ~/.claude/projects are empty and read-only, and the prompt history, paste

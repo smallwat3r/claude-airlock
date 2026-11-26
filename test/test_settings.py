@@ -103,6 +103,7 @@ class SettingsListTest(LauncherTest):
             CLAUDE_AIRLOCK_SSH_AGENT="1",
             CLAUDE_AIRLOCK_RW_CONFIG="1",
             CLAUDE_AIRLOCK_SHARED_HISTORY="1",
+            CLAUDE_AIRLOCK_API_LOG="1",
             CLAUDE_AIRLOCK_PROTECT="docs",
             CLAUDE_AIRLOCK_CPUS="2",
         ).flags

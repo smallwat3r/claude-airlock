@@ -71,6 +71,10 @@ class Settings:
     net_ask: bool = False
     net_log: bool = True
     proc_log: bool = True
+    # Whether what Claude Code sends to the model, and what the model
+    # answers, is kept, see recording/api_log.py. Off unless asked for:
+    # it is everything a session read, again with every request
+    api_log: bool = False
     telemetry: bool = False
     # Whether a session loads the connectors of the claude.ai account
     connectors: bool = False
@@ -136,7 +140,8 @@ class Host:
     def state_dir(self) -> str:
         # The launcher's own records. Never mounted into a session, which
         # could otherwise edit what is kept about it, but for
-        # sandbox_claude_dir and history_dir.
+        # sandbox_claude_dir, history_dir and a session's own directory
+        # of api_drop_dir.
         return os.path.join(self.state_home, NAME)
 
     @property
@@ -219,6 +224,24 @@ class Host:
     @property
     def captures_dir(self) -> str:
         return os.path.join(self.state_dir, "captures")
+
+    @property
+    def api_drop_dir(self) -> str:
+        # Where Claude Code leaves what it sends to the model and what
+        # is answered, see api_log.py: a directory for each session,
+        # mounted into that session alone and gone with it
+        return os.path.join(self.state_dir, "api-drop")
+
+    @property
+    def api_bodies_dir(self) -> str:
+        # What the launcher took out of there, never mounted into a
+        # session
+        return os.path.join(self.state_dir, "api-log")
+
+    @property
+    def api_calls_file(self) -> str:
+        # A line per request to the model, see api_log.py
+        return os.path.join(self.state_dir, "api-calls.jsonl")
 
     @property
     def feature_dirs(self) -> list[str]:
@@ -309,6 +332,11 @@ SETTINGS = (
     ),
     Setting("NET_LOG", Kind.SWITCH, "0 stops recording what a session connects to"),
     Setting("PROC_LOG", Kind.SWITCH, "0 stops recording the processes of a session"),
+    Setting(
+        "API_LOG",
+        Kind.SWITCH,
+        "1 keeps what Claude Code sends to the model, and the answers",
+    ),
     Setting(
         "TELEMETRY", Kind.SWITCH, "1 lets Claude Code send usage and crash reports"
     ),

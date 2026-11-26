@@ -37,6 +37,10 @@ What a session is given and what it is kept from.
   host's is put back instead. The logins to MCP servers, which Claude
   Code keeps in the same place, are not carried either way: the host's
   stay on the host, a session's in the sandbox.
+- With `CLAUDE_AIRLOCK_API_LOG=1`, a directory of the launcher's for
+  this session alone at `~/.local/state/api-log`, where Claude Code
+  leaves what it sends to the model. What the launcher keeps of it is
+  nowhere in a session.
 - `~/.cache` (Go modules, uv, npm) as a Docker volume per project, so one
   session cannot poison another project's dependencies.
   `CLAUDE_AIRLOCK_CACHE=0` goes back to a tmpfs of at most 2g.
@@ -177,11 +181,44 @@ prints what differs from Docker's own runtime:
   is set with them, for the tools a session runs that go by it, and the
   image turns off the usage reports of gh and of common frameworks (Next.js,
   Nuxt, Astro and the like) whatever the setting.
+- **Without a copy of what it sends.** With `CLAUDE_AIRLOCK_API_LOG=1`
+  it is told to write every request to the model and each answer to a
+  directory (`OTEL_LOG_RAW_API_BODIES`), which the launcher mounts for
+  that session alone and empties as it goes, see
+  [The requests to the model](trace.md#the-requests-to-the-model).
+  Nothing of it is sent anywhere, telemetry stays off.
 - **Without the connectors of claude.ai.** `ENABLE_CLAUDEAI_MCP_SERVERS=false`
   is set, so the connectors of your account (Gmail, Google Drive and the
   like) are not loaded: they reach your data from inside the sandbox, and
   their tools and instructions take room in every request.
   `CLAUDE_AIRLOCK_CONNECTORS=1` loads them.
+
+## Statusline
+
+For Claude Code's native UI. The launcher has no statusline of its own
+and adds none: the one of your `~/.claude/settings.json` works in the
+sandbox as on the host. The file its command runs is mounted read-only
+where the settings name it, whether it is the program
+(`~/.claude/statusline.sh`) or the script an interpreter is given
+(`bash ~/bin/statusline.sh`):
+
+- It has to be a file of your home directory, named by its whole path.
+  A command the image has (`npx some-statusline`) needs no mount.
+- Only that file is mounted. What it runs has to be in the image (bash,
+  `jq`, Python and Node.js are), and what it reads besides in a directory
+  mounted with `CLAUDE_AIRLOCK_EXTRA_DIRS_RO`.
+- A file with the name of a secrets file (`.env`, `.netrc`) is not
+  mounted.
+- Only the statusline of `~/.claude/settings.json` on the host, not one a
+  project's settings name.
+- It can show the sandbox from the variables a session has of how it was
+  started, `env | grep CLAUDE_AIRLOCK_` in a session lists them: the name
+  of the container, which is not set outside the sandbox, the network
+  mode and the doors that are open.
+
+[Line mode](line-mode.md) does not run it. It shows a status of its own
+above its prompt, made from what it knows of the session, with the
+effort and the weekly limit of Fable while that is the model.
 
 ## The check when a session ends
 

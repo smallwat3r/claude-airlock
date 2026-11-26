@@ -21,6 +21,7 @@ from .docker import container_gone, docker_ok, remove_container
 from .errors import Fatal
 from .notice import warn
 from .recording.address import session_address_recorded
+from .recording.api_log import api_logged
 from .recording.capture import CaptureSidecar, session_captured
 from .recording.egress_log import net_log
 from .recording.host_health import collect_left_behind, health_recorded
@@ -334,6 +335,9 @@ def recorded_session(
     session is in. Returns how it went, see Ran."""
     settings, host, image = plan.settings, plan.host, plan.image
     with contextlib.ExitStack() as running:
+        # What is done once the recorders are, see where the start is
+        # noted
+        at_last = running.enter_context(contextlib.ExitStack())
         # The capture first, a filtered session's address is its
         # sidecar's
         for recording in (
@@ -351,6 +355,9 @@ def recorded_session(
         )
         agent = ssh_agent_door(settings, host, name, os.environ)
         agent_args = running.enter_context(agent)
+        # Where Claude Code writes what it sends to the model, when that
+        # is kept
+        api_args = running.enter_context(api_logged(settings, host, name))
         # How the sandbox is started, noted for a trace and what
         # follows the sessions, and for a chat to say first
         start = Start.of(
@@ -366,6 +373,11 @@ def recorded_session(
             servers=image.language_servers if plan.runs_claude else (),
         )
         said = note_start(host, name, start)
+        # Noted to be over once the recorders are done: what they note
+        # of the session as they end, its last requests to the model and
+        # the uses of a door that were only counted, is within its stay.
+        # Its name is not another session's to take before that.
+        at_last.callback(note_end, host, name)
         through = None
         if plan.is_chat:
             sandbox = Sandbox.started(name, start, host.home)
@@ -378,7 +390,7 @@ def recorded_session(
                 guarded=settings.injection_stop,
                 hosts=hosts,
             )
-        run_args = run_args + agent_args
+        run_args = run_args + agent_args + api_args
         try:
             status = run_session(run_args, image, _command_args(plan), ending, through)
         finally:
@@ -388,7 +400,6 @@ def recorded_session(
             # was restarted under it, a terminal that was detached), which
             # would go on writing with nothing looking any more
             remove_container(name)
-            note_end(host, name)
     # Whole once the recorders are done
     return Ran(status, hit.lines(), copier.lengths)
 

@@ -236,6 +236,7 @@ claude   task     completed: Agent "review" finished
 | `api` | A request the API did not answer or refused, which Claude Code tried again |
 | `compact` | The conversation was summed up to make room: from there on claude knows what came before by the summary |
 | `task` | A subagent, or a command left to run, ended |
+| `request` | With `CLAUDE_AIRLOCK_API_LOG=1`, a request to the model and what it used, see [The requests to the model](#the-requests-to-the-model) |
 
 - A file of instructions steers a session as a prompt does, and a
   `Project` one came with the repository. The header lists them all
@@ -580,7 +581,7 @@ sandbox  started  language servers: gopls, pyright
 | The first | The container, the runtime it runs under (`gVisor (name)` under [gVisor](sandbox.md#gvisor), else the name of the runtime, `runc` as a rule) and its image |
 | `limits` | `CLAUDE_AIRLOCK_MEMORY`, `CLAUDE_AIRLOCK_PIDS` and `CLAUDE_AIRLOCK_CPUS` as they were set |
 | `network` | Whether `CLAUDE_AIRLOCK_NET_FILTER` was on |
-| `recorded` | What the launcher kept of the session from outside it: its connections, its processes, or under gVisor its memory and CPU use alone |
+| `recorded` | What the launcher kept of the session from outside it: its connections, its processes, or under gVisor its memory and CPU use alone. And `requests to the model` with `CLAUDE_AIRLOCK_API_LOG=1`, which the session writes itself, see [The requests to the model](#the-requests-to-the-model) |
 | `open` | What was open that is closed by default: the SSH agent, the Docker socket, a writable `~/.claude` config, the history of other projects, the connectors, telemetry. Not there when nothing was |
 | `mounted` | The directories mounted next to the project. Not there without any |
 | `plugins` | The plugins switched on in `~/.claude/settings.json` and the settings of the project, each as `name@marketplace` with the version installed. Not there without any |
@@ -618,6 +619,81 @@ refused has 200 lines of its own and is counted apart (`refused sign`):
 asking for what is refused costs nothing, and any number of those does
 not use up the lines of what the session was let do after them.
 
+## The requests to the model
+
+A transcript tells what a session did. It does not hold all the model was
+given to do it with: the system prompt, the definitions of the tools,
+what Claude Code adds to a prompt on its own, and the requests it makes
+besides the conversation (a title, a summary, what a fetched page says).
+With `CLAUDE_AIRLOCK_API_LOG=1` Claude Code writes each request and each
+answer out, and the launcher keeps them and notes a line per request:
+
+```
+claude   request  claude-fable-5-2  sent 412 kB: tools 61 kB, system 14 kB, messages 336 kB  tokens: 96.2k in (95.8k cached), 310 out  tool_use  kept as 000041
+agent    request  claude-haiku-5-5  sent 53 kB: tools 16 kB, system 3 kB, messages 33 kB  tokens: 18.3k in (0 cached), 4 out  end_turn  kept as 000042  agent:builtin:general-purpose
+claude   request  claude-haiku-5-5  sent 9 kB: system 1 kB, messages 8 kB  tokens: 2.1k in (0 cached), 12 out  end_turn  kept as 000043  for: generate_session_title  no step of the transcript
+claude   request  claude-fable-5-2  sent 415 kB: tools 61 kB, system 14 kB, messages 339 kB  NO ANSWER was noted  kept as 000044
+```
+
+| Part | Says |
+| --- | --- |
+| The model | The one the request named |
+| `sent` | How long the body of the request was, and how much of it the definitions of the tools, the system prompt and the conversation took |
+| `tokens` | What the API says the request used: the tokens read, how many of them from the cache, and those written. Then why the model stopped (`end_turn`, `tool_use`, `max_tokens`) |
+| `kept as` | The number the two bodies are kept under, in the directory the header names: `000041.request.json` and `000041.response.json`. `bodies NOT KEPT` when they are not, `bodies NO LONGER KEPT` once they have gone |
+| `for:` | What Claude Code made the request for when that is not the conversation, as it names it (`compact`, `generate_session_title`, `web_fetch_apply`). A request of a subagent has the kind of the subagent instead |
+| `no step of the transcript` | The answer is no step of the session's transcript nor of those of its subagents: the model was asked besides the conversation |
+| `of session` | Claude Code says the request is of another session of the project, which ran at the same time or went on in the same container (`/clear`) |
+| `NO ANSWER was noted` | The request was written out and no answer to it was by the time the session was over: a turn that was interrupted, or a request that failed |
+
+The header says how many there were, how much they sent in all and where
+the bodies are:
+
+```
+# requests    44 to the model, 9 MB sent, 1 without an answer
+# requests    bodies kept in /home/me/.local/state/claude-airlock/api-log/claude-api-1767344531
+```
+
+- A body is the JSON Claude Code sent or was answered with, the answer
+  put together from the stream. What the model thought is left out of
+  both by Claude Code (`<REDACTED>`). `jq .system 000041.request.json`
+  shows the system prompt of a request, `jq '.tools[].name'` its tools,
+  `jq '.messages[-1]'` what was added to the conversation last.
+- `--json` has the ids Claude Code gives a request, the ones a
+  transcript knows the step by: `request_id` is the `requestId` of its
+  entries, `message_id` their `message.id` and `message_uuid` the `uuid`
+  of the last of them. With them `claude_session`, `source`, `answered`,
+  `sent`, `tools`, `system`, `messages`, `tool_count`, `message_count`,
+  `received`, the tokens under the names a `step` has them by, `stop`,
+  `kept`, and `no_step` on a request that is no step of the transcript.
+- It is the session's own word, as the transcript is: Claude Code writes
+  the files from inside the sandbox, and what else runs there can write
+  them too. The launcher takes each request out of the session's reach
+  a moment after its answer is whole, and says when it did. What did go
+  to the model's API is told by the capture, see
+  [The network](#the-network): the bytes a session sent there should
+  come to about what `sent` adds up to, and more by what else Claude
+  Code asks that host.
+- A request shows once it is answered, at the time the launcher took it,
+  so after the first lines of what the model then did. One without an
+  answer shows when the session ends.
+- What is kept is bounded, a session can write any number of files of
+  any length. A body of more than 48 MB is not read (the API takes no
+  request of more than 32 MB), no more than 1 GB of bodies is kept of
+  one session, no more than 4 GB read and no more than 2000 requests
+  noted. Past the first a request is noted without its bodies
+  (`bodies NOT KEPT`), past the second by how long its files are alone,
+  and past the third it is counted and said as
+  `NOT RECORDED one by one`, which `--failed` keeps.
+- A body holds everything the session read up to it, and the ids of
+  your account. It is kept for you alone, as a transcript is, and for
+  14 days. The oldest sessions go sooner once there is more than 4 GB
+  in all, which is looked at when a session starts. The line of a
+  request stays in the record after its bodies have gone.
+- A trace of a session that still runs has its requests up to a few
+  seconds ago: one is noted a moment after its answer is in the
+  transcript.
+
 ## When a session ends
 
 The launcher says what is worth a look, and is silent when there is
@@ -643,6 +719,8 @@ claude-airlock: of this session, claude-airlock --trace has the rest:
   the transcript of 3fa9c0de was removed, --trace shows the launcher's copy of it
   23 transcripts of subagents of 3fa9c0de were neither copied nor read, past the first 1000: what those subagents did is not told
   ssh agent 4 requests, 2 signatures
+  requests 44 to the model, 9 MB sent, 1 without an answer
+  requests bodies kept in /home/me/.local/state/claude-airlock/api-log/claude-api-1767344531
 ```
 
 A destination is known by its name, which is the session's own word. An
@@ -673,11 +751,14 @@ log:
 | `door-use.jsonl` | A line per use of the SSH agent and the Docker socket | The latest 5000 |
 | `session-starts.jsonl` | How each session was started, and when it was over | The latest 2000 lines |
 | `claude-code-changes.jsonl` | A line per change line mode found in what Claude Code says | The latest 1000 |
+| `api-log` | With `CLAUDE_AIRLOCK_API_LOG=1`, the requests each session sent to the model and the answers, a directory per session | For 14 days, 1 GB a session at most. Past 4 GB in all the oldest sessions go, when the next one starts |
+| `api-calls.jsonl` | A line per request to the model | The latest 5000 |
 | `destinations.json` | What each project is known to reach | 2000 destinations per project |
 
 The directory also holds what is not a record: the launcher's locks, the
-lines typed in line mode, and `history`, what the sessions of each project
-remember (see
+lines typed in line mode, `api-drop`, where a running session leaves its
+requests to the model until the launcher takes them, and `history`, what
+the sessions of each project remember (see
 [What is read-only or hidden](sandbox.md#what-is-read-only-or-hidden)).
 
 ## Following a session

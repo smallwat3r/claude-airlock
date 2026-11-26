@@ -48,12 +48,16 @@ from ..recording.recorder import (
 )
 from ..recording.started import start_summary
 from ..settings import Host
+from .api_events import place_calls
 from .entries import (
+    NOT_ALL_HELD,
+    NOT_ALL_READ,
     entry_times,
     prompts,
     read_entries,
     session_files,
     short_id,
+    step_of,
     title,
     tool_calls,
     unreadable_lines,
@@ -196,6 +200,25 @@ def _transcript_side(
     return left + removed, left if read.entries else removed
 
 
+def _steps_told(read: Sequence[ReadTranscript], unread: int) -> set[str] | None:
+    """The ids of the steps of the model that the transcripts of a
+    session and of its subagents tell of, with what was taken out of
+    them: what a request to the model is looked for among, see
+    place_calls. None when they were not all read, a step that is not
+    among them may then be in what was not."""
+    if unread:
+        return None
+    steps: set[str] = set()
+    for of_one in read:
+        for entry in (*of_one.entries, *of_one.compared.gone):
+            if entry.get("text") in (NOT_ALL_READ, NOT_ALL_HELD):
+                return None
+            step = step_of(entry)
+            if step:
+                steps.add(step)
+    return steps
+
+
 def session_events(
     path: Path,
     host: Host,
@@ -244,6 +267,8 @@ def session_events(
         net_lines += unseen_summary(mark_unseen(told, recorded.watched))
         # Over all of the sessions' stay, as the network is, see stay
         noted_rows, noted = noted_events(host, *recorded.stay)
+        # Each request to the model next to the steps the transcripts have
+        place_calls(noted, path.stem, _steps_told([own, *subagents], unread))
     header = [
         *_session_header(own, subagents, project_dir, planted, unread, taken),
         *(

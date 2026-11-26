@@ -72,6 +72,9 @@ class Kind(enum.StrEnum):
     COMMAND = "command"
     # What a step of the model used
     STEP = "step"
+    # A request Claude Code made to the model, as the launcher kept it,
+    # see recording/api_log.py
+    REQUEST = "request"
     # What the session was told and became, see told.py
     CONTEXT = "context"
     TASK = "task"
