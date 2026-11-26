@@ -15,12 +15,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: shellcheck docker/squid-ask-helper.sh test/smoke/run.sh test/smoke/inside/*.sh
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      # ruff, its formatter, shellcheck and mypy, as the Makefile runs them.
       # Which files and which rules: pyproject.toml. Which versions: uv.lock
-      - run: uv run --locked ruff check
-      - run: uv run --locked ruff format --check
-      - run: uv run --locked mypy
+      - run: make lint types
 
   test:
     runs-on: ${{ matrix.os }}

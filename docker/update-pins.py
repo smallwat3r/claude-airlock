@@ -2,8 +2,9 @@
 """Refresh every pinned version, sha256 and image digest of the sandbox.
 
 Covers the Dockerfile parts (base, tail, features, plus your own features in
-~/.config/claude-airlock/features) and the sidecar images in
-claude_airlock/sandbox/egress_proxy.py and socket_proxy.py.
+~/.config/claude-airlock/features), the sidecar images in
+claude_airlock/sandbox/egress_proxy.py and socket_proxy.py, and the actions
+of the CI workflow, each pinned to the commit of its latest release.
 A pin that appears in none of the files is skipped, so removing a feature
 needs no change here.
 
@@ -35,6 +36,9 @@ REGISTRY_ACCEPT = (
 IMAGE_REF = r"(?<![\w./-])([a-z0-9][a-z0-9._/-]*):([\w.-]+)@sha256:[0-9a-f]{64}"
 # name==version, as written in the uv pip install lines
 PYPI_PIN = r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]*)==(\d[\w.]*)"
+# An action of a workflow, pinned to a commit and named by its tag after it
+ACTION_PIN = r"uses: ([\w.-]+/[\w.-]+)@[0-9a-f]{40} # [\w.+-]+"
+COMMIT = re.compile(r"[0-9a-f]{40}")
 # What a pin is written as: the digest of an image, and a version or a
 # checksum, see plain
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -65,6 +69,22 @@ def github_latest_tag(repo: str) -> str:
     if not tag:
         sys.exit(f"failed to resolve latest release of {repo}")
     return tag
+
+
+def tag_commit(repo: str, tag: str) -> str:
+    """The commit a tag of a repository on GitHub points to, through the
+    tag object of one that is annotated."""
+    target = fetch_json(f"https://api.github.com/repos/{repo}/git/ref/tags/{tag}")
+    found = target["object"]
+    # A tag of a tag is followed, not for ever
+    for _ in range(3):
+        if found["type"] != "tag":
+            break
+        found = fetch_json(found["url"])["object"]
+    commit = found["sha"]
+    if found["type"] != "commit" or not COMMIT.fullmatch(commit):
+        sys.exit(f"failed to resolve the commit of {repo} {tag}, got {found!r}")
+    return commit
 
 
 def image_digest(image: str, tag: str) -> str:
@@ -269,6 +289,18 @@ def pin_digests(pins: Pins) -> None:
         print(f"{image}:{tag} {digest}")
 
 
+def pin_actions(pins: Pins) -> None:
+    for repo in sorted(pins.findall(ACTION_PIN)):
+        tag = plain(github_latest_tag(repo), repo)
+        commit = tag_commit(repo, tag)
+        pins.substitute(
+            rf"uses: {re.escape(repo)}@[0-9a-f]{{40}} # [\w.+-]+",
+            f"uses: {repo}@{commit} # {tag}",
+            repo,
+        )
+        print(repo, tag, commit)
+
+
 def arg_marker(arg: str) -> str:
     """The marker of a pin that is an ARG of a Dockerfile."""
     return rf"(?m)^ARG {arg}="
@@ -302,6 +334,7 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (arg_marker("GOPLS_VERSION"), pin_gopls),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),
+    (ACTION_PIN, pin_actions),
 ]
 
 
@@ -315,6 +348,7 @@ def default_paths() -> list[Path]:
         *sorted((config / "claude-airlock" / "features").glob("*.Dockerfile")),
         here.parent / "claude_airlock" / "sandbox" / "egress_proxy.py",
         here.parent / "claude_airlock" / "sandbox" / "socket_proxy.py",
+        here.parent / ".github" / "workflows" / "ci.yml",
     ]
 
 
