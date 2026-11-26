@@ -297,8 +297,13 @@ def own_statusline_args(
     but what the launcher mounts: a path anywhere else could be a
     program of the image, which the host's must not stand in for. Not
     what is in the project or a directory mounted next to it (mounted),
-    which is there already, and not a file whose name says it holds
-    secrets (see hidden_files of mounts.py). What the script needs
+    which is there already, not a file whose name says it holds
+    secrets (see hidden_files of mounts.py), and not one in a directory
+    that is never a session's to have (see kept_out of mounts.py): the
+    user's keys, the launcher's settings and records. Where a session
+    can write the settings (CLAUDE_AIRLOCK_RW_CONFIG, or settings kept
+    as a link into a directory it is given), it names the file, and
+    would be given any of the home it named. What the script needs
     besides itself has to be in the image, or in a directory mounted
     next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
     for path in _configured_statusline(host):
@@ -312,6 +317,15 @@ def own_statusline_args(
         names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
         if any(names_secrets(name, patterns) for name in names):
             warn(f"the statusline {path} is not mounted: its name is one of secrets")
+            continue
+        # Claude's own directory is the one where a statusline is kept as
+        # a rule, and what of it a session has is the launcher's to say
+        kept = kept_out(path, host, but=(host.claude_dir,))
+        if kept:
+            warn(
+                f"the statusline {path} is not mounted: {kept} is not a"
+                " session's to have"
+            )
             continue
         inner = os.path.relpath(path, host.home)
         in_claude = os.path.relpath(path, host.claude_dir)

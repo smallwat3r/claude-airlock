@@ -211,7 +211,9 @@ where the settings name it, whether it is the program
   `jq`, Python and Node.js are), and what it reads besides in a directory
   mounted with `CLAUDE_AIRLOCK_EXTRA_DIRS_RO`.
 - A file with the name of a secrets file (`.env`, `.netrc`) is not
-  mounted.
+  mounted, nor one in a directory no session is given: `~/.ssh`,
+  `~/.gnupg`, the launcher's settings and its records, by where the path
+  leads. The launch says so.
 - Only the statusline of `~/.claude/settings.json` on the host, not one a
   project's settings name.
 - It can show the sandbox from the variables a session has of how it was

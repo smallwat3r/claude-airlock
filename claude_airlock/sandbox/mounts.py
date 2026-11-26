@@ -44,6 +44,21 @@ def _kept_out(host: Host) -> list[str]:
     ]
 
 
+def kept_out(path: str, host: Host, but: Sequence[str] = ()) -> str:
+    """The directory that is never a session's to have which a file is
+    in, see _kept_out, empty when it is in none. By the path as it is
+    written and by where it leads: a link to a key is the key. But for
+    the directories given, which whoever asks handles itself."""
+    real = os.path.realpath(path)
+    for kept in _kept_out(host):
+        if kept in but:
+            continue
+        for file, directory in ((path, kept), (real, os.path.realpath(kept))):
+            if file.startswith(directory.rstrip("/") + "/"):
+                return kept
+    return ""
+
+
 def _reaches(one: str, other: str) -> bool:
     """Whether one of two directories is the other or is inside it,
     either way round: mounting the first brings in the second, or a part

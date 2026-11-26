@@ -252,3 +252,34 @@ class InstallTest(LauncherTest):
             assert len(result.flags) == before, command
         said = self.launched_with("~/.netrc").stderr
         assert "is not mounted: its name is one of secrets" in said
+
+    def test_what_is_kept_out_of_every_session_is_no_statusline(self):
+        # Where a session can write the settings, it names the file
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("a key\n")
+        (self.home / "status").symlink_to(key)
+        config = self.home / ".config" / "claude-airlock" / "config"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.touch()
+        before = len(self.launched_with().flags)
+        for command in (
+            "~/.ssh/id_ed25519",
+            "cat ~/.ssh/id_ed25519",
+            # By where it leads too
+            "~/status",
+            "bash ~/.config/claude-airlock/config",
+        ):
+            result = self.launched_with(command)
+            assert result.status == 0, (command, result.stderr)
+            assert len(result.flags) == before, command
+            assert "is not a session's to have" in result.stderr, command
+        said = self.launched_with("~/status").stderr
+        assert (
+            f"the statusline {self.home}/status is not mounted: {self.home}/.ssh"
+            " is not a session's to have"
+        ) in said
+        # One of the user's own in ~/.claude is mounted as before
+        own = self.home / ".claude" / "line.sh"
+        own.touch()
+        assert [f for f in self.launched_with(str(own)).flags if "line.sh" in f]
