@@ -34,24 +34,27 @@ What you get:
 - **A check when it ends.** The launcher warns when a session changed a
   file that runs commands on the host, a git hook or a Makefile say.
 - **Line mode.** Claude Code with a simpler UI that shows more than the
-  native one: a prompt, and above it what the session does as it does it.
-  Under each command the connections it made and how they ended, the
-  files it changed, who allowed it, what each step cost, how much memory
-  and CPU the sandbox uses, and each use of an opt-in door.
+  native one: a prompt, and above it what the session does as it does it,
+  see [Line mode](#line-mode).
 - **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
   each off until you switch it on.
 
 Contents:
 
-- [Requirements](#requirements), [Install](#install) and [Usage](#usage),
-  with the [settings](#settings)
-- [What the sandbox does](#what-the-sandbox-does) and its
-  [known limits](#known-limits)
-- [Reviewing a session](#reviewing-a-session) with `--trace`
+- [Requirements](#requirements)
+- [Install](#install)
+- [Usage](#usage)
+  - [Login](#login)
+  - [Settings](#settings)
+  - [The config file](#the-config-file)
+- [What the sandbox does](#what-the-sandbox-does)
+- [Known limits](#known-limits)
+- [Reviewing a session](#reviewing-a-session), with `--trace`
 - [Line mode](#line-mode), Claude Code without its native UI
 - [The image](#the-image) and its features
-- [Statusline](#statusline), [Editor integration](#editor-integration)
-  and [Tests](#tests)
+- [Statusline](#statusline)
+- [Editor integration](#editor-integration)
+- [Tests](#tests)
 
 ## Requirements
 
@@ -103,7 +106,7 @@ claude-airlock --rebuild             # clean image rebuild, then exit
 claude-airlock --prune               # delete all sandbox images but the current one
 claude-airlock --dockerfile          # print the generated Dockerfile, then exit
 
-# The egress filter, see "The opt-in doors"
+# The egress filter, see docs/sandbox.md
 claude-airlock --net-log             # domains the egress filter denied
 claude-airlock --net-reload          # restart the egress filter
 
@@ -122,9 +125,9 @@ CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock  # or in the config file, for every se
 
 ### Login
 
-A session has the login of `claude` on the host, and what either renews
-is the other's a moment later. On macOS that login is in the Keychain,
-where the launcher reads and writes it.
+A session uses the login of `claude` on the host. When either of the two
+renews it, the other has the new one a moment later. On macOS that login
+is in the Keychain, where the launcher reads and writes it.
 
 So log in with `claude` on the host. Or in a session, with the native UI,
 as [line mode](#line-mode) has no `/login`:
@@ -184,13 +187,13 @@ The container and its image:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `CLAUDE_AIRLOCK_FEATURES="go typst"` | `features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
+| `CLAUDE_AIRLOCK_FEATURES="go typst"` | `~/.config/claude-airlock/features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
 | `CLAUDE_AIRLOCK_MEMORY=32g` | `16g` | Memory limit. Below about 10g, `/tmp` and the other tmpfs shrink to fit in half of it |
 | `CLAUDE_AIRLOCK_PIDS=1024` | `512` | Process limit |
 | `CLAUDE_AIRLOCK_CPUS=4` | every CPU | CPU limit, a fraction like `1.5` works too. A session at its limit runs slower, nothing is ended |
 | `CLAUDE_AIRLOCK_RUNTIME=runsc-hostnet` | Docker's own | Container runtime, as registered in Docker. For gVisor see [docs/sandbox.md](docs/sandbox.md#gvisor) |
 
-The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the two
+The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the
 records in [docs/trace.md](docs/trace.md).
 
 ### The config file
@@ -206,9 +209,9 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 ```
 
 - The environment wins, so one session can override the file. A variable
-  that is set but empty says nothing, the file is asked next, but for
-  `CLAUDE_AIRLOCK_FEATURES` and `CLAUDE_AIRLOCK_SHARED_DIR`, where empty
-  says none.
+  that is set but empty counts as not set, and the value of the file is
+  used. The exceptions are `CLAUDE_AIRLOCK_FEATURES` and
+  `CLAUDE_AIRLOCK_SHARED_DIR`, where empty means none.
 - Values are taken literally, without quotes. A leading `~` is your home
   directory in the settings that take a path. A value in quotes, or with
   blanks around it, stops the launcher: taken as it is, it would hide or
@@ -225,8 +228,9 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 
 What a session is given and kept from: what is mounted and how, what is
 read-only or hidden, the hardening of the container, the check of the files
-that run code on the host when a session ends, and the opt-in doors (the SSH
-agent, the Docker socket). See [docs/sandbox.md](docs/sandbox.md).
+that run code on the host when a session ends, and the opt-in doors (the
+egress filter, the SSH agent, the Docker socket). See
+[docs/sandbox.md](docs/sandbox.md).
 
 ## Known limits
 
@@ -248,52 +252,25 @@ do on its own, also when something it read told it to:
   It names them, it does not read them for you, and its list is not
   whole: a script a Makefile calls, what is in `node_modules`, and any
   build file it has no name for are still yours to review in the diff.
-- `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
-  plugin's hook scripts are not protected the way `settings.json` is. A
-  change to them is reported when the session ends, not prevented.
 - With the network open, a session reaches whatever the host listens on,
   like the rest of your network. Only the egress filter keeps it off.
-- The MCP servers you set up for every project on the host are not in the
-  sandbox: the config it starts from leaves them out, they come with
-  tokens. Add the ones you want there from inside a session.
-- Of the history of other projects, some is still there to read: the
-  transcripts of a project first used after the session started, the paths
-  of the projects you ran in the sandbox (in its `.claude.json`), and what
-  Claude Code keeps by session rather than by project (`jobs`, its debug
-  log) of the other sandboxed sessions. Those of the host are not there.
 - The login is in the sandbox, a session can read it and use it elsewhere.
   It can replace it too: what a session writes as its login is carried to
   the host, as a renewal has to be, so a session can log the host's
   `claude` out, or into another account. Only what does not read as a
   login is kept from the host.
-- The sandboxed sessions of every project share one `.claude.json`. An
-  MCP server a session adds there is started by the next session of
-  another project. The launcher says so when the session ends, it does
-  not prevent it.
 - The egress allowlist limits what a session can reach, not what it can
   send there. GitHub, npm and Anthropic's API, all on the list, take
   uploads from whoever holds a token, and a session needs none of yours:
   what it read can come with one of its own, to push to a repository or
   a gist, or to publish a package. With a forwarded SSH agent or a
   `GH_TOKEN` it does so as you.
-- The filter goes by the name a connection asks the proxy for, and does
-  not look into what is then sent over it. A name on the list that is
-  served by a network of many sites (npm, PyPI and GitHub's files are)
-  leads to that network's addresses, and a session can ask there for
-  another site of the same network.
 - Secrets that are not in a shadowed file (hard-coded, or in git history)
   are readable.
-- What Python compiled of a project's modules (`__pycache__`) is run in
-  the place of a module whose time and size it carries, and no diff
-  shows it. A session can leave such a file. The launcher does not run
-  its own from there, your tools still do: remove those directories
-  before you run a project's Python on the host after a session you do
-  not trust.
-- Claude Code names the directory of a project's transcripts after its
-  path, with every character that is no letter or digit as a dash. Two
-  projects whose paths differ in such characters alone (`my-app` and
-  `my_app`) share one, and a session of either reads what the other's
-  sessions said and remember.
+
+The narrower ones, on plugins, MCP servers, the history of other
+projects and what the egress filter cannot tell apart, are in
+[docs/sandbox.md](docs/sandbox.md#known-limits).
 
 ## Reviewing a session
 
@@ -342,29 +319,11 @@ pinned.
 
 ## Statusline
 
-For Claude Code's native UI. The launcher has no statusline of its own
-and adds none: the one of your `~/.claude/settings.json` works in the
-sandbox as on the host. The file its command runs is mounted read-only
-where the settings name it, whether it is the program
-(`~/.claude/statusline.sh`) or the script an interpreter is given
-(`bash ~/bin/statusline.sh`):
-
-- It has to be a file of your home directory, named by its whole path.
-  A command the image has (`npx some-statusline`) needs no mount.
-- Only that file is mounted. What it runs has to be in the image (bash,
-  `jq`, Python and Node.js are), and what it reads besides in a directory
-  mounted with `CLAUDE_AIRLOCK_EXTRA_DIRS_RO`.
-- A file whose name is one of secrets (`.env`, `.netrc`) is not mounted.
-- Only the statusline of `~/.claude/settings.json` on the host, not one a
-  project's settings name.
-- It can show the sandbox from the variables a session has of how it was
-  started, `env | grep CLAUDE_AIRLOCK_` in a session lists them: the name
-  of the container, which is not set outside the sandbox, the network
-  mode and the doors that are open.
-
-[Line mode](#line-mode) does not run it. It shows a status of its own
-above its prompt, made from what it knows of the session, with the
-effort and the weekly limit of Fable while that is the model.
+With Claude Code's native UI, the statusline of your
+`~/.claude/settings.json` works in the sandbox as on the host: the file
+its command runs is mounted read-only. [Line mode](#line-mode) does not
+run it and shows a status of its own. See
+[docs/sandbox.md](docs/sandbox.md#statusline).
 
 ## Editor integration
 

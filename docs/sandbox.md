@@ -51,7 +51,7 @@ What a session is given and what it is kept from.
   before pushing.
 - The file `~/.claude/settings.json` runs as its statusline, read-only,
   when it is a file of your home directory, see
-  [Statusline](../README.md#statusline).
+  [Statusline](#statusline).
 
 ## What is read-only or hidden
 
@@ -362,3 +362,40 @@ secrets.
   filter refuses as without this, and says so when it starts. A request
   made in the first moment of a session, before the launcher knows its
   address, is refused too.
+
+## Known limits
+
+The [README](../README.md#known-limits) has the limits that change how
+you use the sandbox. The narrower ones:
+
+- `~/.claude/plugins` stays writable, Claude updates plugins itself, so a
+  plugin's hook scripts are not protected the way `settings.json` is. A
+  change to them is reported when the session ends, not prevented.
+- The MCP servers you set up for every project on the host are not in the
+  sandbox: the config it starts from leaves them out, they come with
+  tokens. Add the ones you want there from inside a session.
+- Of the history of other projects, some is still there to read: the
+  transcripts of a project first used after the session started, the paths
+  of the projects you ran in the sandbox (in its `.claude.json`), and what
+  Claude Code keeps by session rather than by project (`jobs`, its debug
+  log) of the other sandboxed sessions. Those of the host are not there.
+- The sandboxed sessions of every project share one `.claude.json`. An
+  MCP server a session adds there is started by the next session of
+  another project. The launcher says so when the session ends, it does
+  not prevent it.
+- The filter goes by the name a connection asks the proxy for, and does
+  not look into what is then sent over it. A name on the list that is
+  served by a network of many sites (npm, PyPI and GitHub's files are)
+  leads to that network's addresses, and a session can ask there for
+  another site of the same network.
+- What Python compiled of a project's modules (`__pycache__`) is run in
+  the place of a module whose time and size it carries, and no diff
+  shows it. A session can leave such a file. The launcher does not run
+  its own from there, your tools still do: remove those directories
+  before you run a project's Python on the host after a session you do
+  not trust.
+- Claude Code names the directory of a project's transcripts after its
+  path, with every character that is no letter or digit as a dash. Two
+  projects whose paths differ in such characters alone (`my-app` and
+  `my_app`) share one, and a session of either reads what the other's
+  sessions said and remember.

@@ -179,7 +179,7 @@ each: the time after a limit is when that limit starts again.
 
 - A statusline of your own (`statusLine` of the settings) is not run
   here. It is in Claude Code's native UI, see
-  [Statusline](../README.md#statusline).
+  [Statusline](sandbox.md#statusline).
 
 ## The subagents
 
