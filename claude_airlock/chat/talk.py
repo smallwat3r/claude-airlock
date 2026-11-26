@@ -10,11 +10,12 @@ asking.py): the second goes on listening meanwhile, a session whose
 subagents work on is not held up by a question nobody has answered yet.
 
 What each of them does is not here: what the session did is written by
-followed.py, a turn that is quiet is said to run by turn.py, a line that
-is the chat's own to do is done by commands.py. A command of the user's
-has a thread more while it runs, which writes what it writes: the first
-waits for it, and reads a line meanwhile only when the user is asked
-something (see shell.py)."""
+followed.py, a turn that is quiet is said to run by turn.py, how far the
+subagents of claude are is said by tasks.py, a line that is the chat's
+own to do is done by commands.py. A command of the user's has a thread
+more while it runs, which writes what it writes: the first waits for it,
+and reads a line meanwhile only when the user is asked something (see
+shell.py)."""
 
 from __future__ import annotations
 
@@ -63,6 +64,7 @@ from .reply import ReplyStream
 from .said import Session, own
 from .shell import Shell
 from .status import Sandbox, StatusLine
+from .tasks import Progress, Running, Tasks, still_running
 from .turn import Heartbeat, Turns, Usage, ended_badly, turn_line
 
 # What reaches claude for a chat, given what to tell once claude has ended
@@ -207,7 +209,9 @@ class Chat:
         self._session = Session(drift=self._drift)
         self._turns = Turns()
         self._usage = Usage(self._drift)
-        self._notices = Notices(self._page)
+        # The tasks claude started, its subagents among them
+        self._tasks = Tasks(self._drift)
+        self._notices = Notices(self._page, self._tasks)
         # What the session writes that is no message of claude's
         self._plain = PlainLines(self._page)
         self._followed = Followed(
@@ -238,13 +242,18 @@ class Chat:
             lambda: self._followed.settle(ASK_SETTLE),
         )
         self._heartbeat = Heartbeat(self._page, self._turns, lambda: self._asker.asking)
+        self._progress = Progress(
+            self._page,
+            lambda: self._tasks.running,
+            lambda: self._asker.asking or self._replies.writing,
+        )
         self._status = StatusLine(
             self._page,
             sandbox,
             self._session,
             self._usage,
             self._drift,
-            lambda: self._notices.running,
+            lambda: self._tasks.running,
         )
         self._shell = Shell(self._page, sandbox.name, lambda: self._asker.asking)
         resume = Resume(self._page, host, self._turns, self._read, handover)
@@ -586,11 +595,13 @@ class Chat:
         """Look at what the session did besides saying it: write what
         is followed, have the user asked about the hosts that wait, and
         say that a turn that is quiet still runs. The status first,
-        made again as it is by now: what claude said since may have
-        changed it, and so may the time, at which a limit starts again,
-        and how wide the terminal is. What is written next then has it
-        under it as it is."""
+        made again as it is by now, and with it how far the subagents
+        of claude are, which it counts: what claude said since may have
+        changed them, and so may the time, at which a limit starts
+        again, and how wide the terminal is. What is written next then
+        has them under it as they are."""
         self._status.refresh()
+        self._progress.show()
         self._followed.show()
         if self._hosts:
             self._hosts.look()
@@ -724,7 +735,7 @@ class Chat:
         if not turn.guarded:
             # Not of a turn that was stopped for what claude read: it has
             # not finished, and what comes next is said where it stopped
-            ready = ready_line(self._page.layout, self._notices.running)
+            ready = ready_line(self._page.layout, self._tasks.running)
             self._page.put([ready])
         if not turn.interrupted and time.monotonic() - turn.started >= LONG_TURN:
             self._console.bell()
@@ -894,15 +905,16 @@ def _waiting_line(layout: Layout) -> Shown:
     return layout.header([labelled("chat", WAITING)], READY_STYLE)[0]
 
 
-def ready_line(layout: Layout, running: int = 0) -> Shown:
+def ready_line(layout: Layout, running: Running | None = None) -> Shown:
     """What is said once a turn is over, for the eye to find where claude
     stopped and the prompt is the user's again: bright green in colour.
-    With tasks of claude's that still run, it says so: the turn is over
-    and the work is not, claude takes up again when one of them ends."""
+    With subagents or other tasks of claude's that still run, it says
+    so: the turn is over and the work is not, claude takes up again
+    when one of them ends."""
     said = READY
-    if running:
-        tasks = "1 task still runs" if running == 1 else f"{running} tasks still run"
-        paused = f"claude has paused, {tasks}, it goes on when one ends"
+    left = still_running(running) if running else ""
+    if left:
+        paused = f"claude has paused, {left}, it goes on when one ends"
         said = labelled("ready", paused)
     return layout.header([said], READY_STYLE)[0]
 

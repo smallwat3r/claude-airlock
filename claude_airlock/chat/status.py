@@ -1,9 +1,10 @@
 """The status of a chat, above its prompt as the head of a shell's prompt
 is: the sandbox it runs in, then the model and the effort it is asked
-for, the permission mode when it changed, the tasks claude left to run,
-how full its context is, the limits of the account and what the session
-cost. Made again whenever what it says may have changed, and said in
-full when /status asks, a line for each thing.
+for, the permission mode when it changed, the subagents of claude that
+run and the tasks it left to run, how full its context is, the limits of
+the account and what the session cost. Made again whenever what it says
+may have changed, and said in full when /status asks, a line for each
+thing.
 
 It takes one row where the terminal has room for it, said shorter if
 need be, and two where it has not: the sandbox over the session, or the
@@ -52,6 +53,7 @@ from .console import Page
 from .drift import Drift
 from .said import Session
 from .screen import columns_at_most
+from .tasks import Running, rows_in_full
 from .turn import Usage, tokens
 
 # The windows of the limits of the account that are shown, as claude
@@ -102,7 +104,8 @@ class Rank(enum.IntEnum):
     next to the project, a limit that is far from used up, and last how
     full the context is while it is far from full. What has no rank is
     never left out: the sandbox, its network and what is open to it, the
-    model, the mode, the tasks that run, and whatever is nearly used up."""
+    model, the mode, the subagents and the tasks that run, and whatever
+    is nearly used up."""
 
     COST = 1
     RESET = 2
@@ -340,13 +343,17 @@ def _mode_shown(session: Session) -> bool:
     )
 
 
-def named_group(session: Session, tasks: int = 0) -> Group:
+# Nothing that claude started runs
+NOTHING = Running()
+
+
+def named_group(session: Session, running: Running = NOTHING) -> Group:
     """How claude is set and what it does, as the parts of the status
     that are said together: the model with how it is asked to work, the
-    permission mode when the status says it, and the tasks claude
-    started that still run. The mode stands out, it changes what a
-    prompt does, and so do the tasks: claude goes on by itself when one
-    of them ends."""
+    permission mode when the status says it, and what claude started
+    that still runs, its subagents and its other tasks. The mode stands
+    out, it changes what a prompt does, and so does what runs: claude
+    goes on by itself when one of them ends."""
     model = _model_of(session)
     named = [Part(BOLD, model)] if model else []
     if session.effort:
@@ -355,8 +362,10 @@ def named_group(session: Session, tasks: int = 0) -> Group:
         named.append(Part(DIM, "fast", rank=Rank.EFFORT))
     if _mode_shown(session):
         named.append(Part(BOLD, f"mode:{session.mode}"))
-    if tasks:
-        named.append(Part("", f"tasks:{tasks}"))
+    if running.agents:
+        named.append(Part("", f"agents:{len(running.agents)}"))
+    if running.others:
+        named.append(Part("", f"tasks:{running.others}"))
     return named
 
 
@@ -506,19 +515,41 @@ def _limits_in_full(limits: Limits, model: str, now: float) -> list[str]:
     return said
 
 
+def _running_in_full(running: Running) -> list[tuple[str, str]]:
+    """What claude started that still runs as /status says it: how many
+    subagents, with those of their lot that have ended, and under that
+    each of them with how far it is (see rows_in_full of tasks.py),
+    then how many other tasks."""
+
+    def still(count: int) -> str:
+        return "1 still runs" if count == 1 else f"{count} still run"
+
+    said = []
+    if running.agents:
+        ended = f", {len(running.ended)} ended" if running.ended else ""
+        runs = f"{still(len(running.agents))}{ended}"
+        said.append(("agents", f"{runs}, claude goes on when one ends"))
+        said += [("", row) for row in rows_in_full(running)]
+    if running.others:
+        runs = still(running.others)
+        said.append(("tasks", f"{runs}, claude goes on when one ends"))
+    return said
+
+
 def said_in_full(
     sandbox: Sandbox,
     session: Session,
     usage: Usage,
     limits: Limits,
-    tasks: int = 0,
+    running: Running = NOTHING,
     now: float | None = None,
 ) -> list[str]:
     """What /status says: all that the status above the prompt says in
     short, in words and never cut, each thing on a line after what it is
-    about, and what the status has no room for at all: how many tokens
-    the context holds, the day each limit starts again, the session and
-    the version of Claude Code. What is not known yet is left out."""
+    about, and what the status has no room for at all: how far each
+    subagent is, how many tokens the context holds, the day each limit
+    starts again, the session and the version of Claude Code. What is
+    not known yet is left out."""
     now = time.time() if now is None else now
     model = _model_of(session)
     said = sandbox.said_in_full()
@@ -530,9 +561,7 @@ def said_in_full(
     if session.mode:
         plans = ", claude plans and changes nothing" if session.mode == PLAN else ""
         said.append(("mode", session.mode + plans))
-    if tasks:
-        runs = "1 still runs" if tasks == 1 else f"{tasks} still run"
-        said.append(("tasks", f"{runs}, claude goes on when one ends"))
+    said += _running_in_full(running)
     if usage.window and usage.context:
         used = min(100, round(100 * usage.context / usage.window))
         held = f"{tokens(usage.context)} of {tokens(usage.window)} tokens"
@@ -560,20 +589,20 @@ class StatusLine:
         session: Session,
         usage: Usage,
         drift: Drift | None = None,
-        tasks: Callable[[], int] = lambda: 0,
+        running: Callable[[], Running] = Running,
     ):
         self._page = page
         self._sandbox = sandbox
         self._session = session
         self._usage = usage
-        # How many of the tasks claude started still run
-        self._tasks = tasks
+        # What claude started that still runs, see Tasks.running
+        self._running = running
         self.limits = Limits(drift=drift or Drift())
 
     def refresh(self) -> list[str]:
         """Make the status and keep it above the prompt, in the rows
         that fit the page as wide as it is now. Returns them."""
-        named = named_group(self._session, self._tasks())
+        named = named_group(self._session, self._running())
         used = used_groups(self._session, self._usage, self.limits)
         rows = status_rows(self._sandbox.parts(), named, used, self._page.width)
         lines = [row_text(row, self._page.layout.colour) for row in rows]
@@ -585,6 +614,6 @@ class StatusLine:
         self.refresh()
         self._page.say(
             said_in_full(
-                self._sandbox, self._session, self._usage, self.limits, self._tasks()
+                self._sandbox, self._session, self._usage, self.limits, self._running()
             )
         )

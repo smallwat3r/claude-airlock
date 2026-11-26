@@ -269,7 +269,7 @@ LOCALS = (
     Local(
         STATUS,
         "/status",
-        "the sandbox, model, context, limits and cost in full, or /statusline",
+        "the status in full, with how far each subagent is, or /statusline",
         Commands._said_status,
     ),
     Local(

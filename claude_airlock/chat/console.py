@@ -19,12 +19,12 @@ prompt after each of its lines would stand among them, and a line can be
 typed there without one. It is written once the turn is over.
 
 The prompt of a line can have a head, lines above it as a shell's prompt
-has (the status, see status.py), and above that a line that says a turn
-still runs, see set_working. At a terminal it goes with the
-prompt, under what is written, and is written again in its place when it
-changes. Anywhere else it is written with the prompt of each line read,
-and once it changed under what is written next, with the prompt: never
-for the change alone, see _head_changed.
+has (the status, see status.py), and above that the lines that say what
+runs now, a turn and the subagents of claude, see set_working. At a
+terminal it goes with the prompt, under what is written, and is written
+again in its place when it changes. Anywhere else it is written with the
+prompt of each line read, and once it changed under what is written
+next, with the prompt: never for the change alone, see _head_changed.
 
 A line the user typed is written again in a style of its own once it is
 entered, for what they said to be found among what is written around it.
@@ -233,8 +233,9 @@ class Console:
     ):
         self._lock = threading.Lock()
         self._given_out = out
-        # How many columns what is written to has
+        # How many columns what is written to has, and how many rows
         self.columns = columns or (lambda: shutil.get_terminal_size().columns)
+        self.height: Callable[[], int] = lambda: shutil.get_terminal_size().lines
         # The style of a line once it is entered, none for as it was typed
         self._sent = sent
         # The line being read, as far as it is, see Prompting: had and
@@ -253,11 +254,12 @@ class Console:
         # What the line being read starts with that readline does not
         # have, see _line: editline cannot be given the start of a line
         self._begun = ""
-        # The lines above the prompt, whether the line being read has
-        # them, and what is on the screen of it, head and prompt: at a
-        # terminal what is erased, anywhere else the head last written
+        # The lines above the prompt, and above those the ones that say
+        # what runs now, see set_working. Whether the line being read
+        # has them, and what is on the screen of it, head and prompt: at
+        # a terminal what is erased, anywhere else the head last written
         self._head: list[str] = []
-        self._working = ""
+        self._working: list[str] = []
         self._headed = False
         self._shown = ""
         # Where nothing is erased: whether the prompt is held back, see
@@ -611,8 +613,8 @@ class Console:
 
     def _entered(self, line: str) -> None:
         """Write a line that was entered again in its style, in its place
-        under the head it was typed under, that head without the line that
-        said a turn still runs: it would stay on the screen, no longer
+        under the head it was typed under, that head without the lines
+        that said what ran then: they would stay on the screen, no longer
         true. Called with the lock held."""
         prompt = self._reading
         styled = bool(self._sent and line.strip())
@@ -669,7 +671,7 @@ class Console:
     def _above(self) -> str:
         """The head as it is written above the prompt of the line being
         read: none above a question, nor for a line that has none."""
-        head = [self._working, *self._head] if self._working else self._head
+        head = [*self._working, *self._head]
         if not self._headed or self._asked is not None or not head:
             return ""
         return "\n".join(head) + "\n"
@@ -682,12 +684,15 @@ class Console:
                 self._head = list(lines)
                 self._head_changed()
 
-    def set_working(self, line: str) -> None:
-        """Have this line above the head, none when empty: that a turn
-        still runs, said in its place rather than in lines that pile up."""
+    def set_working(self, lines: list[str]) -> None:
+        """Have these lines above the head, none when empty: what runs
+        now, a turn and the subagents of claude, said in its place
+        rather than in lines that pile up. It holds only while it is
+        said, and is not left above a line that was entered, see
+        _entered."""
         with self._lock:
-            if line != self._working:
-                self._working = line
+            if lines != self._working:
+                self._working = list(lines)
                 self._head_changed()
 
     def _head_changed(self) -> None:
@@ -871,6 +876,10 @@ class Page:
         # When a line was last written, for a turn that then writes
         # nothing to say that it still runs
         self.wrote = time.monotonic()
+        # What is said above the head while it holds, each as it is
+        # written: that a turn still runs, and how far the subagents are
+        self._working: list[str] = []
+        self._progress: list[str] = []
 
     @property
     def width(self) -> int | None:
@@ -963,11 +972,29 @@ class Page:
         start one as the launcher's."""
         self._console.set_head([self._rows(line)[0] for line in lines])
 
+    @property
+    def height(self) -> int:
+        """How many rows the terminal has, see Console.height."""
+        return self._console.height()
+
     def working(self, line: str) -> None:
         """Say that a turn still runs above the head, as a header line,
         or no longer when empty. See Console.set_working."""
-        shown = self._rows(self.layout.header([line])[0])[0] if line else ""
-        self._console.set_working(shown)
+        self._working = self._above_head([line] if line else [])
+        self._console.set_working([*self._working, *self._progress])
+
+    def progress(self, rows: list[str]) -> None:
+        """Say how far the subagents of claude are above the head, under
+        the line that says a turn still runs, as header lines, or no
+        longer when there are none. See Console.set_working."""
+        self._progress = self._above_head(rows)
+        self._console.set_working([*self._working, *self._progress])
+
+    def _above_head(self, texts: list[str]) -> list[str]:
+        """Texts of the chat's own as the header lines that are written
+        above the head, no more of each than a row of the terminal, as
+        of the head itself, see head."""
+        return [self._rows(line)[0] for line in self.layout.header(texts)]
 
     def say(self, notes: list[str], whole: bool = False) -> None:
         """Lines about the chat itself, as the header lines of a trace.

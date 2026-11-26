@@ -28,11 +28,12 @@ not made a path of before it is seen to be one.
 The conversation itself, the threads it takes and how it ends, is in
 talk.py. What a chat does itself with a line (/mode, /resume, !COMMAND)
 is in commands.py and shell.py, what it says of claude's doings besides
-answering in notices.py. What the egress filter asks the user about a
-host it does not allow is put by hosts.py. What claude says over the pipe
-is checked for being what it should be in said.py, and what the session
-writes there that is no message of claude's is shown by plain.py, no more
-of it than can be read."""
+answering in notices.py, and of the tasks claude started, how many of
+its subagents run and how far each is, in tasks.py. What the egress
+filter asks the user about a host it does not allow is put by hosts.py.
+What claude says over the pipe is checked for being what it should be in
+said.py, and what the session writes there that is no message of
+claude's is shown by plain.py, no more of it than can be read."""
 
 from .commands import Handover
 from .pipe import CHAT_ARGS

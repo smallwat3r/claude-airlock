@@ -10,12 +10,11 @@ import time
 from ..events import flat, labelled
 from ..report.entries import measured
 from .console import Page
+from .tasks import Tasks, ended_line, started_line
 from .turn import tokens
 
-# Of what a task or an error is said to be about
+# Of what an error is said to be about, and of how a task is said to end
 ABOUT_WIDTH = 200
-# The tasks remembered to name them when they end
-MOST_TASKS = 1000
 # How claude says an MCP server is when it can be used
 CONNECTED = "connected"
 
@@ -36,21 +35,15 @@ def _servers_line(servers: list[tuple[str, str]]) -> str:
 
 
 class Notices:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, tasks: Tasks | None = None):
         self._page = page
-        # What the tasks claude started are about, by their ids
-        self._tasks: dict[str, str] = {}
+        # The tasks claude started, told when one starts, gets further
+        # and ends: what runs of them is asked of it, see tasks.py
+        self._tasks = tasks or Tasks()
         # What claude last said of the limits of the account
         self._limit = "allowed"
         # The MCP servers claude last said it has, as they were told
         self._servers: list[tuple[str, str]] = []
-
-    @property
-    def running(self) -> int:
-        """How many of the tasks claude started have not ended: what it
-        left to run goes on after its turn, and it takes up again when one
-        ends."""
-        return len(self._tasks)
 
     def system(self, message: dict) -> None:
         """Take in what claude says of the session while a turn runs."""
@@ -65,6 +58,9 @@ class Notices:
                 self._page.say([line.rstrip()])
             case "task_started":
                 self._task_started(message)
+            case "task_progress":
+                # Said in the rows of its own, see Progress of tasks.py
+                self._tasks.progressed(message)
             case "task_notification":
                 self._task_ended(message)
 
@@ -92,21 +88,17 @@ class Notices:
     def _task_started(self, message: dict) -> None:
         """A task of claude's started: a subagent, or what it left to
         run."""
-        task = message.get("task_id")
-        if not isinstance(task, str):
-            return
-        about = flat(message.get("description") or "")[:ABOUT_WIDTH]
-        if len(self._tasks) < MOST_TASKS:
-            self._tasks[task] = about
-        self._page.note("task", f"started: {about}".rstrip())
+        task = self._tasks.started(message)
+        if task is not None:
+            self._page.say([started_line(task, self._tasks.running)])
 
     def _task_ended(self, message: dict) -> None:
-        task = message.get("task_id")
-        if not isinstance(task, str):
-            return
-        about = self._tasks.pop(task, "")
-        status = flat(message.get("status") or "ended")[:ABOUT_WIDTH]
-        self._page.note("task", f"{status}: {about}".rstrip(": "))
+        """A task of claude's has ended, in the way claude says it did:
+        completed, failed, stopped."""
+        task = self._tasks.ended(message)
+        if task is not None:
+            status = flat(message.get("status") or "ended")[:ABOUT_WIDTH]
+            self._page.say([ended_line(task, status, self._tasks.running)])
 
     def limit(self, info: object) -> None:
         """Say what claude tells of the limits of the account, when it is

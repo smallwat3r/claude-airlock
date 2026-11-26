@@ -60,7 +60,9 @@ and CPU the sandbox uses](img/line-mode.png)
 - A change of the permission mode or of the model, and at the first turn
   the MCP servers the session has, with those that are not connected,
   and again when they change.
-- Each reply, and what its subagents do.
+- Each reply, and what its subagents do: each call of theirs, and how
+  many of them run and how far each is, see
+  [The subagents](#the-subagents).
 - What the session writes besides, to its errors or as a line that is no
   message of Claude Code's, behind a `|`. No more of it than can be
   read: past 500 lines within 5 seconds a line says how many more were
@@ -80,9 +82,9 @@ and CPU the sandbox uses](img/line-mode.png)
   allow, before it is refused: see [What you type](#what-you-type).
 - After a turn, how long it took and what it cost.
 - Above the prompt, the status: the sandbox with its network mode and
-  what is open to it, the model and the effort it is asked for, how
-  full the context is and the limits of your account. See
-  [The status](#the-status).
+  what is open to it, the model and the effort it is asked for, the
+  subagents that run, how full the context is and the limits of your
+  account. See [The status](#the-status).
 
 The lines are those of `--trace`, see
 [Reading the lines](trace.md#reading-the-lines). `--trace` has the rest
@@ -105,7 +107,8 @@ each: the time after a limit is when that limit starts again.
 | `effort:high` | The effort the model is asked for, as `/effort` sets it. Not there for a model that takes none |
 | `fast` | Fast mode is on |
 | `mode:plan` | The permission mode, when it is not the one the session started in, and `plan` always |
-| `tasks:2` | The tasks claude started that still run: it goes on by itself when one ends |
+| `agents:2` | The subagents of claude that run, see [The subagents](#the-subagents) |
+| `tasks:2` | What else claude started that still runs, a command it left to run: it goes on by itself when one ends |
 | `ctx:12%` | How full the context is |
 | `5h:40% used 14:00` | The limit of the account by the hour, and when it starts again |
 | `7d:72% used Sun 12:00` | The limit by the week. When it starts again is said from 70% on |
@@ -113,8 +116,8 @@ each: the time after a limit is when that limit starts again.
 | `$1.25` | What the session cost, as Claude Code counts it |
 
 - A limit is dim, yellow from 70% used and red from 90%, and so is the
-  context. The mode and the tasks are not dimmed: they change what
-  happens next, a prompt is not acted on in `plan`.
+  context. The mode, the subagents and the tasks are not dimmed: they
+  change what happens next, a prompt is not acted on in `plan`.
 - It takes one row where the terminal is wide enough. Where it is not,
   each part is first said the shorter way it has, `5h:40% 14:00` and
   `dirs:2` for two directories. Where that is still too long it takes
@@ -140,9 +143,9 @@ each: the time after a limit is when that limit starts again.
   the effort and `fast`, the directories, such a limit itself, and the
   context while it is far from full. `...` at the end of the row says that some
   were left out, `/status` says all of it. The network, what is open to
-  the session, the model, the mode, the tasks and what is nearly used up
-  are never left out: the name of the sandbox is cut before they are
-  (`[claude-pr~]`).
+  the session, the model, the mode, the subagents, the tasks and what is
+  nearly used up are never left out: the name of the sandbox is cut
+  before they are (`[claude-pr~]`).
 - Only the limits your plan has are shown: an account without a limit by
   the hour has no `5h`. A limit that has started again since claude last
   said it is left out until claude says it anew, with its next reply.
@@ -153,9 +156,9 @@ each: the time after a limit is when that limit starts again.
   under the next line written: never a prompt of its own. Nothing is
   known of the limits before the first reply of a session.
 - `/status` says it in full, a line for each thing and none of it left
-  out, with what the status has no room for: how many tokens the context
-  holds, the day each limit starts again, the session and the version of
-  Claude Code.
+  out, with what the status has no room for: how far each subagent is,
+  how many tokens the context holds, the day each limit starts again,
+  the session and the version of Claude Code.
 
   ```
   # status      what the status above the prompt says, in full:
@@ -174,6 +177,65 @@ each: the time after a limit is when that limit starts again.
   here. It is in Claude Code's native UI, see
   [Statusline](../README.md#statusline).
 
+## The subagents
+
+Claude gives parts of the work to subagents, and waits for them or goes
+on meanwhile. What each of them does is written as it does it, the
+lines of all of them one among the other. How many of them run and how
+far each is, is said apart.
+
+```
+# agent       started: Map the auth module (Explore)
+# agent       started: Review the tests (general-purpose)  2 running
+# agent       completed: Review the tests, 3 calls, 8.1k tokens, 70s  1 running, 1 ended
+# agent       completed: Map the auth module, 12 calls, 34.5k tokens, 125s  all 2 ended
+```
+
+- A line says when one starts, with the kind of subagent it is, and
+  when it ends: how it ended (`completed`, `failed`, `stopped`) and what
+  it used in all, the calls it made, the tokens it held and the seconds
+  it ran.
+- Those that run at the same time are counted in these lines: `2 running`,
+  then `1 running, 1 ended`. One that has ended counts until all of them
+  have, a subagent started after that is counted anew. One alone is not
+  counted.
+- The status counts those that run, `agents:2`.
+- While they run, how far each is:
+
+  ```
+  # working     65s, waiting for agent
+  # agents      2 running: 15 calls, 42.6k tokens
+  #   Map the auth module: 12 calls, 34.5k tokens, Reading src/auth.py
+  #   Review the tests: 3 calls, 8.1k tokens, Running the tests
+  [claude-proj] net:open  Fable 5.2 effort:high agents:2  ctx:12%  5h:40% used 14:00
+  ```
+
+  The first row counts them and says what all of them used, those that
+  have ended too. One subagent alone has its row and no other
+  (`# agent       Map the auth module: 12 calls, ...`).
+- At a terminal these rows are above the status, and written again in
+  their place whenever a subagent gets further, not as the time goes
+  by: how long the turn has waited is in the line above them. They are
+  gone when the last one has ended, and no line you enter keeps them
+  above it.
+- Anywhere else, a shell buffer of Emacs or a file, they are lines that
+  stay, each subagent with the seconds it has run: 30 seconds after the
+  subagents started, then less and less often, never sooner than 2
+  minutes after the time before, and only when one of them got further
+  since. `/status` says them whenever you ask, each subagent whole and
+  with its kind, the first 50 of them.
+- The figures are what Claude Code says of a subagent each time it makes
+  a call. The tokens are those it holds, what it has read and written
+  so far, not what it cost. What it is at is the status it gives when
+  it gives one, else the call it made last, in the words Claude Code
+  has for it, or the name of the tool.
+- No more rows than 7, nor than a third of the rows of the terminal: of
+  more subagents than that the first have a row, and the last row says
+  how many have none (`and 3 more`).
+- A command that a subagent runs is part of what the subagent does. It
+  is no task of claude's, and `tasks` does not count it. A subagent that
+  a subagent started is one more of them.
+
 ## What you type
 
 A line can be typed at any time, claude takes it up when it can.
@@ -190,7 +252,7 @@ A line can be typed at any time, claude takes it up when it can.
 | `/mode plan` | Changes the permission mode |
 | `/resume` | Leaves this session for an earlier one of the project |
 | `/mcp` | The MCP servers of the session |
-| `/status`, `/statusline` | The status in full, a line for each thing: the sandbox, the model, the context, the limits and the cost, see [The status](#the-status) |
+| `/status`, `/statusline` | The status in full, a line for each thing: the sandbox, the model, the subagents and how far each is, the context, the limits and the cost, see [The status](#the-status) |
 | `!make test` | Runs a command in the sandbox, claude is not told |
 | `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 
