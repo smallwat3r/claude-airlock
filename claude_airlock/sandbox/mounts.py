@@ -185,7 +185,10 @@ def protected_dirs(
     change, wherever it is mounted from: the host's claude may follow
     files that are in a directory every session can write, a kit of
     skills in the shared directory for one. A path that is in no mounted
-    directory is not in the session at all, and passed over."""
+    directory is not in the session at all, and passed over. A directory
+    that is mounted from inside a protected path is a part of it, and is
+    read-only with it: mounted writable it would be written to there,
+    whatever the path around it is said to be."""
     dirs = list(dirs)
     inside: list[str] = []
     for raw in settings.protect:
@@ -195,6 +198,13 @@ def protected_dirs(
                 f"cannot protect {raw}: the project is in it, --add-dir-ro"
                 " mounts a directory read-only"
             )
+        for at, extra in enumerate(dirs):
+            if not extra.read_only and _within(extra.path, path):
+                dirs[at] = ExtraDir(extra.path, read_only=True)
+                warn(
+                    f"{extra.path} is mounted read-only: it is in {raw},"
+                    " which CLAUDE_AIRLOCK_PROTECT protects"
+                )
         roots = [host.project_dir, *(extra.path for extra in dirs)]
         found = [mounted for mounted in (_within(path, r) for r in roots) if mounted]
         if not found:
@@ -322,6 +332,23 @@ def names_secrets(name: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
+def _led_to(link: str, roots: Sequence[str]) -> list[str]:
+    """Where a link that is named as a file of secrets leads, as a
+    session has it: the secrets are in the file it points to, which is
+    readable under a name of its own that says nothing, and is hidden in
+    its place. By each mounted directory it is in. None for what is no
+    plain file, and for what is in no mounted directory, which a session
+    does not have."""
+    real = os.path.realpath(link)
+    try:
+        plain = stat.S_ISREG(os.lstat(real).st_mode)
+    except OSError:
+        return []
+    if not plain:
+        return []
+    return [found for root in roots if (found := _within(real, root))]
+
+
 def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden:
     """What to shadow: .env files (and direnv's .envrc, which commonly
     exports secrets, plus .netrc and .pypirc, which hold nothing but
@@ -329,7 +356,8 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
     files (.env.example and friends) stay readable, they exist to be read
     and hold no secrets. Regular files only: a .env directory (some
     virtualenvs) cannot take a /dev/null bind mount and would abort the
-    run. CLAUDE_AIRLOCK_SHADOW adds name globs, e.g. "*.pem:.npmrc". The
+    run. Of a link under such a name, the file it leads to, see _led_to.
+    CLAUDE_AIRLOCK_SHADOW adds name globs, e.g. "*.pem:.npmrc". The
     whole tree is walked on purpose, pruning more directories would be
     faster but could leave a real secret visible.
 
@@ -347,7 +375,8 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
         if isinstance(problem.filename, str):
             closed[problem.filename] = None
 
-    for root in [host.project_dir] + [extra.path for extra in dirs]:
+    roots = [host.project_dir] + [extra.path for extra in dirs]
+    for root in roots:
         for directory, subdirs, files in os.walk(root, onerror=not_listed):
             if not os.access(directory, os.X_OK):
                 # Listed, and not to be entered: neither what its files
@@ -361,12 +390,14 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
                     continue
                 path = os.path.join(directory, name)
                 try:
-                    plain = stat.S_ISREG(os.lstat(path).st_mode)
+                    mode = os.lstat(path).st_mode
                 except OSError:
                     # Gone since it was listed, a build or another session
                     continue
-                if plain:
+                if stat.S_ISREG(mode):
                     hidden[path] = None
+                elif stat.S_ISLNK(mode):
+                    hidden.update(dict.fromkeys(_led_to(path, roots)))
     covered = [directory for directory in closed if openable(directory)]
     if covered:
         warn(

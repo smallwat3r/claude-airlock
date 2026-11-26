@@ -72,6 +72,27 @@ class ExtraDirsTest(LauncherTest):
         assert not [flag for flag in flags if "not-mounted" in flag]
         assert f"--env=CLAUDE_AIRLOCK_PROTECT={kit}:{self.project / 'docs'}" in flags
 
+    def test_a_directory_mounted_from_inside_a_protected_path_is_read_only(self):
+        kit = self.shared / "kit"
+        (kit / "sub").mkdir(parents=True)
+        result = self.launch(
+            "--add-dir", str(kit / "sub"), CLAUDE_AIRLOCK_PROTECT="~/claude-shared/kit"
+        )
+        flags = result.flags
+        # Not writable again by being mounted on its own
+        assert f"--volume={kit / 'sub'}:{kit / 'sub'}:ro,z" in flags
+        assert f"--volume={kit / 'sub'}:{kit / 'sub'}:z" not in flags
+        assert f"--volume={kit}:{kit}:ro,z" in flags
+        assert (
+            f"{kit / 'sub'} is mounted read-only: it is in ~/claude-shared/kit,"
+            " which CLAUDE_AIRLOCK_PROTECT protects"
+        ) in result.stderr
+        # The protected path itself, mounted on its own, the same
+        flags = self.launch_anew(
+            "--add-dir", str(kit), CLAUDE_AIRLOCK_PROTECT="~/claude-shared/kit"
+        ).flags
+        assert f"--volume={kit}:{kit}:z" not in flags
+
     def test_the_directories_above_a_protected_path_are_held_in_place(self):
         deep = self.project / "a" / "b" / "kit"
         deep.mkdir(parents=True)
@@ -253,6 +274,23 @@ class ExtraDirsTest(LauncherTest):
         flags = self.launch("--add-dir", "./sub").flags
         hidden = f"--volume=/dev/null:{inside / '.env'}:ro"
         assert flags.count(hidden) == 1
+
+    def test_a_link_named_as_a_secret_has_what_it_leads_to_hidden(self):
+        kept = self.project / "config" / "production.env"
+        kept.parent.mkdir()
+        kept.write_text("SECRET=1\n")
+        (self.project / "apps").mkdir()
+        (self.project / "apps" / ".envrc").symlink_to(kept)
+        # Out of what the session has, and to no file: nothing to hide
+        outside = self.work / "elsewhere.env"
+        outside.touch()
+        (self.project / ".netrc").unlink()
+        (self.project / ".netrc").symlink_to(outside)
+        (self.project / ".pypirc").symlink_to(self.project / "config")
+        flags = self.launch().flags
+        assert f"--volume=/dev/null:{kept}:ro" in flags
+        assert not [flag for flag in flags if "elsewhere.env" in flag]
+        assert f"--volume=/dev/null:{self.project / 'config'}:ro" not in flags
 
     def test_a_secret_with_a_colon_in_its_name_is_hidden_the_long_way(self):
         # A session can make one: refused, every later launch would be

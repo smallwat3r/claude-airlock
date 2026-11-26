@@ -62,12 +62,16 @@ What a session is given and what it is kept from.
 - **What you name.** `CLAUDE_AIRLOCK_PROTECT` makes a path read-only inside
   whatever mounts it. The directories between the two cannot be renamed
   or removed in a session, their content can: a path that was moved
-  aside could be made again with other content, for the host to read.
+  aside could be made again with other content, for the host to read. A
+  directory mounted from inside a protected path is read-only too,
+  however it was asked for, and the launch says so.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty. Templates such as `.env.example` stay readable,
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
   Not hidden: one under `node_modules` or `.git`, which are not looked
-  into for them, and one made after the session started.
+  into for them, and one made after the session started. Of a link
+  under such a name, the file it leads to is hidden, where it is in a
+  mounted directory.
   - The directories above a hidden file cannot be renamed or removed in a
     session (`Device or resource busy`). A session cannot read the file,
     but it could otherwise move it under `node_modules`, where the next
