@@ -331,6 +331,32 @@ class HostHealthTest(LauncherTest):
         assert not watcher.is_alive()
         assert noted == [{"limit": "pids", "hits": 1}, {"limit": "pids", "hits": 2}]
 
+    def test_what_is_counted_just_as_the_watcher_is_stopped_is_noted_too(self):
+        events = self.cgroup / "pids.events"
+        events.write_text("max 1\n")
+        noted: list[int] = []
+        stop = threading.Event()
+        read = host_health._process_limit_hits
+
+        def then_stopped(descriptor: int) -> int | None:
+            # The limit is run into once more and the session ends, both
+            # right after the watcher has read the count
+            hits = read(descriptor)
+            if not stop.is_set():
+                with open(events, "r+b", buffering=0) as file:
+                    file.write(b"max 2\n")
+                stop.set()
+            return hits
+
+        with (
+            mock.patch.object(host_health, "_process_limit_hits", then_stopped),
+            mock.patch.object(host_health, "ASK_EVERY", 0.01),
+        ):
+            host_health.watch_process_limit(
+                str(self.cgroup), lambda **said: noted.append(said["hits"]), stop
+            )
+        assert noted == [1, 2]
+
     def test_a_cgroup_that_does_not_count_them_is_not_waited_on(self):
         never = threading.Event()
         # No pids.events, as without the controller: returns at once

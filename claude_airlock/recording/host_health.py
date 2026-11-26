@@ -246,14 +246,18 @@ def watch_process_limit(
         changed.register(events, select.POLLPRI)
         noted = 0
         while True:
+            # Asked before the read, and acted on after it: what was
+            # counted last, before it was set, is then noted too. Asked
+            # after, a count that came between the read and the stop
+            # would go with it
+            over = stop.is_set()
             hits = _process_limit_hits(events)
             if hits is None:
                 return
             if hits > noted:
                 noted = hits
                 note(limit="pids", hits=hits)
-            # After the read, so that what was counted last is noted too
-            if stop.is_set():
+            if over:
                 return
             changed.poll(ASK_EVERY * 1000)
     finally:
