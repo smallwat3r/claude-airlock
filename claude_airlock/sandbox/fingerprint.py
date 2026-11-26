@@ -276,12 +276,13 @@ def _listing_hash(listing: bytes) -> str:
     return sha256_hex(b"\0".join(_lasting_entries(listing)))
 
 
-def _included_configs(listing: bytes, config: str) -> list[str]:
+def _included_configs(listing: bytes, config: str, home: str = "") -> list[str]:
     """The files a git config has git read with it, by its listing:
     those of include.path, and of includeIf whatever its condition, which
     holds in one place and not in another. A relative one is taken from
-    where the config is, as git takes it."""
-    home = os.path.expanduser("~")
+    where the config is, as git takes it, and ~ is the home given, else
+    the one of this process."""
+    home = home or os.path.expanduser("~")
     found = []
     for entry in listing.split(b"\0"):
         name, _, value = entry.partition(b"\n")
@@ -289,6 +290,26 @@ def _included_configs(listing: bytes, config: str) -> list[str]:
             path = expand_home(os.fsdecode(value), home)
             found.append(os.path.normpath(os.path.join(os.path.dirname(config), path)))
     return found
+
+
+def included_configs(configs: Sequence[str], home: str) -> list[str]:
+    """The files that some git configs have git read with them, and
+    those that these do, each once and as git takes it (see
+    _included_configs): those that are there, no more than MOST_INCLUDED."""
+    seen = set(configs)
+    pending = list(reversed(configs))
+    found: list[str] = []
+    while pending and len(found) < MOST_INCLUDED:
+        config = pending.pop()
+        listing = git_listing(config)
+        if listing is None:
+            continue
+        for path in _included_configs(listing, config, home):
+            if path not in seen and os.path.isfile(path):
+                seen.add(path)
+                found.append(path)
+                pending.append(path)
+    return found[:MOST_INCLUDED]
 
 
 def hash_git_config(config: str, fingerprint: dict[str, str]) -> None:

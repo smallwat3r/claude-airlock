@@ -94,9 +94,13 @@ class DefaultSessionTest(LauncherTest):
     def test_no_credentials_come_with_the_git_config(self):
         git = self.home / ".config" / "git"
         (git / "templates").mkdir(parents=True)
-        (git / "config").write_text("[include]\n\tpath = ~/.config/git/work\n")
-        for name in ("ignore", "work", "credentials", "credentials-nas"):
+        # Relative, from the config that names it, as git takes it, and
+        # what that one pulls in too
+        (git / "config").write_text("[include]\n\tpath = work\n")
+        for name in ("ignore", "credentials", "credentials-nas"):
             (git / name).write_text("\n")
+        (git / "work").write_text('[includeIf "gitdir:~/w/"]\n\tpath = ~/w.gitconfig\n')
+        (self.home / "w.gitconfig").write_text("[user]\n\tname = w\n")
         # The second session of this test, after the one of setUp
         calls = self.launch().calls
         flags = [call for call in calls if call[0] == "run"][-1]
@@ -104,6 +108,8 @@ class DefaultSessionTest(LauncherTest):
             mount = f"--volume={git / name}:/home/sandbox/.config/git/{name}:ro,z"
             assert mount in flags
         assert f"--volume={git / 'work'}:{git / 'work'}:ro,z" in flags
+        nested = self.home / "w.gitconfig"
+        assert f"--volume={nested}:{nested}:ro,z" in flags
         assert not [flag for flag in flags if "credentials" in flag]
         assert not [flag for flag in flags if flag.startswith(f"--volume={git}:")]
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -45,6 +44,7 @@ from ..settings import (
 )
 from .claude_args import is_a_command, says_permissions
 from .ending import Ending
+from .fingerprint import included_configs
 from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
 from .mounts import SHADOWED_NAMES, kept_out, names_secrets
@@ -409,32 +409,6 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
     return args
 
 
-# The seconds git is given to list what the global config pulls in
-GIT_CONFIG_SECONDS = 10
-
-
-def _git_include_paths() -> list[str]:
-    """The files the global git config pulls in with include or includeIf."""
-    try:
-        result = subprocess.run(
-            ["git", "config", "--global", "-z", "--get-regexp"]
-            + [r"^include(if\..*)?\.path$"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
-            check=False,
-            # It reads the user's own config, of the host: a moment
-            timeout=GIT_CONFIG_SECONDS,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-    # Each pair ends in a NUL, the key on a line ahead of its value: the
-    # condition of an includeIf is part of the key and can hold a space
-    pairs = (pair.partition("\n") for pair in result.stdout.split("\0"))
-    return [value for _, separator, value in pairs if separator]
-
-
 # What git reads of its directory in XDG_CONFIG_HOME that is forwarded. Not
 # the directory whole: git's store helper keeps passwords in clear there
 # (credentials, or the file its --file names), and whatever else is put
@@ -460,14 +434,11 @@ def git_config_args(host: Host) -> list[str]:
     # Files pulled in with include/includeIf (e.g. a work identity under
     # "gitdir:~/work/") live outside the mounts, so without this they
     # silently never apply. Mounted at their host path, the one the config
-    # refers to. Relative paths are taken from the home directory, where
-    # ~/.gitconfig is.
-    for path in _git_include_paths():
-        # Also one that is absolute, which the join leaves as it is
-        path = os.path.normpath(os.path.join(host.home, expand_home(path, host.home)))
-        if path in forwarded:
-            continue
-        if os.path.isfile(path):
+    # refers to, and those they pull in too. A relative path is taken
+    # from the config that names it, as git takes it.
+    configs = [gitconfig, os.path.join(xdg_git, "config")]
+    for path in included_configs(configs, host.home):
+        if path not in forwarded:
             args.append(mount_arg(path, path, "ro,z"))
             forwarded.add(path)
     return args
