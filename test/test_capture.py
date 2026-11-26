@@ -814,6 +814,15 @@ class DnsTrustTest:
         assert (
             "  dns 6 more messages NOT READ, past the 2 lookups that are kept" in said
         )
+        # Nor more addresses than so many in all, whatever the lookups
+        with unittest.mock.patch.object(lookups_module, "MOST_ADDRESSES", 3):
+            found = self.read(packets, asked=False)
+        assert [lookup.name for lookup in found.dns.lookups] == [
+            "n0.test",
+            "n1.test",
+            "n2.test",
+        ]
+        assert found.dns.unread == 2
 
     def test_no_more_messages_are_read_than_a_capture_may_have(self):
         def over(payload: bytes, sent: bool = True) -> bytes:

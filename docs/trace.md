@@ -391,8 +391,10 @@ address is what was reached. Trust the address where the two matter.
   tcpdump says how many when it ends, and a capture that dropped any is
   `INCOMPLETE` too, with their number.
 - No more than 400,000 DNS messages of a capture are read, whatever
-  comes of them, the rest are counted as `NOT READ`: a session can send
-  any number that are none, or that nobody asked for.
+  comes of them, nor more than 100,000 lookups kept, with 200,000
+  addresses in all: the rest are counted as `NOT READ`. A session can
+  send any number that are none, or that nobody asked for, and one
+  answer can give thousands of addresses.
 - What is sent to a resolver over TCP and cannot be read to its end is
   counted too, and said (`NOT READ to its end`): a packet longer than
   the capture keeps of one (1024 bytes), with whatever follows its first

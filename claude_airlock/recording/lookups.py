@@ -60,6 +60,11 @@ MOST_LOOKUPS = 100_000
 # lookup takes two messages, so this is twice what MOST_LOOKUPS of them
 # take. Past it the messages are counted and not read, the same.
 MOST_DNS_READ = 4 * MOST_LOOKUPS
+# Nor more addresses in all than this, in the lookups that are kept: one
+# answer can give thousands, and each takes some 650 bytes once it is
+# known by the name it was looked up under. Past it a lookup is counted
+# and not kept, as one past MOST_LOOKUPS is.
+MOST_ADDRESSES = 200_000
 
 
 def _domain_of(labels: list[str]) -> str:
@@ -150,8 +155,10 @@ class Lookups:
     )
     _silent: set[tuple[int, str, int]] = field(default_factory=set, repr=False)
     _expired_at: float = field(default=0.0, repr=False)
-    # How many DNS messages were read, see MOST_DNS_READ
+    # How many DNS messages were read, see MOST_DNS_READ, and how many
+    # addresses the lookups that are kept give, see MOST_ADDRESSES
     _read: int = field(default=0, repr=False)
+    _addresses: int = field(default=0, repr=False)
 
     @property
     def whole(self) -> bool:
@@ -278,10 +285,12 @@ class Lookups:
         self._pending[key] = when
 
     def _keep(self, lookup: Lookup) -> None:
-        if len(self.lookups) >= MOST_LOOKUPS:
+        addresses = self._addresses + len(lookup.addresses)
+        if len(self.lookups) >= MOST_LOOKUPS or addresses > MOST_ADDRESSES:
             # Of the queries still waiting when the last one was kept
             self.unread += 1
             return
+        self._addresses = addresses
         self.lookups.append(lookup)
         self._flag(lookup)
         if lookup.kind in ("A", "AAAA"):
