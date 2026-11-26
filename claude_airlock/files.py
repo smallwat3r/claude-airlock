@@ -9,6 +9,7 @@ not what it should be is no line."""
 
 from __future__ import annotations
 
+import enum
 import fcntl
 import hashlib
 import json
@@ -227,7 +228,31 @@ def open_plain(path: str | Path, *, links: bool = False) -> BinaryIO | None:
     return os.fdopen(descriptor, "rb")
 
 
-def bounded_lines(file: BinaryIO, longest: int = LINE_LIMIT) -> Iterator[bytes | None]:
+class NotRead(enum.Enum):
+    """Why a file a session can write was not read, see read_plain."""
+
+    # Not there, or no plain file
+    ABSENT = enum.auto()
+    UNREADABLE = enum.auto()
+    TOO_LARGE = enum.auto()
+
+
+def read_plain(path: str | Path, most: int, *, links: bool = False) -> bytes | NotRead:
+    """All of a file a session can write, opened as open_plain has it, or
+    why it was not read: it can be made as large as the disk, past most
+    bytes it is not."""
+    file = open_plain(path, links=links)
+    if file is None:
+        return NotRead.ABSENT
+    try:
+        with file:
+            content = file.read(most + 1)
+    except OSError:
+        return NotRead.UNREADABLE
+    return NotRead.TOO_LARGE if len(content) > most else content
+
+
+def bounded_lines(file: IO[bytes], longest: int = LINE_LIMIT) -> Iterator[bytes | None]:
     """The lines of a file a session can write, each with its end, a last
     one without when that is how the file ends. None in the place of a
     line longer than longest, which is passed over and not held in
@@ -319,15 +344,8 @@ def settings_object(path: str | Path) -> dict:
     too deep to read. Through a link, as Claude Code reads it and as a
     user keeps the one of ~/.claude, but never from a pipe or a device a
     session put there, which would not end."""
-    file = open_plain(path, links=True)
-    if file is None:
-        return {}
-    try:
-        with file:
-            content = file.read(SETTINGS_BYTES + 1)
-    except OSError:
-        return {}
-    return {} if len(content) > SETTINGS_BYTES else json_object(content) or {}
+    content = read_plain(path, SETTINGS_BYTES, links=True)
+    return {} if isinstance(content, NotRead) else json_object(content) or {}
 
 
 def expand_home(path: str, home: str) -> str:
@@ -337,3 +355,21 @@ def expand_home(path: str, home: str) -> str:
     if path == "~":
         return home
     return home + path[1:] if path.startswith("~/") else path
+
+
+def is_under(path: str, directory: str) -> bool:
+    """Whether a path is under a directory, not the directory itself. By
+    both as they are written, neither is resolved: who asks resolves them
+    first where a link counts. The root holds every other path."""
+    return path.startswith(directory.rstrip(os.sep) + os.sep)
+
+
+def is_within(path: str, directory: str) -> bool:
+    """Whether a path is a directory or under it, see is_under."""
+    return path == directory or is_under(path, directory)
+
+
+def overlap(one: str, other: str) -> bool:
+    """Whether one of two directories is the other or is inside it,
+    either way round, see is_within."""
+    return is_within(one, other) or is_within(other, one)

@@ -401,6 +401,13 @@ SETTINGS = (
 CONFIG_FILE_SETTINGS = frozenset(
     setting.name for setting in SETTINGS if setting.config_file
 )
+_VARIABLES = {setting.field: setting.variable for setting in SETTINGS}
+
+
+def variable(field: str) -> str:
+    """The variable of the setting a field of Settings holds, as a session
+    is told it. Raises KeyError for a field that is no setting's."""
+    return _VARIABLES[field]
 
 
 def settings_help() -> str:
