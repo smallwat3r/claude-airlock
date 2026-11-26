@@ -214,6 +214,16 @@ BRANCH_TARGETS = (b"remote", b"pushremote")
 # than this, it is a session's to write.
 COMMON_DIR = "commondir"
 COMMON_DIR_BYTES = 4096
+# The settings of Claude Code that it runs as a command, as it does a
+# hook's: what gives it a key for the API, renews a login to a cloud and
+# makes the headers of what it reports
+HELPER_KEYS = (
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "otelHeadersHelper",
+)
+COMMAND_KEYS = frozenset(("command", *HELPER_KEYS))
 # The servers of the config the sandboxed sessions share, by this name
 # wherever in it they are: those of every project, and those of each
 SERVERS = "mcpServers"
@@ -580,16 +590,22 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
 
 def commands_in(value: object) -> Iterator[str]:
     """Every "command" in a settings file, of a hook, a statusline or a
-    server, at whatever depth. Without recursion: a file is read at a
+    server, at whatever depth, and each of the "args" it is given: a
+    server is as often "node" given its script as the script itself.
+    With the settings Claude Code runs as a command under a name of
+    their own, see HELPER_KEYS. Without recursion: a file is read at a
     depth Python cannot call to, and the check must not be made to
     fail."""
     pending = [value]
     while pending:
         value = pending.pop()
         if isinstance(value, dict):
+            commanded = isinstance(value.get("command"), str)
             for key, inner in value.items():
-                if key == "command" and isinstance(inner, str):
+                if key in COMMAND_KEYS and isinstance(inner, str):
                     yield inner
+                elif key == "args" and commanded and isinstance(inner, list):
+                    yield from (word for word in inner if isinstance(word, str))
                 else:
                     pending.append(inner)
         elif isinstance(value, list):

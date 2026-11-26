@@ -416,6 +416,29 @@ class TamperingTest(LauncherTest):
         assert f"  {self.project}/tools/format.sh\n" in result.stderr
         assert "settings.json" not in result.stderr
 
+    def test_a_script_a_server_is_given_or_a_helper_runs_is_reported(self):
+        # A server is as often a program given its script as the script
+        tools = self.project / "tools"
+        tools.mkdir()
+        for name in ("server.js", "server.py", "key.sh"):
+            (tools / name).write_text("true\n")
+        servers = {
+            "node": {"command": "node", "args": ["tools/server.js"]},
+            "uv": {"command": "uv", "args": ["run", "--script", "tools/server.py"]},
+        }
+        (self.project / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
+        (self.project / ".claude").mkdir()
+        (self.project / ".claude" / "settings.json").write_text(
+            json.dumps({"apiKeyHelper": "tools/key.sh"})
+        )
+        result = self.launch(session="for f in tools/*; do echo evil >> $f; done")
+        for name in ("server.js", "server.py", "key.sh"):
+            assert f"  {tools / name}\n" in result.stderr
+        # Not what is given to no command
+        (self.project / ".mcp.json").write_text(json.dumps({"args": ["tools/key.sh"]}))
+        (self.project / ".claude" / "settings.json").write_text("{}")
+        assert self.REPORT not in self.launch(session="echo x >> tools/key.sh").stderr
+
     def test_changed_instructions_are_reported(self):
         result = self.launch(
             session="echo x > CLAUDE.md; mkdir -p .claude/skills/s;"

@@ -245,8 +245,10 @@ rather than locked: the launcher warns when a session changed one.
   each working tree made of it (`git worktree add`), whose own
   `commondir` can lead elsewhere too.
 - There too, for Claude: `.claude/settings.json`, `settings.local.json`
-  and `.mcp.json` with the scripts they name, `CLAUDE.md` and `AGENTS.md`
-  with the files they have Claude read (`@docs/style.md`), the prompts
+  and `.mcp.json` with the scripts they name, a server's among its `args`
+  too, and those Claude Code runs as a helper (`apiKeyHelper`,
+  `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`),
+  `CLAUDE.md` and `AGENTS.md` with the files they have Claude read (`@docs/style.md`), the prompts
   Claude Code runs by itself (`.claude/scheduled_tasks.json`,
   `.claude/loop.md`), and the `hooks`, `commands`, `skills`, `agents`,
   `rules`, `output-styles`, `workflows` and `routines` of `.claude`.
