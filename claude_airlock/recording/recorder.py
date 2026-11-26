@@ -52,6 +52,7 @@ from ..background import in_background
 from ..files import (
     LINE_LIMIT,
     digested_lines,
+    held_size,
     json_object,
     line_entry,
     open_locked,
@@ -87,10 +88,11 @@ MOST_A_SESSION = 2 * 1024 * 1024 * 1024
 # next one waiting for all of it
 MOST_A_TURN = 16 * 1024 * 1024
 # A transcript of more different lines than this is not compared with its
-# copies, and of the lines found gone no more bytes are held than this:
-# both are a session's to make large
+# copies, and of the lines found gone no more is held than this, as the
+# entries they are once read (see held_size): both are a session's to
+# make large
 MOST_COMPARED = 1_000_000
-MOST_GONE_BYTES = 64 * 1024 * 1024
+MOST_GONE_HELD = 256 * 1024 * 1024
 # Copies older than this many days go, as long as Claude Code keeps a
 # transcript by default
 KEPT_DAYS = 30
@@ -564,7 +566,7 @@ class Compared:
     # the transcript holds past it has nothing to be compared with
     cut_short: bool = False
     # How many more lines are gone than the entries of gone, which holds
-    # no more than MOST_GONE_BYTES of them
+    # no more than MOST_GONE_HELD of them
     more_gone: int = 0
     # Whether the transcript has more lines than are compared: what was
     # taken out of it is then not known
@@ -673,9 +675,10 @@ def compare(host: Host, transcript: Path) -> Compared:
             continue
         if len(seen) < MOST_COMPARED:
             seen.add(digest)
-        # Nothing is held of a line that was too long to be
-        size = 0 if line is None else len(line)
-        if held + size > MOST_GONE_BYTES:
+        # What it takes once read, as an entry: a line of small values
+        # takes dozens of times its length. Nothing of one too long to be.
+        size = 0 if line is None else held_size(line)
+        if held + size > MOST_GONE_HELD:
             found.more_gone += 1
             continue
         # One that holds no entry is said to be gone too, as that, and so

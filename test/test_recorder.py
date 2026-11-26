@@ -120,8 +120,11 @@ class RecorderTest(LauncherTest):
     def test_of_the_lines_found_gone_only_so_much_is_held(self):
         recorder.catch_up(self.transcript, self.copy)
         self.rewrite(self.entries[:1])
-        longest = max(len(json.dumps(entry)) for entry in self.entries) + 1
-        with unittest.mock.patch.object(recorder, "MOST_GONE_BYTES", longest):
+        # By what they take once read, not by their length
+        lines = [json.dumps(entry).encode() + b"\n" for entry in self.entries]
+        most = max(map(files.held_size, lines)) + 1
+        assert most > 2 * max(map(len, lines))
+        with unittest.mock.patch.object(recorder, "MOST_GONE_HELD", most):
             compared = recorder.compare(self.host, self.transcript)
         gone = len(self.entries) - 1
         assert len(compared.gone) == 1

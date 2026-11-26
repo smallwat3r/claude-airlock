@@ -10,6 +10,7 @@ not what it should be is no line."""
 from __future__ import annotations
 
 import enum
+import errno
 import fcntl
 import hashlib
 import json
@@ -21,6 +22,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, BinaryIO
 
+# Where a file goes on from a hole of a sparse file, where the system
+# can tell: none with it, a file is then read through its holes
+SEEK_DATA = getattr(os, "SEEK_DATA", -1)
 # What a session can write is read a line at a time, and no line longer
 # than this is held in memory
 LINE_LIMIT = 32 << 20
@@ -265,10 +269,28 @@ def bounded_lines(file: IO[bytes], longest: int = LINE_LIMIT) -> Iterator[bytes 
         if len(line) <= longest or line.endswith(b"\n"):
             yield line
             continue
-        # The rest of it, a piece at a time
+        # The rest of it, a piece at a time, past what is a hole
         while line and not line.endswith(b"\n"):
+            _past_a_hole(file)
             line = file.readline(longest)
         yield None
+
+
+def _past_a_hole(file: IO[bytes]) -> None:
+    """Move a file that is read through a line too long to take past the
+    hole of a sparse file it is in, if any: a hole holds no line break,
+    and a session can make one as large as the disk takes at no cost of
+    its own, for whoever reads it to read through. Nothing where the file
+    or the system has no such thing to tell, a pipe or gVisor."""
+    try:
+        file.seek(file.tell(), SEEK_DATA)
+    except OSError as error:
+        if error.errno == errno.ENXIO:
+            # Nothing but a hole from here to the end
+            file.seek(0, os.SEEK_END)
+    except ValueError:
+        # No such whence for this file, or no such file any more
+        pass
 
 
 def digested_lines(

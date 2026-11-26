@@ -31,7 +31,46 @@ class Pieces(io.BytesIO):
         return line
 
 
+class Sparse(Pieces):
+    """A file with a hole, as a system that tells where data is again
+    has it: from start to end, where it reads as nothing but zeros."""
+
+    def __init__(self, content: bytes, start: int, end: int) -> None:
+        super().__init__(content)
+        self.hole = (start, end)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence != files.SEEK_DATA:
+            return super().seek(offset, whence)
+        start, end = self.hole
+        if start <= offset < end:
+            if end >= len(self.getbuffer()):
+                raise OSError(errno.ENXIO, "No such device or address")
+            offset = end
+        return super().seek(offset)
+
+
 class FilesTest(LauncherTest):
+    def test_a_line_too_long_to_take_is_not_read_through_its_holes(self):
+        hole = bytes(100_000)
+        tail = b"y\n" + b'{"after": 1}\n'
+        sparse = Sparse(b'{"a": 1}\n' + b"x" * 50 + hole + tail, 59, 100_059)
+        assert list(files.bounded_lines(sparse, 30)) == [
+            b'{"a": 1}\n',
+            None,
+            b'{"after": 1}\n',
+        ]
+        # The hole was not read, the data after it was
+        assert sum(sparse.taken) < 200
+        # Nor one that goes on to the end
+        sparse = Sparse(b"x" * 50 + hole, 50, 100_050)
+        assert list(files.bounded_lines(sparse, 30)) == [None]
+        assert sum(sparse.taken) < 100
+        # Where holes cannot be told, the line is read through
+        with unittest.mock.patch.object(files, "SEEK_DATA", -1):
+            dense = Pieces(b"x" * 50 + hole + tail)
+            assert list(files.bounded_lines(dense, 30))[-1] == b'{"after": 1}\n'
+
     def test_a_file_is_written_whole_and_for_the_user_alone(self):
         file = self.work / "record"
         for content in ("one", b"two"):
