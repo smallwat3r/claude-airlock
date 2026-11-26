@@ -59,6 +59,13 @@ class TurnTest:
             "result": "too\x1b[2J long",
         }
         assert turn.turn_line(ran, ended).endswith("ENDED error_max_turns: too[2J long")
+        # An error of the API, in a turn that is otherwise said to succeed
+        refused = {"subtype": "success", "is_error": True, "result": "Credit low"}
+        assert turn.turn_line(ran, refused).endswith("0 calls  ENDED: Credit low")
+        # The reason of a subtype of claude's own is in its errors
+        cut = {"subtype": "error_during_execution", "errors": ["a", 7, "b\nc"]}
+        said = turn.turn_line(ran, cut)
+        assert said.endswith("ENDED error_during_execution: a; b\\nc")
         ran.interrupted = True
         assert turn.turn_line(ran, ended).endswith("0 calls  interrupted")
 
@@ -348,6 +355,13 @@ class ReplyTest:
             "",
             "after",
         ]
+        # A span between three backticks at the start of a line opens no
+        # block: the line is there, and what follows it is prose
+        assert lines("```make``` builds it\nafter") == [
+            f"\x1b[{code}mmake\x1b[0m builds it",
+            "after",
+        ]
+        assert lines("~~~ `x`\ncode\n~~~") == [f"\x1b[{code}mcode\x1b[0m"]
         assert lines("use `make` **now**") == [
             f"use \x1b[{code}mmake\x1b[0m \x1b[{bold}mnow\x1b[0m"
         ]

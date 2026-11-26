@@ -293,8 +293,21 @@ def turn_line(turn: Turn, result: dict, more: Sequence[str] = ()) -> str:
     if turn.interrupted:
         line += "  interrupted"
     elif ended_badly(result):
-        reason = flat(result.get("result", "")).strip()
-        line += f"  ENDED {flat(result.get('subtype', '?'))}" + (
-            f": {reason}" if reason else ""
-        )
+        # An error of the API ends a turn that is said to have gone well
+        # otherwise (Credit balance is too low): the subtype says nothing
+        subtype = result.get("subtype", "?")
+        line += "  ENDED" + ("" if subtype == "success" else f" {flat(subtype)}")
+        reason = _reason(result)
+        line += f": {reason}" if reason else ""
     return line
+
+
+def _reason(result: dict) -> str:
+    """Why a turn ended badly, as claude says it: in result for an error
+    of the API, in errors for a subtype of its own."""
+    said = result.get("result")
+    errors = result.get("errors")
+    parts = [said] if isinstance(said, str) else []
+    if isinstance(errors, list):
+        parts += [error for error in errors if isinstance(error, str)]
+    return flat("; ".join(part.strip() for part in parts if part.strip()))
