@@ -172,6 +172,15 @@ class Usage:
         """How much the model can read at most, 0 until a turn said."""
         return self._window
 
+    @property
+    def context_used(self) -> int | None:
+        """How full the context is in percent, none until both what the
+        last step read and the window are known. No more than full: past
+        it the window is not the one the model reads with."""
+        if not (self._context and self._window):
+            return None
+        return min(100, round(100 * self._context / self._window))
+
     def step(self, message: dict) -> None:
         """Take in a step of claude's own: what it read is how full its
         context is, the whole conversation up to it. The model says
@@ -202,8 +211,8 @@ class Usage:
         models = self._drift.field(result, "modelUsage", dict) if asked else None
         if models:
             self._drift.missed("contextWindow of a model")
-        if self._context and self._window:
-            parts.append(f"context {100 * self._context / self._window:.0f}%")
+        if self.context_used is not None:
+            parts.append(f"context {self.context_used}%")
         if model and model != self._named:
             parts.append(model)
             self._named = model

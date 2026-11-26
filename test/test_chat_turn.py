@@ -12,7 +12,7 @@ from claude_airlock.chat import console, turn
 from claude_airlock.chat import reply as replying
 from claude_airlock.events import Event, Who
 from claude_airlock.report import entries
-from claude_airlock.report.layout import Layout
+from claude_airlock.report.layout import Layout, Styled
 
 
 def message(kind: str, *blocks: dict, **more) -> dict:
@@ -92,6 +92,14 @@ class TurnTest:
         for cost in ("1", -1, float("inf"), 10**400):
             assert turn.used({**odd, "total_cost_usd": cost}, 0.0) == []
         assert turn.used({"usage": []}, 0.0) == []
+
+    def test_the_context_is_said_full_at_most_on_the_turn_line_as_in_the_status(self):
+        usage = {"input_tokens": 230_000, "output_tokens": 5}
+        result = {"usage": usage, "modelUsage": {"m": {"contextWindow": 200_000}}}
+        used = turn.Usage()
+        used.step({"message": {"usage": usage}})
+        assert "context 100%" in used.parts(result, "m")
+        assert used.context_used == 100
 
     def test_a_turn_that_is_quiet_says_that_it_still_runs(self):
         shown, turns = page(), turn.Turns()
@@ -253,7 +261,7 @@ class ReplyTest:
             assert lines.count(wrote[2]) == 4
 
     def test_the_marks_of_a_long_line_are_found_in_one_pass(self):
-        def lines(text: str) -> list[str]:
+        def lines(text: str) -> list[Styled]:
             return replying.reply_lines(text, None, True)
 
         code, bold = replying.CODE, replying.BOLD
@@ -331,7 +339,7 @@ class ReplyTest:
     def test_a_reply_in_colour_has_styles_for_its_marks(self):
         code, bold = replying.CODE, replying.BOLD
 
-        def lines(text: str, width: int | None = None) -> list[str]:
+        def lines(text: str, width: int | None = None) -> list[Styled]:
             return replying.reply_lines(text, width, True)
 
         # The fences are left out, and the code is not read as Markdown

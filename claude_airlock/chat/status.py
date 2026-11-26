@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..events import LABEL_WIDTH, flat, labelled
+from ..files import is_under
 from ..recording.started import (
     ALL_HISTORY,
     DOCKER_FULL,
@@ -269,7 +270,8 @@ class Sandbox:
 
 def _home_relative(path: str, home: str) -> str:
     """A path as the shell shortens it, ~ for the home directory."""
-    return "~" + path[len(home) :] if path.startswith(home + "/") else path
+    home = home.rstrip("/")
+    return "~" + path[len(home) :] if is_under(path, home) else path
 
 
 def _used_style(percent: float) -> str:
@@ -376,8 +378,7 @@ def used_groups(
     they are shown: how full the context is, each limit of the account
     that holds for its model, and what it cost."""
     groups: list[Group] = []
-    if usage.window and usage.context:
-        used = min(100, round(100 * usage.context / usage.window))
+    if (used := usage.context_used) is not None:
         rank = None if used >= WARN_AT else Rank.CONTEXT
         groups.append([Part(_used_style(used), f"ctx:{used}%", rank=rank)])
     groups += limit_groups(limits, _model_of(session), now)
@@ -562,8 +563,7 @@ def said_in_full(
         plans = ", claude plans and changes nothing" if session.mode == PLAN else ""
         said.append(("mode", session.mode + plans))
     said += _running_in_full(running)
-    if usage.window and usage.context:
-        used = min(100, round(100 * usage.context / usage.window))
+    if (used := usage.context_used) is not None:
         held = f"{tokens(usage.context)} of {tokens(usage.window)} tokens"
         said.append(("context", f"{used}% used, {held}"))
     for at, limit in enumerate(_limits_in_full(limits, model, now)):
