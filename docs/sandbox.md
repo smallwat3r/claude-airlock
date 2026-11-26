@@ -387,7 +387,10 @@ you use the sandbox. The narrower ones:
   not look into what is then sent over it. A name on the list that is
   served by a network of many sites (npm, PyPI and GitHub's files are)
   leads to that network's addresses, and a session can ask there for
-  another site of the same network.
+  another site of the same network. One that asks for it in the hello
+  of its TLS is flagged in the trace (see
+  [What a connection is](trace.md#what-a-connection-is)), one that asks
+  for it inside the encryption is not seen.
 - What Python compiled of a project's modules (`__pycache__`) is run in
   the place of a module whose time and size it carries, and no diff
   shows it. A session can leave such a file. The launcher does not run

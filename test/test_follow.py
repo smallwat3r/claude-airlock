@@ -7,9 +7,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime
@@ -18,7 +20,17 @@ from unittest import mock
 
 import pytest
 from harness import LAUNCHER, LauncherTest, follow, pcap, transcript
-from test_capture import answer, dns_response, pcap_file, sample_capture, tcp
+from harness import capture as capture_module
+from test_capture import (
+    answer,
+    dns_response,
+    knock,
+    pcap_file,
+    read_parts,
+    sample_capture,
+    taken_up,
+    tcp,
+)
 
 from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
@@ -501,7 +513,9 @@ class FollowNetworkTest(LauncherTest):
         assert "# network     following the capture of claude-proj" in shown
         assert "sandbox  net         tcp/https good.test (198.51.100.7):443" in shown
         assert "lookup" not in shown
-        more = pcap_file([(self.now + 9, tcp("192.0.2.44", 6379), True)])
+        # Made a while ago: a connection is shown once it has had the
+        # moment in which what tells of it comes
+        more = pcap_file([(time.time() - 1, tcp("192.0.2.44", 6379), True)])
         with open(captured, "ab") as growing:
             # Without the header of the file, and the packet in two parts
             growing.write(more[24:-10])
@@ -513,8 +527,15 @@ class FollowNetworkTest(LauncherTest):
         shown = following.until(DONE)
         assert shown.count("sandbox  net         tcp/redis 192.0.2.44:6379") == 1
         assert "198.51.100.7" not in shown
-        tails = [c for c in self.calls() if c[:1] == ["exec"]]
-        assert tails[0] == ["exec", self.SIDECAR, "tail", "-c", "+1", "/capture.pcap"]
+        # Every part of the capture is read by one command, from where
+        # each was read to
+        script = follow.captured_since.__globals__["READ_SCRIPT"]
+        reads = [c for c in self.calls() if c[:1] == ["exec"] and script in c]
+        assert reads[0][:6] == ["exec", self.SIDECAR, "sh", "-c", script, "sh"]
+        assert reads[0][6] == str(capture_module.READ_MOST)
+        assert reads[0][7:9] == ["/capture.pcap:0", "/dns.pcap:0"]
+        assert len(reads[0][7:]) == len(follow.PARTS)
+        assert f"/capture.pcap:{len(sample_capture(self.now))}" in reads[1]
 
     def test_how_a_session_is_doing_shows_as_its_watcher_says_it(self):
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
@@ -538,9 +559,14 @@ class FollowNetworkTest(LauncherTest):
         assert "sandbox  health      mem 2g of 16g (12%)  cpu 12%" in shown
         assert "gone since: [812] node 8g" in shown
         # Asked of the watcher from outside, nothing is run next to the session
+        # All it said at first, then its last lines from a little before
+        # the last one that was read, none of which is shown again
+        add(self.file, self.last)
+        assert "health" not in following.until(DONE)
         asked = [c for c in self.calls() if c[:1] == ["logs"]]
-        assert asked[0][2] == "claude-proj.procs"
-        assert re.search(r"^--since=\d+\.\d{3}$", asked[0][1])
+        assert asked[0] == ["logs", "claude-proj.procs"]
+        assert asked[-1][2:] == ["claude-proj.procs"]
+        assert re.search(r"^--since=\d+\.\d{3}$", asked[-1][1])
         assert [c for c in self.calls() if c[:1] == ["exec"]] == []
 
     def test_what_becomes_of_a_connection_shows_when_it_does(self):
@@ -668,6 +694,384 @@ class FollowNetworkTest(LauncherTest):
         assert (
             "net         [claude-proj-2] proxy/https CONNECT theirs.test:443" in shown
         )
+
+    def watched(self, *lines: dict) -> str:
+        """The watcher of the session next to its capture, which says
+        these lines aloud: what docker lists of the two."""
+        about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
+        said = self.work / "said"
+        said.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        self.said = said
+        return f"{self.ps}\nclaude-proj.procs\t{json.dumps(about)}"
+
+    def test_a_connection_says_which_process_made_it_as_it_is_made(self):
+        then = time.time() - 5
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(pcap_file([(then, tcp("198.51.100.7", 443), True)]))
+        both = self.watched(
+            {"t": then - 1, "pid": 640, "ppid": 1, "exe": "/bin/bash", "argv": ["sh"]},
+            {
+                "t": then,
+                "pid": 812,
+                "ppid": 640,
+                "exe": "/usr/bin/curl",
+                "argv": ["curl", "-sS", "https://good.test"],
+            },
+            {
+                "t": then,
+                "port": 40443,
+                "to": "198.51.100.7",
+                "to_port": 443,
+                "pids": [812],
+            },
+            {"t": then, "listen": 8080, "on": "0.0.0.0", "pids": [812]},
+        )
+        following = Following(
+            self,
+            FAKE_PS=both,
+            FAKE_CAPTURE=str(captured),
+            FAKE_PROXY_LOG=str(self.said),
+        )
+        add(self.file, self.last)
+        shown = following.until(DONE)
+        who = "by: [812] curl -sS https://good.test < bash"
+        assert f"tcp/https 198.51.100.7:443  {who}" in shown
+        assert f"listen      tcp 0.0.0.0:8080  OPEN to its network  {who}" in shown
+        # Nothing is run next to the session for it, the watcher is heard
+        assert [
+            c[:2] for c in self.calls() if c[:1] == ["exec"] and "sh" not in c
+        ] == []
+
+    def test_a_watcher_that_says_no_more_aloud_is_said_once(self):
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(pcap_file([]))
+        both = self.watched({"t": time.time() - 5, "note": "hushed"})
+        following = Following(
+            self,
+            FAKE_PS=both,
+            FAKE_CAPTURE=str(captured),
+            FAKE_PROXY_LOG=str(self.said),
+        )
+        shown = following.until("no longer said")
+        assert (
+            "# processes   which process makes a connection is no longer said as"
+            " claude-proj runs" in shown
+        )
+        add(self.file, self.last)
+        assert "no longer said" not in following.until(DONE)
+
+    def test_a_destination_the_project_did_not_reach_before_is_said_to_be_new(self):
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(sample_capture(self.now - 60))
+        self.state.mkdir(parents=True)
+        known = {str(self.project): {"tcp good.test 443": 1}}
+        (self.state / "destinations.json").write_text(json.dumps(known))
+        following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
+        add(self.file, self.last)
+        shown = following.until(DONE)
+        assert "tcp/postgres 10.0.0.7:5432  NEW for this project" in shown
+        assert shown.count("NEW for this project") == 2
+        known_ones = [line for line in shown.splitlines() if "good.test" in line]
+        assert known_ones
+        assert not [line for line in known_ones if "NEW" in line]
+
+    def test_nothing_is_new_to_a_project_that_has_no_record_yet(self):
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(sample_capture(self.now - 60))
+        following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
+        add(self.file, self.last)
+        assert "NEW" not in following.until(DONE)
+
+    def test_who_connects_to_the_session_shows_as_they_do(self):
+        then, them = time.time() - 5, "172.20.0.9"
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(
+            pcap_file(
+                [
+                    (then, knock(them, 8080), False),
+                    (then, taken_up(them, 8080), True),
+                ]
+            )
+        )
+        following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
+        shown = following.until(them)
+        assert "sandbox  net         tcp IN from 172.20.0.9 to its port 8080" in shown
+
+
+class CaptureTailTest:
+    """The capture of a running session as it is read, without docker:
+    what it holds is given."""
+
+    THERE = "198.51.100.7"
+
+    def test_every_part_is_read_by_one_command_from_where_it_was_read_to(self):
+        read = capture_module.captured_since
+        offsets = {"/capture.pcap": 24, "/dns.pcap": 0, "/flows.pcap": 7}
+        with mock.patch.object(capture_module, "docker_bytes") as asked:
+            # How many bytes each has more, then those bytes
+            asked.return_value = b"3\nab\n0\n5\n12345"
+            found, whole = read("claude-proj.capture", offsets)
+            assert found == {
+                "/capture.pcap": b"ab\n",
+                "/dns.pcap": b"",
+                "/flows.pcap": b"12345",
+            }
+            assert whole
+            (command,) = asked.call_args_list
+            assert command.args[:3] == ("exec", "claude-proj.capture", "sh")
+            assert command.args[-4:] == (
+                str(capture_module.READ_MOST),
+                "/capture.pcap:24",
+                "/dns.pcap:0",
+                "/flows.pcap:7",
+            )
+            # What is cut short, or is no such thing, is read as far as it
+            # holds up, and a sidecar that cannot be asked has nothing
+            asked.return_value = b"3\nabc9\nx"
+            assert read("claude-proj.capture", offsets)[0]["/dns.pcap"] == b"x"
+            for said in (b"nothing of the kind", b"", None):
+                asked.return_value = said
+                found, _ = read("claude-proj.capture", offsets)
+                assert set(found.values()) == {b""}
+            # As much as one reading takes: there is more to come
+            with mock.patch.object(capture_module, "READ_MOST", 8):
+                asked.return_value = b"8\n12345678" + b"0\n" * 2
+                assert read("claude-proj.capture", offsets)[1] is False
+
+    def test_one_reading_takes_no_more_than_it_is_to_and_the_parts_in_order(self):
+        # A session can fill every part to its limit: whoever starts to
+        # follow it then reads that in turns, and no part ahead of the
+        # ones before it
+        directory = Path(tempfile.mkdtemp())
+        try:
+            first, second = directory / "a.pcap", directory / "b.pcap"
+            first.write_bytes(b"0123456789")
+            second.write_bytes(b"abcdefghij")
+
+            def read(most: int, *offsets: int) -> bytes:
+                wanted = [
+                    f"{file}:{at}"
+                    for file, at in zip((first, second, "/none"), offsets, strict=True)
+                ]
+                return subprocess.run(
+                    ["sh", "-c", capture_module.READ_SCRIPT, "sh", str(most), *wanted],
+                    capture_output=True,
+                    check=True,
+                ).stdout
+
+            assert read(100, 0, 0, 0) == b"10\n012345678910\nabcdefghij0\n"
+            assert read(100, 4, 10, 0) == b"6\n4567890\n0\n"
+            assert read(12, 0, 0, 0) == b"10\n01234567892\nab0\n"
+            assert read(4, 0, 0, 0) == b"4\n01230\n0\n"
+        finally:
+            shutil.rmtree(directory)
+
+    def tail(self, **more: object) -> follow.CaptureTail:
+        return follow.CaptureTail("claude-proj.capture", verbose=False, **more)
+
+    def fed(self, tail: follow.CaptureTail, packets: list) -> list[Event]:
+        """What a look gives when the capture has these packets more."""
+        frames = pcap_file(packets, asked=False)
+        offset = tail._offsets["tcp"]
+        more = frames if not offset else frames[24:]
+        read = {part.file: b"" for part in follow.PARTS}
+        read["/capture.pcap"] = more
+        with mock.patch.object(follow, "captured_since", return_value=(read, True)):
+            return tail.poll()
+
+    def test_a_connection_is_shown_once_it_has_had_its_moment(self):
+        tail = self.tail()
+        now = time.time()
+        opening = [
+            (now, tcp(self.THERE, 443, sequence=100), True),
+            (now, answer(self.THERE, 443, sequence=500, acknowledged=101), False),
+            (now, tcp(self.THERE, 443, 0x11, sequence=101, acknowledged=501), True),
+            # One made a while ago is shown at once
+            (now - 5, tcp("192.0.2.44", 6379), True),
+        ]
+        # Made this instant: what tells of it may be yet to come
+        (old,) = self.fed(tail, [opening[3]])
+        assert old.fields["address"] == "192.0.2.44"
+        assert self.fed(tail, opening[:3]) == []
+        # At the next look it is there, and what became of it after it
+        opened, closed = self.fed(tail, [])
+        assert (opened.fields["stage"], closed.fields["stage"]) == ("open", "outcome")
+        assert closed.fields["opened"] == opened.when
+        assert self.fed(tail, []) == []
+
+    def test_what_is_known_a_moment_later_is_on_the_line_of_the_connection(self):
+        tail = self.tail()
+        now = time.time()
+        proxy = "172.20.0.2"
+        asked = b"CONNECT good.test:443 HTTP/1.1\r\n\r\n"
+        assert (
+            self.fed(
+                tail,
+                [
+                    (now, tcp(proxy, 3128, sequence=100), True),
+                    (now, answer(proxy, 3128, sequence=500), False),
+                ],
+            )
+            == []
+        )
+        (opened,) = self.fed(
+            tail, [(now + 0.01, tcp(proxy, 3128, 0x18, asked, sequence=101), True)]
+        )
+        assert opened.details == ["tcp/proxy 172.20.0.2:3128  asked for good.test:443"]
+
+    def test_a_connection_that_is_still_open_says_how_far_it_has_got(self):
+        tail = self.tail()
+        step = follow.PROGRESS_STEP
+        opened = [
+            (10.0, tcp(self.THERE, 443, sequence=100), True),
+            (10.0, answer(self.THERE, 443, sequence=500, acknowledged=101), False),
+        ]
+
+        def came(reached: int) -> tuple:
+            packet = answer(
+                self.THERE, 443, 0x18, 501 + reached - 100, payload=b"y" * 100
+            )
+            return (11.0, packet, False)
+
+        tail.capture = read_parts(opened, downloads=[came(step + 5_000)])
+        now = [1000.0]
+        with mock.patch.object(follow.time, "monotonic", lambda: now[0]):
+            (event,) = tail._still_open()
+            assert event.details[0].startswith(
+                "tcp/https 198.51.100.7:443  still open after "
+            )
+            assert event.details[0].endswith("s, 0 B out, 17 MB in so far")
+            assert (event.fields["stage"], event.fields["bytes_in"]) == (
+                "progress",
+                step + 5_000,
+            )
+            # Not again until it has carried as much more, and not sooner
+            # than a while after
+            assert tail._still_open() == []
+            more = PcapReader().feed(pcap_file([came(3 * step)], asked=False))
+            pcap.take_frames(tail.capture, more, "downloads")
+            now[0] += follow.PROGRESS_EVERY - 1
+            assert tail._still_open() == []
+            now[0] += 2
+            (later,) = tail._still_open()
+            assert later.fields["bytes_in"] == 3 * step
+        # A line of its own is not what a call is said to have made
+        timeline = stream.Timeline()
+        timeline.take(event)
+        assert event.notes == []
+
+    def test_what_the_session_did_on_the_network_is_summed_since_it_was_asked(self):
+        tail = self.tail()
+        there, them = self.THERE, "172.20.0.9"
+        sent = [
+            (3.0 + at / 100, tcp(there, 443, 0x18, b"x" * 1000, 101 + at * 1000), True)
+            for at in range(5)
+        ]
+        tail.capture = read_parts(
+            [
+                (1.0, dns_response("good.test", there), False),
+                (2.0, tcp(there, 443, sequence=100), True),
+                (2.0, answer(there, 443, sequence=500, acknowledged=101), False),
+                (4.0, tcp("10.0.0.7", 5432), True),
+                (4.0, answer("10.0.0.7", 5432, flags=0x14), False),
+                (5.0, knock(them, 8080), False),
+            ],
+            elsewhere=sent,
+        )
+        summed = tail.traffic()
+        assert summed == follow.Traffic(
+            connections=2, hosts=2, failed=1, inbound=1, sent=5000
+        )
+        assert summed.said == (
+            "2 connections to 2 hosts, 5 kB out, 0 B in, 1 FAILED,"
+            " 1 made to it from outside"
+        )
+        # Nothing since
+        assert not tail.traffic()
+        assert tail.traffic().said == ""
+        assert follow.Traffic(connections=1, hosts=1, denied=2).said == (
+            "1 connection to 1 host, 2 DENIED"
+        )
+
+    def test_a_follower_sums_what_its_sessions_did(self):
+        follower = follow.Follower(mock.Mock(project_dir="/proj"), verbose=False)
+        tail = self.tail()
+        tail.capture = read_parts([(2.0, tcp(self.THERE, 443), True)])
+        follower._captures[(tail.sidecar, 1.0)] = tail
+        follower._denied = 3
+        assert follower.traffic() == follow.Traffic(connections=1, hosts=1, denied=3)
+        assert not follower.traffic()
+
+    def test_a_tunnel_to_the_model_has_no_line_of_how_far_it_got(self):
+        proxy, step = "172.20.0.2", follow.PROGRESS_STEP
+
+        def tunnel(port: int, host: str) -> list:
+            asked = f"CONNECT {host}:443 HTTP/1.1\r\n\r\n".encode()
+            return [
+                (10.0, tcp(proxy, port, sequence=100), True),
+                (10.0, answer(proxy, port, sequence=500, acknowledged=101), False),
+                (10.1, tcp(proxy, port, 0x18, asked, sequence=101), True),
+                (20.0, tcp(proxy, port, 0x10, b"x" * 1000, 101 + 2 * step), True),
+            ]
+
+        tail = self.tail(filtered=True)
+        with mock.patch.object(follow, "EGRESS_PORT", 3128, create=True):
+            tail.capture = read_parts(
+                [*tunnel(3128, "api.anthropic.com"), *tunnel(3128 + 1, "big.test")]
+            )
+        # Both go to the proxy's address: one is told by what it asked for
+        tail.capture.connections[1].port = 3128
+        (event,) = tail._still_open()
+        assert "asked for big.test:443  still open after" in event.details[0]
+        assert event.fields["asked"] == "big.test:443"
+
+    def test_what_a_watcher_said_is_not_taken_twice_after_a_look_that_gave_nothing(
+        self,
+    ):
+        said = [
+            json.dumps({"t": 100.0, "listen": 8080, "on": "0.0.0.0", "pids": []}),
+            json.dumps({"t": 100.5, "health": {"mem": [1, 2]}}),
+        ]
+        heard = [said, [], said, [*said, json.dumps({"t": 101.0, "note": "hushed"})]]
+        tail = follow.WatcherTail("claude-proj.procs")
+        with mock.patch.object(follow, "said_lines", side_effect=heard) as asked:
+            listening = [len(tail.poll()) for _ in heard]
+        assert listening == [1, 0, 0, 0]
+        assert len(tail.record.listeners) == len(tail.record.samples) == 1
+        assert tail.newly_hushed()
+        # All of it at first, then from a little before the last of it
+        assert [call.args[1] for call in asked.call_args_list] == [
+            0.0,
+            98.5,
+            98.5,
+            98.5,
+        ]
+
+    def test_what_is_known_of_a_session_is_asked_again_as_it_comes_up(self):
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, verbose=False)
+        sidecar = [("claude-proj.capture", 5.0)]
+        known = [frozenset({"tcp good.test 443"}), frozenset({"tcp new.test 443"})]
+        with (
+            mock.patch.object(follow.CaptureSidecar, "running", return_value=sidecar),
+            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
+            mock.patch.object(follow.Follower, "_filtered_addresses") as addresses,
+            mock.patch.object(follow, "known_destinations", side_effect=known),
+        ):
+            # The capture of a session is up before the session is
+            addresses.return_value = {}
+            follower._look_for_sessions(follow.Round())
+            (tail,) = follower._captures.values()
+            assert (tail.filtered, tail._known) == (False, known[0])
+            addresses.return_value = {"172.20.0.5": "claude-proj"}
+            follower._look_for_sessions(follow.Round())
+            assert tail.filtered
+            # And what the project is known to reach is as the session
+            # before left it
+            sidecar[0] = ("claude-proj.capture", 9.0)
+            follower._look_for_sessions(follow.Round())
+            (later,) = follower._captures.values()
+            assert later._known == known[1]
 
 
 class TranscriptTailTest:

@@ -1,5 +1,7 @@
 """Checks that the capture of a smoke session holds what inside/capture.sh
-did: a TCP connection, a lookup of example.com and a UDP datagram.
+did: a TCP connection, a lookup of example.com and a UDP datagram. And
+that what it tells of the connection of curl is what curl did: TLS, with
+a hello for the name it looked up, which nothing is noted of.
 
 Usage: capture.py CAPTURE_PREFIX"""
 
@@ -19,3 +21,10 @@ require(("1.1.1.1", 53) in connected, connected)
 require("example.com" in capture.names.values(), capture.names)
 sent = {(flow.transport, flow.address, flow.port) for flow in capture.flows}
 require(("udp", "1.1.1.1", 9999) in sent, sent)
+https = [made for made in capture.connections if made.port == 443]
+spoken = [(made.speaks, made.hello.name if made.hello else None) for made in https]
+require(("tls", "example.com") in spoken, spoken)
+require(not capture.noticed, [what for _, what, _ in capture.noticed])
+require(not capture.inbound, [made.address for made in capture.inbound])
+# What curl sent is in the part that has all the session sends
+require("elsewhere" in capture.part_packets, capture.part_packets)

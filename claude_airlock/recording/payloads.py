@@ -1,5 +1,6 @@
 """What a packet carries, of the three kinds that are read: a DNS message,
 the hello of TLS with the name of the server, and a plain HTTP request.
+And of the first bytes a connection sends, what they say is spoken on it.
 
 Each is the session's to write, or written to it: what is not what it is
 read as raises NotThis or reads as nothing."""
@@ -43,7 +44,24 @@ NO_ANSWER = "no answer"
 DNS_MOST_LABELS = 127
 TLS_HANDSHAKE = 0x16
 TLS_CLIENT_HELLO = 0x01
+# The major version every record of TLS starts with, after its type
+TLS_MAJOR = 0x03
+# The extensions of a hello that are read: the name of the server, and
+# what the client offers to speak once the connection is made
 TLS_SERVER_NAME = 0
+TLS_ALPN = 16
+# No more of what a hello offers to speak is kept than this, nor of each
+MOST_OFFERED = 8
+OFFERED_LENGTH = 32
+# What the first bytes a connection sends are told as, see spoken
+TLS, HTTP, SSH, OTHER = "tls", "http", "ssh", "other"
+# How a client that speaks HTTP/2 without TLS and without asking first
+# begins, which is no method of HTTP
+HTTP2_PREFACE = b"PRI * HTTP/2"
+SSH_BANNER = b"SSH-"
+# From this many bytes on, what starts as none of the three is another
+# protocol: the longest of what they start with
+TOLD_BY = len(HTTP2_PREFACE)
 
 
 @dataclass(frozen=True)
@@ -166,26 +184,79 @@ def http_request(payload: bytes) -> tuple[str, str, str] | None:
     return method, target, host
 
 
-def tls_server_name(record: bytes) -> str:
-    """The server name a TLS client hello asks for. Empty for anything
-    else, and for a hello without one or longer than what was captured."""
+@dataclass(frozen=True)
+class Hello:
+    """The hello of a TLS client as far as it is read: the server name it
+    asks for, empty without one, what it offers to speak once connected
+    (ALPN), and whether all of its extensions were there to be read. One
+    that was cut short, by the capture or by the packet it came in, may
+    name a server past the cut."""
+
+    name: str
+    offered: tuple[str, ...]
+    whole: bool
+
+
+def _offered(listed: bytes) -> tuple[str, ...]:
+    """What an ALPN extension lists, see MOST_OFFERED."""
+    found: list[str] = []
+    reader = Cursor(listed)
+    reader.skip(2)  # the length of the list
+    while reader.rest() and len(found) < MOST_OFFERED:
+        name = reader.take(reader.number(1))
+        found.append(name[:OFFERED_LENGTH].decode("ascii", "replace"))
+    return tuple(found)
+
+
+def tls_hello(record: bytes) -> Hello | None:
+    """The hello of a TLS client, none for anything else and for one cut
+    before its extensions begin."""
+    hello = Cursor(record)
     try:
-        hello = Cursor(record)
         if hello.number(1) != TLS_HANDSHAKE:
-            return ""
+            return None
         hello.skip(4)  # record version and length
         if hello.number(1) != TLS_CLIENT_HELLO:
-            return ""
+            return None
         hello.skip(3 + 2 + 32)  # handshake length, version, random
         hello.skip(hello.number(1))  # session id
         hello.skip(hello.number(2))  # cipher suites
         hello.skip(hello.number(1))  # compression methods
-        hello.skip(2)  # length of the extensions
-        while True:
-            kind, length = hello.number(2), hello.number(2)
-            if kind == TLS_SERVER_NAME:
-                hello.skip(3)  # list length, name type
-                return hello.take(hello.number(2)).decode("ascii", "replace")
-            hello.skip(length)
+        end = hello.number(2)
+        end += hello.at
     except NotThis:
-        return ""
+        return None
+    name = ""
+    offered: tuple[str, ...] = ()
+    try:
+        while hello.at < end:
+            kind, length = hello.number(2), hello.number(2)
+            extension = hello.take(length)
+            if kind == TLS_SERVER_NAME and not name:
+                named = Cursor(extension)
+                named.skip(3)  # list length, name type
+                name = named.take(named.number(2)).decode("ascii", "replace")
+            elif kind == TLS_ALPN and not offered:
+                offered = _offered(extension)
+    except NotThis:
+        return Hello(name, offered, whole=False)
+    return Hello(name, offered, whole=True)
+
+
+def spoken(payload: bytes) -> str:
+    """What a connection speaks, going by the first bytes sent on it: TLS,
+    HTTP, SSH, OTHER for what starts as none of them, and nothing when
+    there are too few bytes to tell. The bytes are the session's to
+    choose: this tells a connection that is not what its port says from
+    one that is, not one made to look like it."""
+    if payload[:1] == bytes([TLS_HANDSHAKE]) and len(payload) > 5:
+        if payload[1] == TLS_MAJOR and payload[5] == TLS_CLIENT_HELLO:
+            return TLS
+        return OTHER
+    if payload.startswith(SSH_BANNER):
+        return SSH
+    if payload.startswith(HTTP2_PREFACE):
+        return HTTP
+    if any(payload.startswith(method.encode() + b" ") for method in HTTP_METHODS):
+        return HTTP
+    return OTHER if len(payload) >= TOLD_BY else ""

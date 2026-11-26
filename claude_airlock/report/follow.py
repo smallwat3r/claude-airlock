@@ -8,18 +8,29 @@ of each. The capture of each of the
 project's running sessions, read out of its sidecar. For a filtered
 session the egress proxy's log. And what the launcher notes of the use of
 the SSH agent and the Docker socket (see doors.py). Not the record of the
-processes: which process made a connection is told by --trace of a
-session that is over. Of what the watcher of the processes notes, only
-how the session is doing, which it says aloud (see health.py).
+processes, which stays in its sidecar until the session is over: of what
+the watcher of the processes notes, what it says aloud, how the session
+is doing (see health.py) and which process holds each connection and
+each socket that waits for them (see procwatch.py).
 
 Three things differ from the trace of a session that is over. A tool call
 is shown when it is issued and its result when that comes, as an event of
-its own, the two having the same number. Of a prompt or a reply only the first line is shown, whoever
-follows is after what the session does, what it says is on its own screen.
-And a connection is shown with the name known when it was made: one
-that only its TLS hello gives, to an address that was not looked up, comes
-too late for the line. A tunnel through the egress proxy is logged when it
-closes, so it shows then, at the time it began.
+its own, the two having the same number. Of a prompt or a reply only the
+first line is shown, whoever follows is after what the session does, what
+it says is on its own screen. And a connection is shown half a second
+after it was made, with what is known of it by then: the process that
+made it, what it asked a proxy for, the name its hello gives an address
+that was not looked up. What comes later than that is on the line of what
+became of it. A tunnel through the egress proxy is logged when it closes,
+so the proxy's line shows then, at the time it began.
+
+Some things are only said of a session that runs. A destination no
+session of the project was noted to reach before is NEW, by the record
+the digest of a session keeps (see digest.py). A connection that is still
+open says how much it has carried each time that is 16 MB more, no more
+often than every ten seconds. And what the sessions did on the network
+since it was last asked is summed, for a chat to say after each turn (see
+Traffic).
 
 Of what the latest transcript held before the following began, the last
 few events are shown, and no more than its end is read for them (see
@@ -33,6 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import math
 import os
 import sys
 import time
@@ -44,7 +56,7 @@ from typing import Self
 
 from ..docker import running_containers
 from ..errors import Fatal
-from ..events import Event, Kind, clean, flat, labelled
+from ..events import Event, Kind, Stage, Who, clean, flat, labelled
 from ..files import LINE_LIMIT, line_entry, open_plain
 from ..projects import (
     MOST_SUBAGENTS,
@@ -53,27 +65,44 @@ from ..projects import (
     subagents_unread,
     transcript_files,
 )
+from ..recording.answers import OVER
 from ..recording.capture import (
     PARTS,
     CaptureSidecar,
     captured_since,
     cut_short,
     died_so_far,
+    lookups_whole,
 )
 from ..recording.egress_log import logged_since
 from ..recording.health import Ended, Sample
 from ..recording.host_health import running_health, said_in
-from ..recording.pcap import Capture, take_frames
+from ..recording.model_api import is_model_api
+from ..recording.pcap import Capture, Connection, Marks, take_frames
 from ..recording.pcap_file import PcapReader
-from ..recording.processes import SILENT_BEATS, Watcher, said_since
+from ..recording.processes import (
+    SAID_AGAIN,
+    SILENT_BEATS,
+    ProcessRecord,
+    Watcher,
+    said_lines,
+)
 from ..recording.procwatch import HEALTH_EVERY as SAID_EVERY
 from ..recording.records import recorded_sessions
 from ..recording.uploads import PAUSE
 from ..settings import Host
+from .digest import destination_key, known_destinations
 from .entries import read_entries, session_files, title
 from .layout import Layout, event_json
-from .net_events import capture_events, name_container, proxy_event
+from .net_events import (
+    capture_events,
+    listener_events,
+    name_container,
+    name_processes,
+    proxy_event,
+)
 from .noted import NewlyNoted
+from .shown import over, reached, size
 from .stream import (
     EVERYTHING,
     Filter,
@@ -84,7 +113,7 @@ from .stream import (
 )
 from .trace_args import USAGE, picked_session, trace_options
 from .transcript import Walk, WalkOptions
-from .wire import Wire, upload_event
+from .wire import Sent, Wire, answer_event, tunnel_to_model, upload_event
 
 # Seconds between two looks at what is followed
 INTERVAL = 1.0
@@ -102,6 +131,22 @@ DIED_EVERY = 5.0
 # shown: twice the pause that ends one, for what the clock of the capture
 # and this one are apart
 UPLOAD_OVER = 2 * PAUSE
+# And seconds after its last packet that an answer of the model is shown,
+# the pause that ends one and a little more for the same
+ANSWER_OVER = OVER + 2.0
+# Seconds after it was made that a connection is shown: what tells of it
+# comes a moment later, the process its watcher found to hold it, what it
+# asked a proxy for, its hello. Sooner when it was read at an earlier
+# look, the clock of a capture can be ahead of this one.
+SETTLE = 0.5
+# A connection that is still open says how much it has carried each time
+# that is so many bytes more one way, no more often than every so many
+# seconds: what comes in is known by a packet of every 16 MB, see
+# capture.py
+PROGRESS_STEP = 1 << 24
+PROGRESS_EVERY = 10.0
+# What is said next to a destination the project was not noted to reach
+NEW = "NEW for this project"
 # Seconds without a word on how a session is doing after which what says
 # it is taken to have ended, or hung: it says so every SAID_EVERY
 SILENT_AFTER = SILENT_BEATS * SAID_EVERY
@@ -238,10 +283,67 @@ class TranscriptTail:
         return self._walk.take(entry)
 
 
-class CaptureTail:
-    """The capture of a running session, read as it grows."""
+@dataclass(frozen=True)
+class Traffic:
+    """What sessions did on the network in some time, summed: the
+    connections they made and to how many places, those of them that
+    were refused or not answered, the requests the egress filter
+    refused, the connections made to them from outside, and the bytes
+    each way, as far as the capture tells of those: of a connection
+    still open to anywhere but the model's API, what came in is known to
+    within 16 MB."""
 
-    def __init__(self, sidecar: str, verbose: bool):
+    connections: int = 0
+    hosts: int = 0
+    failed: int = 0
+    denied: int = 0
+    inbound: int = 0
+    sent: int = 0
+    received: int = 0
+
+    def __bool__(self) -> bool:
+        return any(dataclasses.astuple(self))
+
+    def __add__(self, other: Traffic) -> Traffic:
+        both = zip(dataclasses.astuple(self), dataclasses.astuple(other), strict=True)
+        return Traffic(*(mine + theirs for mine, theirs in both))
+
+    @property
+    def said(self) -> str:
+        """As the line of a chat says it, empty when there was none."""
+        parts = []
+        if self.connections:
+            made = (
+                "1 connection"
+                if self.connections == 1
+                else f"{self.connections} connections"
+            )
+            hosts = "1 host" if self.hosts == 1 else f"{self.hosts} hosts"
+            parts.append(f"{made} to {hosts}")
+        if self.sent or self.received:
+            parts.append(f"{size(self.sent)} out, {size(self.received)} in")
+        if self.failed:
+            parts.append(f"{self.failed} FAILED")
+        if self.denied:
+            parts.append(f"{self.denied} DENIED")
+        if self.inbound:
+            parts.append(f"{self.inbound} made to it from outside")
+        return ", ".join(parts)
+
+
+class CaptureTail:
+    """The capture of a running session, read as it grows. With known,
+    the destinations its project was noted to reach, for the ones that
+    are new to be said, and with filtered, whether the session is behind
+    the egress filter."""
+
+    def __init__(
+        self,
+        sidecar: str,
+        verbose: bool,
+        known: frozenset[str] | None = None,
+        filtered: bool = False,
+    ):
         self.sidecar = sidecar
         self.session = CaptureSidecar.session_of(sidecar)
         self._verbose = verbose
@@ -253,25 +355,115 @@ class CaptureTail:
         self._uploads_seen = {True: 0, False: 0}
         # What it has read so far, for what places a request on the wire
         self.capture = Capture()
+        self.filtered = filtered
+        # How much of it was shown, and how much it held at the last
+        # look: what was there then has had its moment, see SETTLE
+        self._shown = Marks()
+        self._read = Marks()
+        # The answers before this one were shown, and of those from it
+        # on the ones that were
+        self._answers_seen = 0
+        self._answers_said: set[int] = set()
+        # Of each connection said to be still open, how much it had
+        # carried each way then, and when that was
+        self._progress: dict[int, tuple[int, int, float]] = {}
+        # The destinations known, and those said to be new
+        self._known = known
+        self._new: set[str] = set()
+        # How much there was when what the session did was last summed
+        self._summed = (0, 0, 0, 0)
         self._said_cut_short = False
         # The parts already said to have died, and when that was last asked
         self._said_died = ""
         self._asked_died = 0.0
+
+    @property
+    def seen(self) -> Sent:
+        """What it saw the session send, told apart, see wire.py."""
+        return Sent(self.capture, self.filtered)
 
     def poll(self) -> list[Event]:
         """What the capture has since the last time: the connections that
         opened, what became of the open ones, the plain HTTP requests, and
         with --verbose the lookups. Nothing while it cannot be read: it can
         again later, or its session has ended."""
-        past = self.capture.marks()
+        offsets = {part.file: self._offsets[part.name] for part in PARTS}
+        read, whole = captured_since(self.sidecar, offsets)
         for part in PARTS:
-            data = captured_since(self.sidecar, self._offsets[part.name], part.file)
+            data = read[part.file]
             if data:
                 self._offsets[part.name] += len(data)
                 frames = self._readers[part.name].feed(data)
                 take_frames(self.capture, frames, part.name)
-        events = capture_events(self.capture, self._verbose, past)
-        return events + self._uploads_over()
+        if whole:
+            # Once every part is read as far as it goes, and not against
+            # lookups that are known to be missing
+            self.capture.lookups_whole = not self._said_died and lookups_whole(
+                self.capture
+            )
+            self.capture.look_at_hellos()
+        upto = self._settled()
+        events = capture_events(self.capture, self._verbose, self._shown, upto)
+        self._shown, self._read = upto, self.capture.marks()
+        self._say_new(events)
+        return [
+            *events,
+            *self._uploads_over(),
+            *self._answers_over(),
+            *self._still_open(),
+        ]
+
+    def _settled(self) -> Marks:
+        """How much of the capture is shown by now: all of it, but for
+        the connections made less than SETTLE seconds ago and read at
+        this look, with what became of them and what stands out of them.
+        They are shown next time, with what came of them meanwhile."""
+        now = self.capture.marks()
+        fresh = time.time() - SETTLE
+        held: set[int] = set()
+
+        def settled(made: list[Connection], read: int, shown: int) -> int:
+            """How many of some connections are shown: those shown
+            before, those read at an earlier look, and of the rest the
+            first that are old enough."""
+            count = max(read, shown)
+            while count < len(made) and made[count].when <= fresh:
+                count += 1
+            held.update(id(connection) for connection in made[count:])
+            return count
+
+        capture = self.capture
+        made = settled(capture.connections, self._read.connections, self._shown[0])
+        inbound = settled(capture.inbound, self._read.inbound, self._shown.inbound)
+        endings = self._shown.endings
+        while endings < now.endings and id(capture.endings[endings][2]) not in held:
+            endings += 1
+        noticed = self._shown.noticed
+        while noticed < now.noticed and id(capture.noticed[noticed][2]) not in held:
+            noticed += 1
+        return now._replace(
+            connections=made, inbound=inbound, endings=endings, noticed=noticed
+        )
+
+    def _say_new(self, events: list[Event]) -> None:
+        """Say of each destination that is reached, and that no session
+        of the project was noted to reach before, that it is new: once,
+        where it is first reached. Nothing when the project has no
+        record of them yet, all of them would be."""
+        if self._known is None:
+            return
+        for event in events:
+            fields = event.fields
+            reaching = fields.get("stage") == Stage.OPEN and "transport" in fields
+            if not reaching:
+                continue
+            key = destination_key(
+                fields["transport"], fields["name"], fields["address"], fields["port"]
+            )
+            if key not in self._known and key not in self._new:
+                self._new.add(key)
+                fields["new"] = True
+                event.notes.append(NEW)
 
     def _uploads_over(self) -> list[Event]:
         """The uploads that are over since the last time, to the model's
@@ -280,6 +472,7 @@ class CaptureTail:
         connection for longer than the pause that ends it, by the clock
         of this side."""
         events = []
+        seen = self.seen
         parts = ((True, self.capture.uploads), (False, self.capture.elsewhere))
         for to_model, part in parts:
             uploads = part.all
@@ -289,8 +482,84 @@ class CaptureTail:
                     break
                 self._uploads_seen[to_model] += 1
                 if upload.sized:
-                    events.append(upload_event(self.capture, upload, to_model))
+                    model = to_model or seen.to_model(upload)
+                    events.append(upload_event(self.capture, upload, model))
         return events
+
+    def _answers_over(self) -> list[Event]:
+        """The answers of the model's API that are over since the last
+        time, each as an event: one is over once another began on its
+        connection, or nothing came on it for longer than the pause that
+        ends one, by the clock of this side."""
+        events = []
+        answers = self.capture.answers
+        for answer in answers.all[self._answers_seen :]:
+            over = answers.superseded(answer)
+            over = over or time.time() - answer.ended > ANSWER_OVER
+            if over and id(answer) not in self._answers_said:
+                self._answers_said.add(id(answer))
+                events.append(answer_event(self.capture, answer))
+        while (
+            self._answers_seen < len(answers.all)
+            and id(answers.all[self._answers_seen]) in self._answers_said
+        ):
+            self._answers_said.discard(id(answers.all[self._answers_seen]))
+            self._answers_seen += 1
+        return events
+
+    def _still_open(self) -> list[Event]:
+        """The connections that are still open and have carried a lot
+        more since it was last said, each as an event, see
+        PROGRESS_STEP: a long download or upload is not quiet until it
+        is over. Not those to the model's API, nor behind the egress
+        filter a tunnel to its host: each thing sent there has a line of
+        its own."""
+        events = []
+        now = time.monotonic()
+        still = self.capture.still_open()
+        there = {id(connection) for connection in still}
+        self._progress = {
+            known: said for known, said in self._progress.items() if known in there
+        }
+        for connection in still:
+            to_model = is_model_api(connection.address) or (
+                self.filtered and tunnel_to_model(connection.port, connection.asked)
+            )
+            if connection.inbound or to_model:
+                continue
+            out, back = (count or 0 for count in connection.so_far)
+            said_out, said_back, said_at = self._progress.get(
+                id(connection), (0, 0, -math.inf)
+            )
+            more = max(out - said_out, back - said_back) >= PROGRESS_STEP
+            if more and now - said_at >= PROGRESS_EVERY:
+                self._progress[id(connection)] = (out, back, now)
+                events.append(_progress_event(self.capture, connection, out, back))
+        return events
+
+    def traffic(self) -> Traffic:
+        """What the session did on the network since this was last
+        asked, see Traffic. Not what its egress filter refused it, which
+        the capture does not tell."""
+        capture = self.capture
+        made, inbound, was_out, was_back = self._summed
+        new = capture.connections[made:]
+        hosts = {
+            connection.asked
+            or capture.name_of(connection.address, connection.when)
+            or connection.address
+            for connection in new
+        }
+        out, back = capture.carried()
+        self._summed = (len(capture.connections), len(capture.inbound), out, back)
+        return Traffic(
+            connections=len(new),
+            hosts=len(hosts),
+            failed=sum(connection.failed for connection in new),
+            inbound=len(capture.inbound) - inbound,
+            sent=max(out - was_out, 0),
+            received=max(back - was_back, 0),
+        )
 
     def newly_died(self) -> str:
         """The parts whose tcpdump is found to have died since the last
@@ -312,6 +581,85 @@ class CaptureTail:
         if self._said_cut_short or not cut_short(self.capture):
             return False
         self._said_cut_short = True
+        return True
+
+
+def _progress_event(
+    capture: Capture, connection: Connection, out: int, back: int
+) -> Event:
+    """A connection that is still open, as an event of now: for how long
+    it has been, and how much it has carried so far."""
+    address, port = connection.address, connection.port
+    open_for = round(max(time.time() - connection.when, 0.0), 1)
+    asked = f"  asked for {flat(connection.asked)}" if connection.asked else ""
+    detail = (
+        f"{reached(capture, address, port, 'tcp', connection.when)}{asked}"
+        f"  still open after {open_for:.0f}s, {size(out)} out, {size(back)} in so far"
+    )
+    fields = {
+        **({"asked": connection.asked} if connection.asked else {}),
+        "protocol": over("tcp", port),
+        "name": capture.name_of(address, connection.when),
+        "address": address,
+        "port": port,
+        "source_port": connection.source_port,
+        "stage": Stage.PROGRESS,
+        "opened": connection.when,
+        "seconds": open_for,
+        "bytes_out": out,
+        "bytes_in": back,
+    }
+    return Event(time.time(), Who.SANDBOX, Kind.NET, [detail], fields)
+
+
+class WatcherTail:
+    """What the watcher of a running session says aloud, read as it says
+    it: how the session is doing, each connection and each socket that
+    waits for them with the processes that hold it, and those processes
+    (see procwatch.py). Not the record of all that ran, which stays in
+    the sidecar."""
+
+    def __init__(self, watcher: str) -> None:
+        self.watcher = watcher
+        self.session = Watcher.session_of(watcher)
+        # What it said so far, as a record of the session's processes
+        # with only those in it that hold a socket
+        self.record = ProcessRecord()
+        # The lines of the last look: what it said then is asked for
+        # again in part, see SAID_AGAIN
+        self._last: set[str] = set()
+        self._listeners = 0
+        self._said_hushed = False
+
+    def poll(self) -> list[Event]:
+        """Take in what it said since the last time. The sockets that
+        started to wait for connections since, as events."""
+        since = max(self.record.last_line - SAID_AGAIN, 0.0)
+        lines = said_lines(self.watcher, since)
+        for line in lines:
+            if line not in self._last:
+                self.record.take(line)
+        if lines:
+            # Not after a look that gave nothing, it may not have been
+            # answered: what it said before would be taken again
+            self._last = set(lines)
+        events = listener_events(self.record, self._listeners)
+        self._listeners = len(self.record.listeners)
+        return events
+
+    def health_since(self, since: float) -> list[Sample | Ended]:
+        """How the session was doing later than a time, as far as read."""
+        said: list[Sample | Ended] = [*self.record.samples, *self.record.ended]
+        return sorted(
+            (one for one in said if one.when > since), key=lambda one: one.when
+        )
+
+    def newly_hushed(self) -> bool:
+        """Whether it said that it says no more aloud of connections and
+        their processes, once."""
+        if self._said_hushed or self.record.hushed_at is None:
+            return False
+        self._said_hushed = True
         return True
 
 
@@ -432,6 +780,16 @@ class Follower:
         self._unfollowed: set[Path] = set()
         self._captures: dict[tuple[str, float], CaptureTail] = {}
         self._health: dict[tuple[str, float], HealthTail] = {}
+        # What the watcher of each session says aloud
+        self._watchers: dict[tuple[str, float], WatcherTail] = {}
+        # The destinations the project was noted to reach before, for
+        # those that are new to be said: as they were when the capture
+        # of a session was last begun to be followed, a session notes
+        # its own when it ends
+        self._known: frozenset[str] | None = None
+        # The requests the egress filter refused since it was last
+        # asked, see traffic
+        self._denied = 0
         self._proxy = ProxyTail()
         # Of the project's filtered sessions that are running, with the
         # name of the container each is of
@@ -619,7 +977,8 @@ class Follower:
             return
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
-                tail = CaptureTail(sidecar, self._verbose)
+                self._known = known_destinations(self._host)
+                tail = CaptureTail(sidecar, self._verbose, self._known)
                 self._captures[(sidecar, started)] = tail
                 # No call from before it was started runs in it
                 self._timeline.began(tail.session, started)
@@ -630,6 +989,11 @@ class Follower:
         for key in set(self._captures) - set(running):
             name = clean(self._captures.pop(key).session)
             found.notes.append(labelled("network", f"the capture of {name} ended"))
+        # Which of them are behind the egress filter is known once their
+        # session is up, which is after its capture is
+        filtered = set(self._addresses.values())
+        for tail in self._captures.values():
+            tail.filtered = tail.filtered or tail.session in filtered
         # How each is doing, without a word on the following of it,
         # unless what said so is gone and the session is not
         gone = [self._health.pop(key) for key in set(self._health) - set(watched)]
@@ -662,9 +1026,16 @@ class Follower:
         watcher's name or the record's path, with the start time. Each
         value is the session's name and the function that reads it."""
         sources: dict[tuple[str, float], tuple[str, SaidSince]] = {}
-        for watcher, started in Watcher.running(self._host.project_dir):
-            session = Watcher.session_of(watcher)
-            sources[(watcher, started)] = (session, partial(said_since, watcher))
+        running = {
+            (watcher, started)
+            for watcher, started in Watcher.running(self._host.project_dir)
+            if self._ours(Watcher.session_of(watcher))
+        }
+        for gone in set(self._watchers) - running:
+            del self._watchers[gone]
+        for key in running:
+            tail = self._watchers.setdefault(key, WatcherTail(key[0]))
+            sources[key] = (tail.session, tail.health_since)
         for record, session, started in running_health(self._host):
             sources[(record, started)] = (session, partial(said_in, record))
         return {key: asked for key, asked in sources.items() if self._ours(asked[0])}
@@ -703,8 +1074,27 @@ class Follower:
         if not self._docker:
             return
         several = self._several()
+        # What the watchers said first: which process made a connection
+        # is said with the connection
+        records: dict[str, ProcessRecord] = {}
+        for watcher in self._watchers.values():
+            events = watcher.poll()
+            records[watcher.session] = watcher.record
+            name_container(events, watcher.session, several)
+            found.events += [(None, event) for event in events]
+            if watcher.newly_hushed():
+                found.notes.append(
+                    labelled(
+                        "processes",
+                        "which process makes a connection is no longer said as"
+                        f" {clean(watcher.session)} runs, its watcher said as much"
+                        " as it says aloud: --trace has it once the session is over",
+                    )
+                )
         for capture in self._captures.values():
             events = capture.poll()
+            if capture.session in records:
+                name_processes(events, records[capture.session])
             name_container(events, capture.session, several)
             found.events += [(None, event) for event in events]
             dead = capture.newly_died()
@@ -727,6 +1117,7 @@ class Follower:
                 )
         if self._addresses:
             requests = self._proxy.poll(self._addresses, several)
+            self._denied += sum(bool(event.fields["denied"]) for event in requests)
             found.events += [(None, event) for event in requests]
         for health in self._health.values():
             events = health.poll()
@@ -748,12 +1139,22 @@ class Follower:
         found and the requests to the model, each of those with where
         the capture of its session saw it go."""
         noted = self._noted.poll()
-        captures = {tail.session: tail.capture for tail in self._captures.values()}
+        captures = {tail.session: tail.seen for tail in self._captures.values()}
         for event in noted:
-            capture = captures.get(str(event.fields.get("container")))
-            if event.kind is Kind.REQUEST and capture:
-                self._wire.place(event, capture)
+            seen = captures.get(str(event.fields.get("container")))
+            if event.kind is Kind.REQUEST and seen:
+                self._wire.place(event, seen)
         found.events += [(None, event) for event in noted]
+
+    def traffic(self) -> Traffic:
+        """What the followed sessions did on the network since this was
+        last asked, as far as their captures and the egress proxy's log
+        were read by now."""
+        summed = Traffic(denied=self._denied)
+        self._denied = 0
+        for capture in self._captures.values():
+            summed += capture.traffic()
+        return summed
 
     def _keep_latest(self, found: Round) -> None:
         """Of what happened before the following began, the last few.

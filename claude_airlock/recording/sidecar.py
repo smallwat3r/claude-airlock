@@ -56,6 +56,8 @@ class Sidecar:
     # The memory it runs with, and the capabilities it is given, of none
     MEMORY: ClassVar[str]
     CAPABILITIES: ClassVar[tuple[str, ...]]
+    # The processes it can have at once
+    PIDS: ClassVar[int] = SIDECAR_PIDS
 
     name: str
     project: str
@@ -101,7 +103,7 @@ class Sidecar:
             *(f"--cap-add={capability}" for capability in self.CAPABILITIES),
             NO_NEW_PRIVILEGES,
             f"--memory={self.MEMORY}",
-            f"--pids-limit={SIDECAR_PIDS}",
+            f"--pids-limit={self.PIDS}",
         ]
 
     def last_said(self, lines: int | None = None) -> str:

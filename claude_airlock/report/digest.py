@@ -43,7 +43,7 @@ from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
 from .calls import written_paths
 from .entries import read_entries, short_id, unreadable_lines
-from .net_events import slowed
+from .net_events import reached_from, slowed
 from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
@@ -62,20 +62,39 @@ MOST_SAID = 8
 KEPT_DESTINATIONS = 2000
 
 
+def destination_key(transport: str, name: str | None, address: str, port: int) -> str:
+    """What a destination is known by: its transport, its name (its
+    address without one) and its port."""
+    return f"{transport} {(name or address).lower()} {port}"
+
+
 def _destinations(capture: Capture) -> dict[str, str]:
     """Each destination of a capture as it is known by, with how it is
-    shown: by its transport, its name (its address without one) and its
-    port."""
+    shown."""
     found: dict[str, str] = {}
     reaches = [(c.address, c.port, "tcp", c.when) for c in capture.connections]
     reaches += [(f.address, f.port, f.transport, f.when) for f in capture.flows]
     for address, port, transport, when in reaches:
-        name = (capture.name_of(address, when) or address).lower()
+        name = capture.name_of(address, when)
         found.setdefault(
-            f"{transport} {name} {port}",
+            destination_key(transport, name, address, port),
             reached(capture, address, port, transport, when),
         )
     return found
+
+
+def known_destinations(host: Host) -> frozenset[str] | None:
+    """The destinations the sessions of the project were noted to reach
+    up to now, each as destination_key has it. None for a project no
+    session of which was noted yet, whose destinations are all new, and
+    when the record cannot be read: nothing is then said to be new."""
+    try:
+        with open(host.destinations_file, encoding="utf-8") as record:
+            projects = json_object(record.read()) or {}
+    except OSError:
+        return None
+    recorded = projects.get(host.project_dir)
+    return frozenset(recorded) if isinstance(recorded, dict) else None
 
 
 def _uploads(capture: Capture, filtered: bool) -> list[str]:
@@ -181,6 +200,16 @@ def _network_lines(host: Host, recorded: Recorded) -> list[str]:
             continue
         found.update(_destinations(capture))
         lines += _uploads(capture, filtered)
+        # Each once, however often they connected
+        made = dict.fromkeys(reached_from(capture, made) for made in capture.inbound)
+        lines += _headed("connected to from outside the session:", list(made))
+        lines += _headed(
+            "connections that stand out:",
+            [
+                f"{reached(capture, c.address, c.port, 'tcp', c.when)}: {flat(what)}"
+                for _, what, c in capture.noticed
+            ],
+        )
         lines += _headed(
             "lookups that stand out:",
             [flat(f"{lookup.name}: {why}") for why, lookup in capture.flagged],

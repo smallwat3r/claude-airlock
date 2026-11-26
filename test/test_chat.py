@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from harness import LAUNCHER, ROOT, LauncherTest, Terminal, reads_proc
+from test_capture import answer, pcap_file, tcp
 
 from claude_airlock import files
 from claude_airlock.chat import (
@@ -433,6 +434,35 @@ class ChatTest(LauncherTest):
 
     def chat_host(self) -> Host:
         return Host(str(self.home), str(self.project), "", str(self.home / "state"))
+
+    def test_a_turn_says_what_the_session_did_on_the_network(self):
+        # A session whose capture is read as it runs: what it has when a
+        # turn is over is summed under the line of the turn
+        then, there = time.time() - 5, "198.51.100.7"
+        captured = self.work / "capture.pcap"
+        captured.write_bytes(
+            pcap_file(
+                [
+                    (then, tcp(there, 443, sequence=1000), True),
+                    (then, answer(there, 443, sequence=5000), False),
+                    (then + 1, tcp(there, 443, 0x11, b"", 1101, 5201), True),
+                    (then + 2, tcp("10.0.0.7", 5432), True),
+                    (then + 2, answer("10.0.0.7", 5432, flags=0x14), False),
+                ]
+            )
+        )
+        about = {"project": str(self.project), "start": then, "pid": os.getpid()}
+        done = self.chat(
+            "hello\n",
+            FAKE_PS=f"claude-proj.capture\t{json.dumps(about)}",
+            FAKE_CAPTURE=str(captured),
+        )
+        assert done.returncode == 0, done.stderr
+        said = "# network     2 connections to 2 hosts, 100 B out, 200 B in, 1 FAILED\n"
+        assert said in done.stdout, done.stdout
+        assert done.stdout.index("# turn ") < done.stdout.index(said)
+        # Nothing of a session that is not captured
+        assert " out, " not in self.chat("hello\n").stdout
 
     def test_a_chat_says_first_how_its_sandbox_was_started(self):
         done = self.chat("hello\n")

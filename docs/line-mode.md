@@ -21,8 +21,8 @@ and CPU the sandbox uses](img/line-mode.png)
 
 - **You see what a command did, not only that it ran.** The cyan lines
   are what Claude Code's own UI does not show: every connection the
-  session opens, under the command that was running at the time, and how
-  it ended. Here the install reaches a second host besides the registry,
+  session opens, under the command that was running at the time, with
+  the process that made it and how it ended. Here the install reaches a second host besides the registry,
   and the tests fail because the database refuses the connection. A
   command also says which files it changed and who allowed it, and an
   edit comes with its diff.
@@ -36,9 +36,9 @@ and CPU the sandbox uses](img/line-mode.png)
   read (see [What it read](trace.md#what-it-read)) are in bold red, among
   lines that are not.
 - **The cost is in sight.** Each step says the tokens it wrote and read
-  and whether it missed the cache, each turn how long it took and what
-  it cost, and the status above the prompt how full the context and the
-  limits of your account are.
+  and whether it missed the cache, each turn how long it took, what it
+  cost and what it did on the network, and the status above the prompt
+  how full the context and the limits of your account are.
 - **It works anywhere.** Claude Code's native UI redraws itself as it
   goes, which needs a terminal that keeps up with it. Line mode only adds
   lines, so it works in a terminal, a shell buffer of Emacs (`M-x shell`)
@@ -76,17 +76,38 @@ and CPU the sandbox uses](img/line-mode.png)
   is answered: how much was sent and what of, the tokens the API counted,
   why the model stopped, and where the capture saw it go, see
   [The requests to the model](trace.md#the-requests-to-the-model).
-- Every connection the session opens, and how it ended: closed after how
-  long and how much it carried, or what went wrong (`REFUSED`,
-  `NO ANSWER`).
+- Every connection the session opens, with the process that made it,
+  and how it ended: closed after how long and how much it carried, or
+  what went wrong (`REFUSED`, `NO ANSWER`). One to a destination the
+  project did not reach before says so (`NEW for this project`), one
+  through a proxy what it asked the proxy for, and one that is not what
+  it looks is `FLAGGED`: a hello for another name than it was reached
+  by, a port that speaks something else than its use, see
+  [What a connection is](trace.md#what-a-connection-is).
+- Every connection made to the session from outside it (`IN from`), and
+  each socket that starts to wait for them on more than its own
+  loopback (`listen`).
 - Each thing of 4 kB or more the session sends, as the capture sees it
   go: a request to the model, a push, a file sent somewhere, with how
-  much it was, see [On the wire](trace.md#on-the-wire).
+  much it was, and each answer of the model's API, with how long it
+  took to begin and how much came back, see
+  [On the wire](trace.md#on-the-wire).
+- How far a connection that is still open has got, each time it has
+  carried 16 MB more: a long download or upload is not quiet until it
+  is over, see [What comes in](trace.md#what-comes-in).
 - Each request the egress filter refused (`DENIED`), and each use of the
   SSH agent and of the Docker socket.
 - With `CLAUDE_AIRLOCK_NET_ASK=1`, a host the egress filter does not
   allow, before it is refused: see [What you type](#what-you-type).
-- After a turn, how long it took and what it cost.
+- After a turn, how long it took and what it cost, and what the
+  session did on the network since the turn before: the connections it
+  made and to how many hosts, the bytes each way, what failed or was
+  denied, and what was made to it from outside.
+
+```
+# turn        41.3s, 6 calls, 18.2k in, 1.1k out, $0.0931, context 12%
+# network     5 connections to 3 hosts, 414 kB out, 41 MB in, 1 FAILED
+```
 - Above the prompt, the status: the sandbox with its network mode and
   what is open to it, the model and the effort it is asked for, the
   subagents that run, how full the context is and the limits of your
@@ -94,7 +115,7 @@ and CPU the sandbox uses](img/line-mode.png)
 
 The lines are those of `--trace`, see
 [Reading the lines](trace.md#reading-the-lines). `--trace` has the rest
-once the session is over, such as which process made each connection.
+once the session is over, such as every process that ran.
 
 ## The status
 

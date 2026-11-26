@@ -730,6 +730,12 @@ class Chat:
         # line: the model was not asked and no call was made
         if more or turn.said or turn.interrupted or ended_badly(result):
             self._page.say([turn_line(turn, result, more)])
+        # And what it did on the network, as its capture saw it: since
+        # the turn before, what the session does between two is in the
+        # next one's
+        reached = self._followed.network()
+        if reached:
+            self._page.say([labelled("network", reached)])
         self._status.refresh()
         self._ask_settings()
         if not turn.guarded:

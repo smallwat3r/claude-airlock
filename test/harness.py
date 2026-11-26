@@ -97,6 +97,8 @@ elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
         "/flows.pcap": "FAKE_CAPTURE_FLOWS",
         "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
         "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
+        "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
+        "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
     }}
     where = [env for path, env in other.items() if args[1].endswith(path)]
     source = os.environ.get(where[0]) if where else os.environ["FAKE_CAPTURE"]
@@ -109,19 +111,31 @@ if args[0] == "logs" and "FAKE_PROXY_LOG" in os.environ:
 if args[0] == "exec" and "cat " in args[-1] and "FAKE_ACCESS_LOG" in os.environ:
     with open(os.environ["FAKE_ACCESS_LOG"]) as access_log:
         sys.stdout.write(access_log.read())
-if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.environ:
+reading = args[0] == "exec" and args[2:4] == ["sh", "-c"] and "for wanted" in args[4]
+if reading and "FAKE_CAPTURE" not in os.environ:
+    sys.exit(1)
+if reading:
+    # Each part from where it was read to, as the sidecar's script gives
+    # them: how many bytes, then those bytes
     other = {{
         "/dns.pcap": "FAKE_CAPTURE_DNS",
         "/direct.pcap": "FAKE_CAPTURE_DIRECT",
         "/flows.pcap": "FAKE_CAPTURE_FLOWS",
         "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
         "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
+        "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
+        "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
     }}
-    source = os.environ.get(other.get(args[5], "FAKE_CAPTURE"))
-    if source is None:
-        sys.exit(1)
-    with open(source, "rb") as captured:
-        sys.stdout.buffer.write(captured.read()[int(args[4]) - 1 :])
+    # After the most it is to give in all, which no check comes near
+    for wanted in args[7:]:
+        file, _, start = wanted.rpartition(":")
+        source = os.environ.get(other.get(file, "FAKE_CAPTURE"))
+        held = b""
+        if source is not None:
+            with open(source, "rb") as captured:
+                held = captured.read()[int(start) :]
+        sys.stdout.buffer.write(str(len(held)).encode() + b"\\n" + held)
+        sys.stdout.buffer.flush()
 if args[0] == "exec" and "grep -Hs" in " ".join(args[2:5]):
     part, _, code = os.environ.get("FAKE_CAPTURE_DIED", "").partition(":")
     if code:

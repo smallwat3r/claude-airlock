@@ -51,7 +51,7 @@ through your pager.
 | `3fa9` | The session whose id starts so, instead of the latest |
 | `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process, what the language server reported |
 | `--only bash,net` | The events of the kinds named, by what the `what` column says |
-| `--failed` | What went wrong: a call that failed or was not allowed to run, a write outside the project, something read that may be written to instruct the session, a refused request or connection, a request the API did not answer, a lookup that stands out, what was taken out of the transcript, a line of it that cannot be read |
+| `--failed` | What went wrong: a call that failed or was not allowed to run, a write outside the project, something read that may be written to instruct the session, a refused request or connection, a request the API did not answer, a lookup or a connection that stands out, what was taken out of the transcript, a line of it that cannot be read |
 | `--json` | JSON Lines, see [As JSON](#as-json) |
 | `--follow` | The sessions as they run, see [Following a session](#following-a-session) |
 
@@ -278,7 +278,10 @@ under one of their names: what a use of the SSH agent signed or asked for
 is `request`, what line mode found changed is `change`.
 
 - What happened on the network also has `during`, the ids of the tool
-  calls running at that time.
+  calls running at that time. A connection that is followed as it
+  happens has `stage`: `open` when it is made, `progress` while it is
+  still open and `outcome` when it ended, the last two with when it was
+  `opened`.
 - A command no process was seen of has `unseen`, see [What ran](#what-ran).
 - What was taken out of the transcript has `removed`, see
   [The transcript](#the-transcript). A result that is told apart from
@@ -298,7 +301,7 @@ session, which can neither forge nor edit them:
 | Record | Kept when | Holds |
 | --- | --- | --- |
 | The egress proxy's log | `CLAUDE_AIRLOCK_NET_FILTER=1` | What the session asked the proxy for: method, host, allowed or `DENIED`, the bytes each way and duration |
-| The capture | Unless `CLAUDE_AIRLOCK_NET_LOG=0` | Every TCP connection whatever the protocol, what was sent by anything but TCP, and every name looked up |
+| The capture | Unless `CLAUDE_AIRLOCK_NET_LOG=0` | Every TCP connection whatever the protocol, the session's own and those made to it, what was sent by anything but TCP, and every name looked up |
 
 The capture is taken by a sidecar that shares the session's network
 namespace. It records where a connection went and how it ended, not what
@@ -307,7 +310,11 @@ was sent: of HTTPS neither the URL nor the content.
 ```
 sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
 sandbox  net         tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
-sandbox  net         tcp/https api.anthropic.com (160.79.104.10):443  left open  (no call running)
+sandbox  net         tcp/https api.anthropic.com (160.79.104.10):443  left open, at least 4 MB out, 1 MB in  (no call running)
+sandbox  net         tcp/proxy claude-egress-proxy (172.20.0.2):3128  asked for registry.npmjs.org:443  closed after 8.1s, 2 kB out, 41 MB in
+sandbox  net         tcp 203.0.113.9:8443  speaks TLS  closed after 0.4s, 1 kB out, 3 kB in
+sandbox  net         tcp/https cdn.example (203.0.113.7):443  FLAGGED: its hello asks for other.example, it was reached as cdn.example
+sandbox  net         tcp IN from 172.20.0.9 to its port 8080  closed after 0.2s, 1 kB out, 2 kB in
 sandbox  net         udp/https www.google.com (142.250.74.4):443  212 packets, 31 kB out
 sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually long name
 ```
@@ -315,11 +322,15 @@ sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually lo
 | On the line | Means |
 | --- | --- |
 | `closed after` | How long the connection was open, with the bytes each way |
+| `left open` | It had not ended when the session did, with how much it had carried by then when that is 4 kB or more: no less than that, see [What comes in](#what-comes-in) |
 | `REFUSED`, `NO ANSWER` | The other end refused, or did not answer |
+| `asked for` | What the connection first asked a proxy to connect it to, see [What a connection is](#what-a-connection-is) |
+| `speaks` | What is spoken on a port that does not say, by the first bytes sent there |
+| `IN from` | A connection made to the session from outside it, with the port of the session it was made to |
 | `during:` | The tool call that was running when the connection was made. By the clock, not proof |
 | `(no call running)` | Claude Code itself (the API), or something a command left running |
 | `by:` | The process that made the connection, see [What ran](#what-ran) |
-| `FLAGGED` | A lookup that stands out: a very long name, or many different names under one parent (30) or under one domain whatever is between (100). Data can be carried out that way, it is a prompt to look |
+| `FLAGGED` | A lookup that stands out: a very long name, or many different names under one parent (30) or under one domain whatever is between (100). Data can be carried out that way, it is a prompt to look. Or a connection that is not what it looks, see [What a connection is](#what-a-connection-is) |
 
 The name of a destination is what the session looked up or asked for, the
 address is what was reached. Trust the address where the two matter.
@@ -338,12 +349,15 @@ address is what was reached. Trust the address where the two matter.
   end of both sides: what is sent after the other side closed counts too.
   The numbers start over every 4 GB, so the capture takes one packet of
   every gigabyte a connection carries, and a longer one is counted right.
-- The capture has six parts, each with a limit of 100,000 packets of its
-  own: `tcp` (the start, answer and end of connections, the TLS hello,
-  plain HTTP), `dns` (what Docker's resolver is asked and says), `direct`
-  (what goes to port 53 anywhere else), `flows` (what is not TCP),
-  `uploads` (what is sent to the model's API) and `elsewhere` (what is
-  sent over TCP to anywhere else, see below). A
+- The capture has eight parts, each with a limit of 100,000 packets of
+  its own: `tcp` (the start, answer and end of connections, the TLS
+  hello, plain HTTP), `dns` (what Docker's resolver is asked and says),
+  `direct` (what goes to port 53 anywhere else), `flows` (what is not
+  TCP), `uploads` (what is sent to the model's API), `elsewhere` (what
+  is sent over TCP to anywhere else, see below), `answers` (what the
+  model's API sends back, 200,000 packets: it comes in many small ones)
+  and `downloads` (a sample of what comes in from anywhere else, see
+  [What comes in](#what-comes-in)). A
   session that floods one cannot fill what the others have: whatever it
   sends to port 53, the lookups the resolver makes for it and its
   connections to that port are still recorded. A part that reaches its
@@ -351,12 +365,16 @@ address is what was reached. Trust the address where the two matter.
   whose tcpdump ended before the session did as `INCOMPLETE`, what came
   after is not in it. `--follow` says so too, within a few seconds of it.
 - Of what the session sends over TCP, `uploads` and `elsewhere` have
-  the headers of every packet that carries something, 160 bytes of each
-  and nothing of what it carries: the first of what goes to the
-  addresses of the model's API, the second of the rest. From them the
-  launcher tells when each thing was sent, how long it was and over
-  which connection, see [On the wire](#on-the-wire). Two parts, so that
-  a session that sends a lot somewhere does not use up what its
+  the first 160 bytes of every packet that carries something: the first
+  of what goes to the addresses of the model's API, the second of the
+  rest. That is the headers of a packet, however long they are, and
+  where they are shorter, as they are as a rule, the start of what it
+  carries, some 90 bytes: encrypted over TLS, and as it is sent
+  otherwise. From them the launcher tells when each thing was sent, how
+  long it was and over which connection, see
+  [On the wire](#on-the-wire). Of what a packet carries it reads the
+  first of a connection alone, for what is spoken there. Two parts, so
+  that a session that sends a lot somewhere does not use up what its
   requests to the model are told by.
 - Packets that come faster than they are taken are dropped, and what
   they told of, a connection made in that burst, is in no part. Each
@@ -375,6 +393,93 @@ address is what was reached. Trust the address where the two matter.
 - Not told: a name for QUIC that no lookup gave (its hello is encrypted),
   and the process that sent UDP or a ping, which is known for TCP
   connections alone.
+
+### What a connection is
+
+A port says what a connection is for, a name where it goes. Both are
+what the session chose, so three things more are read from the first
+bytes a connection sends:
+
+- **What it asked a proxy for.** A connection that begins by asking a
+  proxy to connect it somewhere (`CONNECT host:443`) says so
+  (`asked for`). Behind the egress filter every connection goes to the
+  proxy, and this is what tells them apart as they are made: the proxy's
+  own line comes when the tunnel closes. It is what the session asked,
+  the proxy's line says whether it was allowed. Only the first bytes of
+  a connection are taken for it: what goes through a tunnel later is the
+  session's to make read as anything.
+- **Whether its hello asks for the name it was reached by.** The hello
+  of TLS names the server the connection is for, in the clear. One that
+  asks for another name than the address was looked up under, or than
+  the proxy was asked for, is `FLAGGED`: the server is told another name
+  than the one the session went by, which is how another site is
+  reached behind the address of one that is allowed (see the
+  [limits](sandbox.md#known-limits) of the egress filter). An address
+  that has several names is held against them all. Nothing is said of
+  an address that was not looked up at all, its hello is all that names
+  it, nor of a capture whose lookups may not all be there: they went
+  unread, their part ran into its packet limit, or a recorder ended
+  early or lost packets. A hello that names no server is flagged on
+  port 443 alone, and not one the capture has only the start of.
+- **What it speaks.** TLS, HTTP and SSH are told by how they begin.
+  Port 443 that does not begin as TLS, port 80 that does not begin as
+  HTTP and port 22 that does not begin as SSH are `FLAGGED`
+  (`speaks SSH, not TLS`, `does not speak TLS`). On a port without a
+  use that is beyond doubt, what is spoken is said next to it
+  (`speaks TLS`).
+
+These tell a connection that is not what it looks from one that is.
+They do not tell one that was made to look right: a session can send a
+hello for the name it looked up and ask for another site inside the
+encryption, or begin as TLS and go on as something else.
+
+`--json` has `asked`, `speaks` (`tls`, `http`, `ssh` or `other`), the
+name of the `hello` and what it `offered` to speak once connected
+(ALPN), and `flagged` on the line of what stands out.
+
+A connection made to the session (`IN from`) is one somebody else
+opened: another container on its network, another session there, the
+host. The session has to wait on a port for it to be taken (see
+`listen` under [What ran](#what-ran)), one that nothing waits on is
+`refused`, which is nothing gone wrong for the session and not among
+what `--failed` keeps. `--json` has `inbound`, the `port` of the
+session and the `peer_port` of the other end. What the session does
+within itself, over its own loopback or its own address, is not
+shown.
+
+### What comes in
+
+How much a connection brought in is counted when it ends. Until then
+the capture has a sample of it, so that a download shows before it is
+over:
+
+- From anywhere but the model's API, `downloads` has one packet of
+  every 16 MB a connection brings in. How far a connection has got is
+  then known to within 16 MB while it is open.
+- From the model's API, `answers` has every packet, see
+  [On the wire](#on-the-wire).
+- Of a packet of either the first 96 bytes are kept: its headers, and
+  where those are short a few bytes of what it carries, which are not
+  read.
+- What the session sends is known to the byte, from `uploads` and
+  `elsewhere`.
+
+So a connection that is still open says how much it has carried each
+time that is 16 MB more one way, no more often than every 10 seconds,
+while the session is followed and in line mode:
+
+```
+sandbox  net         tcp/https releases.example (203.0.113.20):443  still open after 42s, 2 kB out, 160 MB in so far
+```
+
+Not one to the model's API, whose every upload and answer has a line,
+nor behind the egress filter a tunnel to its host. One through a proxy
+says what it asked for. `--json` has `stage` as `progress` on such a
+line, with `bytes_out`,
+`bytes_in`, `seconds` and when the connection was `opened`. A
+connection that was `left open` when the session ended says the same,
+as `at least`: of one the capture has no packet of since, nothing more
+is known.
 
 ## The transcript
 
@@ -486,6 +591,17 @@ sandbox  listen  tcp 0.0.0.0:8080  OPEN to its network  by: [812] node server.js
 A connection the sidecar saw and found no process for says
 `by: a process that cannot be looked into`: a process can close itself to
 the others of its user, its connection is noted all the same.
+
+While the session runs the record stays in the sidecar, where the
+session cannot reach it. The sidecar says aloud which process holds each
+connection and each socket that waits on more than the session's
+loopback, with the processes that one comes from, and
+`--trace --follow` and line mode read that: `by:` is on the line of a
+connection as it is made, and `listen` is a line when a socket starts to
+wait. No more than 2 MB of it in one session, the output of a sidecar is
+kept until the session is over. Past that a line says so
+(`which process makes a connection is no longer said`), and the trace of
+the session that is over has them all.
 
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
@@ -730,26 +846,63 @@ sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  closed after 
   shorter is what keeps a connection going, its handshake, or a request
   that asks for something and sends little: a `GET` is none.
 - A connection says how many uploads of that length went over it.
-- An upload to anywhere but the model's API says which call it was sent
-  during and, with the record of the processes, which process made its
-  connection, as a connection does. One to the model does not: no call
-  makes those.
-- The capture keeps the headers of those packets alone, so nothing here
-  tells what an upload held, nor which model it asked. One the capture
+- An upload says which process made its connection, with the record
+  of the processes, as a connection does. One to anywhere but the
+  model's API says which call it was sent during too. One to the model
+  does not: no call makes those.
+- The capture keeps no more of those packets than their start, so
+  nothing here tells what an upload held, nor which model it asked. One the capture
   lost packets of is counted by the next packet, one sent again once.
 - Two things sent at the same moment over one connection, a request of
   claude's and one of a subagent, are one upload: nothing on the wire
   tells them apart.
 - `--json` has `upload` on such a line, with `bytes_out`, `seconds`,
-  the `address`, `port` and `source_port` of its connection, and
-  `model_api` for whether it went to the model's API, which is told by
-  the address.
+  the `address`, `port` and `source_port` of its connection, when that
+  was `opened`, and `model_api` for whether it went to the model's API,
+  which is told by the address.
 - Line mode and `--trace --follow` show an upload a second after its
   last packet.
 - Of a session behind the egress filter (`CLAUDE_AIRLOCK_NET_FILTER=1`)
-  every upload is one to the proxy, all its packets go there: which of
-  them are for the model is not told apart. Nothing is told for a
+  every packet goes to the proxy. An upload then says what its
+  connection asked the proxy for (`asked for api.anthropic.com:443`,
+  `asked` in `--json`), and one over a tunnel to the model's host is
+  one to the model. Of any other session a name is not taken for that:
+  it can ask any proxy it reaches for any name. Nothing is told for a
   session run with `CLAUDE_AIRLOCK_NET_LOG=0`.
+
+What the model's API sends back after an upload is its answer, a line
+when it is over:
+
+```
+sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  answer of 38 kB in 14.2s, began 1.2s after the upload of 10:02:41
+```
+
+```
+# answers     44 from the model's API, 1 MB received
+```
+
+- An answer is what came in on the connection of an upload after the
+  last of it was sent, until the next thing of 4 kB or more was sent
+  there. It says how long after the last of the upload it began, how
+  much it was and for how long it came: the model sends what it makes
+  as it makes it. What comes in while the upload is still being sent
+  is not its answer, on a connection that was just made that is the
+  other end's side of the handshake. What the other end says of such a
+  connection right after a short first request does count, and that
+  answer then reads as begun sooner than the model began it.
+- One that was quiet for more than 10 seconds is taken to be over, and
+  what comes after that is `the rest of the answer to the upload of`
+  that time, on a line of its own.
+- Two requests sent over one connection at the same time have their
+  answers come back together, as one answer to the later of the two.
+- The capture keeps no more of those packets than their headers and a
+  few bytes after them, nothing here tells what an answer held.
+- `--json` has `answer` on such a line, with `bytes_in`, `seconds`,
+  how long it `waited`, and when its upload began as `upload_at`.
+- Line mode and `--trace --follow` show an answer once another upload
+  began on its connection, or 12 seconds after its last packet.
+- A session behind the egress filter has none: what comes back to it
+  all comes from the proxy.
 
 With `CLAUDE_AIRLOCK_API_LOG=1` the two records are put side by side,
 what Claude Code says it sent and what was seen to go:
@@ -806,6 +959,10 @@ claude-airlock: of this session, claude-airlock --trace has the rest:
     example.org:443 x3
   ran into its memory limit of 16g, what it ran was ended for it: CLAUDE_AIRLOCK_MEMORY sets the limit
   ran into its limit of processes 3 times, what it tried to start then did not: CLAUDE_AIRLOCK_PIDS sets the limit
+  connected to from outside the session:
+    tcp IN from 172.20.0.9 to its port 8080
+  connections that stand out:
+    tcp/https cdn.example (203.0.113.7):443: its hello asks for other.example, it was reached as cdn.example
   lookups that stand out:
     4a6f...3d.x.example.com: an unusually long name
   waited for connections, open to the other sessions on its network:
@@ -842,7 +999,7 @@ log:
 | What | Holds | How much |
 | --- | --- | --- |
 | `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB, more by what a session has logged within 10 seconds |
-| `captures` | The capture of each session | A few kB, and the headers of what the session sent: some hundred kB each as a rule, 18 MB at most for what went to the model and as much for the rest. The latest 100 |
+| `captures` | The capture of each session | A few kB, and the headers of what the session sent and of what came back: some hundred kB each as a rule. At most 18 MB for what went to the model and as much for the rest, 22 MB for what the model sent back and 11 MB for the sample of what came in from anywhere else. The latest 100 |
 | `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
 | `transcripts` | The launcher's copy of each transcript | For 30 days, 2 GB a session at most |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |
@@ -877,6 +1034,17 @@ it, so it can be started and stopped at any time.
 
 - A tool call shows when it is issued, and its result on a line of its own
   when that comes. The two have the same number (`[7]`).
+- A connection shows half a second after it was made, with what is
+  known of it by then: the process that made it, what it asked a proxy
+  for. What became of it is a line of its own when it ends, and how far
+  it has got while it is open, see [What comes in](#what-comes-in).
+- A destination no session of the project was noted to reach before
+  says so where it is first reached (`NEW for this project`, `new` in
+  `--json`), by the record the launcher keeps of what each project
+  reaches (see [When a session ends](#when-a-session-ends)). A name is
+  the session's own word there too. Nothing is new to a project that
+  has no such record yet, and a session behind the egress filter
+  reaches the proxy alone.
 - A call runs until its result comes. One whose session was ended while
   it ran has none: it is told as that when the model takes its next step
   (`result: none recorded, the session went on without one`), and a call

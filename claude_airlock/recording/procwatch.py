@@ -29,7 +29,13 @@ its largest processes, as its cgroup says (version 2, of version 1 only
 what /proc gives). The sixth when a process of it was ended for want of
 memory, with the large ones that are gone since. Those two are written to
 the watcher's output as well, for what follows a session as it runs: the
-record stays in the sidecar until the session is over. The seventh when
+record stays in the sidecar until the session is over. So are the second
+and the third, of what is not on the session's own loopback, each after
+the first of the process that holds the socket and of those it comes
+from: which process made a connection is then known while the session
+runs, without all its processes being said aloud. No more of that than
+MOST_ALOUD, the output of a sidecar is kept by docker until the session
+is over. The seventh when
 looks came much later than they are meant to, which is the session's
 doing: how many did since it was last said, how long after the look before
 them in all, and the longest of those. What lived shorter than that, then,
@@ -112,6 +118,13 @@ OUT_OF_TURN_EVERY = 5.0
 LARGEST = 3
 # The processes that hold a socket that are named, the ones started last
 MOST_HOLDERS = 8
+# Of the process that holds a socket, how many of those it comes from are
+# said aloud with it: as many as are shown next to a connection
+SAID_PARENTS = 3
+# What is said aloud of the connections, of the sockets that wait and of
+# their processes stops at this size, with a last word that it did. The
+# record goes on, it is the output alone that docker keeps.
+MOST_ALOUD = 2 * 1024 * 1024
 MOST_TMPFS = 16
 NAME_LENGTH = 64
 # Where a container finds what it uses and may use, under the root of one
@@ -135,6 +148,9 @@ class Note(enum.StrEnum):
     # that a record that stops being written to for want of a watcher
     # (killed, crashed) is told from a session with nothing to note
     ALIVE = "alive"
+    # Said aloud alone, as the last of what is said there of connections
+    # and their processes, see MOST_ALOUD: the record has the rest
+    HUSHED = "hushed"
 
 
 def _take_identity(uid: int, gid: int) -> None:
@@ -608,6 +624,14 @@ class Watch:
         # Each process seen: what it was, when it was first seen and when
         # it was last looked at
         self._processes: dict[int, tuple[tuple, float, float]] = {}
+        # The parent of each, and what each was when it was last said
+        # aloud next to a socket it holds, see _say_who
+        self._parents: dict[int, int] = {}
+        self._said: dict[int, tuple] = {}
+        # How much was said aloud of connections and their processes,
+        # and whether that has stopped, see MOST_ALOUD
+        self._spoken = 0
+        self._hushed = False
         self._connections: set[tuple[int, str, int]] = set()
         self._listening: set[tuple[int, str, int]] = set()
         self._tries: dict[tuple[int, str, int], int] = {}
@@ -637,7 +661,13 @@ class Watch:
         _, program, argv = known[0]
         return os.path.basename(program or (argv[0] if argv else "?"))[:NAME_LENGTH]
 
-    def note(self, reserved: bool = False, aloud: bool = False, **said: object) -> None:
+    def note(
+        self,
+        reserved: bool = False,
+        aloud: bool = False,
+        counted: bool = False,
+        **said: object,
+    ) -> None:
         """Add a line to the record, while there is room for it: what is
         not reserved (a process, how the session is doing, what is on the
         session's own loopback) leaves RESERVED for what is (a connection,
@@ -647,7 +677,8 @@ class Watch:
         its last line when the reserved part is too, which a session can
         fill as well: one that ends without a word reads as a session
         with nothing more to note. A line said aloud goes to the
-        watcher's output too, no more of them than to the record."""
+        watcher's output too, no more of them than to the record, and of
+        those that are counted no more than MOST_ALOUD, see _speak."""
         if self._ended or (self._full and not reserved):
             return
         line = stamped(**said)
@@ -663,17 +694,53 @@ class Watch:
         self._out.write(line)
         self._out.flush()
         if aloud:
-            try:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-            except (OSError, ValueError):
-                # Nobody listens, the record has it
-                pass
+            self._speak(line, counted)
+
+    def _speak(self, line: str, counted: bool = False) -> None:
+        """Write a line to the watcher's output, for what follows the
+        session as it runs. One that is counted, a connection or a
+        process next to it, only while less than MOST_ALOUD of them was
+        said: how many there are is the session's to choose, and docker
+        keeps the output until the session is over. Past that a last
+        word says so, and no more of them come."""
+        if counted:
+            if self._hushed:
+                return
+            if self._spoken + len(line) > MOST_ALOUD:
+                self._hushed = True
+                line = stamped(note=Note.HUSHED)
+            self._spoken += len(line)
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            # Nobody listens, the record has it
+            pass
+
+    def _say_who(self, held_by: list[int]) -> None:
+        """Say aloud which process holds a socket, ahead of the line of
+        the socket: the one started last of those that hold it and those
+        it comes from, each as the record has it, unless it was said as
+        that before. The record has every process, the output only those
+        a connection is tied to."""
+        pid = max(held_by, default=0)
+        for _ in range(SAID_PARENTS + 1):
+            known = self._processes.get(pid)
+            if not known or self._hushed:
+                return
+            what = known[0]
+            parent = self._parents.get(pid, 0)
+            if self._said.get(pid) != what:
+                self._said[pid] = what
+                _, program, argv = what
+                said = stamped(pid=pid, ppid=parent, exe=program, argv=argv)
+                self._speak(said, counted=True)
+            pid = parent
 
     def say(self, **said: object) -> None:
         """Write a line to the record and to the watcher's output, see
         note. The line does not use the reserved part of the record."""
-        self.note(reserved=False, aloud=True, **said)
+        self.note(reserved=False, aloud=True, counted=False, **said)
 
     def look(self) -> None:
         now = time.monotonic()
@@ -719,6 +786,8 @@ class Watch:
     def _look_at_processes(self, pids: list[int], now: float) -> None:
         for pid in set(self._processes).difference(pids):
             del self._processes[pid]
+            self._parents.pop(pid, None)
+            self._said.pop(pid, None)
         for pid in pids:
             known = self._processes.get(pid)
             if known:
@@ -736,6 +805,7 @@ class Watch:
                 self.note(pid=pid, ppid=parent, exe=program, argv=argv)
                 known = (what, now, now)
             self._processes[pid] = (what, known[1], now)
+            self._parents[pid] = parent
 
     def _look_at_connections(self, current: Sockets, pids: list[int]) -> None:
         """Note each new connection with the processes that hold it. One
@@ -765,8 +835,11 @@ class Watch:
                     continue
             self._connections.add(key)
             port, to, to_port = key
+            self._say_who(held_by)
             self.note(
                 reserved=True,
+                aloud=True,
+                counted=True,
                 port=port,
                 to=to,
                 to_port=to_port,
@@ -804,7 +877,17 @@ class Watch:
             self._listening.add(key)
             port, on, _ = key
             held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
-            self.note(reserved=not _is_loopback(on), listen=port, on=on, pids=held_by)
+            reachable = not _is_loopback(on)
+            if reachable:
+                self._say_who(held_by)
+            self.note(
+                reserved=reachable,
+                aloud=reachable,
+                counted=True,
+                listen=port,
+                on=on,
+                pids=held_by,
+            )
 
 
 def _main(args: list[str]) -> int:

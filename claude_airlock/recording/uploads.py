@@ -3,11 +3,13 @@ each run of packets it sent somewhere without a pause is an upload. A
 request to the model is one, the conversation sent again, and so is a
 push to a repository or a file sent anywhere. So they show from outside
 the session, with the connection each went over and when, without
-anything of what they hold: of these packets the capture keeps the
-headers alone. What goes to the model's API and what goes anywhere else
-are two parts of a capture, each with its own packet limit (see
-capture.py): a session that sends a lot somewhere does not use up what
-its requests to the model are told by.
+anything of what they hold: of these packets the capture keeps no more
+than their start, the headers and where those are short some bytes after
+them (see HEADERS_LENGTH of capture.py), which are not read here. What
+goes to the model's API and what goes anywhere else are two parts of a
+capture, each with its own packet limit (see capture.py): a session that
+sends a lot somewhere does not use up what its requests to the model are
+told by.
 
 What a session says it asked the model is another record, its own word
 (see api_log.py). The two are put side by side by report/wire.py.
@@ -61,6 +63,8 @@ class Upload:
     began: float
     ended: float
     sent: int = 0
+    # When it got long enough to be worth a line, none while it is not
+    sized_at: float | None = None
 
     @property
     def seconds(self) -> float:
@@ -72,6 +76,32 @@ class Upload:
         return self.sent >= LEAST
 
 
+class Reached:
+    """How far what each connection sent one way got, by the sequence
+    numbers of its packets: what a packet adds to that."""
+
+    def __init__(self) -> None:
+        self._reached: dict[Key, int] = {}
+
+    def adds(self, key: Key, packet: Packet) -> tuple[int, bool]:
+        """How many bytes a packet adds to what its connection sent that
+        way, none for one sent again or out of its turn, which was
+        counted when it first came. And whether it is of another
+        connection than the packets before it: neither the stream going
+        on nor a part of it again, the port was taken by a new one."""
+        end = (packet.sequence + packet.length) % SEQUENCE_SPACE
+        reached = self._reached.get(key)
+        ahead, another = packet.length, False
+        if reached is not None:
+            ahead = (end - reached) % SEQUENCE_SPACE
+            if not 0 < ahead <= packet.length + MOST_MISSED:
+                if (reached - end) % SEQUENCE_SPACE <= MOST_MISSED:
+                    return 0, False
+                ahead, another = packet.length, True
+        self._reached[key] = end
+        return ahead, another
+
+
 @dataclass
 class Uploads:
     """The uploads of one part of a capture, in the order they began."""
@@ -79,28 +109,22 @@ class Uploads:
     all: list[Upload] = field(default_factory=list)
     # The one each connection sent last, and how far its stream got
     _last: dict[Key, Upload] = field(default_factory=dict, repr=False)
-    _reached: dict[Key, int] = field(default_factory=dict, repr=False)
+    _reached: Reached = field(default_factory=Reached, repr=False)
+    # Those of each connection that are long enough to be worth a line,
+    # in the order they began: what came back after each is its answer,
+    # see answers.py
+    _sized: dict[Key, list[Upload]] = field(default_factory=dict, repr=False)
 
     def add(self, packet: Packet) -> None:
         """Take in a packet a session sent that carries something."""
         if not packet.sent or not packet.length:
             return
         key = (packet.source_port, packet.destination, packet.port)
-        end = (packet.sequence + packet.length) % SEQUENCE_SPACE
-        reached = self._reached.get(key)
-        ahead = packet.length
-        if reached is not None:
-            ahead = (end - reached) % SEQUENCE_SPACE
-            if not 0 < ahead <= packet.length + MOST_MISSED:
-                if (reached - end) % SEQUENCE_SPACE <= MOST_MISSED:
-                    # Sent again, or out of its turn: counted when it
-                    # first came
-                    return
-                # Neither the stream going on nor a part of it again:
-                # another connection from the same port
-                ahead = packet.length
-                self._last.pop(key, None)
-        self._reached[key] = end
+        ahead, another = self._reached.adds(key, packet)
+        if not ahead:
+            return
+        if another:
+            self._last.pop(key, None)
         last = self._last.get(key)
         if last is None or packet.when - last.ended > PAUSE:
             if len(self.all) >= MOST_UPLOADS:
@@ -109,6 +133,22 @@ class Uploads:
             self.all.append(last)
         last.ended = max(last.ended, packet.when)
         last.sent += ahead
+        if last.sized and last.sized_at is None:
+            last.sized_at = packet.when
+            self._sized.setdefault(key, []).append(last)
+
+    def asked_by(self, key: Key, when: float, since: float) -> Upload | None:
+        """The last upload from a port to a place that had got long
+        enough to be worth a line by a time: the request what comes back
+        then is the answer to. Not one that began before since, when the
+        connection something came back on was made: a port is used
+        again. None when there was none yet."""
+        sized = self._sized.get(key)
+        if not sized:
+            return None
+        at = bisect.bisect_right(sized, when, key=lambda upload: upload.sized_at or 0)
+        found = sized[at - 1] if at else None
+        return found if found and found.began >= since else None
 
     def between(self, start: float, end: float) -> list[Upload]:
         """Those that began between two times, the first first."""

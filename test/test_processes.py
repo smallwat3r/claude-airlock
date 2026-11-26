@@ -255,6 +255,90 @@ class WatcherTest:
         ours = [line for line in seen if line.get("listen") == port]
         assert [line["on"] for line in ours] == ["127.0.0.1"]
 
+    def holding(self, out: io.StringIO) -> procwatch.Watch:
+        """A watcher that knows of a shell, of curl started by it, and
+        finds curl to hold whatever socket it is asked about."""
+        watch = procwatch.Watch(out)
+        watch._processes = {
+            640: (("1", "/bin/bash", ["bash"]), 0.0, 0.0),
+            812: (("2", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
+        }
+        watch._parents = {640: 1, 812: 640}
+        watch._holders.of = lambda inodes, pids: {inode: [812] for inode in inodes}
+        return watch
+
+    def test_who_holds_a_connection_is_said_aloud_with_those_it_comes_from(self):
+        out, aloud = io.StringIO(), io.StringIO()
+        watch = self.holding(out)
+        with mock.patch.object(sys, "stdout", aloud):
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+            watch._look_at_connections(
+                {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 443): "8"},
+                [812],
+            )
+            # On the session's own loopback, which nothing else reaches
+            watch._look_at_listeners({(8000, "127.0.0.1", 0): "9"}, [812])
+            watch._look_at_listeners({(8080, "0.0.0.0", 0): "10"}, [812])
+        said = [json.loads(line) for line in aloud.getvalue().splitlines()]
+        # The process and where it comes from, once, then each socket
+        assert [(line.get("pid"), line.get("ppid")) for line in said[:2]] == [
+            (812, 640),
+            (640, 1),
+        ]
+        assert said[0]["argv"] == ["curl", "-sS"]
+        assert [line.get("port") or line.get("listen") for line in said[2:]] == [
+            40212,
+            40213,
+            8080,
+        ]
+        # And what follows the session reads it as the record is read
+        record = noted(*said)
+        (made,) = record.holder(40213, "203.0.113.9", 443, said[3]["t"])[:1]
+        assert (made.pid, made.command) == (812, "curl -sS")
+        assert [listener.port for listener in record.listeners] == [8080]
+        # The record has the sockets, and no process twice for them
+        kept = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line for line in kept if "pid" in line] == []
+        assert len([line for line in kept if "port" in line]) == 2
+
+    def test_a_process_that_became_another_program_is_said_again(self):
+        out, aloud = io.StringIO(), io.StringIO()
+        watch = self.holding(out)
+        with mock.patch.object(sys, "stdout", aloud):
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+            watch._processes[812] = (("2", "/usr/bin/ssh", ["ssh"]), 0.0, 0.0)
+            watch._look_at_connections(
+                {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 22): "8"},
+                [812],
+            )
+        said = [json.loads(line) for line in aloud.getvalue().splitlines()]
+        assert [line["exe"] for line in said if "exe" in line] == [
+            "/usr/bin/curl",
+            "/bin/bash",
+            "/usr/bin/ssh",
+        ]
+
+    def test_no_more_is_said_aloud_of_connections_than_docker_is_to_keep(self):
+        out, aloud = io.StringIO(), io.StringIO()
+        watch = self.holding(out)
+        with (
+            mock.patch.object(sys, "stdout", aloud),
+            mock.patch.object(procwatch, "MOST_ALOUD", 2000),
+        ):
+            for port in range(40000, 40100):
+                watch._look_at_connections({(port, "203.0.113.9", 443): str(port)}, [])
+            # How the session is doing is still said, every so often
+            watch.say(health={"cpu": 1.0})
+        said = [json.loads(line) for line in aloud.getvalue().splitlines()]
+        assert len(aloud.getvalue()) < 2500
+        assert [line.get("note") for line in said[-2:]] == ["hushed", None]
+        assert "health" in said[-1]
+        assert sum(line.get("note") == "hushed" for line in said) == 1
+        assert noted(*said).hushed_at == said[-2]["t"]
+        # The record has them all
+        kept = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert len([line for line in kept if "port" in line]) == 100
+
 
 class RecordTest:
     @pytest.fixture(autouse=True)

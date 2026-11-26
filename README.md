@@ -170,7 +170,7 @@ What is recorded, for `--trace`:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `CLAUDE_AIRLOCK_NET_LOG` | `1` | Records every connection, what is sent by UDP or a ping, every name looked up, and when and how much is sent over each connection, a request to the model as a push. `0` records nothing |
+| `CLAUDE_AIRLOCK_NET_LOG` | `1` | Records every connection the session makes and every one made to it, what is sent by UDP or a ping, every name looked up, and when and how much is sent over each connection, a request to the model as a push, with how long the model's answer took. `0` records nothing |
 | `CLAUDE_AIRLOCK_PROC_LOG` | `1` | Records the processes that run, which of them made each connection, and the memory and CPU the session uses. `0` records nothing |
 | `CLAUDE_AIRLOCK_API_LOG` | `0` | `1` keeps every request Claude Code sends to the model and each answer: the system prompt, the tools and the conversation as they were sent. With the capture on, each request is placed on the connection it was seen to go over, see [docs/trace.md](docs/trace.md#the-requests-to-the-model) |
 
@@ -286,18 +286,19 @@ You get a prompt and, above it, what the session does in the lines of
 `--trace`, as it happens. Why it is the default:
 
 - **You see what a command did, not only that it ran.** Under each
-  command are the connections made while it ran and how each ended, the
-  files it changed, and who allowed it. The native UI shows none of
+  command are the connections made while it ran, the process that made
+  each and how it ended, the files it changed, and who allowed it. The native UI shows none of
   that, a host an install reaches besides the registry goes unseen there.
 - **It is the launcher's word, not the session's.** The network, the
   resource use and the doors are recorded from outside the sandbox, the
   session cannot leave them out.
 - **What went wrong stands out.** A refused connection, a denied
-  request, a failed command, a write outside the project and a possible
-  prompt injection in what was read are in bold red and in capitals.
+  request, a failed command, a write outside the project, a connection
+  that is not what it looks and a possible prompt injection in what was
+  read are in bold red and in capitals.
 - **The cost is in sight.** Each step says the tokens it wrote and read,
-  each turn its time and price, and the sandbox says every so often how
-  much memory and CPU it uses.
+  each turn its time, its price and what it did on the network, and the
+  sandbox says every so often how much memory and CPU it uses.
 - **It works anywhere.** Lines are only added, never redrawn, so it reads
   the same in a terminal, an Emacs shell buffer or a file, and scrolls
   back like any output.

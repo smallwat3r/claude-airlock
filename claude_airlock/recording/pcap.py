@@ -1,7 +1,15 @@
 """Reading a capture for what it says a session reached: each TCP
 connection and how it went, what it sent by anything else (UDP, a ping),
 the answers of the resolver, the server name of a TLS hello and the request
-of plain HTTP. Over IPv4 and IPv6.
+of plain HTTP. Over IPv4 and IPv6. And for who reached the session: each
+connection made to it from outside.
+
+Of a connection the session made, three things more are read from what it
+sent first: what it asked a proxy to connect it to (CONNECT), whether its
+hello asks for the name it was reached by, and whether what it speaks is
+what its port says. The last two are noted when they are not (see
+Capture.noticed): the bytes are the session's own, so this tells what is
+not as it looks, not what was made to look right.
 
 Nothing here runs docker, see capture.py for the sidecar that writes the
 files. The file is read by pcap_file.py, a packet by packets.py and what it
@@ -13,12 +21,15 @@ from __future__ import annotations
 
 import bisect
 import enum
-from collections.abc import Iterable
+import math
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from ..reader import NotThis
 from ..settings import EGRESS_PORT
+from .answers import ANSWERS_PART, DOWNLOADS_PART, Answers
 from .packets import (
     ICMP_ECHO,
     RESOLVER,
@@ -30,10 +41,15 @@ from .packets import (
     parse_packet,
 )
 from .payloads import (
+    HTTP,
+    SSH,
+    TLS,
+    Hello,
     Lookup,
     dns_message,
     http_request,
-    tls_server_name,
+    spoken,
+    tls_hello,
     unanswered,
 )
 from .pcap_file import pcap_frames
@@ -89,6 +105,21 @@ MOST_DNS_READ = 4 * MOST_LOOKUPS
 # session can leave any number half open
 MOST_CLOSING = 10_000
 SEQUENCE_SPACE = 1 << 32
+# What is spoken on the ports whose use is not in doubt, as spoken of
+# payloads.py tells it: a connection there that begins as something else
+# is noted. And how each is written.
+SPOKEN_ON = {22: SSH, 80: HTTP, 443: TLS}
+SPOKEN_NAMES = {SSH: "SSH", HTTP: "HTTP", TLS: "TLS"}
+HTTPS_PORT = 443
+# What is kept of what a connection asked a proxy for, the session's to
+# make as long as a packet
+ASKED_LENGTH = 255
+# No more is noted of the connections of a capture than this
+MOST_NOTICED = 10_000
+# No more of what was sent on a connection that is not read yet is kept
+# to be looked at again than this, and no more often than so many times
+MOST_UNPLACED = 256
+LATE_TRIES = 2
 
 
 class Went(enum.StrEnum):
@@ -126,10 +157,20 @@ class Stream:
     # Whether anything told how far, and whether it said it was done
     known: bool = False
     closed: bool = False
+    # When the last packet that told how far was sent
+    told_at: float = -math.inf
 
-    def reach(self, sequence: int) -> None:
-        """Take a sequence number that it got to. One that is behind is
-        a packet sent again, or out of its turn."""
+    def reach(self, sequence: int, when: float) -> None:
+        """Take a sequence number that it got to by a time. One that is
+        behind is a packet sent again, or out of its turn. And one from
+        before the last that was taken tells nothing: the parts of a
+        capture are read one after the other, each from its start, and
+        a number is only good to compare with the ones around it in
+        time. Held against one from gigabytes later, an early packet
+        would read as four gigabytes further on."""
+        if when < self.told_at:
+            return
+        self.told_at = when
         ahead = (sequence - self.start - self.reached) % SEQUENCE_SPACE
         if ahead < SEQUENCE_SPACE // 2:
             self.reached += ahead
@@ -144,7 +185,9 @@ class Stream:
 @dataclass
 class Connection:
     """A TCP connection the session opened, and how it went as far as the
-    capture tells."""
+    capture tells. Or one that was made to the session from outside
+    (inbound): its address is then that of whoever made it, its port the
+    one of the session it was made to, and its source port theirs."""
 
     when: float
     address: str
@@ -164,15 +207,42 @@ class Connection:
     # What each end sent, the other end's once it answered
     outgoing: Stream | None = field(default=None, repr=False)
     incoming: Stream | None = field(default=None, repr=False)
+    # Whether it was made to the session, not by it
+    inbound: bool = False
+    # What its first bytes asked a proxy to connect it to (host:port),
+    # empty when they asked for no such thing: the session's word, which
+    # a proxy takes or refuses
+    asked: str = ""
+    # The hello of TLS it sent, none when it sent none
+    hello: Hello | None = None
+    # What it speaks, by the first bytes the session sent on it, see
+    # spoken of payloads.py: empty while that is not known
+    speaks: str = ""
 
     def __post_init__(self) -> None:
-        self.outgoing = Stream(self.sequence)
+        first = Stream(self.sequence)
+        if self.inbound:
+            self.incoming = first
+        else:
+            self.outgoing = first
+
+    @property
+    def key(self) -> Key:
+        """What it is known by: the session's port, then the address and
+        the port of the other end."""
+        if self.inbound:
+            return (self.port, self.address, self.source_port)
+        return (self.source_port, self.address, self.port)
 
     def answer(self, sequence: int) -> None:
-        """The other end answered, starting from a sequence number."""
+        """The other end answered, starting from a sequence number. Of
+        one made to the session, the session did."""
         if self.answer_sequence is None:
             self.answer_sequence = sequence
-            self.incoming = Stream(sequence)
+            if self.inbound:
+                self.outgoing = Stream(sequence)
+            else:
+                self.incoming = Stream(sequence)
 
     def count(self, packet: Packet) -> None:
         """Take in how far a packet of it says each end got: its sender
@@ -187,10 +257,10 @@ class Connection:
         if not packet.sent:
             sender, other = other, sender
         if not sender.closed:
-            sender.reach(packet.sequence + packet.length)
+            sender.reach(packet.sequence + packet.length, packet.when)
             sender.closed = TcpFlag.FIN in flags
         if TcpFlag.ACK in flags and not other.closed:
-            other.reach(packet.acknowledgement)
+            other.reach(packet.acknowledgement, packet.when)
         if self.ended is not None:
             self.sent, self.received = self.outgoing.count, self.incoming.count
 
@@ -228,6 +298,18 @@ class Connection:
     def seconds(self) -> float | None:
         """How long it was open, once it has ended."""
         return None if self.ended is None else round(self.ended - self.when, 3)
+
+    @property
+    def so_far(self) -> tuple[int | None, int | None]:
+        """The bytes each way as far as any packet of it told, out then
+        in: of one that has not ended, what is known of it by now. Of
+        what the session sent every packet tells, when the capture took
+        those. Of what came in, as the capture samples it: every packet
+        from the model's API, one of every 16 MB from anywhere else (see
+        capture.py)."""
+        out = self.outgoing.count if self.outgoing else None
+        back = self.incoming.count if self.incoming else None
+        return out, back
 
 
 @dataclass
@@ -283,13 +365,15 @@ def _domain_of(labels: list[str]) -> str:
 
 
 @dataclass
-class Answers:
+class LookedUp:
     """The names an address was looked up under, by when each answer
     came, the earliest first: found by the time without going through
     them all, a session can have any number of answers give one address."""
 
     times: list[float] = field(default_factory=list)
     names: list[str] = field(default_factory=list)
+    # When each name was first given it, in small letters
+    _first: dict[str, float] = field(default_factory=dict, repr=False)
 
     def add(self, when: float, name: str) -> None:
         # After those of the same time. At the end as a rule, the answers
@@ -297,22 +381,48 @@ class Answers:
         at = bisect.bisect_right(self.times, when)
         self.times.insert(at, when)
         self.names.insert(at, name)
+        known = name.lower().rstrip(".")
+        self._first[known] = min(when, self._first.get(known, when))
 
     def as_of(self, when: float) -> str | None:
         """The name of the last answer that came by a time."""
         at = bisect.bisect_right(self.times, when)
         return self.names[at - 1] if at else None
 
+    def had(self, name: str, when: float) -> bool:
+        """Whether an answer gave it a name, in small letters, by a time."""
+        return self._first.get(name, math.inf) <= when
+
+
+class Marks(NamedTuple):
+    """How much of each kind a capture has, for a reader that follows it
+    to tell what came since, and to say how far it shows."""
+
+    connections: int = 0
+    endings: int = 0
+    lookups: int = 0
+    requests: int = 0
+    flows: int = 0
+    flagged: int = 0
+    inbound: int = 0
+    noticed: int = 0
+
 
 @dataclass
 class Capture:
-    """What a capture says a session reached."""
+    """What a capture says a session reached, and who reached it."""
 
     # Each TCP connection it opened
     connections: list[Connection] = field(default_factory=list)
+    # Each one that was made to it from outside
+    inbound: list[Connection] = field(default_factory=list)
     # What became of them, in the order it did: when, what (no answer,
     # refused or closed) and the connection. For a reader that follows.
     endings: list[tuple[float, Went, Connection]] = field(default_factory=list)
+    # What stands out of the connections it opened, in the order it was
+    # found: when, what, and the connection. See look_at_hellos and
+    # _take_first.
+    noticed: list[tuple[float, str, Connection]] = field(default_factory=list)
     # Each answer of the resolver
     lookups: list[Lookup] = field(default_factory=list)
     # The lookups that stand out, each with what for, see DNS_MANY_NAMES
@@ -329,7 +439,15 @@ class Capture:
     # uploads.py
     uploads: Uploads = field(default_factory=Uploads)
     elsewhere: Uploads = field(default_factory=Uploads)
+    # What came back from the model's API after each thing sent there,
+    # when the capture took that part, see answers.py
+    answers: Answers = field(default_factory=Answers)
     packets: int = 0
+    # Whether the lookups are all there, as far as whoever reads the
+    # capture knows: not when the part that has them stopped at its
+    # packet limit, or its recorder ended or lost packets. A hello is
+    # then held against no name, see _reached_otherwise.
+    lookups_whole: bool = True
     # How many each part of the capture had, by its name: each has a
     # packet limit of its own
     part_packets: dict[str, int] = field(default_factory=dict)
@@ -341,6 +459,9 @@ class Capture:
     _closing: dict[tuple[int, str, int], Connection] = field(
         default_factory=dict, repr=False
     )
+    # Every connection by what it is known by, see Connection.key, those
+    # of one key in the order they were made: a port is used again
+    _by_key: dict[Key, list[Connection]] = field(default_factory=dict, repr=False)
     # The start of a DNS message over TCP whose rest has not come, by
     # where it is from and where it goes, see DNS_MOST_HELD
     _dns_held: dict[tuple[str, int, str, int], bytes] = field(
@@ -354,8 +475,14 @@ class Capture:
     # the server name the first TLS hello to it asked for. Both are the
     # session's doing: the address is what it reached, the name what it
     # says it was after.
-    _answered: dict[str, Answers] = field(default_factory=dict, repr=False)
+    _answered: dict[str, LookedUp] = field(default_factory=dict, repr=False)
     _hello: dict[str, str] = field(default_factory=dict, repr=False)
+    # The connections whose hello is still to be held against what was
+    # looked up, each with when it sent it, see look_at_hellos
+    _hellos: list[tuple[float, Connection]] = field(default_factory=list, repr=False)
+    # What the session sent on a connection whose start was not read
+    # yet, each with how often it was looked for again, see sent_too
+    _unplaced: list[tuple[Packet, int]] = field(default_factory=list, repr=False)
     # The queries the session sent to a resolver that have not been
     # answered, by the key of their answer, with when each was sent, and
     # those of them said to have had none
@@ -367,16 +494,18 @@ class Capture:
     # How many DNS messages were read, see MOST_DNS_READ
     _dns_read: int = field(default=0, repr=False)
 
-    def marks(self) -> tuple[int, int, int, int, int, int]:
+    def marks(self) -> Marks:
         """How much of each kind there is, for a reader that follows to
         tell what came since."""
-        return (
+        return Marks(
             len(self.connections),
             len(self.endings),
             len(self.lookups),
             len(self.requests),
             len(self.flows),
             len(self.flagged),
+            len(self.inbound),
+            len(self.noticed),
         )
 
     def add(self, packet: Packet) -> None:
@@ -398,18 +527,20 @@ class Capture:
             key = (packet.source_port, packet.destination, packet.port)
         else:
             key = (packet.port, packet.source, packet.source_port)
-        if is_loopback(key[1]):
-            # What the session does within itself
+        if is_loopback(key[1]) or packet.source == packet.destination:
+            # What the session does within itself, at its own address too
             return
         flags = packet.tcp_flags
         if TcpFlag.SYN in flags:
             # The start of a connection has SYN alone, the answer to it
-            # SYN and ACK. Those of connections made to the session are
-            # the other way around, and passed over.
-            if packet.sent and TcpFlag.ACK not in flags:
+            # SYN and ACK. One the session sends is a connection it
+            # makes, one that comes in is made to it from outside, and
+            # the answer comes from the other side than the start.
+            known = self._open.get(key)
+            if TcpFlag.ACK not in flags:
                 self._add_connection(packet, key)
-            elif not packet.sent and TcpFlag.ACK in flags and key in self._open:
-                self._open[key].answer(packet.sequence)
+            elif known and packet.sent == known.inbound:
+                known.answer(packet.sequence)
         elif flags & (TcpFlag.FIN | TcpFlag.RST):
             if key in self._open:
                 self._end_connection(packet, key, self._open.pop(key))
@@ -424,7 +555,7 @@ class Capture:
         # can carry its first bytes, and the one that ends it its last, a
         # request sent whole with the end of the connection it is on
         if packet.sent and packet.payload:
-            self._add_server_name(packet)
+            self._read_sent(packet, key)
             self._add_request(packet)
 
     def _dns_left(self) -> int:
@@ -535,7 +666,7 @@ class Capture:
         self._flag(lookup)
         if lookup.kind in ("A", "AAAA"):
             for address in lookup.addresses:
-                self._answered.setdefault(address, Answers()).add(
+                self._answered.setdefault(address, LookedUp()).add(
                     lookup.when, lookup.name
                 )
 
@@ -566,16 +697,84 @@ class Capture:
         known = {address: said.names[-1] for address, said in self._answered.items()}
         return {**self._hello, **known}
 
-    def connection_of(self, key: Key, when: float) -> Connection | None:
-        """The connection something was sent on at a time, by the
-        session's port and the other end: the last one from that port
-        opened by then. None when the capture has none, it began later
+    def still_open(self) -> list[Connection]:
+        """The connections that were answered and have not ended."""
+        return [found for found in self._open.values() if found.answered]
+
+    def carried(self) -> tuple[int, int]:
+        """How much the session sent and got over TCP so far, on the
+        connections it made and on those made to it, as far as the
+        capture tells: of one that ended, by what ended it, of any other
+        by the packets of it there are, see Connection.so_far."""
+        out = back = 0
+        for found in (*self.connections, *self.inbound):
+            sent, received = found.so_far
+            out += (sent if found.sent is None else found.sent) or 0
+            back += (received if found.received is None else found.received) or 0
+        return out, back
+
+    def connection_at(self, key: Key, when: float) -> Connection | None:
+        """The connection a packet of a time is of, by the session's
+        port and the other end: the last one of that key made by then,
+        whoever made it. None when the capture has none, it began later
         or its part ran into its packet limit."""
-        for connection in reversed(self.connections):
-            known = (connection.source_port, connection.address, connection.port)
-            if known == key and connection.when <= when:
-                return connection
-        return None
+        known = self._by_key.get(key)
+        if not known:
+            return None
+        at = bisect.bisect_right(known, when, key=lambda connection: connection.when)
+        return known[at - 1] if at else None
+
+    def connection_of(self, key: Key, when: float) -> Connection | None:
+        """The connection something was sent on at a time, see
+        connection_at: one the session made, none for any other."""
+        found = self.connection_at(key, when)
+        return found if found and not found.inbound else None
+
+    def sent_too(self, packet: Packet) -> None:
+        """Take in a packet of the parts that have all the session
+        sends, which are read for the uploads (see uploads.py): how far
+        its connection got by it, while that is open, and what the
+        connection speaks when it is the first of it."""
+        if not packet.sent or not packet.length:
+            return
+        if not self._sent_on(packet) and len(self._unplaced) < MOST_UNPLACED:
+            # Its connection is not known: while a capture grows, the
+            # part this packet is in is read a moment after the part
+            # that has what starts a connection, and can be ahead of it
+            self._unplaced.append((packet, 0))
+
+    def _sent_on(self, packet: Packet) -> bool:
+        """Take in what a packet the session sent tells of its
+        connection, one it made or one made to it. Whether it has one."""
+        key = (packet.source_port, packet.destination, packet.port)
+        connection = self.connection_at(key, packet.when)
+        if connection is None:
+            return False
+        if not connection.inbound:
+            self._take_first(connection, packet)
+        if connection.ended is None:
+            connection.count(packet)
+        return True
+
+    def _place_late(self) -> None:
+        """Look again for the connections of what was sent before its
+        connection was read, see sent_too: twice, the start of one comes
+        with the next reading of its part at the latest."""
+        late, self._unplaced = self._unplaced, []
+        for packet, tries in late:
+            if not self._sent_on(packet) and tries < LATE_TRIES:
+                self._unplaced.append((packet, tries + 1))
+
+    def received_too(self, packet: Packet) -> None:
+        """Take in a packet of the parts that have some of what comes
+        in (see answers.py): how far its connection got by it, while
+        that is open."""
+        if packet.sent or not packet.length:
+            return
+        key = (packet.port, packet.source, packet.source_port)
+        connection = self.connection_at(key, packet.when)
+        if connection and connection.ended is None:
+            connection.count(packet)
 
     def name_of(self, address: str, when: float | None = None) -> str | None:
         """The name an address was looked up under, as of a time: the last
@@ -635,23 +834,38 @@ class Capture:
         flow.sent += packet.length
 
     def _add_connection(self, packet: Packet, key: tuple[int, str, int]) -> None:
+        """Take in the start of a connection: one the session makes when
+        it sent the packet, one made to it when the packet came in."""
         known = self._open.get(key)
+        inbound = not packet.sent
         # The same attempt sent again, which starts from the same number:
         # it got no answer in the time the kernel waits for one, a second
         # at first and twice as long each time after
-        if known and packet.sequence == known.sequence:
+        if known and packet.sequence == known.sequence and known.inbound == inbound:
             if not known.answered and not known.retried:
                 known.retried = True
                 self.endings.append((packet.when, Went.NO_ANSWER, known))
             return
-        connection = Connection(
-            packet.when,
-            packet.destination,
-            packet.port,
-            packet.source_port,
-            packet.sequence,
-        )
-        self.connections.append(connection)
+        if inbound:
+            connection = Connection(
+                packet.when,
+                packet.source,
+                packet.port,
+                packet.source_port,
+                packet.sequence,
+                inbound=True,
+            )
+            self.inbound.append(connection)
+        else:
+            connection = Connection(
+                packet.when,
+                packet.destination,
+                packet.port,
+                packet.source_port,
+                packet.sequence,
+            )
+            self.connections.append(connection)
+        self._by_key.setdefault(key, []).append(connection)
         self._open[key] = connection
         # The one before it from the same port, if it was half ended
         self._closing.pop(key, None)
@@ -669,7 +883,9 @@ class Capture:
         that side has ended it too, see _end_other_side."""
         connection.ended = packet.when
         closing = TcpFlag.FIN in packet.tcp_flags
-        if not connection.answered and not closing and not packet.sent:
+        # From the side that was asked, the session's of one made to it
+        refusing = packet.sent == connection.inbound
+        if not connection.answered and not closing and refusing:
             connection.refused = True
             self.endings.append((packet.when, Went.REFUSED, connection))
             return
@@ -690,11 +906,110 @@ class Capture:
         if TcpFlag.RST in packet.tcp_flags or connection.done:
             del self._closing[key]
 
-    def _add_server_name(self, packet: Packet) -> None:
-        name = tls_server_name(packet.payload)
-        if name:
+    def _read_sent(self, packet: Packet, key: Key) -> None:
+        """Read what a packet the session sent carries, for what it
+        tells of its connection: the hello of TLS, and when it is the
+        first the connection sent, what is spoken there and what a
+        proxy was asked for."""
+        connection = self.connection_of(key, packet.when)
+        if connection:
+            self._take_first(connection, packet)
+        hello = tls_hello(packet.payload)
+        # Not the hello of a tunnel, which names what is behind the proxy
+        # the address is of
+        if hello and hello.name and not (connection and connection.asked):
             # What the resolver said, if anything, is looked at first
-            self._hello.setdefault(packet.destination, name)
+            self._hello.setdefault(packet.destination, hello.name)
+        if connection is None:
+            return
+        if hello and connection.hello is None:
+            connection.hello = hello
+            self._hellos.append((packet.when, connection))
+
+    def _notice(self, when: float, what: str, connection: Connection) -> None:
+        if len(self.noticed) < MOST_NOTICED:
+            self.noticed.append((when, what, connection))
+
+    def _take_first(self, connection: Connection, packet: Packet) -> None:
+        """Take in the first bytes a connection sent, when the packet
+        holds them: what they say is spoken there, noted when the port
+        is one that speaks something else, and what they ask a proxy to
+        connect to. Later bytes are not looked at for either: within a
+        tunnel they are the session's to make read as anything."""
+        first = (connection.sequence + 1) % SEQUENCE_SPACE
+        if connection.speaks or packet.sequence != first:
+            return
+        connection.speaks = spoken(packet.payload)
+        if connection.speaks == HTTP:
+            asked = http_request(packet.payload)
+            if asked and asked[0] == "CONNECT":
+                connection.asked = asked[1][:ASKED_LENGTH]
+        usual = SPOKEN_ON.get(connection.port)
+        if not usual or connection.speaks in ("", usual):
+            return
+        said = SPOKEN_NAMES.get(connection.speaks)
+        self._notice(
+            packet.when,
+            f"speaks {said}, not {SPOKEN_NAMES[usual]}"
+            if said
+            else f"does not speak {SPOKEN_NAMES[usual]}",
+            connection,
+        )
+
+    def _reached_otherwise(self, connection: Connection, name: str, when: float) -> str:
+        """The name a connection was reached by, when that is not the
+        name its hello asks for, in small letters: the host it asked a
+        proxy for, else the one its address was looked up under last by
+        a time, when the address was given no such name by then. Empty
+        when the hello asks for a name it was reached by, and when that
+        cannot be told: the address was not looked up, the lookups are
+        not all there, or it goes to the egress proxy and what it asked
+        of it was not seen."""
+        if connection.asked:
+            host = connection.asked.rpartition(":")[0] or connection.asked
+            host = host.strip("[]").lower()
+            return "" if name == host else host
+        said = self._answered.get(connection.address)
+        whole = self.lookups_whole and not self.dns_unread
+        if not said or not whole or connection.port == EGRESS_PORT:
+            return ""
+        return "" if said.had(name, when) else (said.as_of(when) or "").lower()
+
+    def look_at_hellos(self) -> None:
+        """Hold the hellos that came since the last time against the
+        names their connections were reached by, see _look_at_hello.
+        Once every part of the capture is read as far as it goes: the
+        lookups are in another part than the hellos, and a name that was
+        looked up a moment before a hello is to be known by then. What
+        was sent on a connection that was not read yet is looked at
+        again then too."""
+        self._place_late()
+        for when, connection in self._hellos:
+            if connection.hello:
+                self._look_at_hello(connection, connection.hello, when)
+        self._hellos.clear()
+
+    def _look_at_hello(self, connection: Connection, hello: Hello, when: float) -> None:
+        """Note the hello of TLS of a connection that does not ask for
+        the name the connection was reached by: the server is then told
+        another name than the session looked up, or asked its proxy for,
+        which is how one host is reached in the place of another behind
+        the same address. Nothing of an address that was not looked up
+        at all, whose hello is all that names it. A hello without a name
+        is noted on the port of HTTPS alone, elsewhere clients leave it
+        out, and not one that was cut short, which may name its server
+        past the cut."""
+        name = hello.name.lower().rstrip(".")
+        reached = self._reached_otherwise(connection, name, when)
+        if not reached:
+            return
+        if name:
+            what = f"its hello asks for {hello.name}"
+        elif hello.whole and connection.port == HTTPS_PORT:
+            what = "its hello names no server"
+        else:
+            return
+        self._notice(when, f"{what}, it was reached as {reached}", connection)
 
     def _add_request(self, packet: Packet) -> None:
         # What goes to the egress proxy is in the proxy's log, with whether
@@ -708,6 +1023,35 @@ class Capture:
             )
 
 
+def _taken_by(capture: Capture, part: str) -> Callable[[Packet], None]:
+    """What takes in the packets of a part of a capture. Those of what
+    the session sent and of what came back are counted on their own: the
+    part of the TCP has what starts and ends their connections, and its
+    own count of each."""
+    uploads = {UPLOADS_PART: capture.uploads, ELSEWHERE_PART: capture.elsewhere}
+    if part in uploads:
+
+        def sent(packet: Packet) -> None:
+            uploads[part].add(packet)
+            capture.sent_too(packet)
+
+        return sent
+    if part == ANSWERS_PART:
+
+        def answered(packet: Packet) -> None:
+            # Of the connection it came in on, by when that was made: a
+            # port is used again, and what went over the one before it
+            # is not what this is the answer to
+            key = (packet.port, packet.source, packet.source_port)
+            found = capture.connection_at(key, packet.when)
+            since = found.when if found else -math.inf
+            capture.answers.add(packet, capture.uploads, since)
+            capture.received_too(packet)
+
+        return answered
+    return capture.received_too if part == DOWNLOADS_PART else capture.add
+
+
 def take_frames(
     capture: Capture,
     frames: Iterable[tuple[float, int, bytes]],
@@ -716,10 +1060,7 @@ def take_frames(
     """Add what captured frames tell to a capture, those of the part of it
     that is named. A packet that cannot be made sense of is counted and
     passed over."""
-    # Those of the uploads are counted alone: the part of the TCP has what
-    # starts and ends their connections, and its own count of each
-    uploads = {UPLOADS_PART: capture.uploads, ELSEWHERE_PART: capture.elsewhere}
-    take = uploads[part].add if part in uploads else capture.add
+    take = _taken_by(capture, part)
     for when, link_type, frame in frames:
         capture.packets += 1
         capture.part_packets[part] = capture.part_packets.get(part, 0) + 1
@@ -732,7 +1073,10 @@ def take_frames(
 def read_capture(path: Path, others: Iterable[Path] = ()) -> Capture:
     """What a capture file says a session reached, with the files of the
     other parts of the capture that are there. Raises OSError when the
-    first cannot be read, and passes over one of the others that cannot."""
+    first cannot be read, and passes over one of the others that cannot.
+    The hellos are not held against the lookups here, see
+    Capture.look_at_hellos: whoever reads a capture knows whether its
+    lookups are all there, see read_parts of capture.py."""
     capture = Capture()
     take_frames(capture, pcap_frames(path))
     for other in others:

@@ -9,6 +9,12 @@ and network namespaces once it is up and notes, from /proc, each process
 it sees and the processes that hold each TCP connection (procwatch.py).
 A connection of the capture is then tied to its process by its ports.
 
+While the session runs the record stays in the sidecar. What its watcher
+says aloud is read meanwhile (said_lines): how the session is doing, and
+each connection with the process that holds it and those that one comes
+from, for what follows a session to say who made a connection as it is
+made.
+
 The sidecar looks many times a second, it is not told: what lived shorter
 than that can be missed, and a connection without a process falls back on
 the clock. It comes up a moment after the session, so the very first
@@ -69,6 +75,10 @@ SOON_OVER = 5.0
 HELD_WITHIN = 5.0
 # A watcher that said nothing for so many of its beats has ended, or hung
 SILENT_BEATS = 2.5
+# What a watcher said aloud is asked for again from so many seconds
+# before the last of what is known of it: docker goes by when it took a
+# line, not by when the watcher wrote it
+SAID_AGAIN = 2.0
 
 
 class Watcher(Sidecar):
@@ -124,13 +134,14 @@ def _start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watc
     return watcher
 
 
-def said_since(watcher: str, since: float) -> list[Sample | Ended]:
-    """How a running session was doing since a time, as its watcher said
-    it aloud: the record itself stays in the sidecar until the session is
-    over, and a command run there to read it would be noted as one of the
-    session's. Nothing when it cannot be asked."""
-    said = docker_output("logs", f"--since={since:.3f}", watcher)
-    return health_said(said.splitlines(), since)
+def said_lines(watcher: str, since: float) -> list[str]:
+    """What the watcher of a running session said aloud since a time, and
+    all of it for no time: the record itself stays in the sidecar until
+    the session is over, and a command run there to read it would be
+    noted as one of the session's. Nothing when it cannot be asked. How
+    much a watcher says aloud is bounded, see MOST_ALOUD of procwatch.py."""
+    asked = [f"--since={since:.3f}"] if since else []
+    return docker_output("logs", *asked, watcher).splitlines()
 
 
 def health_said(lines: Iterable[str], since: float) -> list[Sample | Ended]:
@@ -295,6 +306,10 @@ class ProcessRecord:
     # never did
     watched_from: float | None = None
     full_at: float | None = None
+    # When it said it would say no more aloud of connections and their
+    # processes, none for one that did not: of what is read while a
+    # session runs, see procwatch.py
+    hushed_at: float | None = None
     # Every how many seconds the watcher said it was there, none for one
     # that did not say it would, and the time of the last line it wrote
     beat: float | None = None
@@ -343,6 +358,8 @@ class ProcessRecord:
         # Each as first said, should a line say it again
         if note == Note.FULL and self.full_at is None:
             self.full_at = when
+        if note == Note.HUSHED and self.hushed_at is None:
+            self.hushed_at = when
         if note == Note.STARTED:
             beat = said.get("beat")
             if isinstance(beat, (int, float)) and not isinstance(beat, bool):

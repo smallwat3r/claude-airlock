@@ -31,9 +31,15 @@ from harness import (
 )
 
 from claude_airlock.reader import NotThis
-from claude_airlock.recording import address, egress_log, payloads, sidecar
+from claude_airlock.recording import (
+    address,
+    egress_log,
+    payloads,
+    processes,
+    sidecar,
+)
 from claude_airlock.recording.pcap_file import PcapReader
-from claude_airlock.report import net_events
+from claude_airlock.report import layout, net_events
 from claude_airlock.sandbox import egress_proxy
 
 
@@ -77,7 +83,12 @@ def tcp(
 
 
 def answer(
-    address: str, port: int, flags: int = 0x12, sequence: int = 0, acknowledged: int = 0
+    address: str,
+    port: int,
+    flags: int = 0x12,
+    sequence: int = 0,
+    acknowledged: int = 0,
+    payload: bytes = b"",
 ) -> bytes:
     """A packet of the other end of a connection made with tcp, SYN and
     ACK unless told otherwise."""
@@ -85,7 +96,36 @@ def answer(
     header = struct.pack(
         "!HHIIBBHHH", *ports, sequence, acknowledged, 0x50, flags, 0, 0, 0
     )
+    return ipv4(6, address, "172.20.0.5", header + payload)
+
+
+def knock(
+    address: str, port: int, flags: int = 0x02, sequence: int = 0, acknowledged: int = 0
+) -> bytes:
+    """A packet of someone who connects to a port of the session from
+    their port 50000, SYN alone unless told otherwise."""
+    ports = (50000, port)
+    header = struct.pack(
+        "!HHIIBBHHH", *ports, sequence, acknowledged, 0x50, flags, 0, 0, 0
+    )
     return ipv4(6, address, "172.20.0.5", header)
+
+
+def taken_up(
+    address: str,
+    port: int,
+    flags: int = 0x12,
+    sequence: int = 0,
+    acknowledged: int = 0,
+    payload: bytes = b"",
+) -> bytes:
+    """A packet the session sends back to someone who connected to a
+    port of it with knock, SYN and ACK unless told otherwise."""
+    ports = (port, 50000)
+    header = struct.pack(
+        "!HHIIBBHHH", *ports, sequence, acknowledged, 0x50, flags, 0, 0, 0
+    )
+    return ipv4(6, "172.20.0.5", address, header + payload)
 
 
 def dns_failure(name: str, kind: int = 1) -> bytes:
@@ -108,11 +148,18 @@ def dns_response(name: str, address: str) -> bytes:
     return ipv4(17, "127.0.0.11", "127.0.0.1", datagram)
 
 
-def client_hello(name: str) -> bytes:
+def client_hello(name: str, offered: tuple[str, ...] = ()) -> bytes:
+    """The hello of a TLS client that asks for a server by name, none
+    when the name is empty, and offers to speak what is given."""
     host = name.encode()
     server_name = struct.pack("!HBH", len(host) + 3, 0, len(host)) + host
     extensions = struct.pack("!HH", 0x000A, 2) + b"\x00\x1d"
-    extensions += struct.pack("!HH", 0, len(server_name)) + server_name
+    if name:
+        extensions += struct.pack("!HH", 0, len(server_name)) + server_name
+    if offered:
+        listed = b"".join(bytes([len(one)]) + one.encode() for one in offered)
+        listed = struct.pack("!H", len(listed)) + listed
+        extensions += struct.pack("!HH", 16, len(listed)) + listed
     body = b"\x03\x03" + bytes(32) + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00"
     body += struct.pack("!H", len(extensions)) + extensions
     handshake = b"\x01" + len(body).to_bytes(3, "big") + body
@@ -336,12 +383,32 @@ class CaptureFileTest:
                 tcp("127.0.0.1", 8000),
             ],
         }
+        # And of what comes in: all the model's API sends back, and from
+        # anywhere else what is in the first 64 kB of every 16 MB
+        model, sampled = "160.79.104.10", 0x12005678
+        came_in = {
+            "answers": [
+                answer(model, 443, 0x18, window + 70000, payload=b"y" * 100),
+                answer(model, 443, 0x18, sampled, payload=b"y" * 100),
+            ],
+            "downloads": [answer(there, 443, 0x18, sampled, payload=b"y" * 100)],
+            # Outside the sample, and with nothing in it. And what the
+            # session sends to its own address, which is as much as it
+            # likes. What it sends anywhere else is in the parts above
+            "": [
+                answer(there, 443, 0x18, sampled + 65536, payload=b"y" * 100),
+                answer(there, 443, 0x10, sampled),
+                answer("172.20.0.5", 443, 0x18, sampled, payload=b"y" * 100),
+            ],
+        }
         # What is sent anywhere is in its part whatever else has it: the
         # packets of that part are read for when they went and how long
         # they were alone, and not as those of the others are
         carrying = packets["tcp"][3:] + packets["elsewhere"]
-        every = [packet for some in packets.values() for packet in some]
-        frames = [(1.0 + at, packet, True) for at, packet in enumerate(every)]
+        every = [(packet, True) for some in packets.values() for packet in some]
+        every += [(packet, False) for some in came_in.values() for packet in some]
+        frames = [(1.0 + at, *packet) for at, packet in enumerate(every)]
+        packets.update({part: some for part, some in came_in.items() if part})
         with tempfile.TemporaryDirectory() as directory:
             whole = Path(directory, "all.pcap")
             whole.write_bytes(pcap_file(frames, link_type=113, asked=False))
@@ -553,6 +620,404 @@ def dns_over(
 def dns_message_of(packet: bytes) -> bytes:
     """What a UDP packet made by the helpers above carries."""
     return packet[28:]
+
+
+def read_parts(main: list, whole: bool = True, **parts: list) -> pcap.Capture:
+    """What a capture of some packets says, with the other parts of it
+    that are given by their names. Not whole, of a capture that is known
+    to miss some of what there was."""
+    with tempfile.TemporaryDirectory() as directory:
+        file = Path(directory, "c.pcap")
+        file.write_bytes(pcap_file(main))
+        for name, frames in parts.items():
+            Path(directory, f"c.pcap.{name}").write_bytes(
+                pcap_file(frames, asked=False)
+            )
+        return capture_module.read_parts(file, whole)
+
+
+class ToldOfConnectionsTest:
+    """What a capture tells of a connection besides where it went: who
+    made it, what it asked a proxy for, whether its hello asks for the
+    name it was reached by, and what is spoken on it."""
+
+    THEM = "172.20.0.9"
+    THERE = "198.51.100.7"
+    PROXY = "172.20.0.2"
+
+    def test_a_connection_made_to_the_session_is_read(self):
+        them = self.THEM
+        found = read_parts(
+            [
+                (10.0, knock(them, 8080, sequence=700), False),
+                (10.0, taken_up(them, 8080, sequence=900, acknowledged=701), True),
+                # 500 bytes from them by then, and 300 back
+                (12.0, knock(them, 8080, 0x11, 1201, acknowledged=1201), False),
+                (12.1, taken_up(them, 8080, 0x11, 1201, acknowledged=1202), True),
+                # A port nothing waits on, which the session's kernel refuses
+                (20.0, knock(them, 9000), False),
+                (20.0, taken_up(them, 9000, 0x14), True),
+                # And one never answered
+                (30.0, knock(them, 9001, sequence=5), False),
+                (31.0, knock(them, 9001, sequence=5), False),
+                # From its own loopback, which nobody else reaches
+                (40.0, knock("127.0.0.1", 8080), False),
+            ]
+        )
+        assert found.connections == []
+        taken, refused, unanswered = found.inbound
+        assert (taken.address, taken.port, taken.source_port) == (them, 8080, 50000)
+        assert (taken.outcome, taken.seconds) == ("closed", 2.1)
+        assert (taken.sent, taken.received) == (300, 500)
+        assert (refused.outcome, unanswered.outcome) == ("refused", "no answer")
+        assert [what for _, what, _ in found.endings] == [
+            "closed",
+            "refused",
+            "no answer",
+        ]
+        # What the session did on the network counts both ways
+        assert found.carried() == (300, 500)
+
+    def test_who_reached_the_session_is_a_line_of_its_own(self):
+        them = self.THEM
+        capture = read_parts(
+            [
+                (1.0, dns_response("other.test", them), False),
+                (10.0, knock(them, 8080, sequence=700), False),
+                (10.0, taken_up(them, 8080, sequence=900, acknowledged=701), True),
+                (20.0, knock("172.20.0.77", 9000), False),
+                (20.0, taken_up("172.20.0.77", 9000, 0x14), True),
+            ]
+        )
+        taken, refused = net_events.capture_events(capture, verbose=False)
+        assert taken.details == [
+            "tcp IN from other.test (172.20.0.9) to its port 8080  left open"
+        ]
+        assert taken.fields["inbound"] is True
+        assert (taken.fields["port"], taken.fields["peer_port"]) == (8080, 50000)
+        # Nothing went wrong for the session when it took none
+        assert refused.details == ["tcp IN from 172.20.0.77 to its port 9000  refused"]
+        assert not layout.went_wrong(refused)
+        said = net_events.capture_summary(capture, verbose=False)
+        assert "  tcp IN from other.test (172.20.0.9) to its port 8080 x1" in said
+        # The process that took it is the one that holds its socket
+        record = processes.ProcessRecord()
+        for line in (
+            {"t": 9.0, "pid": 812, "ppid": 1, "exe": "/usr/bin/node", "argv": ["n"]},
+            {"t": 10.0, "port": 8080, "to": them, "to_port": 50000, "pids": [812]},
+        ):
+            record.take(json.dumps(line))
+        net_events.name_processes([taken], record)
+        assert taken.notes == ["by: [812] node"]
+
+    def connected(self, *sent: bytes, port: int = 443, to: str = "") -> list:
+        """A connection to a port and what the session then sent on it,
+        each thing after the last."""
+        there = to or self.THERE
+        packets = [
+            (2.0, tcp(there, port, sequence=100), True),
+            (2.0, answer(there, port, sequence=500, acknowledged=101), False),
+        ]
+        at = 101
+        for number, payload in enumerate(sent):
+            packet = tcp(there, port, 0x18, payload, sequence=at)
+            packets.append((2.1 + number / 10, packet, True))
+            at += len(payload)
+        return packets
+
+    def test_what_a_connection_asked_a_proxy_for_is_read(self):
+        asked = b"CONNECT good.test:443 HTTP/1.1\r\nHost: good.test:443\r\n\r\n"
+        capture = read_parts(
+            [
+                (1.0, dns_response("claude-egress-proxy", self.PROXY), False),
+                *self.connected(
+                    asked,
+                    client_hello("good.test"),
+                    # Within the tunnel, what reads as another request
+                    b"CONNECT evil.test:443 HTTP/1.1\r\n\r\n",
+                    port=3128,
+                    to=self.PROXY,
+                ),
+            ]
+        )
+        (tunnel,) = capture.connections
+        assert (tunnel.asked, tunnel.speaks) == ("good.test:443", "http")
+        assert capture.noticed == []
+        (event,) = net_events.capture_events(capture, verbose=False)
+        where = "tcp/proxy claude-egress-proxy (172.20.0.2):3128"
+        assert event.details == [f"{where}  asked for good.test:443  left open"]
+        assert event.fields["asked"] == "good.test:443"
+
+    def test_a_hello_for_another_name_than_the_proxy_was_asked_for_is_noted(self):
+        asked = b"CONNECT good.test:443 HTTP/1.1\r\n\r\n"
+        capture = read_parts(
+            self.connected(asked, client_hello("evil.test"), port=3128, to=self.PROXY)
+        )
+        ((when, what, tunnel),) = capture.noticed
+        assert what == "its hello asks for evil.test, it was reached as good.test"
+        assert (when, tunnel.asked) == (2.2, "good.test:443")
+        _, flagged = net_events.capture_events(capture, verbose=False)
+        assert flagged.details == [f"tcp/proxy 172.20.0.2:3128  FLAGGED: {what}"]
+        assert layout.went_wrong(flagged)
+        assert flagged.fields["opened"] == 2.0
+        # Not when what was asked of the proxy was not seen: the name of
+        # the proxy is no name a hello would ask for
+        unseen = read_parts(
+            [
+                (1.0, dns_response("claude-egress-proxy", self.PROXY), False),
+                *self.connected(client_hello("good.test"), port=3128, to=self.PROXY),
+            ]
+        )
+        assert unseen.noticed == []
+
+    def test_a_hello_is_held_against_the_name_its_address_was_looked_up_under(self):
+        looked_up = (1.0, dns_response("good.test", self.THERE), False)
+        for hello, noted in (
+            (client_hello("good.test"), []),
+            (client_hello("GOOD.test"), []),
+            (
+                client_hello("other.test"),
+                ["its hello asks for other.test, it was reached as good.test"],
+            ),
+            (
+                client_hello(""),
+                ["its hello names no server, it was reached as good.test"],
+            ),
+            # Cut before its end: it may name its server past the cut
+            (client_hello("", ("h2", "http/1.1"))[:-4], []),
+        ):
+            capture = read_parts([looked_up, *self.connected(hello)])
+            assert [what for _, what, _ in capture.noticed] == noted
+        # An address that was not looked up has no name to hold it
+        # against, the hello is all that names it
+        bare = read_parts(self.connected(client_hello("other.test")))
+        assert bare.noticed == []
+        assert bare.names == {self.THERE: "other.test"}
+        # Under any of the names the address was given
+        both = read_parts(
+            [
+                looked_up,
+                (1.5, dns_response("cdn.test", self.THERE), False),
+                *self.connected(client_hello("good.test")),
+            ]
+        )
+        assert both.noticed == []
+        # A name that was only looked up after the hello is not one
+        late = read_parts(
+            [
+                looked_up,
+                *self.connected(client_hello("other.test")),
+                (9.0, dns_response("other.test", self.THERE), False),
+            ]
+        )
+        assert len(late.noticed) == 1
+
+    def test_the_lookups_of_another_part_are_known_when_a_hello_is_held_up(self):
+        # The lookups are in a part of their own, read after the hellos
+        answered = dns_response("good.test", self.THERE)
+        capture = read_parts(
+            self.connected(client_hello("other.test")),
+            dns=[(1.0, asked_for(answered), False), (1.0, answered, False)],
+        )
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello asks for other.test, it was reached as good.test"
+        ]
+
+    def test_a_hello_without_a_name_is_noted_on_the_port_of_https_alone(self):
+        looked_up = (1.0, dns_response("db.test", self.THERE), False)
+        capture = read_parts([looked_up, *self.connected(client_hello(""), port=5432)])
+        assert capture.noticed == []
+
+    def test_what_a_hello_offers_to_speak_is_read(self):
+        hello = payloads.tls_hello(client_hello("sni.test", ("h2", "http/1.1")))
+        assert hello == payloads.Hello("sni.test", ("h2", "http/1.1"), whole=True)
+        assert payloads.tls_hello(client_hello("")) == payloads.Hello("", (), True)
+        assert payloads.tls_hello(b"GET / HTTP/1.1") is None
+        assert payloads.tls_hello(client_hello("sni.test")[:30]) is None
+        capture = read_parts(self.connected(client_hello("a.test", ("h2",))))
+        (event,) = net_events.capture_events(capture, verbose=False)
+        assert (event.fields["hello"], event.fields["offered"]) == ("a.test", ["h2"])
+        assert event.fields["speaks"] == "tls"
+
+    def test_what_the_first_bytes_of_a_connection_speak_is_told(self):
+        for sent, speaks in (
+            (client_hello("a.test"), "tls"),
+            (b"SSH-2.0-OpenSSH_9.6\r\n", "ssh"),
+            (b"GET / HTTP/1.1\r\n", "http"),
+            (b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "http"),
+            (b"\x00\x00\x00\x08\x04\xd2\x16\x2f and more", "other"),
+            # Something else that begins as a record of TLS does
+            (b"\x16\x03\x01\x00\x05\x02 and more", "other"),
+            # Too few bytes to tell
+            (b"GET", ""),
+            (b"\x16\x03", ""),
+        ):
+            assert payloads.spoken(sent) == speaks
+
+    def test_a_port_that_speaks_something_else_than_its_use_is_noted(self):
+        banner = b"SSH-2.0-OpenSSH_9.6\r\n"
+        for port, sent, noted in (
+            (443, banner, ["speaks SSH, not TLS"]),
+            (443, b"here is what I found: " * 3, ["does not speak TLS"]),
+            (80, banner, ["speaks SSH, not HTTP"]),
+            (22, client_hello("a.test"), ["speaks TLS, not SSH"]),
+            (22, banner, []),
+            (80, b"GET / HTTP/1.1\r\n\r\n", []),
+            # A port without a use that is beyond doubt
+            (UNNAMED, banner, []),
+        ):
+            # What a connection sends first is in the part of what is
+            # sent, by its headers and the bytes after them
+            opened = self.connected(port=port)
+            first = (2.1, tcp(self.THERE, port, 0x18, sent, sequence=101), True)
+            capture = read_parts(opened, elsewhere=[first])
+            assert [what for _, what, _ in capture.noticed] == noted, port
+        # Only the first bytes are looked at, whatever comes later
+        later = (2.1, tcp(self.THERE, 443, 0x18, banner, sequence=4000), True)
+        capture = read_parts(self.connected(), elsewhere=[later])
+        assert (capture.noticed, capture.connections[0].speaks) == ([], "")
+
+    def test_what_is_spoken_is_said_where_the_port_does_not(self):
+        port = UNNAMED
+        capture = read_parts(self.connected(client_hello("a.test"), port=port))
+        (event,) = net_events.capture_events(capture, verbose=False)
+        assert event.details[0].startswith(
+            f"tcp a.test (198.51.100.7):{port}  speaks TLS  left open"
+        )
+        # Not where the port says it
+        usual = read_parts(self.connected(client_hello("a.test")))
+        (event,) = net_events.capture_events(usual, verbose=False)
+        assert "speaks" not in event.details[0]
+
+    def test_a_connection_left_open_says_how_much_it_carried_at_least(self):
+        there = self.THERE
+        sent = [
+            (
+                3.0 + at / 100,
+                tcp(there, 443, 0x18, b"x" * 1000, sequence=101 + at * 1000),
+                True,
+            )
+            for at in range(5)
+        ]
+        came = [
+            (4.0, answer(there, 443, 0x18, 501 + (1 << 24), 5101, b"y" * 400), False)
+        ]
+        capture = read_parts(self.connected(), elsewhere=sent, downloads=came)
+        (left,) = capture.connections
+        assert left.so_far == (5000, (1 << 24) + 400)
+        (event, _) = net_events.capture_events(capture, verbose=False)
+        said = "tcp/https 198.51.100.7:443  left open, at least 5 kB out, 17 MB in"
+        assert event.details == [f"{said}, 1 uploads"]
+        assert capture.carried() == (5000, (1 << 24) + 400)
+        # What ended it says how much it carried, the packets before do not
+        ended = [
+            *self.connected(),
+            (9.0, tcp(there, 443, 0x11, b"", 6101, 901), True),
+            (9.1, answer(there, 443, 0x11, 901, 6102), False),
+        ]
+        closed = read_parts(ended, elsewhere=sent)
+        assert closed.carried() == (6000, 400)
+
+    def test_what_was_sent_early_is_not_read_as_gigabytes_further_on(self):
+        # The parts are read one after the other, each from its start: a
+        # packet of the first minute comes after those of every gigabyte
+        there, giga = self.THERE, 1 << 30
+        sampled = [
+            (
+                20.0 + at,
+                answer(there, 443, 0x10, 501 + at * giga, 601, b"y" * 1000),
+                False,
+            )
+            for at in range(1, 4)
+        ]
+        early = tcp(there, 443, 0x18, b"x" * 500, sequence=101, acknowledged=501)
+        capture = read_parts(
+            [*self.connected(), *sampled], elsewhere=[(3.0, early, True)]
+        )
+        (left,) = capture.connections
+        assert left.so_far == (500, 3 * giga + 1000)
+        assert capture.carried() == (500, 3 * giga + 1000)
+
+    def test_a_hello_is_held_against_nothing_when_lookups_may_be_missing(self):
+        # An address many sites share is looked up under one name, then
+        # another: with the second lookup lost, a hello for it would
+        # read as one for a name the address never had
+        packets = [
+            (1.0, dns_response("files.test", self.THERE), False),
+            *self.connected(client_hello("pypi.test")),
+        ]
+        assert len(read_parts(packets).noticed) == 1
+        # The recorder of the capture ended early, or lost packets
+        assert read_parts(packets, whole=False).noticed == []
+        # Or the part that has the lookups ran into its limit
+        answered = dns_response("files.test", self.THERE)
+        looked_up = [(1.0, asked_for(answered), False), (1.0, answered, False)]
+        with unittest.mock.patch.object(capture_module, "PACKET_LIMIT", 2):
+            cut = read_parts(packets[1:], dns=looked_up)
+        assert (cut.lookups_whole, cut.noticed) == (False, [])
+        assert cut.names == {self.THERE: "files.test"}
+
+    def test_whether_an_address_had_a_name_is_told_without_going_through_them(self):
+        looked_up = pcap.LookedUp()
+        for at in range(50_000):
+            looked_up.add(float(at), f"N{at}.Test.")
+        started = time.monotonic()
+        for at in range(50_000):
+            assert looked_up.had(f"n{at}.test", at + 0.5)
+        assert time.monotonic() - started < 5
+        assert not looked_up.had("n7.test", 6.5)
+        assert not looked_up.had("other.test", 1e9)
+
+    def test_what_is_sent_before_its_connection_is_read_is_looked_at_again(self):
+        # As a capture grows, the part that has what is sent is read a
+        # moment after the one that has what starts a connection
+        banner = tcp(self.THERE, 443, 0x18, b"SSH-2.0-OpenSSH_9.6\r\n", sequence=101)
+        capture = pcap.Capture()
+
+        def take(packets: list, part: str) -> None:
+            frames = PcapReader().feed(pcap_file(packets, asked=False))
+            pcap.take_frames(capture, frames, part)
+
+        take([(2.1, banner, True)], "elsewhere")
+        capture.look_at_hellos()
+        assert capture.noticed == []
+        take(self.connected(), "tcp")
+        capture.look_at_hellos()
+        assert [what for _, what, _ in capture.noticed] == ["speaks SSH, not TLS"]
+        assert capture.connections[0].so_far == (21, 0)
+        # No more of it is kept for that than a little, nor for long
+        for port in range(1000, 1000 + 2 * pcap.MOST_UNPLACED):
+            take([(3.0, tcp(self.THERE, port, 0x18, b"x" * 20, 1), True)], "elsewhere")
+        assert len(capture._unplaced) == pcap.MOST_UNPLACED
+        for _ in range(pcap.LATE_TRIES + 1):
+            capture.look_at_hellos()
+        assert capture._unplaced == []
+
+    def test_what_the_session_sends_to_who_connected_to_it_is_counted(self):
+        them = self.THEM
+        sent = [
+            (
+                11.0 + at / 100,
+                taken_up(them, 8080, 0x18, 901 + at * 1000, 701, b"x" * 1000),
+                True,
+            )
+            for at in range(5)
+        ]
+        capture = read_parts(
+            [
+                (10.0, knock(them, 8080, sequence=700), False),
+                (10.0, taken_up(them, 8080, sequence=900, acknowledged=701), True),
+            ],
+            elsewhere=sent,
+        )
+        (taken,) = capture.inbound
+        assert taken.so_far == (5000, 0)
+        assert capture.carried() == (5000, 0)
+        (event,) = net_events.capture_events(capture, verbose=False)
+        made = "tcp IN from 172.20.0.9 to its port 8080"
+        assert event.details == [f"{made}  left open, at least 5 kB out, 1 uploads"]
+        # What is spoken is told of the connections the session makes
+        assert (taken.speaks, capture.noticed) == ("", [])
 
 
 class DnsTrustTest:
@@ -1018,13 +1483,22 @@ class CaptureSessionTest(LauncherTest):
         # It runs tcpdump and outlives it: the session's way out is the
         # sidecar's, and would go with one that ended at its packet limit
         script = sidecar[sidecar.index("-c") + 1]
-        assert script.count("tcpdump $common") == len(capture_module.PARTS) == 6
+        assert script.count("tcpdump $common") == len(capture_module.PARTS) == 8
+        # Of what is sent somewhere the headers alone, and of what comes
+        # in no more than says where a packet is in its stream. What the
+        # model sends back comes in many packets, its part takes more
+        own = {
+            "uploads": " -s 160",
+            "elsewhere": " -s 160",
+            "answers": " -s 96 -c 200000",
+            "downloads": " -s 96",
+        }
         for number, part in enumerate(capture_module.PARTS, 1):
-            # Of what is sent somewhere the headers alone
-            snap = " -s 160" if part.name in ("uploads", "elsewhere") else ""
-            assert f'tcpdump $common{snap} -w {part.file} "${number}" &' in script
+            started = f"tcpdump $common{own.get(part.name, '')} -w {part.file}"
+            assert f'{started} "${number}" &' in script
             assert f'check {part.name} {part.file} "${part.name}"' in script
         stopped = '"$tcp" "$dns" "$direct" "$flows" "$uploads" "$elsewhere"'
+        stopped += ' "$answers" "$downloads"'
         assert f"trap 'kill {stopped} 2>" in script
         assert "while :" in script
         # A tcpdump for each part, and the filter of each after the script

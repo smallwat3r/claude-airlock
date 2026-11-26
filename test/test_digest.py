@@ -11,7 +11,18 @@ from unittest import mock
 
 import pytest
 from harness import LauncherTest, prompts_at
-from test_capture import answer, dns_failure, dns_response, ipv4, pcap_file, tcp, udp
+from test_capture import (
+    answer,
+    client_hello,
+    dns_failure,
+    dns_response,
+    ipv4,
+    knock,
+    pcap_file,
+    taken_up,
+    tcp,
+    udp,
+)
 
 from claude_airlock import files, projects
 from claude_airlock.report import digest
@@ -275,3 +286,26 @@ class DigestTest(LauncherTest):
 
     def test_nothing_is_said_without_a_record(self):
         assert HEADING not in self.launch().stderr
+
+    def test_who_connected_to_the_session_from_outside_is_said(self):
+        said = self.session(
+            (knock("172.20.0.9", 8080), False),
+            (taken_up("172.20.0.9", 8080), True),
+            (knock("172.20.0.9", 8080, sequence=9), False),
+        )
+        assert HEADING in said
+        assert "  connected to from outside the session:" in said
+        assert said.count("    tcp IN from 172.20.0.9 to its port 8080") == 1
+
+    def test_a_connection_that_is_not_what_it_looks_is_said(self):
+        self.session(*self.known())
+        said = self.session(
+            *self.known(),
+            (answer("198.51.100.7", 443, sequence=500), False),
+            (tcp("198.51.100.7", 443, 0x18, client_hello("other.test"), 1), True),
+        )
+        assert "  connections that stand out:" in said
+        assert (
+            "    tcp/https known.test (198.51.100.7):443: its hello asks for"
+            " other.test, it was reached as known.test" in said
+        )

@@ -21,8 +21,11 @@ recorded. Two parts more have the headers of what the session sends over
 TCP, and nothing of what that carries: one of what goes to the model's
 API, one of what goes anywhere else. When each thing was sent, how long it
 was and over which connection is told by them, a request to the model as
-a push to a repository (see uploads.py). The session joins that
-namespace,
+a push to a repository (see uploads.py). And two the headers of some of
+what comes in: of all that the model's API sends back, for when each
+answer began and how long it was, and of one packet of every 16 MB a
+connection brings in from anywhere else, for how far a download has got
+while it still runs (see answers.py). The session joins that namespace,
 so the capture is running before its first packet. It holds no capabilities
 and is in another process namespace, so it can neither capture itself nor
 see, stop or edit the capture, which stays in the sidecar until the
@@ -34,7 +37,7 @@ import re
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +47,7 @@ from ..docker import container_running, docker, docker_bytes, docker_ok
 from ..errors import Fatal
 from ..sandbox.network import namespace_args
 from ..settings import Host, Settings
+from .answers import ANSWERS_PART, DOWNLOADS_PART
 from .model_api import MODEL_API
 from .packets import RESOLVER
 from .payloads import HTTP_METHODS
@@ -61,8 +65,17 @@ CAPTURE_FILE = "/capture.pcap"
 PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
 # Of a packet taken for when it was sent and how long it was alone: its
-# headers, with the options IP and TCP can have, and nothing it carries
+# headers, with the options IP and TCP can have. Where those are shorter,
+# as they are as a rule, the rest is the start of what it carries: some
+# 90 bytes, of which the reader looks at the first of a connection alone,
+# for what is spoken on it (see Capture.sent_too of pcap.py)
 HEADERS_LENGTH = 160
+# Of a packet taken for where it is in what its connection brings in: its
+# headers as far as the numbers of TCP, whatever the options of IP
+SEQUENCE_LENGTH = 96
+# The model sends what it makes back in many small packets: the part that
+# has them takes more than the others before it stops
+ANSWERS_LIMIT = 200_000
 # Captures are a few kB each as a rule, and some hundred with the headers
 # of what a session sent: the oldest go once there are more
 KEPT_CAPTURES = 100
@@ -111,15 +124,24 @@ class Part:
     filter: str
     # How much of each packet is kept, that of the others when 0
     snap: int = 0
+    # How many packets it stops after, as many as the others when 0
+    limit: int = 0
+
+    @property
+    def most(self) -> int:
+        """The packets it takes before it stops."""
+        return self.limit or PACKET_LIMIT
 
     @property
     def started(self) -> str:
         """What starts its tcpdump in the script of the sidecar, given
-        its filter as the argument of that number. A length of its own
-        comes after that of the others, and is the one that counts."""
+        its filter as the argument of that number. A length or a limit
+        of its own comes after that of the others, and is the one that
+        counts."""
         number = PARTS.index(self) + 1
-        snap = f" -s {self.snap}" if self.snap else ""
-        return f'tcpdump $common{snap} -w {self.file} "${number}" &\n{self.name}=$!'
+        own = f" -s {self.snap}" if self.snap else ""
+        own += f" -c {self.limit}" if self.limit else ""
+        return f'tcpdump $common{own} -w {self.file} "${number}" &\n{self.name}=$!'
 
 
 def _http_methods(load: str) -> str:
@@ -179,9 +201,10 @@ FLOWS_FILTER = (
 )
 # What the session sends to the model's API that carries something, by
 # the addresses of that (see model_api.py): every packet of it, for when
-# each request went and how long it was. The headers alone, see
-# HEADERS_LENGTH. Not what comes back. Of a session behind the egress
-# proxy this part has nothing, its packets all go to the proxy.
+# each request went and how long it was. No more of each than its start,
+# see HEADERS_LENGTH. Not what comes back, which has a part of its own.
+# Of a session behind the egress proxy this part has nothing, its packets
+# all go to the proxy.
 _TO_THE_MODEL = {
     version: " or ".join(
         f"dst net {network}" for network in MODEL_API if network.version == version
@@ -207,6 +230,48 @@ ELSEWHERE_FILTER = (
     f" and {_CARRIES6})"
     ")"
 )
+# What the model's API sends back that carries something, by the same
+# addresses: every packet of it, for when each answer began and how long
+# it was. As far as the numbers of TCP, see SEQUENCE_LENGTH. Whatever
+# else has it: what ends a connection is the TCP part's too, and read
+# there for another thing.
+_FROM_THE_MODEL = {
+    version: " or ".join(
+        f"src net {network}" for network in MODEL_API if network.version == version
+    )
+    for version in (4, 6)
+}
+ANSWERS_FILTER = (
+    "inbound and ("
+    f"(ip and tcp and ({_FROM_THE_MODEL[4]}) and {_CARRIES})"
+    f" or ({_TCP6} and ({_FROM_THE_MODEL[6]}) and {_CARRIES6})"
+    ")"
+)
+# And of what comes in over TCP from anywhere else, a packet of every
+# 16 MB of each connection: one that carries something and whose number
+# is in the first 64 kB of those, by the one byte of the number that
+# says so. A packet holds no more than 64 kB, so one at least each time,
+# and about one in 256 of them all. From those how far a download has
+# got is known while it runs, a gigabyte is some thousand packets at
+# most. Not the session's own within itself, over its loopback or from
+# its own address to that, which it could fill the part with: a packet
+# whose two addresses are the same. Nor port 53.
+_SAMPLED_IN = "tcp[5:1] = 0"
+_SAMPLED_IN6 = "ip6[45:1] = 0"
+_FROM_ELSEWHERE = "ip[12:4] != ip[16:4]"
+_FROM_ELSEWHERE6 = (
+    "("
+    + " or ".join(f"ip6[{8 + at}:4] != ip6[{24 + at}:4]" for at in range(0, 16, 4))
+    + ")"
+)
+DOWNLOADS_FILTER = (
+    f"inbound and {_NOT_DNS} and ("
+    f"(ip and tcp and {_SAMPLED_IN} and not ({_FROM_THE_MODEL[4]})"
+    f" and not src net 127.0.0.0/8 and {_FROM_ELSEWHERE} and {_CARRIES})"
+    f" or ({_TCP6} and {_SAMPLED_IN6} and not ({_FROM_THE_MODEL[6]})"
+    f" and not src host ::1 and {_FROM_ELSEWHERE6} and {_CARRIES6})"
+    ")"
+)
 PARTS = (
     Part("tcp", CAPTURE_FILE, "", TCP_FILTER),
     Part("dns", "/dns.pcap", ".dns", DNS_FILTER),
@@ -225,6 +290,22 @@ PARTS = (
         f".{ELSEWHERE_PART}",
         ELSEWHERE_FILTER,
         snap=HEADERS_LENGTH,
+    ),
+    # After what the session sent: an answer is to the upload before it
+    Part(
+        ANSWERS_PART,
+        "/answers.pcap",
+        f".{ANSWERS_PART}",
+        ANSWERS_FILTER,
+        snap=SEQUENCE_LENGTH,
+        limit=ANSWERS_LIMIT,
+    ),
+    Part(
+        DOWNLOADS_PART,
+        "/downloads.pcap",
+        f".{DOWNLOADS_PART}",
+        DOWNLOADS_FILTER,
+        snap=SEQUENCE_LENGTH,
     ),
 )
 # What is added to the file of a part for the one it leaves its exit status
@@ -288,6 +369,9 @@ class CaptureSidecar(Sidecar):
     EXTENSION: ClassVar[str] = "pcap"
     KEPT: ClassVar[int] = KEPT_CAPTURES
     MEMORY: ClassVar[str] = "256m"
+    # A tcpdump for each part, the script that looks after them, and what
+    # reads the parts for whoever follows the session, two of them at once
+    PIDS: ClassVar[int] = len(PARTS) + 24
     # Raw sockets, and what the start-up change of user of tcpdump asks for
     CAPABILITIES: ClassVar[tuple[str, ...]] = ("NET_RAW", "SETUID", "SETGID")
 
@@ -449,7 +533,7 @@ def parts_cut_short(capture: Capture) -> list[str]:
     return [
         part.name
         for part in PARTS
-        if capture.part_packets.get(part.name, 0) >= PACKET_LIMIT
+        if capture.part_packets.get(part.name, 0) >= part.most
     ]
 
 
@@ -465,23 +549,87 @@ def session_capture(host: Host, session: TracedSession) -> Capture | None:
     if not session.capture:
         return None
     try:
-        return read_parts(Path(host.captures_dir, session.capture))
+        # A recorder that ended early or lost packets may have lost
+        # lookups, any of them
+        whole = not session.stopped and not session.dropped
+        return read_parts(Path(host.captures_dir, session.capture), whole)
     except OSError:
         return None
 
 
-def read_parts(main: Path) -> Capture:
+# The parts of a capture that have what the session looked up
+LOOKUP_PARTS = frozenset({"dns", "direct"})
+
+
+def lookups_whole(capture: Capture) -> bool:
+    """Whether the lookups of a capture are all there, as far as its
+    packets tell: not once a part that has them ran into its limit."""
+    return not LOOKUP_PARTS.intersection(parts_cut_short(capture))
+
+
+def read_parts(main: Path, whole: bool = True) -> Capture:
     """What a capture says, by its main file and the files of its other
-    parts next to it. Raises OSError when the main one cannot be read."""
+    parts next to it. Raises OSError when the main one cannot be read.
+    With whole, whether nothing of it is known to be missing: the hellos
+    are held against what was looked up, which takes all the lookups
+    (see Capture.look_at_hellos)."""
     others = [main.with_name(main.name + part.suffix) for part in PARTS[1:]]
-    return read_capture(main, others)
+    capture = read_capture(main, others)
+    capture.lookups_whole = whole and lookups_whole(capture)
+    capture.look_at_hellos()
+    return capture
 
 
-def captured_since(sidecar: str, offset: int, file: str = CAPTURE_FILE) -> bytes | None:
-    """What the capture of a running session holds past its first offset
-    bytes of a file of the sidecar, the main capture unless told which,
-    None when it cannot be read: the session ended, or its sidecar is not
-    there. tcpdump writes every packet out as it comes (-U), so
-    this is the capture up to now. Read by a command of its own each time,
-    one left to follow the file would stay behind in the sidecar."""
-    return docker_bytes("exec", sidecar, "tail", "-c", f"+{offset + 1}", file)
+# What reads the parts of a capture from where each was read to, in one
+# go: given the most bytes to write in all, then each part as
+# file:offset, it writes for each how many bytes of it follow, on a line,
+# then those bytes. How long a file is, is looked at first: it grows
+# meanwhile, and no more of it is written out than was counted. Once the
+# most is reached, the parts after that one are given none of: each is
+# read after those before it, and is never further on than they are.
+READ_SCRIPT = """left=$1
+shift
+for wanted; do
+  file=${wanted%:*}
+  size=$({ wc -c <"$file"; } 2>/dev/null)
+  count=$((${size:-0} - ${wanted##*:}))
+  [ "$count" -gt 0 ] || count=0
+  [ "$count" -le "$left" ] || count=$left
+  echo "$count"
+  [ "$count" -gt 0 ] && tail -c "+$((${wanted##*:} + 1))" "$file" | head -c "$count"
+  left=$((left - count))
+done
+true"""
+# The most one reading of a capture takes in, of all its parts together:
+# a session can fill every part to its limit, and whoever starts to
+# follow it then is not to hold all of that at once
+READ_MOST = 64 << 20
+
+
+def captured_since(
+    sidecar: str, offsets: Mapping[str, int]
+) -> tuple[dict[str, bytes], bool]:
+    """What the capture of a running session holds past the first so
+    many bytes of each of its files in the sidecar, by the file: empty
+    for one that has nothing more, and all of them when it cannot be
+    read, the session ended or its sidecar is not there. And whether
+    that is all there was: not when it came to READ_MOST, the rest is
+    for the next time, the parts in their order. tcpdump writes every
+    packet out as it comes (-U), so this is the capture up to now. Read
+    by one command each time, for all the files: one left to follow them
+    would stay behind in the sidecar."""
+    wanted = [f"{file}:{offset}" for file, offset in offsets.items()]
+    said = docker_bytes(
+        "exec", sidecar, "sh", "-c", READ_SCRIPT, "sh", str(READ_MOST), *wanted
+    )
+    found = dict.fromkeys(offsets, b"")
+    held = memoryview(said or b"")
+    at = 0
+    for file in offsets:
+        end = (said or b"").find(b"\n", at)
+        if said is None or end < 0 or not said[at:end].isdigit():
+            break
+        count = int(said[at:end])
+        found[file] = bytes(held[end + 1 : end + 1 + count])
+        at = end + 1 + count
+    return found, sum(map(len, found.values())) < READ_MOST

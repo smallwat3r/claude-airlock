@@ -17,9 +17,19 @@ from ..recording.capture import parts_cut_short
 from ..recording.egress_log import ProxyRequest
 from ..recording.health import health_summary
 from ..recording.payloads import Lookup
-from ..recording.pcap import Capture, Connection, Flow, Request, Went
+from ..recording.pcap import (
+    SPOKEN_NAMES,
+    SPOKEN_ON,
+    Capture,
+    Connection,
+    Flow,
+    Marks,
+    Request,
+    Went,
+)
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
+from ..recording.uploads import LEAST
 from .recorded import Recorded, Traced
 from .shown import (
     DROPPED,
@@ -126,9 +136,19 @@ def _proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
 
 def _how_it_went(connection: Connection, outcome: Went) -> str:
     """An outcome of a connection as the words after its destination,
-    none for no outcome: the capture does not always tell."""
+    none for no outcome: the capture does not always tell. Of one left
+    open, how much it carried as far as is known, which is no less than
+    that: of what came in the capture has a sample, see answers.py. One
+    made to the session that it did not take is nothing gone wrong for
+    it, and is said in small letters."""
+    if outcome == Went.OPEN:
+        ways = zip(connection.so_far, ("out", "in"), strict=True)
+        carried = ", ".join(f"{size(count)} {way}" for count, way in ways if count)
+        # Not of one that carried next to nothing, as most do
+        much = sum(count or 0 for count in connection.so_far) >= LEAST
+        return f"left open, at least {carried}" if much else "left open"
     if outcome != Went.CLOSED:
-        return "left open" if outcome == Went.OPEN else outcome.upper()
+        return outcome.lower() if connection.inbound else outcome.upper()
     went = f"closed after {connection.seconds:.1f}s"
     # Of a connection that was reset, one of the two may not be known
     for count, way in ((connection.sent, "out"), (connection.received, "in")):
@@ -137,15 +157,35 @@ def _how_it_went(connection: Connection, outcome: Went) -> str:
     return went
 
 
+def reached_from(capture: Capture, connection: Connection) -> str:
+    """A connection made to the session as shown: who made it, by the
+    name their address was looked up under when it has one, and the port
+    of the session it was made to."""
+    address = connection.address
+    known = capture.name_of(address, connection.when)
+    who = f"{known} ({address})" if known else address
+    return flat(f"tcp IN from {who} to its port {connection.port}")
+
+
+def _spoken_there(connection: Connection) -> str:
+    """What a connection speaks, as said next to it: where its port does
+    not say, and it is one of the protocols that are told. On a port
+    that speaks something else it is noted, see Capture.noticed, and
+    what asked a proxy for a destination says that."""
+    told = SPOKEN_NAMES.get(connection.speaks)
+    if not told or connection.port in SPOKEN_ON or connection.asked:
+        return ""
+    return f"speaks {told}"
+
+
 def _uploads_on(capture: Capture, connection: Connection) -> int:
     """How many times something long enough to be worth a line was sent
     over a connection, as far as the capture took that, see uploads.py."""
-    key = (connection.source_port, connection.address, connection.port)
     ended = math.inf if connection.ended is None else connection.ended
     return sum(
         upload.sized
         for part in (capture.uploads, capture.elsewhere)
-        for upload in part.on(key, connection.when, ended)
+        for upload in part.on(connection.key, connection.when, ended)
     )
 
 
@@ -161,11 +201,12 @@ def _connection_event(
     (no answer, refused or closed)."""
     address, port = connection.address, connection.port
     fields: dict = {
-        "protocol": over("tcp", port),
+        "protocol": "tcp" if connection.inbound else over("tcp", port),
+        **({} if connection.inbound else {"transport": "tcp"}),
         "name": capture.name_of(address, connection.when),
         "address": address,
         "port": port,
-        "source_port": connection.source_port,
+        **_told_of(connection),
     }
     when, outcome = ending or (
         connection.when,
@@ -173,6 +214,9 @@ def _connection_event(
     )
     if live:
         fields["stage"] = Stage.OUTCOME if ending else Stage.OPEN
+    if ending:
+        # What it is the outcome of, with the port it is from
+        fields["opened"] = connection.when
     if outcome:
         fields["outcome"] = outcome
     if outcome == Went.CLOSED:
@@ -187,10 +231,55 @@ def _connection_event(
         # When the capture took what is sent over it
         went += f", {uploads} uploads"
         fields["uploads"] = uploads
-    detail = reached(capture, address, port, "tcp", connection.when)
-    detail += f"  {went}" if went else ""
-    wrong = Wrong.THROUGHOUT if outcome.wrong else Wrong.NO
+    if connection.inbound:
+        detail = reached_from(capture, connection)
+    else:
+        detail = reached(capture, address, port, "tcp", connection.when)
+    said = [
+        f"asked for {flat(connection.asked)}" if connection.asked else "",
+        _spoken_there(connection),
+        went,
+    ]
+    detail = "  ".join(filter(None, [detail, *said]))
+    failed = outcome.wrong and not connection.inbound
+    wrong = Wrong.THROUGHOUT if failed else Wrong.NO
     return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
+
+
+def _told_of(connection: Connection) -> dict:
+    """What more a connection is known by, as named values: the port of
+    the session it is from, and what its first bytes told. Of one made
+    to the session, that it is, and the port of the other end."""
+    if connection.inbound:
+        return {"inbound": True, "peer_port": connection.source_port}
+    told: dict = {"source_port": connection.source_port}
+    if connection.asked:
+        told["asked"] = connection.asked
+    if connection.speaks:
+        told["speaks"] = connection.speaks
+    if connection.hello:
+        told["hello"] = connection.hello.name
+        told["offered"] = list(connection.hello.offered)
+    return told
+
+
+def _noticed_event(
+    capture: Capture, when: float, what: str, found: Connection
+) -> Event:
+    """What stands out of a connection, see Capture.noticed of pcap.py,
+    as an event of its own at the time it was found."""
+    fields = {
+        "protocol": over("tcp", found.port),
+        "name": capture.name_of(found.address, found.when),
+        "address": found.address,
+        "port": found.port,
+        "source_port": found.source_port,
+        "opened": found.when,
+        "flagged": what,
+    }
+    where = reached(capture, found.address, found.port, "tcp", found.when)
+    detail = f"{where}  {flat(f'FLAGGED: {what}')}"
+    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=Wrong.THROUGHOUT)
 
 
 def _flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
@@ -200,6 +289,7 @@ def _flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
     protocol = over(flow.transport, flow.port)
     fields: dict = {
         "protocol": protocol,
+        "transport": flow.transport,
         "name": capture.name_of(flow.address, flow.when),
         "address": flow.address,
         "port": flow.port,
@@ -284,6 +374,13 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         lines.append(f"  dns {len(names)} names looked up{hint}")
     if capture.flagged:
         lines.append(f"  dns {len(capture.flagged)} lookups FLAGGED, see --failed")
+    if capture.noticed:
+        lines.append(f"  {len(capture.noticed)} connections FLAGGED, see --failed")
+    made = Counter(reached_from(capture, connection) for connection in capture.inbound)
+    lines += [
+        f"  {who} x{made[who]}"
+        for who in sorted(made, key=lambda who: (-made[who], who))
+    ]
     if capture.dns_unread:
         lines.append(
             f"  dns {capture.dns_unread} more messages NOT READ, past the"
@@ -300,31 +397,49 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
 def capture_events(
     capture: Capture,
     verbose: bool,
-    past: tuple[int, int, int, int, int, int] | None = None,
+    past: Marks | None = None,
+    upto: Marks | None = None,
 ) -> list[Event]:
-    """One event per connection, per place something was sent to by
-    another protocol, per plain HTTP request and per lookup that stands
-    out, with --verbose also per answer of the resolver. Of a capture that
-    is all there, a connection says how it went. Of one read as it grows,
-    past being its marks at the last reading, only what came since: a
+    """One event per connection, made by the session or to it, per place
+    something was sent to by another protocol, per plain HTTP request,
+    per lookup that stands out and per connection that does, with
+    --verbose also per answer of the resolver. Of a capture that is all
+    there, a connection says how it went. Of one read as it grows, past
+    being its marks at the last reading, only what came since: a
     connection when it starts, and what became of it as an event of its
-    own."""
+    own. No further than upto, when what is shown of a capture is held
+    back, see CaptureTail of follow.py."""
     live = past is not None
-    started, ended, looked_up, asked, sent, flagged = past or (0, 0, 0, 0, 0, 0)
-    events = [
-        _connection_event(capture, connection, live)
-        for connection in capture.connections[started:]
-    ]
+    was, now = past or Marks(), upto or capture.marks()
+    started = capture.connections[was.connections : now.connections]
+    started += capture.inbound[was.inbound : now.inbound]
+    events = [_connection_event(capture, connection, live) for connection in started]
     if live:
         events += [
             _connection_event(capture, connection, live, (when, what))
-            for when, what, connection in capture.endings[ended:]
+            for when, what, connection in capture.endings[was.endings : now.endings]
         ]
-    events += [_request_event(request) for request in capture.requests[asked:]]
-    events += [_flow_event(capture, flow, live) for flow in capture.flows[sent:]]
-    events += [_flag_event(why, lookup) for why, lookup in capture.flagged[flagged:]]
+    events += [
+        _noticed_event(capture, *found)
+        for found in capture.noticed[was.noticed : now.noticed]
+    ]
+    events += [
+        _request_event(request)
+        for request in capture.requests[was.requests : now.requests]
+    ]
+    events += [
+        _flow_event(capture, flow, live)
+        for flow in capture.flows[was.flows : now.flows]
+    ]
+    events += [
+        _flag_event(why, lookup)
+        for why, lookup in capture.flagged[was.flagged : now.flagged]
+    ]
     if verbose:
-        events += [_lookup_event(lookup) for lookup in capture.lookups[looked_up:]]
+        events += [
+            _lookup_event(lookup)
+            for lookup in capture.lookups[was.lookups : now.lookups]
+        ]
     return events
 
 
@@ -333,9 +448,17 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
     to hold it: by its ports, so this is not a guess by the clock."""
     for event in events:
         fields = event.fields
-        if event.kind is not Kind.NET or "source_port" not in fields:
+        if event.kind is not Kind.NET or "process" in fields:
             continue
-        made = (fields["source_port"], fields["address"], fields["port"], event.when)
+        # A connection is noted by the session's port and the other end:
+        # of one made to the session, the process is the one that took it
+        opened = fields.get("opened", event.when)
+        if fields.get("inbound"):
+            made = (fields["port"], fields["address"], fields["peer_port"], opened)
+        elif "source_port" in fields:
+            made = (fields["source_port"], fields["address"], fields["port"], opened)
+        else:
+            continue
         lineage = record.holder(*made)
         if not lineage:
             if record.hidden_holder(*made):
@@ -373,13 +496,14 @@ def _process_events(record: ProcessRecord) -> list[Event]:
     return events
 
 
-def _listener_events(record: ProcessRecord) -> list[Event]:
+def listener_events(record: ProcessRecord, past: int = 0) -> list[Event]:
     """One event per socket that started to wait for connections, with
     the process that held it. One that waits on more than the session's
     own loopback says so: the other sessions that run are on its network,
-    of other projects too."""
+    of other projects too. Of a record read as it grows, past being how
+    many it had at the last reading, only those that came since."""
     events = []
-    for listener in record.listeners:
+    for listener in record.listeners[past:]:
         detail = flat(listener.at)
         if listener.open:
             detail += "  OPEN to its network"
@@ -483,7 +607,7 @@ def _watched_events(record: ProcessRecord, verbose: bool) -> list[Event]:
     """What a session's watcher noted, as events: the sockets that waited
     for connections, how the session was doing, and with --verbose each
     process that was seen to run."""
-    ran = _listener_events(record) + (_process_events(record) if verbose else [])
+    ran = listener_events(record) + (_process_events(record) if verbose else [])
     ran += [sample.event() for sample in record.samples]
     return ran + [ended.event() for ended in record.ended]
 

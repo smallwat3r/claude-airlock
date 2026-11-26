@@ -106,11 +106,13 @@ class Kind(enum.StrEnum):
 class Stage(enum.StrEnum):
     """Which part of something an event is, among its values, when it is
     followed as it happens: a tool call and its result, a connection as
-    it opens and what became of it."""
+    it opens, how far it has got while it is still open, and what became
+    of it."""
 
     CALL = "call"
     RESULT = "result"
     OPEN = "open"
+    PROGRESS = "progress"
     OUTCOME = "outcome"
 
 

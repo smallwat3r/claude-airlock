@@ -115,7 +115,8 @@ class Timeline:
             self._note(event, call)
         elif (
             event.kind is Kind.NET
-            and fields.get("stage") != Stage.OUTCOME
+            # A connection when it is made, not what comes of it later
+            and fields.get("stage") not in (Stage.OUTCOME, Stage.PROGRESS)
             # Not what Claude Code sends to the model, which no call makes
             and not fields.get("model_api")
         ):

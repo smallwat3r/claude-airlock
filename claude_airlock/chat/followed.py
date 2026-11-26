@@ -112,6 +112,12 @@ class Followed:
                 together.append(event)
         self._page.put(lines + self._page.events(together))
 
+    def network(self) -> str:
+        """What the session did on the network since this was last
+        asked, as a turn that is over says it: empty when it did
+        nothing there, or nothing of it is recorded."""
+        return self._follower.traffic().said if self._follower else ""
+
     def settle(self, patience: float = SETTLE) -> None:
         """Show what a turn did up to now, for what comes next to be
         written under it. The last of it may not be in the transcript
