@@ -7,8 +7,13 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from ..events import clean
+
 # The escapes of colour, the only ones a head keeps
 SGR = re.compile(r"\x1b\[[0-9;]{0,32}m")
+# The control characters readline shows as a caret and a letter, ^[ for
+# an escape, and that a terminal would act on as they are
+_CARETED = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def uncounted(prompt: str) -> str:
@@ -148,3 +153,13 @@ def cursor_back(prompt: str, typed: str, before: str, columns: int) -> str:
     across = columns_of(part.rpartition("\n")[2]) % columns
     out += f"\x1b[{up}A" if up else ""
     return out + "\r" + (f"\x1b[{across}C" if across else "")
+
+
+def shown_typed(text: str) -> str:
+    """What was typed or pasted as it is to be written to the terminal,
+    as readline shows it: a control character as a caret and a letter,
+    and nothing that clean takes out. The line itself keeps them, this
+    is what is on the screen: a line piped in or pasted can hold the
+    escapes that move the cursor, clear the screen or set its title."""
+    careted = _CARETED.sub(lambda found: "^" + chr(ord(found[0]) ^ 0x40), text)
+    return clean(careted)

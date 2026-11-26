@@ -194,6 +194,19 @@ class ConsoleTest(LauncherTest):
         console.Console(str(self.project))
         assert stdin.errors == "replace"
 
+    def test_what_is_piped_in_is_written_back_without_its_escapes(self):
+        # As gh issue view | claude-airlock gives a page someone wrote
+        piped = "fix this\x1b]0;owned\x07\x1b[2J\u202e\n"
+        stdin = io.TextIOWrapper(io.BytesIO(piped.encode()), encoding="utf-8")
+        self.cleanup.enter_context(unittest.mock.patch.object(sys, "stdin", stdin))
+        screen = console.Console(str(self.project))
+        with written() as lines:
+            # Claude is told what was written, the screen shows it
+            assert screen.read("> ") == piped.removesuffix("\n")
+        assert lines == ["> fix this^[]0;owned^G^[[2J"]
+        # As readline shows them, a new line and a tab left as they are
+        assert screens.shown_typed("a\tb\nc\x7f\x00") == "a\tb\nc^?^@"
+
     def test_a_paste_that_ctrl_c_drops_is_not_written_again_as_sent(self):
         out = io.StringIO()
         screen = console.Console(

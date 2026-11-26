@@ -67,7 +67,7 @@ from typing import TextIO
 
 from ..events import Event, clean, labelled
 from ..report.layout import Layout, Shown, Styled, painted, prefixed
-from .screen import SGR, cursor_back, erased, first_row, uncounted
+from .screen import SGR, cursor_back, erased, first_row, shown_typed, uncounted
 
 try:
     import readline
@@ -456,7 +456,7 @@ class Console:
             # Nobody typed it: said here, for what is written to read as
             # a conversation and to start on a line of its own
             with self._lock:
-                self._say(self._styled(line) + "\n")
+                self._say(self._styled(shown_typed(line)) + "\n")
         if self._redrawn and not keep():
             self._forget(line)
         return line
@@ -494,7 +494,8 @@ class Console:
                     self._say(above + shown)
                     self._on_screen = True
             begun = self._begun
-        typed = self._typed(self._given(above, shown) + begun if self._redrawn else "")
+        given = self._given(above, shown) + shown_typed(begun)
+        typed = self._typed(given if self._redrawn else "")
         if not (self._editline and self._redrawn):
             return typed
         # A key of a new line pressed within the line, see _set_up
@@ -507,7 +508,7 @@ class Console:
         # The line was ended by a key of a new line: it goes on, as the
         # start of the next line read
         with self._lock:
-            shows = line + CONTROL_SHOWN
+            shows = shown_typed(line) + CONTROL_SHOWN
             self._say("\x1b[1A" + self._erased(self._shown, shows))
             self._forget(line)
             self._filled = line + "\n"
@@ -555,10 +556,10 @@ class Console:
                 unfinished = self._typed_on
                 if self._redrawn:
                     # The line entered alone, written again with the rest
-                    out = "\x1b[1A" + self._erased(self._shown, line)
+                    out = "\x1b[1A" + self._erased(self._shown, shown_typed(line))
                     self._forget(line)
                     if not unfinished:
-                        out += self._shown + text
+                        out += self._shown + shown_typed(text)
                         readline.add_history(text.removesuffix("\n"))
                     self._say(out)
                 if not unfinished:
@@ -610,6 +611,7 @@ class Console:
         that said what ran then: they would stay on the screen, no longer
         true. Called with the lock held."""
         prompt = self._reading
+        line = shown_typed(line)
         styled = bool(self._sent and line.strip())
         working = bool(self._working and self._above())
         if prompt is None or not (styled or working):
@@ -801,8 +803,8 @@ class Console:
         if was is None:
             out = text
         elif self._redrawn:
-            typed = self._buffer()
-            before = self._before_cursor(typed)
+            raw = self._buffer()
+            typed, before = shown_typed(raw), shown_typed(self._before_cursor(raw))
             shown = above + (prompt or "")
             # Erased from where the cursor is, and the cursor put back
             # there: readline goes on from where it left it
