@@ -33,6 +33,10 @@ from .outcomes import outside_flag, refused, result_planted
 from .planted import INJECTION, read_said
 from .told import INSTRUCTIONS, attachment, instruction_files, instructions_read
 
+# The values of a field of the entries the header names, no more than so
+# many: the branches, versions and models a session ran under
+MOST_LISTED = 5
+
 
 def planted_reads(entries: list[dict]) -> int:
     """How many of the results of its calls and of the files it read as
@@ -81,6 +85,20 @@ def planted_shown(events: Iterable[Event]) -> int:
     return results + len(files)
 
 
+def _listed(values: Iterable[object]) -> str:
+    """The texts of some values, each once and sorted, as a line
+    that stays one: no more than MOST_LISTED of them and each cut to the
+    width of a preview, then how many more there are. Every entry can
+    give a value of its own, of any length."""
+    found = sorted(
+        {flat(v[:PREVIEW_WIDTH]) for v in values if isinstance(v, str) and v}
+    )
+    if not found:
+        return "?"
+    more = len(found) - MOST_LISTED
+    return ", ".join(found[:MOST_LISTED]) + (f", and {more} more" if more > 0 else "")
+
+
 def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str, str]]:
     """The session at a glance, as labelled values: what ran it, when, at
     what cost, how many calls and how many of them failed. With how many
@@ -92,18 +110,17 @@ def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str,
     cost = last.get("cost-state", {})
 
     def seen(key: str) -> str:
-        values = {flat(e[key]) for e in entries if isinstance(e.get(key), str)}
-        return ", ".join(sorted(values)) or "?"
+        return _listed(e.get(key) for e in entries)
 
-    models = {
-        flat(e["message"].get("model", ""))
+    models = [
+        e["message"].get("model")
         for e in entries
         if e.get("type") == "assistant" and isinstance(e.get("message"), dict)
-    }
+    ]
     rows = [
         ("branch", seen("gitBranch")),
         ("claude", seen("version")),
-        ("model", ", ".join(sorted(models - {"", "<synthetic>"})) or "?"),
+        ("model", _listed(model for model in models if model != "<synthetic>")),
         ("permissions", seen("permissionMode")),
     ]
     if times:

@@ -22,7 +22,7 @@ from claude_airlock import files, projects
 from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean
 from claude_airlock.recording import egress_log, recorder
 from claude_airlock.recording.changes import change_event
-from claude_airlock.report import calls, trace, transcript
+from claude_airlock.report import calls, summary, trace, transcript
 from claude_airlock.report import entries as entries_module
 from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.door_events import use_event
@@ -950,6 +950,16 @@ class TraceTest(LauncherTest):
         assert "drop_all    (no arguments)" in shown
         assert "half  a pair" in shown
         assert "# cost" not in shown
+
+    def test_the_header_names_so_many_values_and_each_at_so_much_length(self):
+        # Each entry can give a branch of its own, of any length
+        entries = [
+            {"type": "user", "gitBranch": f"b{n}" + "x" * 5000} for n in range(9)
+        ]
+        branch = dict(summary.overview(entries))["branch"]
+        assert branch.endswith(", and 4 more")
+        assert len(branch) < summary.MOST_LISTED * 210
+        assert dict(summary.overview([]))["branch"] == "?"
 
     def test_a_header_line_cannot_be_forged(self):
         forged = "main\ntranscript  as the launcher copied it (9 lines)"
