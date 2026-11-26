@@ -25,6 +25,9 @@ DOCKERFILE_DIR = os.path.join(CHECKOUT_DIR, "docker")
 # listens on
 CONTAINER_HOME = "/home/sandbox"
 CONTAINER_CLAUDE = f"{CONTAINER_HOME}/.claude"
+# Where Claude Code keeps what is not in ~/.claude, its locks: a session
+# has a directory of its own there, see session_state of sandbox/home.py
+CONTAINER_STATE = f"{CONTAINER_HOME}/.local/state/claude"
 EGRESS_PORT = 3128
 # What Claude follows or runs of ~/.claude, on the host as in a session:
 # its settings and its instructions, single files then whole directories.
@@ -134,11 +137,6 @@ class Host:
         # The login Keychain of macOS, where Claude Code keeps its login
         # there, see login.py
         return os.path.join(self.home, "Library", "Keychains", "login.keychain-db")
-
-    @property
-    def claude_state_dir(self) -> str:
-        # Claude Code's own state, mounted into a session
-        return os.path.join(self.home, ".local", "state", "claude")
 
     @property
     def state_dir(self) -> str:

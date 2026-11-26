@@ -271,14 +271,16 @@ class ScratchTest(LauncherTest):
             ".npm": "1g",
             ".claude/shell-snapshots": "64m",
             ".claude/session-env": "64m",
+            ".local/state/claude": "64m",
         }
 
     def test_it_takes_no_more_than_half_of_a_small_memory_limit(self):
         sizes = self.sizes(CLAUDE_AIRLOCK_MEMORY="2g", CLAUDE_AIRLOCK_CACHE="0")
-        assert len(sizes) == 6
+        assert len(sizes) == 7
         assert ".cache" in sizes
         # What Claude Code keeps for the session is of them
         assert ".claude/session-env" in sizes
+        assert ".local/state/claude" in sizes
         total = sum(int(size.rstrip("m")) for size in sizes.values())
         assert total <= 1024
         assert total > 1024 - len(sizes)

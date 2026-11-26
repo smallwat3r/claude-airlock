@@ -45,7 +45,7 @@ from .claude_args import is_a_command, says_permissions
 from .ending import Ending
 from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
-from .mounts import SHADOWED_NAMES, names_secrets
+from .mounts import SHADOWED_NAMES, kept_out, names_secrets
 from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
@@ -239,8 +239,9 @@ def base_args(
         # binary the launcher symlinks to, mounting the host's copy shadows
         # the image's baked-in version, dangling the symlink (exit 127). The
         # image owns the version (auto-updater is off, update = rebuild), so
-        # keep it self-contained.
-        mount_arg(host.claude_state_dir, f"{CONTAINER_HOME}/.local/state/claude", "z"),
+        # keep it self-contained. Nor is ~/.local/state/claude, which
+        # is every project's on the host: a session has one of its own,
+        # see session_state of home.py.
         DROP_CAPABILITIES,
         NO_NEW_PRIVILEGES,
         "--read-only",

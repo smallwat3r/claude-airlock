@@ -9,6 +9,7 @@ check "holds no capabilities" grep -q "^CapEff:.0000000000000000$" /proc/self/st
 check_fails "root filesystem is read-only" touch /smoke-probe
 check "/tmp is writable" touch /tmp/smoke-probe
 check "~/.cache is writable" touch "/home/sandbox/.cache/smoke-probe"
+check "~/.local/state/claude is writable" touch "/home/sandbox/.local/state/claude/smoke-probe"
 check "project is mounted read-write" touch written-by-session
 check_fails ".env is shadowed" [ -s .env ]
 check ".env.example stays readable" [ -s .env.example ]

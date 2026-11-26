@@ -82,6 +82,18 @@ class DefaultSessionTest(LauncherTest):
             # What it goes over is there, docker would make it as root
             assert (self.base / name).is_dir()
 
+    def test_what_claude_keeps_outside_its_directory_is_the_sessions_own_too(self):
+        # The host's is one directory for every project, and for whatever
+        # else writes there: none of it is in a session, nor made for one
+        options = f"size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
+        assert f"--tmpfs=/home/sandbox/.local/state/claude:{options}" in self.flags
+        assert not [
+            flag
+            for flag in self.flags
+            if "state/claude:" in flag and "--volume" in flag
+        ]
+        assert not (self.home / ".local" / "state" / "claude").exists()
+
     def test_no_credentials_come_with_the_git_config(self):
         git = self.home / ".config" / "git"
         (git / "templates").mkdir(parents=True)

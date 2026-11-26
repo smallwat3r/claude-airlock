@@ -34,7 +34,14 @@ from pathlib import Path
 
 from ..docker import Tmpfs, env_arg, mount_arg
 from ..files import json_object, private_dir, write_whole
-from ..settings import CONFIG_FILES, CONFIG_TREES, CONTAINER_CLAUDE, Host, Settings
+from ..settings import (
+    CONFIG_FILES,
+    CONFIG_TREES,
+    CONTAINER_CLAUDE,
+    CONTAINER_STATE,
+    Host,
+    Settings,
+)
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .login import LOGIN
 
@@ -146,7 +153,6 @@ def prepare_home(host: Host) -> None:
         (*CONFIG_FILES, PROMPT_HISTORY),
     )
     os.makedirs(host.claude_dir, exist_ok=True)
-    os.makedirs(host.claude_state_dir, exist_ok=True)
     _make_missing(host.claude_dir, (*CONFIG_TREES, *WRITABLE_TREES), CONFIG_FILES)
     _seed_config(host)
 
@@ -207,11 +213,22 @@ def session_state() -> list[Tmpfs]:
     made there and gone with it, and it neither sees nor reaches those of
     another session. Whatever CLAUDE_AIRLOCK_RW_CONFIG says, that is about
     the config and this is not config. The session's user's alone: a tmpfs
-    is root's unless told otherwise."""
+    is root's unless told otherwise.
+
+    The same for what Claude Code keeps outside ~/.claude, in
+    ~/.local/state/claude (its locks). The host's is one directory for
+    all that runs there, of every project and of whatever else the user
+    has write to it: mounted, each session would read and write what
+    the others and the host left. Nothing in it is needed from one
+    session to the next, the image has the one version of Claude Code
+    it was built with."""
     user = (os.getuid(), os.getgid())
     return [
-        Tmpfs(f"{CONTAINER_CLAUDE}/{name}", 64, runs=True, owner=user, mode="700")
-        for name in SESSION_STATE
+        *(
+            Tmpfs(f"{CONTAINER_CLAUDE}/{name}", 64, runs=True, owner=user, mode="700")
+            for name in SESSION_STATE
+        ),
+        Tmpfs(CONTAINER_STATE, 64, owner=user, mode="700"),
     ]
 
 

@@ -194,6 +194,8 @@ defaults() {
   check "what a session leaves in ~/.claude stays with the sandbox" \
     [ -f "${STATE}/home/smoke-probe" ]
   check "and is not in that of the host" bash -c "! ls '${HOME}/.claude/smoke-probe'"
+  check "nor is what it leaves in ~/.local/state/claude" \
+    bash -c "! ls '${HOME}/.local/state/claude/smoke-probe'"
   rm -f "${STATE}/home/smoke-probe"
   check "the history of the session is kept apart, per project" \
     bash -c "ls '${STATE}/history/$(basename "${PROJECT}")-'*/file-history/smoke-probe"

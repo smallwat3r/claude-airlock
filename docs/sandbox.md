@@ -84,6 +84,9 @@ What a session is given and what it is kept from.
   shares it all again.
 - **The shell snapshots of other sessions.** `~/.claude/shell-snapshots`
   and `session-env` are each session's own.
+- **What Claude Code keeps in `~/.local/state/claude`.** A session has
+  a directory of its own there, empty and gone with it: the host's is
+  one for every project, and nothing in it is a session's to read.
 
 ## Hardening
 
@@ -99,7 +102,7 @@ What a session is given and what it is kept from.
   comes last in `PATH`: the cache outlives the session, and a command left
   there cannot stand in for one of the image.
 - Writable space is the mounts, the cache volume and a few size-capped
-  tmpfs (`/tmp`, `~/.npm`, `~/.config`).
+  tmpfs (`/tmp`, `~/.npm`, `~/.config`, `~/.local/state/claude`).
 - Containers still share the host kernel, unless the session runs under
   [gVisor](#gvisor).
 
