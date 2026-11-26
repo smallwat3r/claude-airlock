@@ -238,8 +238,8 @@ class Agent:
         for it, it waits for some, and whatever writes there waits with
         it on a pipe that is no longer read, as claude does. Written
         around a listener that is slow, it would be on the terminal
-        without the mark of what the session wrote, and for as long as a
-        session cares to write."""
+        among the lines of the chat wherever it came, and for as long
+        as a session cares to write."""
         while not self.ended.is_set():
             with contextlib.suppress(queue.Full):
                 self.messages.put(text, size, timeout=1.0)

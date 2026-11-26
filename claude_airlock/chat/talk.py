@@ -579,9 +579,9 @@ class Chat:
     def _taken_in(self, message: dict | str | Unread) -> bool:
         """Take in what came over the pipe. Whether it was a message of
         claude's, the empty one that stands for nothing said too: not a
-        line that is none, which is the session's word all the same and
-        marked as such (see Agent), nor what stands for a line that
-        could not be read."""
+        line that is none, which is the session's word all the same
+        (see Agent), nor what stands for a line that could not be
+        read."""
         if isinstance(message, dict):
             self._heard(message)
             return True
@@ -872,8 +872,7 @@ class Chat:
         resumed = self._handover is not None and self._handover.session
         if self._session.id and self._life.left and not resumed:
             again = f"claude-airlock --line-mode --resume {self._session.id}"
-            # Whole: a command to copy, and the id in it is one (see said.py)
-            self._page.note("chat", f"to go on with this session: {again}", whole=True)
+            self._page.note("chat", f"to go on with this session: {again}")
 
     def _answer(self, message: dict) -> None:
         """Answer what claude asks its host: whether a tool may be used,

@@ -59,9 +59,8 @@ class Shell:
         wait does. Claude is not told of it and the transcript does not
         have it, the record of what ran does. What it writes is the
         session's word as anything else from there: shown a line at a
-        time, cleaned, behind the mark of what the session wrote (see
-        Page.said). Ctrl-C is for the command while it runs, see
-        running."""
+        time, cleaned (see Page.said). Ctrl-C is for the command while
+        it runs, see running."""
         if not command:
             return
         if not self._over.is_set():

@@ -410,16 +410,16 @@ class Asker:
         names it by: its first line. Shown whole, from what claude asks
         here, unless that line is all of it: a command of several lines,
         the diff of an edit, the arguments of a tool, the plan claude
-        wants to act on, each line behind the mark of what the session
-        wrote (see Page.said): a command or a plan is claude's to write,
-        and no line of it is to read as the chat's own under the
-        question. What the transcript told of the call is not relied on
-        for it, a line of a subagent's can come after the question."""
+        wants to act on. A command or a plan is claude's to write, and
+        is written as its word is (see Page.said): the lines of a call
+        under the line that says they are, a plan as a reply. What the
+        transcript told of the call is not relied on for it, a line of a
+        subagent's can come after the question."""
         acted = self._acted(tool, tool_input)
         named = flat(acted[0]) if acted else ""
         plan = tool_input.get("plan")
         if tool == "ExitPlanMode" and isinstance(plan, str):
-            width, colour = self._page.said_width, self._page.layout.colour
+            width, colour = self._page.width, self._page.layout.colour
             self._page.note("plan", "what claude asks to go ahead with:")
             self._page.put(
                 [*self._page.replied(reply_lines(plan, width, colour)), BLANK]

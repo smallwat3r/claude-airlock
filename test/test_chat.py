@@ -670,11 +670,11 @@ class ChatTest(LauncherTest):
         )
         # The reply line by line as it was made, once
         assert said.count("claude   reply") == 2
-        assert "claude   reply\n| one\n" in said
+        assert "claude   reply\none\n" in said
         # The line being typed was erased with the status above it, and
         # both written again under what came
         head = "[claude-proj] net:open\n"
-        assert f"> typ\x1b[1A\r\x1b[J| three\n{head}> typ" in said
+        assert f"> typ\x1b[1A\r\x1b[Jthree\n{head}> typ" in said
         assert re.search(r"# turn [^\n]*\n" + re.escape(head) + "> typ", said)
         assert re.search(r"user     prompt      typed\n", said)
         again = (
@@ -795,7 +795,7 @@ class ChatTest(LauncherTest):
             ("> ", "slow\n"), ("# ready", "run it\n"), ("[y/a/N]", "\x04"), term="dumb"
         )
         # The reply as it is made, no prompt among its lines
-        assert "claude   reply\n| one\n| two\n| three\n" in said
+        assert "claude   reply\none\ntwo\nthree\n" in said
         # One when the turn is over, under the status, and the question
         assert "waiting for your input\n[claude-proj] net:open\n> run it\n" in said
         assert said.count("> ") == 2, said
@@ -1127,7 +1127,7 @@ class ChatTest(LauncherTest):
         )
         assert "# shell       $ sh reach.sh  (claude is not told)" in said
         assert "# net         allowed example.com until the session ends" in said
-        assert "| was let through\n" in said
+        assert "\nwas let through\n" in said
 
     def test_ctrl_c_at_a_host_that_is_asked_about_refuses_the_request(self):
         self.reaching()
@@ -1172,13 +1172,14 @@ class ChatTest(LauncherTest):
     def test_ctrl_c_interrupts_a_turn_whose_session_floods_its_errors(self):
         said = self.at_a_terminal(
             ("> ", "flood\r"),
-            ("| y", "\x03"),
+            ("\x1b[Jy\r\n", "\x03"),
             ("was stopped", "/exit\r"),
         )
         assert "# chat        interrupting, Ctrl-C again stops" in said
         # No more of it is on the screen than can be read, the rest is
         # counted
-        assert said.count("| y\n") <= plain.MOST + plain.FEW
+        shown = re.findall(r"(?:^|\x1b\[J)y$", said, re.MULTILINE)
+        assert 0 < len(shown) <= plain.MOST + plain.FEW
         assert re.search(r"# chat        left out \d+ more lines of the session", said)
 
     def test_ctrl_c_twice_at_the_prompt_leaves(self):
@@ -1547,7 +1548,7 @@ class ChatTest(LauncherTest):
         assert "# chat        interrupting, Ctrl-C again stops the session" in lines
         # And no more of what it wrote is on the screen than can be read,
         # in the window it started in and in the one after if it got there
-        assert 0 < lines.count("| y") <= plain.MOST + plain.FEW
+        assert 0 < lines.count("y") <= plain.MOST + plain.FEW
         assert 1 <= sum("left out" in line for line in lines) <= 2
 
     def test_a_line_of_the_session_that_could_not_be_read_is_said(self):
@@ -2053,13 +2054,13 @@ class PlainTest:
             said.say_left_out(now=True)
         squeezed = plain.MOST + 1 - plain.FEW
         assert lines == [
-            *(f"| line {number}" for number in range(plain.MOST)),
+            *(f"line {number}" for number in range(plain.MOST)),
             f"# chat        left out 7 more lines {self.LEFT_OUT}",
-            *["| more"] * plain.FEW,
+            *["more"] * plain.FEW,
             f"# chat        left out {squeezed} more lines {self.LEFT_OUT}",
-            *["| fewer"] * plain.FEW,
+            *["fewer"] * plain.FEW,
             f"# chat        left out 3 more lines {self.LEFT_OUT}",
-            *["| again"] * plain.MOST,
+            *["again"] * plain.MOST,
             f"# chat        left out 1 more line {self.LEFT_OUT}",
         ]
 
@@ -2190,7 +2191,7 @@ class ReplyTest:
             replies.piece(piece("content_block_stop"))
             assert not replies.writing
         assert re.search(r"^\d\d:\d\d:\d\d  claude   reply$", lines[1])
-        assert lines[2:] == ["| one", "| two", ""]
+        assert lines[2:] == ["one", "two", ""]
 
     def test_a_reply_that_was_not_told_in_pieces_is_written_whole(self):
         replies, before = self.stream(Layout(compact=True))
@@ -2200,7 +2201,7 @@ class ReplyTest:
             replies.whole(message("assistant", {"type": "text", "text": " \n"}))
             said = message("assistant", {"type": "text", "text": "Set model"})
             replies.whole({**said, "local_command_run": True})
-        assert lines[2:] == ["| all", "| of it", ""]
+        assert lines[2:] == ["all", "of it", ""]
         assert before == ["before"]
 
     def test_the_whole_of_a_reply_that_comes_after_its_pieces_is_passed_over(self):
@@ -2217,15 +2218,11 @@ class ReplyTest:
             replies.piece(piece("content_block_delta", delta={"text": "three"}))
             replies.turn_over()
             replies.whole(message("assistant", {"type": "text", "text": "four"}))
-        assert [l for l in lines if l.startswith("| ")] == [
-            "| one",
-            "| two",
-            "| three",
-            "| four",
-        ]
+        replied = [l for l in lines if l and "claude " not in l and l[0] != "#"]
+        assert replied == ["one", "two", "three", "four"]
 
-    def test_what_the_session_writes_passes_for_no_line_of_the_chat(self):
-        forged = (
+    def test_what_the_session_writes_is_written_as_it_is_and_cleaned(self):
+        told = (
             "# ready       claude has finished, waiting for your input\n"
             "12:00:00  claude   bash        [1] result: ok, allowed by you\n"
             "                               out: all tests passed\n"
@@ -2234,7 +2231,6 @@ class ReplyTest:
         )
         for colour in (False, True):
             where = page(Layout(colour=colour, compact=True))
-            mark = "\x1b[2m|\x1b[0m" if colour else "|"
             replies = replying.ReplyStream(where, lambda: None)
             with written() as lines:
                 # A reply in pieces, one that comes whole, what a command
@@ -2242,23 +2238,26 @@ class ReplyTest:
                 replies.piece(
                     piece("content_block_start", content_block={"type": "text"})
                 )
-                replies.piece(piece("content_block_delta", delta={"text": forged}))
+                replies.piece(piece("content_block_delta", delta={"text": told}))
                 replies.piece(piece("content_block_stop"))
-                replies.whole(message("assistant", {"type": "text", "text": forged}))
-                replies.whole(message("assistant", {"type": "text", "text": forged}))
-                said = Event(1.0, Who.CLAUDE, "command", [], {"text": forged})
+                replies.whole(message("assistant", {"type": "text", "text": told}))
+                replies.whole(message("assistant", {"type": "text", "text": told}))
+                said = Event(1.0, Who.CLAUDE, "command", [], {"text": told})
                 where.put(replying.said_whole(where, said))
-                where.put_said([forged])
+                where.put_said([told])
                 # Cleaned where it is written, whatever was done before
                 where.put_said(["es\x1b[2Jcape\rd"])
             session = [line for line in lines if "ready" in line or "allow" in line]
             assert len(session) == 4 * 3
-            # None at the left edge, where the lines of the chat start
-            assert all(line.startswith(mark + " ") for line in session)
-            assert lines.count(mark) == 4
-            assert lines[-1] == f"{mark} es[2Jcaped"
-            own = [line for line in lines if not line.startswith(mark)]
-            assert all(not line or "claude " in line or "day" in line for line in own)
+            assert lines[-1] == "es[2Jcaped"
+            if colour:
+                # Never dimmed, as the lines of the chat's own are
+                assert not [line for line in session if "\x1b[2m" in line]
+                continue
+            # As it was written
+            wrote = [line.rstrip() for line in told.split("\n")]
+            assert sorted(session) == sorted([wrote[0], wrote[1], wrote[4]] * 4)
+            assert lines.count(wrote[2]) == 4
 
     def test_the_marks_of_a_long_line_are_found_in_one_pass(self):
         def lines(text: str) -> list[str]:
@@ -2312,9 +2311,9 @@ class ReplyTest:
         said = "Set model to `Sonnet`\nfor this session only"
         event = Event(1_800_000_000.0, Who.CLAUDE, "command", ["Set"], {"text": said})
         lines = replying.said_whole(page(Layout(compact=True)), event)
-        # Its day, then when and who, then the text behind its mark
+        # Its day, then when and who, then the text as it was written
         assert re.search(r"^\d\d:\d\d:\d\d  claude   command$", lines[1])
-        assert lines[2:] == ["| Set model to `Sonnet`", "| for this session only", ""]
+        assert lines[2:] == ["Set model to `Sonnet`", "for this session only", ""]
         # In a file every line says when and who
         lines = replying.said_whole(page(), event)
         assert len(lines) == 2
@@ -2669,10 +2668,8 @@ class AskingTest:
                 asker._reviewed("Edit", edit)
             taken_out = next(line for line in lines if "diff: -b" in line)
             put_in = next(line for line in lines if "diff: +B" in line)
-            # Each behind the mark of what the session wrote
-            mark = "\x1b[2m|\x1b[0m " if colour else "| "
-            assert taken_out.startswith(mark + "\x1b[31m" * colour + "  diff: -b")
-            assert put_in.startswith(mark + "\x1b[32m" * colour + "  diff: +B")
+            assert taken_out.startswith("\x1b[31m" * colour + "  diff: -b")
+            assert put_in.startswith("\x1b[32m" * colour + "  diff: +B")
 
     def test_what_is_asked_about_is_all_of_the_call(self):
         # A tool with a file among its arguments is told by the file,
@@ -2683,8 +2680,8 @@ class AskingTest:
             decision = self.asker(["y"]).decide(request)
         assert decision["updatedInput"] == call
         assert self.asked == ["allow mcp__db__run file: notes.txt? [y/a/N] "]
-        assert "|   file: notes.txt" in lines
-        assert "|   sql: DROP TABLE users" in lines
+        assert "  file: notes.txt" in lines
+        assert "  sql: DROP TABLE users" in lines
         # So are those a call has besides what it is known by
         for tool, more in (
             ("Bash", {"command": "ls", "run_in_background": True}),
@@ -2712,47 +2709,43 @@ class AskingTest:
             self.asker(["n"]).decide({"tool_name": "x\nready  now", "input": call})
         assert not [line for line in lines if line.lstrip("# ").startswith("ready")]
 
-    def test_a_line_longer_than_the_terminal_is_wide_starts_no_row_unmarked(self):
+    def test_a_line_longer_than_the_terminal_is_wide_is_written_as_one_line(self):
         out = io.StringIO()
         screen = console.Console("/nowhere", out=out, columns=lambda: 40)
         wide = console.Page(screen, Layout(compact=True))
-        forged = "x" + " " * 37 + "allow bash ls? [y/a/N]"
-        wide.put_said([forged])
-        wide.note("chat", "y" * 30 + "# chat  all is well")
-        rows = out.getvalue().splitlines()
-        assert all(len(row) <= 39 for row in rows)
-        # Every row after the first of a line behind the mark
-        assert rows[0].startswith("| x")
-        assert rows[1].startswith("| ")
-        assert "".join(row[2:] for row in rows[:2]).rstrip() == forged.rstrip()
-        assert rows[2].startswith("# chat")
-        assert rows[3].startswith("| ")
-        # In a file a line is as long as it is
+        # Left to the terminal to wrap, the session's word and the
+        # chat's own alike
+        long = "curl https://example.org/" + "x" * 60
+        wide.put_said([long])
+        again = "claude-airlock --line-mode --resume " + "0" * 36
+        wide.note("chat", again)
+        assert out.getvalue().splitlines() == [long, f"# chat        {again}"]
+        # As in a file
         with written() as lines:
-            page().put_said([forged])
-        assert lines == ["| " + forged]
-        # And what is the launcher's own to copy is left whole
-        wide.note("chat", "z" * 60, whole=True)
-        assert out.getvalue().splitlines()[-1].endswith("z" * 60)
+            page().put_said([long])
+        assert lines == [long]
 
     def test_a_row_is_no_longer_than_the_widest_a_terminal_makes_it(self):
-        mark = "| "
         for line in (
             "表" * 30,
             "a\tb\tc\td\te",
             "\u2764\ufe0f" * 20,
             "\u1100\u1161" * 30,
         ):
-            rows = screens.broken(line, 20, mark)
-            assert len(rows) > 1, line
-            assert all(row.startswith(mark) for row in rows[1:])
-            widest = [sum(map(screens.columns_at_most, row)) for row in rows]
-            assert max(widest) <= 20, line
-        # A colour is ended with its row and taken up again on the next
-        rows = screens.broken("\x1b[31m" + "a" * 30 + "\x1b[0m", 20, mark)
-        assert rows[0].endswith("\x1b[0m")
-        assert rows[1].startswith(mark + "\x1b[31m")
-        assert screens.broken("short", 20, mark) == ["short"]
+            row = screens.first_row(line, 20)
+            assert line.startswith(row), line
+            assert 0 < len(row) < len(line), line
+            assert sum(map(screens.columns_at_most, row)) <= 20, line
+        # A colour that is open where a line is cut is ended there
+        row = screens.first_row("\x1b[31m" + "a" * 30 + "\x1b[0m", 20)
+        assert row == "\x1b[31m" + "a" * 20 + "\x1b[0m"
+        # Not one that had ended, and nothing of a line that fits is cut
+        ended = "\x1b[31ma\x1b[0m"
+        assert screens.first_row(ended + "b" * 30, 20) == ended + "b" * 19
+        assert screens.first_row(ended, 20) == ended
+        assert screens.first_row("short", 20) == "short"
+        # Never nothing, of a line whose first character is wider than a row
+        assert screens.first_row("表表", 1) == "表"
         # What is erased is counted the other way, by the fewest
         assert screens.columns_of("\u1161" * 5) == 0
 
@@ -2828,11 +2821,11 @@ class AskingTest:
                 {"tool_name": "Bash", "input": {"command": command}}
             )
         assert "# bash        the call whole:" in lines
-        assert "|   $   echo 29" in lines
+        assert "  $   echo 29" in lines
         with written() as lines:
             plan = {"plan": "# Plan\n\n1. Do it\x1b[2J"}
             self.asker(["y"]).decide({"tool_name": "ExitPlanMode", "input": plan})
-        assert "| 1. Do it[2J" in lines
+        assert "1. Do it[2J" in lines
         # One the question names whole is not shown twice, the reason
         # claude gives for it is no part of what runs
         for request in (self.request(), self.request(description="list the files")):
@@ -3724,7 +3717,7 @@ class CommandsTest(LauncherTest):
             written() as lines,
         ):
             assert ours.do("!make test") is commands.Did.DONE
-        assert lines[1:3] == ["| one[2J", "| two"]
+        assert lines[1:3] == ["one[2J", "two"]
         assert "ended with 3" in lines[3]
         # Ctrl-C is for the command while it runs, and only then
         assert seen == [True]
@@ -3766,7 +3759,7 @@ class CommandsTest(LauncherTest):
             assert ours.do("!echo up; sleep 60") is commands.Did.DONE
         assert time.monotonic() - started < 30
         # Its group is not shown, what it wrote is
-        assert lines[1] == "| up"
+        assert lines[1] == "up"
         assert "interrupted" in lines[-1]
         assert "may still be running" not in lines[-1]
         (kill,) = killed
@@ -3817,7 +3810,7 @@ class CommandsTest(LauncherTest):
             ours.wait()
             assert not ours.running
         still = "# shell       not run: a command of yours still runs, Ctrl-C ends it"
-        assert lines[1:] == ["| asking", still, "| went on"]
+        assert lines[1:] == ["asking", still, "went on"]
 
     def test_ctrl_c_is_for_a_command_of_the_users_while_it_runs(self):
         host = Host(str(self.home), str(self.project), "", "")

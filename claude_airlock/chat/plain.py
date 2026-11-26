@@ -2,7 +2,7 @@
 line of its errors, a line of its output that is no message (see Agent),
 and the lines of claude's that could not be read.
 
-Each is written as it comes, the session's own word behind its mark. Not
+Each is written as it comes, cleaned, the session's own word. Not
 without end: a process of the session writes to the errors of the first
 as fast as it likes (yes > /proc/1/fd/2), and what the user is to read,
 a question among it, would be gone from the screen before they could.

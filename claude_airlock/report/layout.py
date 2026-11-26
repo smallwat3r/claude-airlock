@@ -8,13 +8,12 @@ the start of another event.
 
 A line that is ready to be written is of a kind of its own, Shown, which
 only what lays lines out makes: a header line, the lines of an event, and
-in a chat what the session said behind its mark (see Page of
-chat/console.py). What writes to a terminal takes no other, so a text of
-the session's cannot be written as it is, as a line of the launcher's
-own, without the type check saying so. And each of those that makes one
-cleans the text it is given itself, a header line kept to the one line
-it is: that a line is Shown says it was cleaned, not that whoever built
-its text remembered to."""
+in a chat what the session said (see Page of chat/console.py). What
+writes to a terminal takes no other, so a text of the session's cannot
+be written without having been through one of them, the type check says
+so. And each of those that makes one cleans the text it is given itself,
+a header line kept to the one line it is: that a line is Shown says it
+was cleaned, not that whoever built its text remembered to."""
 
 from __future__ import annotations
 

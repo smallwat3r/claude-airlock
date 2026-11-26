@@ -66,8 +66,8 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from ..events import Event, clean, labelled
-from ..report.layout import DIM, Layout, Shown, Styled, painted, prefixed
-from .screen import SGR, broken, cursor_back, erased, uncounted
+from ..report.layout import Layout, Shown, Styled, painted, prefixed
+from .screen import SGR, cursor_back, erased, first_row, uncounted
 
 try:
     import readline
@@ -127,13 +127,6 @@ PASTE_GAP = 0.3
 PASTE_LIMIT = 1 << 20
 # A terminal narrower than this is written to as if it were so wide
 NARROWEST = 20
-# What starts each line a chat writes of the session's own word where no
-# line says who and what: a reply of claude's, what a command of the
-# user's wrote, a line claude wrote that is no message. A line of the
-# chat's own starts with the mark of a header line, with a time, or
-# under one of those with spaces, never with this: what the session
-# writes after it cannot pass for one of them, with or without colour
-SAID = "| "
 
 
 def _read_whatever_comes(stream: TextIO) -> None:
@@ -867,8 +860,14 @@ class Page:
     """What a chat writes, laid out as a trace is (see Layout), and when
     it last wrote. The one place a chat writes through: it takes lines
     that were laid out (see Shown of layout.py), which are the launcher's
-    own as a header line or an event, or the session's word behind its
-    mark, as said and replied make them."""
+    own as a header line or an event, or the session's word, as said and
+    replied make them.
+
+    The session's word is cleaned, and in no style but those given it
+    here: a line of it is never dimmed as a header line is, nor in the
+    colour of an event. Nothing else tells it from a line of the chat's
+    own, without colour one written as a header line or as a question
+    reads as one."""
 
     def __init__(self, console: Console, layout: Layout):
         self._console = console
@@ -889,62 +888,34 @@ class Page:
             return None
         return max(NARROWEST, self._console.columns() - 1)
 
-    @property
-    def said_width(self) -> int | None:
-        """What the session's own word is wrapped to, behind what each
-        line of it starts with, see said."""
-        width = self.width
-        return width and max(NARROWEST, width - len(SAID))
-
     def said(
         self, texts: list[str], style: Callable[[str], str] | None = None
     ) -> list[Shown]:
         """Texts of the session's own word as the lines they are written
-        as: cleaned here, whatever was done to them before, each behind
-        SAID, and so each line of one that holds a line break. With
-        style, each line in the style that gives for it, in colour."""
+        as: cleaned here, whatever was done to them before, and a line
+        for each line of one that holds a line break. With style, each
+        line in the style that gives for it, in colour."""
         lines = prefixed("", [clean(text) for text in texts])
         if style and self.layout.colour:
             lines = [painted(style(line), line) for line in lines]
-        return self._marked(lines)
+        return [Shown(line) for line in lines]
 
     def replied(self, lines: list[Styled]) -> list[Shown]:
-        """Lines of a reply of claude's as they are written, each behind
-        SAID: cleaned and styled by what made them, see ReplyWriter."""
-        return self._marked(prefixed("", list(lines)))
+        """Lines of a reply of claude's as they are written: cleaned and
+        styled by what made them, see ReplyWriter."""
+        return [Shown(line) for line in prefixed("", list(lines))]
 
-    @property
-    def _mark(self) -> str:
-        """The mark of what the session wrote. In colour it is dimmed, as
-        what a chat says of itself is: the text after it keeps its own."""
-        return painted(DIM, SAID.rstrip()) if self.layout.colour else SAID.rstrip()
-
-    def _marked(self, lines: list[str]) -> list[Shown]:
-        """Lines behind the mark of what the session wrote."""
-        mark = self._mark
-        gap = SAID[len(SAID.rstrip()) :]
-        return [Shown(f"{mark}{gap}{line}" if line else mark) for line in lines]
-
-    def _rows(self, line: str) -> list[str]:
-        """A line as the rows of the terminal it is written on, each
-        after the first behind the mark of what the session wrote: most
-        of a line that long is the session's, and none of it starts a
-        row as the launcher's own would, see broken. As it is in a file,
-        where a line is as long as it is."""
+    def _row(self, line: str) -> str:
+        """No more of a line than a row of the terminal, see first_row.
+        As it is in a file, where a line is as long as it is."""
         width = self.width
-        if width is None:
-            return [line]
-        return broken(line, width, self._mark + SAID[len(SAID.rstrip()) :])
+        return line if width is None else first_row(line, width)
 
-    def put(self, lines: list[Shown], whole: bool = False) -> None:
-        """Write lines, as the rows of the terminal they take, see _rows.
-        As they are when whole, for what is the launcher's own word from
-        its start to its end and is to be copied as it is: a command."""
+    def put(self, lines: list[Shown]) -> None:
+        """Write lines, each as long as it is: one longer than the
+        terminal is wide is the terminal's to wrap."""
         if lines:
-            rows = (
-                lines if whole else [row for line in lines for row in self._rows(line)]
-            )
-            self._console.write([Shown(row) for row in rows])
+            self._console.write(lines)
             self.touched()
 
     def put_said(
@@ -968,9 +939,8 @@ class Page:
         """Have these lines above the prompt, see Console.set_head. No
         more of each than a row of the terminal: what is erased with the
         prompt is counted in rows, and a line of more, long by what the
-        session named, would have the rows above it erased or its own
-        start one as the launcher's."""
-        self._console.set_head([self._rows(line)[0] for line in lines])
+        session named, could have the rows above it erased."""
+        self._console.set_head([self._row(line) for line in lines])
 
     @property
     def height(self) -> int:
@@ -994,16 +964,15 @@ class Page:
         """Texts of the chat's own as the header lines that are written
         above the head, no more of each than a row of the terminal, as
         of the head itself, see head."""
-        return [self._rows(line)[0] for line in self.layout.header(texts)]
+        return [self._row(line) for line in self.layout.header(texts)]
 
-    def say(self, notes: list[str], whole: bool = False) -> None:
-        """Lines about the chat itself, as the header lines of a trace.
-        Whole as put has it."""
-        self.put(self.layout.header(notes), whole)
+    def say(self, notes: list[str]) -> None:
+        """Lines about the chat itself, as the header lines of a trace."""
+        self.put(self.layout.header(notes))
 
-    def note(self, label: str, text: str, whole: bool = False) -> None:
+    def note(self, label: str, text: str) -> None:
         """A line about the chat itself under a label, see labelled."""
-        self.say([labelled(label, text)], whole)
+        self.say([labelled(label, text)])
 
     def events(self, events: list[Event]) -> list[Shown]:
         return self.layout.events(events)

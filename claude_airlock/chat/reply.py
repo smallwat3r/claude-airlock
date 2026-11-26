@@ -259,11 +259,11 @@ def reply_lines(text: str, width: int | None, colour: bool) -> list[Styled]:
 def said_whole(page: Page, said: Event) -> list[Shown]:
     """What was said with all of its lines, where a trace has a few: a
     chat is where it is read. At a terminal a line says when and who, and
-    the text is under it, each line behind the mark of what the session
-    wrote (see Page.said), wrapped to the terminal and with an empty line
-    after it. In a file every line says when and who, as of any event."""
+    the text is under it (see Page.replied), wrapped to the terminal
+    and with an empty line after it. In a file every line says when and
+    who, as of any event."""
     text = said.fields.get("text", "")
-    lines = reply_lines(text, page.said_width, page.layout.colour)
+    lines = reply_lines(text, page.width, page.layout.colour)
     if not page.layout.compact:
         whole = dataclasses.replace(said, details=[*lines] or said.details)
         return page.layout.event(whole)
@@ -317,9 +317,7 @@ class ReplyStream:
                 # The whole of a reply comes before its last piece: one
                 # that has not come by now will not
                 self._owed = 0
-                self._writer = ReplyWriter(
-                    self._page.said_width, self._page.layout.colour
-                )
+                self._writer = ReplyWriter(self._page.width, self._page.layout.colour)
                 self._started = time.time()
         elif kind == "content_block_delta" and self._writer:
             given = event.get("delta")
@@ -369,9 +367,9 @@ class ReplyStream:
         self._owed = 0
 
     def _take(self, lines: list[Styled]) -> None:
-        """Write lines of the reply, at a terminal: behind the mark of
-        what the session wrote, no line of it says who. In a file they
-        are kept for its end."""
+        """Write lines of the reply, at a terminal: under the line that
+        says when and who, none of its own does. In a file they are
+        kept for its end."""
         if not lines:
             return
         if not self._page.layout.compact:
