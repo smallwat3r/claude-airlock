@@ -1090,6 +1090,7 @@ class CaptureTailTest:
             mock.patch.object(follow.Follower, "_health_sources", return_value={}),
             mock.patch.object(follow.Follower, "_filtered_addresses") as addresses,
             mock.patch.object(follow, "known_destinations", side_effect=known),
+            mock.patch.object(follow, "read_traced_sessions", return_value=[]),
         ):
             # The capture of a session is up before the session is
             addresses.return_value = {}
@@ -1103,10 +1104,79 @@ class CaptureTailTest:
             # before left it
             sidecar[0] = ("claude-proj.capture", 9.0)
             follower._look_for_sessions(follow.Round())
-            (later,) = follower._captures.values()
+            later = follower._captures[sidecar[0]]
             assert later._known == known[1]
 
-    def test_a_capture_that_ended_is_let_go_of_and_said_to_have(self):
+    def test_a_capture_that_ended_is_let_go_of_after_a_last_look(self, tmp_path: Path):
+        host = mock.Mock(project_dir="/proj", captures_dir=str(tmp_path))
+        follower = follow.Follower(host, verbose=False)
+        sidecar = [("claude-proj.capture", 5.0)]
+        with (
+            mock.patch.object(tails.CaptureSidecar, "running") as running,
+            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
+            mock.patch.object(follow.Follower, "_filtered_addresses", return_value={}),
+            mock.patch.object(follow, "known_destinations", return_value=None),
+            mock.patch.object(follow, "read_traced_sessions") as noted,
+        ):
+            running.return_value, noted.return_value = sidecar, []
+            began = follow.Round()
+            follower._look_for_sessions(began)
+            assert [note.split(maxsplit=1)[1] for note in began.notes] == [
+                "following the capture of claude-proj"
+            ]
+            (tail,) = follower._captures.values()
+            # Past the first look, as poll counts them
+            follower._rounds = 1
+            # Docker did not answer: it is followed on as it was, not
+            # taken to have ended and read again from its start
+            running.return_value = None
+            unanswered = follow.Round()
+            follower._look_for_sessions(unanswered)
+            assert unanswered.notes == []
+            assert list(follower._captures.values()) == [tail]
+            running.return_value = sidecar
+            follower._look_for_sessions(follow.Round())
+            assert list(follower._captures.values()) == [tail]
+            # Its session is over, its sidecar stopped: kept until the
+            # copy its launcher makes of it is noted
+            sidecar.clear()
+            stopped = follow.Round()
+            follower._look_for_sessions(stopped)
+            assert (stopped.notes, list(follower._captures.values())) == ([], [tail])
+            # Which has what the sidecar did not give by then
+            now = time.time()
+            copy = tmp_path / "claude-proj.capture-5.pcap"
+            there = "198.51.100.7"
+            copy.write_bytes(
+                pcap_file(
+                    [
+                        (now, tcp(there, 443), True),
+                        (now, answer(there, 443), False),
+                    ]
+                )
+            )
+            noted.return_value = [mock.Mock(capture=copy.name)]
+            ended = follow.Round()
+            follower._look_for_sessions(ended)
+        assert follower._captures == {}
+        said = [note.split(maxsplit=1)[1] for note in ended.notes]
+        assert said == ["the capture of claude-proj ended"]
+        assert [event.kind for _, event in ended.events] == [Kind.NET]
+
+    def test_what_goes_on_holds_back_none_of_what_is_over_after_it(self):
+        over = [False, True, True]
+        told = tails.NewlyOver[int]()
+        items = [0, 1, 2]
+        assert told.of(items, lambda item: over[item]) == [1, 2]
+        # Each once, the one that goes on too when it is over
+        over += [True]
+        items.append(3)
+        assert told.of(items, lambda item: over[item]) == [3]
+        over[0] = True
+        assert told.of(items, lambda item: over[item]) == [0]
+        assert told.of(items, lambda item: over[item]) == []
+
+    def test_a_capture_whose_copy_does_not_come_is_let_go_of_all_the_same(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, verbose=False)
         sidecar = [("claude-proj.capture", 5.0)]
@@ -1115,17 +1185,15 @@ class CaptureTailTest:
             mock.patch.object(follow.Follower, "_health_sources", return_value={}),
             mock.patch.object(follow.Follower, "_filtered_addresses", return_value={}),
             mock.patch.object(follow, "known_destinations", return_value=None),
+            mock.patch.object(follow, "read_traced_sessions", return_value=[]),
+            mock.patch.object(follow, "LAST_LOOK_WAIT", 0.0),
         ):
-            began = follow.Round()
-            follower._look_for_sessions(began)
-            assert [note.split(maxsplit=1)[1] for note in began.notes] == [
-                "following the capture of claude-proj"
-            ]
-            # Its session is over, its sidecar with it
+            follower._look_for_sessions(follow.Round())
             sidecar.clear()
             ended = follow.Round()
             follower._look_for_sessions(ended)
         assert follower._captures == {}
+        assert ended.events == []
         said = [note.split(maxsplit=1)[1] for note in ended.notes]
         assert "the capture of claude-proj ended" in said
 

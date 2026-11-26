@@ -1097,7 +1097,8 @@ it, so it can be started and stopped at any time.
   session writes less. A result with a picture in it is not enough.
 - A line says when the capture of a session starts to be followed and
   when it ended, with the session: a session that starts later is picked
-  up. At the start, a project with no transcript yet says that it waits
+  up. What the session did last comes before that line, read from the
+  copy its launcher keeps of the capture, within half a minute of it. At the start, a project with no transcript yet says that it waits
   for one, and one with no session whose network is recorded says so
   (none runs, `CLAUDE_AIRLOCK_NET_LOG=0`, or not sandboxed). Without
   docker, the network is not followed and a line says that too.

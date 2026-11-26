@@ -18,8 +18,8 @@ from ..docker import (
     DROP_CAPABILITIES,
     NO_NEW_PRIVILEGES,
     docker,
+    docker_answer,
     docker_ok,
-    docker_output,
 )
 from ..files import json_object, private_dir
 from ..launcher import Launcher, session_alive
@@ -130,15 +130,18 @@ class Sidecar:
         return cls(name, project, start, launcher)
 
     @classmethod
-    def listed(cls, ended_too: bool = False) -> list[Self]:
+    def listed(cls, ended_too: bool = False) -> list[Self] | None:
         """The sidecars of this kind that are running, of every project,
-        with those that have stopped when asked for."""
-        listed = docker_output(
+        with those that have stopped when asked for. None when docker
+        did not answer."""
+        listed = docker_answer(
             "ps",
             *(["--all"] if ended_too else []),
             f"--filter=label={cls.LABEL}",
             f'--format={{{{.Names}}}}\t{{{{.Label "{cls.LABEL}"}}}}',
         )
+        if listed is None:
+            return None
         found = []
         for line in listed.splitlines():
             name, _, label = line.partition("\t")
@@ -148,12 +151,16 @@ class Sidecar:
         return found
 
     @classmethod
-    def running(cls, project_dir: str) -> list[tuple[str, float]]:
+    def running(cls, project_dir: str) -> list[tuple[str, float]] | None:
         """Those of the sessions of a project that are running now, as
-        the name of each and when it started."""
+        the name of each and when it started. None when docker did not
+        say: that is not that none runs."""
+        listed = cls.listed()
+        if listed is None:
+            return None
         return [
             (sidecar.name, sidecar.start)
-            for sidecar in cls.listed()
+            for sidecar in listed
             if sidecar.project == project_dir
         ]
 
@@ -164,7 +171,7 @@ class Sidecar:
         they recorded."""
         return [
             sidecar
-            for sidecar in cls.listed(ended_too=True)
+            for sidecar in cls.listed(ended_too=True) or []
             if not session_alive(sidecar.launcher, sidecar.session)
         ]
 

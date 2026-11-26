@@ -98,6 +98,13 @@ def docker_output(*args: str) -> str:
     return docker(*args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
 
 
+def docker_answer(*args: str) -> str | None:
+    """Stdout of a docker command, None when it fails: not the same as
+    an answer that is empty, of a listing that has nothing in it."""
+    ran = docker(*args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return ran.stdout if ran.returncode == 0 else None
+
+
 def running_containers() -> set[str]:
     """The names of the containers that are running now."""
     return set(docker_output("ps", "--format={{.Names}}").split())

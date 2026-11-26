@@ -12,7 +12,7 @@ import dataclasses
 import math
 import os
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -317,6 +317,18 @@ class NewlyOver[Item]:
         return found
 
 
+def _read_from(file: Path, offset: int) -> bytes:
+    """What a copy of a part of a capture holds past an offset, nothing
+    for one that is not there: a part that wrote nothing is not copied.
+    The launcher's own file, which a packet limit bounds."""
+    try:
+        with open(file, "rb") as copy:
+            copy.seek(offset)
+            return copy.read()
+    except OSError:
+        return b""
+
+
 class CaptureTail:
     """The capture of a running session, read as it grows. With known,
     the destinations its project was noted to reach, for the ones that
@@ -380,6 +392,29 @@ class CaptureTail:
         again later, or its session has ended."""
         offsets = {part.file: self._offsets[part.name] for part in PARTS}
         read, whole = captured_since(self.sidecar, offsets)
+        self._take(read, whole)
+        return self._events(over=False)
+
+    def last_look(self, copied: Path) -> list[Event]:
+        """What the capture holds past where it was read to, out of the
+        copy its launcher made of it as the session ended, see collect of
+        sidecar.py: the last connections, uploads and answers of the
+        session, which the sidecar, stopped, no longer gives. All of it,
+        nothing more comes."""
+        read = {}
+        for part in PARTS:
+            file = (
+                copied
+                if part is PARTS[0]
+                else copied.with_name(copied.name + part.suffix)
+            )
+            read[part.file] = _read_from(file, self._offsets[part.name])
+        self._take(read, whole=True)
+        self.capture.dns.finish()
+        return self._events(over=True)
+
+    def _take(self, read: Mapping[str, bytes], whole: bool) -> None:
+        """Take in what was read past where each part was read to."""
         for part in PARTS:
             data = read[part.file]
             if data:
@@ -393,7 +428,11 @@ class CaptureTail:
                 self.capture
             )
             self.capture.look_at_hellos()
-        upto = self._settled()
+
+    def _events(self, over: bool) -> list[Event]:
+        """What is to be shown of what was taken in: of a capture that is
+        over, all of it, and no connection is still open."""
+        upto = self.capture.marks() if over else self._settled()
         events = capture_events(
             self.capture, self._verbose, self._shown, upto, self.links
         )
@@ -401,9 +440,9 @@ class CaptureTail:
         self._say_new(events)
         return [
             *events,
-            *self._uploads_over(),
-            *self._answers_over(),
-            *self._still_open(),
+            *self._uploads_over(over),
+            *self._answers_over(over),
+            *([] if over else self._still_open()),
         ]
 
     def _settled(self) -> Marks:
@@ -458,7 +497,7 @@ class CaptureTail:
                 fields["new"] = True
                 event.notes.append(NEW)
 
-    def _uploads_over(self) -> list[Event]:
+    def _uploads_over(self, over: bool = False) -> list[Event]:
         """The uploads that are over since the last time, to the model's
         API and to anywhere else, those long enough to be worth a line,
         each as an event: one is over once nothing was sent on its
@@ -468,7 +507,7 @@ class CaptureTail:
         time, does not keep the others from showing."""
         events = []
         seen = self.seen
-        quiet = time.time() - UPLOAD_OVER
+        quiet = math.inf if over else time.time() - UPLOAD_OVER
         parts = ((True, self.capture.uploads), (False, self.capture.elsewhere))
         for to_model, part in parts:
             told = self._uploads_told[to_model]
@@ -480,18 +519,18 @@ class CaptureTail:
                     )
         return events
 
-    def _answers_over(self) -> list[Event]:
+    def _answers_over(self, over: bool = False) -> list[Event]:
         """The answers of the model's API that are over since the last
         time, each as an event: one is over once another began on its
         connection, or nothing came on it for longer than the pause that
         ends one, by the clock of this side."""
         answers = self.capture.answers
-        quiet = time.time() - ANSWER_OVER
-        over = self._answers_told.of(
+        quiet = math.inf if over else time.time() - ANSWER_OVER
+        ended = self._answers_told.of(
             answers.all,
             lambda answer: answers.superseded(answer) or answer.ended < quiet,
         )
-        return [answer_event(self.capture, answer, self.links) for answer in over]
+        return [answer_event(self.capture, answer, self.links) for answer in ended]
 
     def _still_open(self) -> list[Event]:
         """The connections that are still open and have carried a lot

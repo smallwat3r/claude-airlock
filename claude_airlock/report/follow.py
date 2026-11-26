@@ -72,7 +72,7 @@ from ..recording.processes import (
     ProcessRecord,
     Watcher,
 )
-from ..recording.records import recorded_sessions
+from ..recording.records import read_traced_sessions, recorded_sessions
 from ..settings import Host
 from .digest import known_destinations
 from .entries import session_files
@@ -111,6 +111,10 @@ INTERVAL = 1.0
 LOOK_EVERY = 3
 # The events from before the start that are shown, as tail -f would
 HISTORY = 10
+# Seconds a capture whose session ended is waited for to be copied out of
+# its sidecar, for a last look at what the sidecar no longer gives: its
+# tcpdump is given 10 seconds to stop, then the copy is made
+LAST_LOOK_WAIT = 30.0
 
 
 @dataclass
@@ -163,6 +167,9 @@ class Follower:
         # The sessions said to have more subagents than are followed
         self._unfollowed: set[Path] = set()
         self._captures: dict[tuple[str, float], CaptureTail] = {}
+        # Those whose session ended, until when the copy of each is waited
+        # for, see _last_looks
+        self._ending: dict[tuple[str, float], float] = {}
         self._health: dict[tuple[str, float], HealthTail] = {}
         # What the watcher of each session says aloud
         self._watchers: dict[tuple[str, float], WatcherTail] = {}
@@ -358,11 +365,18 @@ class Follower:
         if not self._docker:
             return
         try:
-            running = [
-                (sidecar, started)
-                for sidecar, started in CaptureSidecar.running(self._host.project_dir)
-                if self._ours(CaptureSidecar.session_of(sidecar))
-            ]
+            listed = CaptureSidecar.running(self._host.project_dir)
+            # Docker did not say: what is followed is kept as it is, it is
+            # not taken to have ended, to be read again from its start
+            running = (
+                [key for key in self._captures if key not in self._ending]
+                if listed is None
+                else [
+                    (sidecar, started)
+                    for sidecar, started in listed
+                    if self._ours(CaptureSidecar.session_of(sidecar))
+                ]
+            )
             self._addresses = self._filtered_addresses()
             watched = self._health_sources()
         except Fatal:
@@ -384,9 +398,14 @@ class Follower:
                 found.notes.append(
                     labelled("network", f"following the capture of {name}")
                 )
-        for key in set(self._captures) - set(running):
-            name = clean(self._captures.pop(key).session)
-            found.notes.append(labelled("network", f"the capture of {name} ended"))
+        now = time.monotonic()
+        for key in running:
+            self._ending.pop(key, None)
+        for key in set(self._captures) - set(running) - set(self._ending):
+            # Its launcher copies it out as the session ends, and notes
+            # the copy once it is made
+            self._ending[key] = now + LAST_LOOK_WAIT
+        self._last_looks(found, now)
         # Which of them are behind the egress filter is known once their
         # session is up, which is after its capture is
         filtered = set(self._addresses.values())
@@ -417,6 +436,28 @@ class Follower:
                 )
             )
 
+    def _last_looks(self, found: Round, now: float) -> None:
+        """Let go of the captures whose session ended, each once the copy
+        its launcher made of it is noted, with a last look at that copy
+        for what the sidecar no longer gave (see CaptureTail.last_look),
+        or once that was waited for LAST_LOOK_WAIT."""
+        if not self._ending:
+            return
+        noted = {session.capture for session in read_traced_sessions(self._host)}
+        for key, until in list(self._ending.items()):
+            sidecar, started = key
+            copy = f"{sidecar}-{int(started)}.{CaptureSidecar.EXTENSION}"
+            if copy not in noted and now < until:
+                continue
+            del self._ending[key]
+            tail = self._captures.pop(key)
+            if copy in noted:
+                events = tail.last_look(Path(self._host.captures_dir, copy))
+                name_container(events, tail.session, self._several())
+                found.events += [(None, event) for event in events]
+            name = clean(tail.session)
+            found.notes.append(labelled("network", f"the capture of {name} ended"))
+
     def _health_sources(self) -> dict[tuple[str, float], tuple[str, SaidSince]]:
         """The source of health readings for each running session of the
         project: its watcher sidecar, or the record its launcher writes
@@ -424,11 +465,17 @@ class Follower:
         watcher's name or the record's path, with the start time. Each
         value is the session's name and the function that reads it."""
         sources: dict[tuple[str, float], tuple[str, SaidSince]] = {}
-        running = {
-            (watcher, started)
-            for watcher, started in Watcher.running(self._host.project_dir)
-            if self._ours(Watcher.session_of(watcher))
-        }
+        listed = Watcher.running(self._host.project_dir)
+        # As for the captures, see _look_for_sessions
+        running = (
+            set(self._watchers)
+            if listed is None
+            else {
+                (watcher, started)
+                for watcher, started in listed
+                if self._ours(Watcher.session_of(watcher))
+            }
+        )
         for gone in set(self._watchers) - running:
             del self._watchers[gone]
         for key in running:
@@ -489,7 +536,10 @@ class Follower:
                         " as it says aloud: --trace has it once the session is over",
                     )
                 )
-        for capture in self._captures.values():
+        for key, capture in self._captures.items():
+            if key in self._ending:
+                # Stopped, its copy is waited for
+                continue
             events = capture.poll()
             if capture.session in records:
                 name_processes(events, records[capture.session])
