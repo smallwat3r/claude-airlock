@@ -149,15 +149,6 @@ def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessag
     return DnsMessage(ident, response, asked, lookup)
 
 
-def dns_answer(when: float, message: bytes) -> Lookup:
-    """A DNS response as a lookup, see dns_message. Raises NotThis for
-    anything else, a query too."""
-    found = dns_message(when, message)
-    if not found.response:
-        raise NotThis
-    return found.lookup
-
-
 def unanswered(asked: float, key: tuple[int, str, int]) -> Lookup:
     """The lookup of a query that never had an answer: when it was sent,
     for which name and kind of record."""

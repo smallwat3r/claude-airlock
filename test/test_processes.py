@@ -22,13 +22,13 @@ from unittest import mock
 
 import pytest
 from fakes import GIB, FakeSession
-from harness import LauncherTest, prompts_at, reads_proc, records
+from harness import LauncherTest, prompts_at, reads_proc
 from packets import pcap_file, tcp
 
 from claude_airlock.events import Event, Who
-from claude_airlock.recording import health, processes, procwatch, sidecar
+from claude_airlock.recording import health, processes, procwatch, records, sidecar
 from claude_airlock.recording.records import TracedSession
-from claude_airlock.report import follow, net_events, unseen
+from claude_airlock.report import follow, net_events, tails, unseen
 
 SIDECAR = "claude-proj.procs"
 
@@ -265,7 +265,7 @@ class WatcherTest:
             812: (("2", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
         }
         watch._parents = {640: 1, 812: 640}
-        watch._holders.of = lambda inodes, pids: {inode: [812] for inode in inodes}
+        watch._holders.of = lambda inodes, pids: {inode: [812] for inode in inodes}  # type: ignore[method-assign]
         return watch
 
     def test_who_holds_a_connection_is_said_aloud_with_those_it_comes_from(self):
@@ -572,19 +572,19 @@ class UnseenTest:
         now = [1000.0]
         heard: list[health.Sample] = []
         with mock.patch.object(follow.time, "monotonic", lambda: now[0]):
-            tail = follow.HealthTail("claude-proj", lambda _since: heard[:])
-            now[0] += follow.SILENT_AFTER - 1
+            tail = tails.HealthTail("claude-proj", lambda _since: heard[:])
+            now[0] += tails.SILENT_AFTER - 1
             assert tail.poll() == []
             assert tail.newly_silent() is None
             now[0] += 2
-            assert tail.newly_silent() == follow.SILENT_AFTER + 1
+            assert tail.newly_silent() == tails.SILENT_AFTER + 1
             # Once, until it is heard again
             now[0] += 100
             assert tail.newly_silent() is None
             heard.append(health.Sample(time.time() + 5))
             assert len(tail.poll()) == 1
             assert tail.newly_silent() is None
-            now[0] += follow.SILENT_AFTER + 1
+            now[0] += tails.SILENT_AFTER + 1
             assert tail.newly_silent() is not None
 
     def test_a_process_of_any_session_that_ran_then_counts(self):
@@ -859,7 +859,7 @@ class HealthShownTest:
 
 class SidecarTest(LauncherTest):
     @pytest.fixture(autouse=True)
-    def record_file(self, sandbox: None) -> None:
+    def record_file_made(self, sandbox: None) -> None:
         self.now = time.time()
         self.record_file = self.work / "processes.jsonl"
         lines = [

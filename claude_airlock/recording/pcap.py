@@ -30,9 +30,9 @@ from typing import NamedTuple
 from ..reader import NotThis
 from ..settings import EGRESS_PORT
 from .answers import ANSWERS_PART, DOWNLOADS_PART, Answers
+from .lookups import Lookups
 from .packets import (
     ICMP_ECHO,
-    RESOLVER,
     TRANSPORT_NAMES,
     Packet,
     Protocol,
@@ -45,61 +45,13 @@ from .payloads import (
     SSH,
     TLS,
     Hello,
-    Lookup,
-    dns_message,
     http_request,
     spoken,
     tls_hello,
-    unanswered,
 )
 from .pcap_file import pcap_frames
 from .uploads import ELSEWHERE_PART, UPLOADS_PART, Key, Uploads
 
-# What a lookup is flagged for: a name or one label of it longer than
-# names are, or this many different names under one parent. Data can be
-# carried out in the names asked for, a resolver passes them on, and it
-# takes long names or many of them. The names are counted under the
-# domain they are of too, whatever is between: a.1.evil.test and
-# a.2.evil.test have no parent in common and are both evil.test's. More
-# of them there before it is said, a provider has many hosts under its
-# own (s3.eu-west-1.amazonaws.com).
-DNS_LONG_NAME = 100
-DNS_LONG_LABEL = 40
-DNS_MANY_NAMES = 30
-DNS_MANY_UNDER_DOMAIN = 100
-# What stands under a country in the place of com, org and the like
-# (co.uk, com.au): a domain there has a label more. Not all of them, a
-# list of those is long and changes: the common ones, by their first label
-DNS_SECOND_LEVEL = frozenset(
-    {"ac", "co", "com", "edu", "gov", "mil", "ne", "net", "nom", "or", "org"}
-)
-COUNTRY_LENGTH = 2
-# The port of DNS
-DNS_PORT = 53
-# A query that has no answer after this many seconds of the capture is
-# recorded as one, an answer later than that is still taken for it
-DNS_WAIT = 10.0
-# No more queries are kept to be matched with an answer than this
-DNS_MOST_PENDING = 2000
-# Over TCP a message comes after its length, in as many packets as its
-# sender likes: of no more streams than this is the start of one kept
-# until the rest comes, and no more of it than so many bytes
-DNS_MOST_HELD = 1000
-DNS_HELD_BYTES = 4096
-DNS_LENGTH = 2
-# No more lookups than this are kept of a capture, the DNS messages past
-# them are counted and not read. Each part of a capture has a packet
-# limit, which bounds what a packet a lookup would: over TCP one packet
-# can hold dozens of messages, and a session can send any number of them
-# to a port of its own.
-MOST_LOOKUPS = 100_000
-# Nor are more DNS messages read than this, whatever comes of them: one
-# that is none, an answer nobody asked for and a query asked again leave
-# no lookup to count, and over TCP a packet can hold hundreds, each as
-# short as it says it is, down to the two bytes of its length alone. A
-# lookup takes two messages, so this is twice what MOST_LOOKUPS of them
-# take. Past it the messages are counted and not read, the same.
-MOST_DNS_READ = 4 * MOST_LOOKUPS
 # A connection that one side has ended is followed until the other has
 # too, for what went over it meanwhile: no more of them than this, a
 # session can leave any number half open
@@ -352,48 +304,6 @@ class Request:
         return f"http://{self.host or self.address}{self.target}"
 
 
-def _domain_of(labels: list[str]) -> str:
-    """The domain a name is of, by its labels: its last two, or three
-    under a country that has com, co and the like of its own (see
-    DNS_SECOND_LEVEL)."""
-    under_country = (
-        len(labels) > 2
-        and len(labels[-1]) == COUNTRY_LENGTH
-        and labels[-2] in DNS_SECOND_LEVEL
-    )
-    return ".".join(labels[-3:] if under_country else labels[-2:])
-
-
-@dataclass
-class LookedUp:
-    """The names an address was looked up under, by when each answer
-    came, the earliest first: found by the time without going through
-    them all, a session can have any number of answers give one address."""
-
-    times: list[float] = field(default_factory=list)
-    names: list[str] = field(default_factory=list)
-    # When each name was first given it, in small letters
-    _first: dict[str, float] = field(default_factory=dict, repr=False)
-
-    def add(self, when: float, name: str) -> None:
-        # After those of the same time. At the end as a rule, the answers
-        # of a capture come in the order of their times
-        at = bisect.bisect_right(self.times, when)
-        self.times.insert(at, when)
-        self.names.insert(at, name)
-        known = name.lower().rstrip(".")
-        self._first[known] = min(when, self._first.get(known, when))
-
-    def as_of(self, when: float) -> str | None:
-        """The name of the last answer that came by a time."""
-        at = bisect.bisect_right(self.times, when)
-        return self.names[at - 1] if at else None
-
-    def had(self, name: str, when: float) -> bool:
-        """Whether an answer gave it a name, in small letters, by a time."""
-        return self._first.get(name, math.inf) <= when
-
-
 class Marks(NamedTuple):
     """How much of each kind a capture has, for a reader that follows it
     to tell what came since, and to say how far it shows."""
@@ -423,17 +333,8 @@ class Capture:
     # found: when, what, and the connection. See look_at_hellos and
     # _take_first.
     noticed: list[tuple[float, str, Connection]] = field(default_factory=list)
-    # Each answer of the resolver
-    lookups: list[Lookup] = field(default_factory=list)
-    # The lookups that stand out, each with what for, see DNS_MANY_NAMES
-    flagged: list[tuple[str, Lookup]] = field(default_factory=list)
-    # The DNS messages that were not read, past MOST_LOOKUPS or
-    # MOST_DNS_READ: of a packet over TCP that was not looked into, one
-    dns_unread: int = 0
-    # And how many times what was sent to a resolver over TCP could not
-    # be read to its end, see _dns_over_tcp: a query may have gone unseen
-    # each time, which is the session's to arrange
-    dns_cut: int = 0
+    # What was asked of resolvers and what they said, see lookups.py
+    dns: Lookups = field(default_factory=Lookups)
     # Each plain HTTP request
     requests: list[Request] = field(default_factory=list)
     # Each place something was sent to by another protocol than TCP
@@ -466,20 +367,9 @@ class Capture:
     # Every connection by what it is known by, see Connection.key, those
     # of one key in the order they were made: a port is used again
     _by_key: dict[Key, list[Connection]] = field(default_factory=dict, repr=False)
-    # The start of a DNS message over TCP whose rest has not come, by
-    # where it is from and where it goes, see DNS_MOST_HELD
-    _dns_held: dict[tuple[str, int, str, int], bytes] = field(
-        default_factory=dict, repr=False
-    )
     _flows: dict[tuple[int, str, int], Flow] = field(default_factory=dict, repr=False)
-    # The names that were looked up, and how many under each parent
-    _looked_up: set[str] = field(default_factory=set, repr=False)
-    _under: dict[str, int] = field(default_factory=dict, repr=False)
-    # What each address was looked up under, with when the answer came, and
-    # the server name the first TLS hello to it asked for. Both are the
-    # session's doing: the address is what it reached, the name what it
-    # says it was after.
-    _answered: dict[str, LookedUp] = field(default_factory=dict, repr=False)
+    # The server name the first TLS hello to each address asked for, what
+    # the session says it was after, see dns for what it looked up
     _hello: dict[str, str] = field(default_factory=dict, repr=False)
     # The connections whose hello is still to be held against what was
     # looked up, each with when it sent it, see look_at_hellos
@@ -487,16 +377,6 @@ class Capture:
     # What the session sent on a connection whose start was not read
     # yet, each with how often it was looked for again, see sent_too
     _unplaced: list[tuple[Packet, int]] = field(default_factory=list, repr=False)
-    # The queries the session sent to a resolver that have not been
-    # answered, by the key of their answer, with when each was sent, and
-    # those of them said to have had none
-    _pending: dict[tuple[int, str, int], float] = field(
-        default_factory=dict, repr=False
-    )
-    _silent: set[tuple[int, str, int]] = field(default_factory=set, repr=False)
-    _expired_at: float = field(default=0.0, repr=False)
-    # How many DNS messages were read, see MOST_DNS_READ
-    _dns_read: int = field(default=0, repr=False)
 
     def marks(self) -> Marks:
         """How much of each kind there is, for a reader that follows to
@@ -504,24 +384,20 @@ class Capture:
         return Marks(
             len(self.connections),
             len(self.endings),
-            len(self.lookups),
+            len(self.dns.lookups),
             len(self.requests),
             len(self.flows),
-            len(self.flagged),
+            len(self.dns.flagged),
             len(self.inbound),
             len(self.noticed),
         )
 
     def add(self, packet: Packet) -> None:
         """Take in what one packet tells."""
+        self.dns.add(packet)
         if packet.protocol != Protocol.TCP:
-            if packet.protocol == Protocol.UDP:
-                self._add_dns(packet, packet.payload)
             self._add_to_flow(packet)
             return
-        if packet.payload and self._is_dns(packet):
-            for message in self._dns_over_tcp(packet):
-                self._add_dns(packet, message)
         self._add_tcp(packet)
 
     def _add_tcp(self, packet: Packet) -> None:
@@ -562,166 +438,11 @@ class Capture:
             self._read_sent(packet, key)
             self._add_request(packet)
 
-    def _dns_left(self) -> int:
-        """How many more DNS messages are read: none once MOST_LOOKUPS
-        are kept, else what is left of MOST_DNS_READ."""
-        if len(self.lookups) >= MOST_LOOKUPS:
-            return 0
-        return max(MOST_DNS_READ - self._dns_read, 0)
-
-    def _dns_over_tcp(self, packet: Packet) -> list[bytes]:
-        """The DNS messages a packet of TCP completes. Over TCP a message
-        comes after its length, and the two need not come together: the
-        length in a packet of its own, a message in several. What is
-        left without its end is kept for the next packet of the same
-        stream. A packet that was not captured whole gives what there is
-        of its last message, and nothing is kept: where the next one
-        starts is not known. No more messages than are still read, see
-        _dns_left: what is left of the packet then counts as one that was
-        not, and is not looked into.
-
-        Where a stream cannot be read to its end, that is counted (see
-        dns_cut), never passed over: a packet of the session's that is
-        longer than the capture keeps, with whatever follows its first
-        message out of sight, and the start of a message that is let go
-        of, for being longer than is held or for more streams than are.
-        A session chooses all three, a query sent behind padding or in
-        a message of many kilobytes is otherwise in no lookup and in no
-        count."""
-        left = self._dns_left()
-        stream = (packet.source, packet.source_port, packet.destination, packet.port)
-        data = self._dns_held.pop(stream, b"") + packet.payload
-        messages: list[bytes] = []
-        at = 0
-        while len(data) - at >= DNS_LENGTH and len(messages) < left:
-            end = at + DNS_LENGTH + int.from_bytes(data[at : at + DNS_LENGTH], "big")
-            if len(data) < end:
-                break
-            messages.append(data[at + DNS_LENGTH : end])
-            at = end
-        data = data[at:]
-        if data and len(messages) >= left:
-            self.dns_unread += 1
-            return messages
-        if len(packet.payload) < packet.length:
-            self._dns_lost(stream)
-            return [*messages, data[DNS_LENGTH:]] if data[DNS_LENGTH:] else messages
-        if len(data) > DNS_HELD_BYTES:
-            self._dns_lost(stream)
-        elif data:
-            while len(self._dns_held) >= DNS_MOST_HELD:
-                oldest = next(iter(self._dns_held))
-                del self._dns_held[oldest]
-                self._dns_lost(oldest)
-            self._dns_held[stream] = data
-        return messages
-
-    def _dns_lost(self, stream: tuple[str, int, str, int]) -> None:
-        """Count a stream of DNS over TCP that could not be read to its
-        end, by where it is from and where it goes, see dns_cut: one
-        that goes to a resolver. What comes back cut short is the answer
-        to a query that was seen, which is then a lookup without one."""
-        _, _, destination, port = stream
-        if destination == RESOLVER or port == DNS_PORT:
-            self.dns_cut += 1
-
-    @staticmethod
-    def _is_dns(packet: Packet) -> bool:
-        """Whether a packet is to or from a resolver: by its port, or by
-        its address, which is the one place docker's own is reached at
-        another port than DNS's. A packet that only says it is DNS, from
-        anywhere else on loopback, is the session's own."""
-        return DNS_PORT in (packet.port, packet.source_port) or RESOLVER in (
-            packet.source,
-            packet.destination,
-        )
-
-    def _add_dns(self, packet: Packet, message: bytes) -> None:
-        """Take in a DNS message. A query the session sent is kept until
-        it is answered. An answer counts when it comes from a resolver
-        (docker's, or a server it reached) and is the answer to one of
-        those: one that was not asked for, or that came from anywhere else
-        on loopback, is nothing the resolver said."""
-        if not self._is_dns(packet):
-            return
-        if not self._dns_left():
-            self.dns_unread += 1
-            return
-        self._dns_read += 1
-        try:
-            # Its question alone at first, see dns_message
-            found = dns_message(packet.when, message, answered=False)
-        except NotThis:
-            return
-        self._expire(packet.when)
-        key = (found.id, found.lookup.name.lower(), found.asked)
-        if not found.response:
-            # On loopback a capture has each packet once, as one that came
-            # in: what goes to the resolver there is the session's query
-            if packet.sent or packet.destination == RESOLVER:
-                self._ask(key, packet.when)
-            return
-        from_resolver = packet.source == RESOLVER or (
-            not packet.sent and not is_loopback(packet.source)
-        )
-        if not from_resolver or key not in self._pending:
-            return
-        del self._pending[key]
-        self._silent.discard(key)
-        self._take_lookup(dns_message(packet.when, message).lookup)
-
-    def _ask(self, key: tuple[int, str, int], when: float) -> None:
-        """Keep a query to match its answer with. Past DNS_MOST_PENDING the
-        oldest goes: queries that are never answered must not keep the
-        later ones, and their answers, from being taken."""
-        if key in self._pending:
-            return
-        while len(self._pending) >= DNS_MOST_PENDING:
-            oldest = next(iter(self._pending))
-            if oldest not in self._silent:
-                self._take_lookup(unanswered(self._pending[oldest], oldest))
-            self._silent.discard(oldest)
-            del self._pending[oldest]
-        self._pending[key] = when
-
-    def _take_lookup(self, lookup: Lookup) -> None:
-        if len(self.lookups) >= MOST_LOOKUPS:
-            # Of the queries still waiting when the last one was kept
-            self.dns_unread += 1
-            return
-        self.lookups.append(lookup)
-        self._flag(lookup)
-        if lookup.kind in ("A", "AAAA"):
-            for address in lookup.addresses:
-                self._answered.setdefault(address, LookedUp()).add(
-                    lookup.when, lookup.name
-                )
-
-    def _expire(self, now: float) -> None:
-        """Record the queries that have waited longer than DNS_WAIT for an
-        answer as lookups that had none, once for each. Looked at once a
-        second of the capture at most."""
-        if now - self._expired_at < 1.0:
-            return
-        self._expired_at = now
-        for key, asked in self._pending.items():
-            if now - asked > DNS_WAIT and key not in self._silent:
-                self._silent.add(key)
-                self._take_lookup(unanswered(asked, key))
-
-    def finish(self) -> None:
-        """Say of what was asked and never answered, of a capture that
-        ended, that it was not. Not for one that is still growing."""
-        for key, asked in self._pending.items():
-            if key not in self._silent:
-                self._silent.add(key)
-                self._take_lookup(unanswered(asked, key))
-
     @property
     def names(self) -> dict[str, str]:
         """The name each address is known by as of the end of the capture,
         see name_of."""
-        known = {address: said.names[-1] for address, said in self._answered.items()}
+        known = {address: said.names[-1] for address, said in self.dns.answered.items()}
         return {**self._hello, **known}
 
     def still_open(self) -> list[Connection]:
@@ -808,39 +529,11 @@ class Capture:
         answer that came before it, so that what the session had looked up
         later does not rename what it reached earlier. Else the name the
         first TLS hello to it asked for. None when there is neither."""
-        said = self._answered.get(address)
+        said = self.dns.answered.get(address)
         if said and when is None:
             return said.names[-1]
         earlier = said.as_of(when) if said and when is not None else None
         return earlier or self._hello.get(address)
-
-    def _flag(self, lookup: Lookup) -> None:
-        """Note a lookup that stands out, a name once however often it is
-        asked for: one longer than names are, the one that makes it
-        DNS_MANY_NAMES under the same parent, and the one that makes it
-        DNS_MANY_UNDER_DOMAIN under the same domain, whatever labels are
-        between the two."""
-        name = lookup.name.lower().rstrip(".")
-        if name in self._looked_up:
-            return
-        self._looked_up.add(name)
-        labels = name.split(".")
-        if len(name) > DNS_LONG_NAME or max(map(len, labels)) > DNS_LONG_LABEL:
-            self.flagged.append(("an unusually long name", lookup))
-        # Under a parent of two labels or more, not under com
-        if len(labels) < 3:
-            return
-        parent, domain = ".".join(labels[1:]), _domain_of(labels)
-        count = self._under[parent] = self._under.get(parent, 0) + 1
-        if count == DNS_MANY_NAMES:
-            self.flagged.append((f"{count} names looked up under {parent}", lookup))
-        if domain in (parent, name):
-            return
-        # By a key no name is: a parent is counted by its own
-        within = f"{domain}."
-        count = self._under[within] = self._under.get(within, 0) + 1
-        if count == DNS_MANY_UNDER_DOMAIN:
-            self.flagged.append((f"{count} names looked up under {domain}", lookup))
 
     def _add_to_flow(self, packet: Packet) -> None:
         """Count a packet that is not TCP towards where the session sent
@@ -996,8 +689,8 @@ class Capture:
             host = connection.asked.rpartition(":")[0] or connection.asked
             host = host.strip("[]").lower()
             return "" if name == host else host
-        said = self._answered.get(connection.address)
-        whole = self.lookups_whole and not self.dns_unread and not self.dns_cut
+        said = self.dns.answered.get(connection.address)
+        whole = self.lookups_whole and self.dns.whole
         if not said or not whole or connection.port == EGRESS_PORT:
             return ""
         return "" if said.had(name, when) else (said.as_of(when) or "").lower()
@@ -1111,5 +804,5 @@ def read_capture(path: Path, others: Iterable[Path] = ()) -> Capture:
             take_frames(capture, pcap_frames(other), other.suffix.lstrip("."))
         except OSError:
             continue
-    capture.finish()
+    capture.dns.finish()
     return capture

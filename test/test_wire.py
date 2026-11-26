@@ -10,18 +10,19 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LauncherTest, follow, pcap, prompts_at, records
+from harness import LauncherTest, prompts_at
 from packets import answer, ipv4, ipv6, pcap_file, tcp, tcp_header, udp
 
 from claude_airlock.events import Event, Kind
-from claude_airlock.recording import answers, api_calls, uploads
+from claude_airlock.recording import answers, api_calls, pcap, records, uploads
 from claude_airlock.recording import capture as capture_module
 from claude_airlock.recording.pcap_file import PcapReader
-from claude_airlock.report import api_events, wire
+from claude_airlock.report import api_events, follow, tails, wire
 from claude_airlock.report.layout import Layout
 from claude_airlock.report.links import Links
 from claude_airlock.report.net_events import capture_events
@@ -339,8 +340,8 @@ class WireTest(LauncherTest):
         self,
         main: Frames,
         sent_to_the_model: Frames,
-        sent_elsewhere: Frames = (),
-        came_back: Frames = (),
+        sent_elsewhere: Sequence[tuple[float, bytes, bool]] = (),
+        came_back: Sequence[tuple[float, bytes, bool]] = (),
         ip: str = "",
     ) -> None:
         """Leave the capture of a session of the project that ran around
@@ -511,7 +512,7 @@ class WireTest(LauncherTest):
         assert asked.notes == [wire.NOT_SEEN]
 
     def test_an_upload_is_followed_once_it_is_over(self):
-        tail = follow.CaptureTail(f"{CONTAINER}.capture", verbose=False)
+        tail = tails.CaptureTail(f"{CONTAINER}.capture", verbose=False)
         long_ago, just_now = self.now - 60, time.time()
         frames = [
             *sent(long_ago, 80_000, 1),
@@ -529,14 +530,14 @@ class WireTest(LauncherTest):
         assert event.details == [f"tcp/https {API}:443  upload of 80 kB in 0.0s"]
         assert (event.when, event.fields["model_api"]) == (long_ago, True)
         assert tail._uploads_over() == []
-        with mock.patch.object(follow, "UPLOAD_OVER", -60.0):
+        with mock.patch.object(tails, "UPLOAD_OVER", -60.0):
             (last,) = tail._uploads_over()
         assert last.fields["bytes_out"] == 9_000
 
     def test_a_request_is_placed_as_it_is_followed(self):
         now = self.now
         follower = follow.Follower(self.host, verbose=False, container=CONTAINER)
-        tail = follow.CaptureTail(f"{CONTAINER}.capture", verbose=False)
+        tail = tails.CaptureTail(f"{CONTAINER}.capture", verbose=False)
         tail.capture = self.captured(opened(now - 30), sent(time.time(), 80_000, 1))
         follower._captures[(tail.sidecar, now - 60)] = tail
         time.sleep(0.01)
@@ -588,7 +589,7 @@ class WireTest(LauncherTest):
         assert asked.notes == ["wire: [n1.1] 80 kB on a connection not seen to open"]
 
     def test_an_upload_that_goes_on_does_not_hold_back_those_after_it(self):
-        tail = follow.CaptureTail(f"{CONTAINER}.capture", verbose=False)
+        tail = tails.CaptureTail(f"{CONTAINER}.capture", verbose=False)
         began, there = time.time() - 3, "198.51.100.7"
         # Sent to a little all the time, from before the other began
         # until well after now: it has no pause that ends it
@@ -603,7 +604,7 @@ class WireTest(LauncherTest):
         assert (over.fields["port"], over.fields["bytes_out"]) == (2222, 30_000)
         assert tail._uploads_over() == []
         # And is shown itself once it is over, the other not again
-        with mock.patch.object(follow, "UPLOAD_OVER", -60.0):
+        with mock.patch.object(tails, "UPLOAD_OVER", -60.0):
             (last,) = tail._uploads_over()
         assert (last.fields["port"], last.fields["bytes_out"]) == (22, 20_000)
         assert tail._uploads_over() == []
@@ -615,7 +616,7 @@ class WireTest(LauncherTest):
         follower = follow.Follower(self.host, verbose=False, container=CONTAINER)
         notes = []
         for started in (now - 200, now - 60):
-            tail = follow.CaptureTail(
+            tail = tails.CaptureTail(
                 f"{CONTAINER}.capture", verbose=False, numbers=follower._numbers
             )
             tail.capture = self.captured(opened(started), sent(time.time(), 80_000, 1))
@@ -716,7 +717,7 @@ class WireTest(LauncherTest):
         assert "during" not in said
 
     def test_an_answer_is_followed_once_it_is_over(self):
-        tail = follow.CaptureTail(f"{CONTAINER}.capture", verbose=False)
+        tail = tails.CaptureTail(f"{CONTAINER}.capture", verbose=False)
         long_ago, just_now = self.now - 120, time.time()
         tail.capture = self.captured(
             opened(self.now - 150),
@@ -730,7 +731,7 @@ class WireTest(LauncherTest):
         (event,) = tail._answers_over()
         assert event.details[0].startswith(f"tcp/https {API}:443  answer of 5 kB in")
         assert tail._answers_over() == []
-        with mock.patch.object(follow, "ANSWER_OVER", -60.0):
+        with mock.patch.object(tails, "ANSWER_OVER", -60.0):
             (last,) = tail._answers_over()
         assert last.fields["bytes_in"] == 800
         assert tail._answers_over() == []

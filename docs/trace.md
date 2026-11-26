@@ -60,7 +60,7 @@ through your pager.
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read, or lines taken out of it that are no event, see [The transcript](#the-transcript)) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `request` (see [The requests to the model](#the-requests-to-the-model)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `health`, `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read, or lines taken out of it that are no event, see [The transcript](#the-transcript)) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -1090,6 +1090,15 @@ it, so it can be started and stopped at any time.
   removed, or with a link put in its place, says so once (`NOT SHOWN`):
   a link is not followed, and what its session does from there on is in
   no line.
+- A transcript a session writes to faster than it is read says so once
+  (`LATE`): what is shown of it comes behind, and catches up when the
+  session writes less. A result with a picture in it is not enough.
+- A line says when the capture of a session starts to be followed and
+  when it ended, with the session: a session that starts later is picked
+  up. At the start, a project with no transcript yet says that it waits
+  for one, and one with no session whose network is recorded says so
+  (none runs, `CLAUDE_AIRLOCK_NET_LOG=0`, or not sandboxed). Without
+  docker, the network is not followed and a line says that too.
 - Of what happened before, the last 10 events are shown, looked for in
   the last 4 MB of the latest transcript: a line says so when that is
   not all of it, and the result of a call from before them is not shown

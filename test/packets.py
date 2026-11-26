@@ -9,8 +9,8 @@ import struct
 import tempfile
 from pathlib import Path
 
-from harness import capture as capture_module
-from harness import pcap
+from claude_airlock.recording import capture as capture_module
+from claude_airlock.recording import pcap
 
 
 def unnamed_port() -> int:

@@ -16,11 +16,11 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
-from harness import LAUNCHER, LauncherTest, follow, pcap, transcript
-from harness import capture as capture_module
+from harness import LAUNCHER, LauncherTest
 from packets import (
     answer,
     dns_response,
@@ -35,8 +35,10 @@ from transcribed import at, call, prompt, result
 
 from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
+from claude_airlock.recording import capture as capture_module
+from claude_airlock.recording import pcap
 from claude_airlock.recording.pcap_file import PcapReader
-from claude_airlock.report import stream
+from claude_airlock.report import follow, stream, tails, transcript
 from claude_airlock.report.layout import Layout
 from claude_airlock.report.transcript import WalkOptions
 
@@ -192,7 +194,7 @@ class FollowTest(LauncherTest):
         old.parent.mkdir(parents=True)
         add(old, call("s1", "Bash", command="echo before the follow"))
         follower = follow.Follower(self.host, verbose=False)
-        with mock.patch.object(follow.CaptureSidecar, "running", return_value=[]):
+        with mock.patch.object(tails.CaptureSidecar, "running", return_value=[]):
             follower.poll()
             # The earlier session goes on, with a subagent of now
             add(earlier, prompt("go on"))
@@ -220,7 +222,7 @@ class FollowTest(LauncherTest):
                 {"type": "assistant", "timestamp": at(second), "message": said}
             )
 
-        with mock.patch.object(follow.CaptureSidecar, "running", return_value=[]):
+        with mock.patch.object(tails.CaptureSidecar, "running", return_value=[]):
             follower.poll()
             # Two at work side by side, each in a transcript that counts
             # its calls from 1, as that of claude does
@@ -260,7 +262,7 @@ class FollowTest(LauncherTest):
             (theirs / name).touch()
         follower = follow.Follower(self.host, verbose=False)
         with (
-            mock.patch.object(follow.CaptureSidecar, "running", return_value=[]),
+            mock.patch.object(tails.CaptureSidecar, "running", return_value=[]),
             mock.patch.object(projects, "MOST_SUBAGENTS", 2),
             mock.patch.object(follow, "MOST_SUBAGENTS", 2),
         ):
@@ -349,7 +351,8 @@ class FollowTest(LauncherTest):
         def issued(number: int, ago: float) -> Event:
             values = {"id": f"t{number}", "tool": "Bash", "stage": Stage.CALL}
             ran = ["$ make"]
-            return Event(now - ago, Who.CLAUDE, "bash", ran, values, number, call=True)
+            link = str(number)
+            return Event(now - ago, Who.CLAUDE, "bash", ran, values, link, call=True)
 
         def reached(container: str) -> list[str]:
             values = {"container": container}
@@ -553,12 +556,12 @@ class FollowNetworkTest(LauncherTest):
         assert "198.51.100.7" not in shown
         # Every part of the capture is read by one command, from where
         # each was read to
-        script = follow.captured_since.__globals__["READ_SCRIPT"]
+        script = tails.captured_since.__globals__["READ_SCRIPT"]
         reads = [c for c in self.calls() if c[:1] == ["exec"] and script in c]
         assert reads[0][:6] == ["exec", self.SIDECAR, "sh", "-c", script, "sh"]
         assert reads[0][6] == str(capture_module.READ_MOST)
         assert reads[0][7:9] == ["/capture.pcap:0", "/dns.pcap:0"]
-        assert len(reads[0][7:]) == len(follow.PARTS)
+        assert len(reads[0][7:]) == len(tails.PARTS)
         assert f"/capture.pcap:{len(sample_capture(self.now))}" in reads[1]
 
     def test_how_a_session_is_doing_shows_as_its_watcher_says_it(self):
@@ -892,17 +895,17 @@ class CaptureTailTest:
         finally:
             shutil.rmtree(directory)
 
-    def tail(self, **more: object) -> follow.CaptureTail:
-        return follow.CaptureTail("claude-proj.capture", verbose=False, **more)
+    def tail(self, **more: Any) -> tails.CaptureTail:
+        return tails.CaptureTail("claude-proj.capture", verbose=False, **more)
 
-    def fed(self, tail: follow.CaptureTail, packets: list) -> list[Event]:
+    def fed(self, tail: tails.CaptureTail, packets: list) -> list[Event]:
         """What a look gives when the capture has these packets more."""
         frames = pcap_file(packets, asked=False)
         offset = tail._offsets["tcp"]
         more = frames if not offset else frames[24:]
-        read = {part.file: b"" for part in follow.PARTS}
+        read = {part.file: b"" for part in tails.PARTS}
         read["/capture.pcap"] = more
-        with mock.patch.object(follow, "captured_since", return_value=(read, True)):
+        with mock.patch.object(tails, "captured_since", return_value=(read, True)):
             return tail.poll()
 
     def test_a_connection_is_shown_once_it_has_had_its_moment(self):
@@ -949,7 +952,7 @@ class CaptureTailTest:
 
     def test_a_connection_that_is_still_open_says_how_far_it_has_got(self):
         tail = self.tail()
-        step = follow.PROGRESS_STEP
+        step = tails.PROGRESS_STEP
         opened = [
             (10.0, tcp(self.THERE, 443, sequence=100), True),
             (10.0, answer(self.THERE, 443, sequence=500, acknowledged=101), False),
@@ -978,7 +981,7 @@ class CaptureTailTest:
             assert tail._still_open() == []
             more = PcapReader().feed(pcap_file([came(3 * step)], asked=False))
             pcap.take_frames(tail.capture, more, "downloads")
-            now[0] += follow.PROGRESS_EVERY - 1
+            now[0] += tails.PROGRESS_EVERY - 1
             assert tail._still_open() == []
             now[0] += 2
             (later,) = tail._still_open()
@@ -1009,7 +1012,7 @@ class CaptureTailTest:
             elsewhere=sent,
         )
         summed = tail.traffic()
-        assert summed == follow.Traffic(
+        assert summed == tails.Traffic(
             connections=2, hosts=2, failed=1, inbound=1, sent=5000
         )
         assert summed.said == (
@@ -1019,7 +1022,7 @@ class CaptureTailTest:
         # Nothing since
         assert not tail.traffic()
         assert tail.traffic().said == ""
-        assert follow.Traffic(connections=1, hosts=1, denied=2).said == (
+        assert tails.Traffic(connections=1, hosts=1, denied=2).said == (
             "1 connection to 1 host, 2 DENIED"
         )
 
@@ -1029,11 +1032,11 @@ class CaptureTailTest:
         tail.capture = read_parts([(2.0, tcp(self.THERE, 443), True)])
         follower._captures[(tail.sidecar, 1.0)] = tail
         follower._denied = 3
-        assert follower.traffic() == follow.Traffic(connections=1, hosts=1, denied=3)
+        assert follower.traffic() == tails.Traffic(connections=1, hosts=1, denied=3)
         assert not follower.traffic()
 
     def test_a_tunnel_to_the_model_has_no_line_of_how_far_it_got(self):
-        proxy, step = "172.20.0.2", follow.PROGRESS_STEP
+        proxy, step = "172.20.0.2", tails.PROGRESS_STEP
 
         def tunnel(port: int, host: str) -> list:
             asked = f"CONNECT {host}:443 HTTP/1.1\r\n\r\n".encode()
@@ -1063,8 +1066,8 @@ class CaptureTailTest:
             json.dumps({"t": 100.5, "health": {"mem": [1, 2]}}),
         ]
         heard = [said, [], said, [*said, json.dumps({"t": 101.0, "note": "hushed"})]]
-        tail = follow.WatcherTail("claude-proj.procs")
-        with mock.patch.object(follow, "said_lines", side_effect=heard) as asked:
+        tail = tails.WatcherTail("claude-proj.procs")
+        with mock.patch.object(tails, "said_lines", side_effect=heard) as asked:
             listening = [len(tail.poll()) for _ in heard]
         assert listening == [1, 0, 0, 0]
         assert len(tail.record.listeners) == len(tail.record.samples) == 1
@@ -1083,7 +1086,7 @@ class CaptureTailTest:
         sidecar = [("claude-proj.capture", 5.0)]
         known = [frozenset({"tcp good.test 443"}), frozenset({"tcp new.test 443"})]
         with (
-            mock.patch.object(follow.CaptureSidecar, "running", return_value=sidecar),
+            mock.patch.object(tails.CaptureSidecar, "running", return_value=sidecar),
             mock.patch.object(follow.Follower, "_health_sources", return_value={}),
             mock.patch.object(follow.Follower, "_filtered_addresses") as addresses,
             mock.patch.object(follow, "known_destinations", side_effect=known),
@@ -1103,6 +1106,29 @@ class CaptureTailTest:
             (later,) = follower._captures.values()
             assert later._known == known[1]
 
+    def test_a_capture_that_ended_is_let_go_of_and_said_to_have(self):
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, verbose=False)
+        sidecar = [("claude-proj.capture", 5.0)]
+        with (
+            mock.patch.object(tails.CaptureSidecar, "running", return_value=sidecar),
+            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
+            mock.patch.object(follow.Follower, "_filtered_addresses", return_value={}),
+            mock.patch.object(follow, "known_destinations", return_value=None),
+        ):
+            began = follow.Round()
+            follower._look_for_sessions(began)
+            assert [note.split(maxsplit=1)[1] for note in began.notes] == [
+                "following the capture of claude-proj"
+            ]
+            # Its session is over, its sidecar with it
+            sidecar.clear()
+            ended = follow.Round()
+            follower._look_for_sessions(ended)
+        assert follower._captures == {}
+        said = [note.split(maxsplit=1)[1] for note in ended.notes]
+        assert "the capture of claude-proj ended" in said
+
 
 class TranscriptTailTest:
     @pytest.fixture(autouse=True)
@@ -1114,7 +1140,7 @@ class TranscriptTailTest:
         return [event.details[0] for event in tail.poll()]
 
     def test_a_line_is_read_once_it_is_whole(self):
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         whole = json.dumps(prompt("hello")) + "\n"
         self.file.write_text(whole[:20])
         assert self.said(tail) == []
@@ -1129,8 +1155,8 @@ class TranscriptTailTest:
         assert self.said(tail) == []
 
     def test_a_line_too_long_to_hold_is_dropped_and_said_to_be(self):
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
-        with mock.patch.object(follow, "LINE_LIMIT", 100):
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        with mock.patch.object(tails, "LINE_LIMIT", 100):
             add(self.file, prompt("x" * 500))
             # Still without its end, which the next look finds
             with open(self.file, "a") as transcript:
@@ -1143,11 +1169,11 @@ class TranscriptTailTest:
             assert self.said(tail) == ["after"]
 
     def test_a_line_many_times_too_long_is_said_once(self):
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         too_long = "UNREADABLE line of the transcript: (a line too long to read)"
         with (
-            mock.patch.object(follow, "LINE_LIMIT", 100),
-            mock.patch.object(follow, "READ_SIZE", 64),
+            mock.patch.object(tails, "LINE_LIMIT", 100),
+            mock.patch.object(tails, "READ_SIZE", 64),
         ):
             # Read in pieces, and found again without its end every time
             with open(self.file, "a") as transcript:
@@ -1162,10 +1188,10 @@ class TranscriptTailTest:
             assert self.said(tail) == ["after"]
 
     def test_a_look_takes_in_no_more_than_it_is_to(self):
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         texts = [f"line {number}" for number in range(100)]
         add(self.file, *map(prompt, texts))
-        count = follow.LATE_AFTER + 2
+        count = tails.LATE_AFTER + 2
         most = self.file.stat().st_size // (2 * count)
         looks = []
         late = []
@@ -1179,7 +1205,7 @@ class TranscriptTailTest:
         seen = [text for look in looks for text in look]
         assert seen == texts[: len(seen)]
         # Said once to be late, when it stays behind
-        assert late.index(True) == follow.LATE_AFTER - 1
+        assert late.index(True) == tails.LATE_AFTER - 1
         assert late.count(True) == 1
         # All there is when there is no most, and no further than that
         rest = [event.details[0] for event in tail.poll(None)]
@@ -1203,7 +1229,7 @@ class TranscriptTailTest:
             assert any("earlier events" in note for note in first.notes)
             assert first.events[-1][1].details == ["before 29"]
             add(self.file, *(prompt(f"flood {number}") for number in range(60)))
-            rounds = [follower.poll() for _ in range(follow.LATE_AFTER + 2)]
+            rounds = [follower.poll() for _ in range(tails.LATE_AFTER + 2)]
         assert all(0 < len(found.events) < 5 for found in rounds)
         notes = [note for found in rounds for note in found.notes]
         assert notes == [
@@ -1234,7 +1260,7 @@ class TranscriptTailTest:
             self.file.rename(moved)
             self.file.symlink_to(moved)
             add(moved, call("t2", "Bash", command="curl evil.test"))
-            rounds = [follower.poll() for _ in range(follow.UNREAD_AFTER + 3)]
+            rounds = [follower.poll() for _ in range(tails.UNREAD_AFTER + 3)]
             assert [found.events for found in rounds] == [[]] * len(rounds)
             notes = [note for found in rounds for note in found.notes]
             assert notes == [
@@ -1244,7 +1270,7 @@ class TranscriptTailTest:
                     " session does from here on is NOT SHOWN"
                 )
             ]
-            assert rounds[follow.UNREAD_AFTER - 1].notes == notes
+            assert rounds[tails.UNREAD_AFTER - 1].notes == notes
             # Back in its place, it is read on, and said again should
             # it go again
             self.file.unlink()
@@ -1253,7 +1279,7 @@ class TranscriptTailTest:
                 ["$ curl evil.test"]
             ]
             self.file.unlink()
-            again = [follower.poll() for _ in range(follow.UNREAD_AFTER)]
+            again = [follower.poll() for _ in range(tails.UNREAD_AFTER)]
             assert [note for found in again for note in found.notes] == notes
 
     def test_what_came_before_is_looked_for_in_the_end_of_a_transcript(self):
@@ -1264,18 +1290,18 @@ class TranscriptTailTest:
         # From within a line: the rest of that one is let go of, and is
         # no line that cannot be read
         within = sum(map(len, lines[-7:])) + 20
-        with mock.patch.object(follow, "MOST_HISTORY", within):
-            tail = follow.TranscriptTail.latest(self.file, "/proj", options)
+        with mock.patch.object(tails, "MOST_HISTORY", within):
+            tail = tails.TranscriptTail.latest(self.file, "/proj", options)
         assert tail.cut
         assert self.said(tail) == texts[-7:]
         # From where a line starts, that line is whole
-        with mock.patch.object(follow, "MOST_HISTORY", within - 20):
-            tail = follow.TranscriptTail.latest(self.file, "/proj", options)
+        with mock.patch.object(tails, "MOST_HISTORY", within - 20):
+            tail = tails.TranscriptTail.latest(self.file, "/proj", options)
         assert self.said(tail) == texts[-7:]
         add(self.file, prompt("now"))
         assert self.said(tail) == ["now"]
         # One that is no longer than is looked at is read from its start
-        whole = follow.TranscriptTail.latest(self.file, "/proj", options)
+        whole = tails.TranscriptTail.latest(self.file, "/proj", options)
         assert not whole.cut
         assert len(whole.poll(None)) == len(texts) + 1
 
@@ -1286,6 +1312,7 @@ class TranscriptTailTest:
             mock.patch.object(follow, "project_root", return_value="/proj"),
             mock.patch.object(follow, "subagent_files", return_value=[]),
             mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+            mock.patch.object(tails, "MOST_HISTORY", 3 << 10),
             mock.patch.object(follow, "MOST_HISTORY", 3 << 10),
         ):
             follower = follow.Follower(host, False, only=self.file)
@@ -1304,24 +1331,22 @@ class TranscriptTailTest:
         late = {"type": "ai-title", "aiTitle": "named later"}
         add(self.file, prompt("the first prompt"), *map(prompt, "x" * 50), late)
         options = WalkOptions(live=True)
-        ended = follow.TranscriptTail(
+        ended = tails.TranscriptTail(
             self.file, "/proj", options, self.file.stat().st_size
         )
         with (
-            mock.patch.object(follow, "TITLE_BYTES", 300),
-            mock.patch.object(
-                follow, "read_entries", wraps=follow.read_entries
-            ) as read,
+            mock.patch.object(tails, "TITLE_BYTES", 300),
+            mock.patch.object(tails, "read_entries", wraps=tails.read_entries) as read,
         ):
             assert ended.title == "the first prompt"
         read.assert_called_once_with(self.file, 300)
         # One that an entry it followed gave a title has that one
-        followed = follow.TranscriptTail(self.file, "/proj", options)
+        followed = tails.TranscriptTail(self.file, "/proj", options)
         followed.poll(None)
         assert followed.title == "named later"
 
     def test_a_transcript_written_anew_is_read_from_its_new_end(self):
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         add(self.file, prompt("one"), prompt("two"))
         assert self.said(tail) == ["one", "two"]
         self.file.write_text(json.dumps(prompt("anew")) + "\n")
@@ -1334,7 +1359,7 @@ class TranscriptTailTest:
         secret.write_text(json.dumps(prompt("a secret")) + "\n")
         self.file.unlink()
         self.file.symlink_to(secret)
-        tail = follow.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         assert self.said(tail) == []
         self.file.unlink()
         os.mkfifo(self.file)

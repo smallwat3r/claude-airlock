@@ -18,18 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from harness import (
-    LauncherTest,
-    Result,
-    launcher,
-    pcap,
-    prompts_at,
-    records,
-    settings,
-)
-from harness import (
-    capture as capture_module,
-)
+from harness import LauncherTest, Result, prompts_at
 from packets import (
     UNNAMED,
     answer,
@@ -54,14 +43,19 @@ from packets import (
     udp,
 )
 
+from claude_airlock import launcher, settings
 from claude_airlock.reader import NotThis
 from claude_airlock.recording import (
     address,
     egress_log,
     payloads,
+    pcap,
     processes,
+    records,
     sidecar,
 )
+from claude_airlock.recording import capture as capture_module
+from claude_airlock.recording import lookups as lookups_module
 from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import layout, net_events
 from claude_airlock.sandbox import egress_proxy
@@ -87,7 +81,7 @@ class CaptureFileTest:
                 "203.0.113.9": "sni.test",
             }
             looked_up = payloads.Lookup(1001.0, "good.test", "A", ("198.51.100.7",), "")
-            assert found.lookups == [looked_up]
+            assert found.dns.lookups == [looked_up]
             assert found.packets == 11
 
     def test_an_answer_the_session_sent_out_names_nothing(self):
@@ -223,7 +217,7 @@ class CaptureFileTest:
             lookup = payloads.Lookup(
                 float(at), f"n{at}.test", "A", ("198.51.100.7",), ""
             )
-            capture._take_lookup(lookup)
+            capture.dns._keep(lookup)
         started = time.monotonic()
         for at in range(count):
             assert capture.name_of("198.51.100.7", at + 0.5) == f"n{at}.test"
@@ -231,9 +225,7 @@ class CaptureFileTest:
         assert capture.name_of("198.51.100.7") == f"n{count - 1}.test"
         assert capture.name_of("198.51.100.7", -1.0) is None
         # One that comes out of its turn is put where its time is
-        capture._take_lookup(
-            payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), "")
-        )
+        capture.dns._keep(payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), ""))
         assert capture.name_of("198.51.100.7", 9.8) == "late.test"
         assert capture.name_of("198.51.100.7", 9.6) == "n9.test"
 
@@ -375,7 +367,7 @@ class CaptureFileTest:
 
     def test_a_lookup_says_what_was_asked_and_what_came_back(self):
         found = self.read(pcap_file([(1.0, dns_failure("nope.test", 28), False)]))
-        assert found.lookups == [
+        assert found.dns.lookups == [
             payloads.Lookup(1.0, "nope.test", "AAAA", (), "no such name")
         ]
         assert found.names == {}
@@ -388,7 +380,7 @@ class CaptureFileTest:
     def test_a_dns_name_that_points_at_itself_ends(self):
         loop = struct.pack("!HHHHHH", 7, 0x8180, 1, 0, 0, 0) + b"\xc0\x0c"
         with pytest.raises(NotThis):
-            payloads.dns_answer(0.0, loop)
+            payloads.dns_message(0.0, loop)
 
 
 class ToldOfConnectionsTest:
@@ -713,7 +705,7 @@ class ToldOfConnectionsTest:
         assert cut.names == {self.THERE: "files.test"}
 
     def test_whether_an_address_had_a_name_is_told_without_going_through_them(self):
-        looked_up = pcap.LookedUp()
+        looked_up = lookups_module.LookedUp()
         for at in range(50_000):
             looked_up.add(float(at), f"N{at}.Test.")
         started = time.monotonic()
@@ -803,7 +795,7 @@ class DnsTrustTest:
                         asked=False,
                     )
                     assert found.names == {}
-                    assert found.lookups[0].error == "no answer"
+                    assert found.dns.lookups[0].error == "no answer"
 
     def test_no_more_lookups_are_kept_than_a_capture_may_have(self):
         packets = []
@@ -813,11 +805,11 @@ class DnsTrustTest:
                 (number + 0.1, dns_query(name), True),
                 (number + 0.2, dns_response(name, "6.6.6.6"), False),
             ]
-        with unittest.mock.patch.object(pcap, "MOST_LOOKUPS", 2):
+        with unittest.mock.patch.object(lookups_module, "MOST_LOOKUPS", 2):
             found = self.read(packets, asked=False)
-        assert [lookup.name for lookup in found.lookups] == ["n0.test", "n1.test"]
+        assert [lookup.name for lookup in found.dns.lookups] == ["n0.test", "n1.test"]
         # The messages past them are counted, and said
-        assert found.dns_unread == 6
+        assert found.dns.unread == 6
         said = net_events.capture_summary(found, False)
         assert (
             "  dns 6 more messages NOT READ, past the 2 lookups that are kept" in said
@@ -842,23 +834,23 @@ class DnsTrustTest:
         ]
         found = self.read(packets, asked=False)
         assert found.name_of("198.51.100.7") == "after.test"
-        assert found.dns_unread == 0
+        assert found.dns.unread == 0
         # Past as many as are read, what is left of a packet is counted
         # as one message that was not, and no longer looked into
-        with unittest.mock.patch.object(pcap, "MOST_DNS_READ", 50):
+        with unittest.mock.patch.object(lookups_module, "MOST_DNS_READ", 50):
             found = self.read(packets, asked=False)
-            assert (found.lookups, found.dns_unread) == ([], 2)
+            assert (found.dns.lookups, found.dns.unread) == ([], 2)
             flood = pcap.parse_packet(
                 1.0, 276, pcap_file([(1.0, over(none), True)])[40:]
             )
             capture = pcap.Capture()
             with unittest.mock.patch.object(
-                pcap, "dns_message", wraps=payloads.dns_message
+                lookups_module, "dns_message", wraps=payloads.dns_message
             ) as read:
                 for _ in range(300):
                     capture.add(flood)
         assert read.call_count == 50
-        assert capture.dns_unread == 300
+        assert capture.dns.unread == 300
         said = net_events.capture_summary(capture, False)
         assert (
             "  dns 300 more messages NOT READ, past the 0 lookups that are kept" in said
@@ -871,7 +863,7 @@ class DnsTrustTest:
         unread = payloads.dns_message(1.0, message, answered=False)
         assert (unread.lookup.name, unread.lookup.addresses) == ("a.test", ())
         with unittest.mock.patch.object(
-            pcap, "dns_message", wraps=payloads.dns_message
+            lookups_module, "dns_message", wraps=payloads.dns_message
         ) as read:
             # A session can send any number of answers nobody asked for
             self.read([(1.0, response, False)], asked=False)
@@ -886,7 +878,7 @@ class DnsTrustTest:
             [(1.0, dns_response("a.test", "6.6.6.6"), False)], asked=False
         )
         assert found.names == {}
-        assert found.lookups == []
+        assert found.dns.lookups == []
         # Nor one for another name, or with another id
         for query in (dns_query("b.test"), dns_query("a.test", ident=9)):
             found = self.read(
@@ -921,7 +913,7 @@ class DnsTrustTest:
 
     def test_a_query_that_was_never_answered_is_a_lookup_without_one(self):
         found = self.read([(1.0, dns_query("lost.test", 28), True)], asked=False)
-        (lookup,) = found.lookups
+        (lookup,) = found.dns.lookups
         assert (
             lookup.when,
             lookup.name,
@@ -938,10 +930,10 @@ class DnsTrustTest:
                 pcap_file([(1.0, dns_query("slow.test"), True)], asked=False)
             ),
         )
-        assert capture.lookups == []
+        assert capture.dns.lookups == []
         later = pcap_file([(20.0, dns_query("other.test"), True)], asked=False)
         pcap.take_frames(capture, PcapReader().feed(later))
-        assert [lookup.name for lookup in capture.lookups] == ["slow.test"]
+        assert [lookup.name for lookup in capture.dns.lookups] == ["slow.test"]
         # The answer when it does come is still the answer
         late = pcap_file(
             [(21.0, dns_response("slow.test", "198.51.100.7"), False)], asked=False
@@ -963,7 +955,7 @@ class DnsTrustTest:
         cut = message[: len(message) - 16 - 5]
         datagram = struct.pack("!HHHH", 41234, 50000, 8 + len(cut), 0) + cut
         found = self.read([(1.0, ipv4(17, "127.0.0.11", "127.0.0.1", datagram), False)])
-        (lookup,) = found.lookups
+        (lookup,) = found.dns.lookups
         assert lookup.addresses == tuple(addresses[:3])
         assert found.name_of(addresses[0]) == name
 
@@ -976,13 +968,13 @@ class DnsTrustTest:
         ]
         found = self.read(packets, asked=False)
         assert found.name_of("198.51.100.7") == "tcp.test"
-        assert [lookup.name for lookup in found.lookups] == ["tcp.test"]
+        assert [lookup.name for lookup in found.dns.lookups] == ["tcp.test"]
         # The same from somewhere that is not a resolver, by no port of one
         elsewhere = [
             (1.0, dns_over("127.0.0.1", "127.0.0.1", query, (40000, 5353)), True),
             (1.1, dns_over("127.0.0.1", "127.0.0.1", response, (5353, 40000)), True),
         ]
-        assert self.read(elsewhere, asked=False).lookups == []
+        assert self.read(elsewhere, asked=False).dns.lookups == []
 
     def test_dns_over_tcp_is_read_however_it_is_cut_into_packets(self):
         def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
@@ -1011,19 +1003,19 @@ class DnsTrustTest:
             ]
             found = self.read(packets, asked=False)
             assert found.name_of("198.51.100.7") == "split.test", cuts
-            assert [(lookup.name, lookup.error) for lookup in found.lookups] == [
+            assert [(lookup.name, lookup.error) for lookup in found.dns.lookups] == [
                 ("split.test", ""),
                 ("second.test", "no answer"),
             ], cuts
         # What is kept of a stream until its rest comes is bounded
         capture = pcap.Capture()
-        for port in range(pcap.DNS_MOST_HELD + 50):
+        for port in range(lookups_module.DNS_MOST_HELD + 50):
             frame = over(b"\x40\x00" + b"x" * 100, (1024 + port, 53), me, server)
             packet = pcap.parse_packet(1.0, 276, pcap_file([(1.0, frame, True)])[40:])
             capture.add(packet)
-        assert len(capture._dns_held) == pcap.DNS_MOST_HELD
+        assert len(capture.dns._held) == lookups_module.DNS_MOST_HELD
         # And each one let go of is counted: its query went unread
-        assert capture.dns_cut == 50
+        assert capture.dns.cut == 50
 
     def test_dns_over_tcp_that_cannot_be_read_to_its_end_is_counted(self):
         def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
@@ -1044,9 +1036,9 @@ class DnsTrustTest:
         kept = dataclasses.replace(whole, payload=whole.payload[:950])
         capture = pcap.Capture()
         capture.add(kept)
-        capture.finish()
-        assert [lookup.name for lookup in capture.lookups] == ["harmless.test"]
-        assert capture.dns_cut == 1
+        capture.dns.finish()
+        assert [lookup.name for lookup in capture.dns.lookups] == ["harmless.test"]
+        assert capture.dns.cut == 1
         said = net_events.capture_summary(capture, False)
         assert (
             "  dns 1 times what was sent to a resolver over TCP was NOT READ to"
@@ -1060,22 +1052,22 @@ class DnsTrustTest:
             capture.add(
                 packet_of(over(long[at : at + 900], (40053, 53), me, server), True)
             )
-        assert capture.lookups == []
-        assert capture.dns_cut >= 1
+        assert capture.dns.lookups == []
+        assert capture.dns.cut >= 1
         # Not what comes back too long: its query was seen, and is a
         # lookup that says it has no answer
         capture = pcap.Capture()
         capture.add(packet_of(dns_over(me, server, query, (40053, 53)), True))
         back = packet_of(over(b"\x20\x00" + b"x" * 990, (53, 40053), server, me), False)
         capture.add(dataclasses.replace(back, payload=back.payload[:950]))
-        capture.finish()
-        assert capture.dns_cut == 0
-        assert [(found.name, found.error) for found in capture.lookups] == [
+        capture.dns.finish()
+        assert capture.dns.cut == 0
+        assert [(found.name, found.error) for found in capture.dns.lookups] == [
             ("harmless.test", "no answer")
         ]
         # A hello is not held against lookups that are not all there
         assert (
-            pcap.Capture(dns_cut=1)._reached_otherwise(
+            pcap.Capture(dns=lookups_module.Lookups(cut=1))._reached_otherwise(
                 pcap.Connection(1.0, "198.51.100.7", 443, 40443, 0), "x.test", 2.0
             )
             == ""
@@ -1126,7 +1118,7 @@ class DnsTrustTest:
             assert filters[name].endswith(")")
 
     def test_queries_never_answered_do_not_keep_later_answers_out(self):
-        most = pcap.DNS_MOST_PENDING
+        most = lookups_module.DNS_MOST_PENDING
         lost = [
             (1.0, dns_query(f"n{number}.lost.test", ident=number % 65536), True)
             for number in range(most + 5)
@@ -1136,7 +1128,7 @@ class DnsTrustTest:
         )
         assert found.name_of("198.51.100.7") == "good.test"
         # Each of them is still said to have had no answer, once
-        unanswered = [lookup for lookup in found.lookups if lookup.error]
+        unanswered = [lookup for lookup in found.dns.lookups if lookup.error]
         assert len(unanswered) == most + 5
 
 
@@ -1223,44 +1215,44 @@ class OtherTrafficTest:
         name = "a" * 50 + ".t.test"
         packets = [(float(at), dns_failure(name), False) for at in range(3)]
         found = self.read([*packets, (5.0, dns_failure("fine.t.test"), False)])
-        assert [(why, lookup.name) for why, lookup in found.flagged] == [
+        assert [(why, lookup.name) for why, lookup in found.dns.flagged] == [
             ("an unusually long name", name)
         ]
 
     def test_many_names_under_one_domain_are_flagged_whatever_is_between(self):
-        count = pcap.DNS_MANY_UNDER_DOMAIN
+        count = lookups_module.DNS_MANY_UNDER_DOMAIN
 
         def lookups(names: list[str]) -> list[tuple[float, bytes, bool]]:
             return [(1.0, dns_response(name, "198.51.100.7"), False) for name in names]
 
         # No two of them under one parent, all of them under one domain
         varied = [f"data{n}.part{n}.evil.test" for n in range(count + 5)]
-        assert self.read(lookups(varied[: count - 1])).flagged == []
-        ((why, lookup),) = self.read(lookups(varied)).flagged
+        assert self.read(lookups(varied[: count - 1])).dns.flagged == []
+        ((why, lookup),) = self.read(lookups(varied)).dns.flagged
         assert why == f"{count} names looked up under evil.test"
         assert lookup.name == varied[count - 1]
         # Under a country a domain has a label more: not every site of it
         sites = [f"www.site{n}.co.uk" for n in range(count + 5)]
-        assert self.read(lookups(sites)).flagged == []
+        assert self.read(lookups(sites)).dns.flagged == []
         deeper = [f"a{n}.b{n}.evil.co.uk" for n in range(count)]
-        ((why, _),) = self.read(lookups(deeper)).flagged
+        ((why, _),) = self.read(lookups(deeper)).dns.flagged
         assert why == f"{count} names looked up under evil.co.uk"
         # Names right under their domain are counted once, by their parent
         flat = [f"n{n}.evil.test" for n in range(count + 5)]
-        ((why, _),) = self.read(lookups(flat)).flagged
-        assert why == f"{pcap.DNS_MANY_NAMES} names looked up under evil.test"
+        ((why, _),) = self.read(lookups(flat)).dns.flagged
+        assert why == f"{lookups_module.DNS_MANY_NAMES} names looked up under evil.test"
 
     def test_many_names_under_one_parent_are_flagged(self):
-        count = pcap.DNS_MANY_NAMES
+        count = lookups_module.DNS_MANY_NAMES
         few = [(1.0, packet, False) for packet in lookups_under("cdn.test", count - 1)]
-        assert self.read(few).flagged == []
+        assert self.read(few).dns.flagged == []
         many = [(1.0, packet, False) for packet in lookups_under("t.test", count + 5)]
         # Not under a parent of one label, every name is under com
         many += [
             (2.0, dns_response(f"site{n}.test", "198.51.100.7"), False)
             for n in range(count + 5)
         ]
-        ((why, lookup),) = self.read(many).flagged
+        ((why, lookup),) = self.read(many).dns.flagged
         assert why == f"{count} names looked up under t.test"
         assert lookup.name == f"n{count - 1}.t.test"
 
@@ -1269,7 +1261,7 @@ class CaptureSessionTest(LauncherTest):
     SIDECAR = "claude-proj.capture"
 
     @pytest.fixture(autouse=True)
-    def capture_file(self, sandbox: None) -> None:
+    def capture_file_made(self, sandbox: None) -> None:
         self.now = time.time()
         self.capture_file = self.work / "capture.pcap"
         self.capture_file.write_bytes(sample_capture(self.now))
@@ -1626,7 +1618,7 @@ class CaptureSessionTest(LauncherTest):
         self.captured()
         first, last = prompts_at(self.now, self.now + 10)
         stamp = datetime.fromtimestamp
-        ran = {"type": "tool_use", "id": "t1", "name": "Bash"}
+        ran: dict[str, object] = {"type": "tool_use", "id": "t1", "name": "Bash"}
         ran["input"] = {"command": "curl plain.test/a"}
         call = {"type": "assistant", "message": {"content": [ran]}}
         call["timestamp"] = stamp(self.now + 1, UTC).isoformat()
@@ -1725,6 +1717,7 @@ class EgressLogTest(LauncherTest):
     ):
         with unittest.mock.patch.dict(os.environ, {"FAKE_ACCESS_LOG": str(self.log)}):
             requests = egress_log.logged_requests()
+        assert requests is not None
         assert [request.host for request in requests] == [
             f"n{n}.test" for n in range(20, 40)
         ]

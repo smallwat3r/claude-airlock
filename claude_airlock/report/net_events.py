@@ -385,12 +385,12 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         lines.append(f"  {failed} connections REFUSED or without an answer")
     if capture.requests:
         lines.append(f"  http {len(capture.requests)} requests in the clear")
-    names = {lookup.name for lookup in capture.lookups}
+    names = {lookup.name for lookup in capture.dns.lookups}
     if names:
         hint = "" if verbose else ", each one shown with --verbose"
         lines.append(f"  dns {len(names)} names looked up{hint}")
-    if capture.flagged:
-        lines.append(f"  dns {len(capture.flagged)} lookups FLAGGED, see --failed")
+    if capture.dns.flagged:
+        lines.append(f"  dns {len(capture.dns.flagged)} lookups FLAGGED, see --failed")
     if capture.noticed:
         lines.append(f"  {len(capture.noticed)} connections FLAGGED, see --failed")
     made = Counter(reached_from(capture, connection) for connection in capture.inbound)
@@ -398,14 +398,14 @@ def capture_summary(capture: Capture, verbose: bool) -> list[str]:
         f"  {who} x{made[who]}"
         for who in sorted(made, key=lambda who: (-made[who], who))
     ]
-    if capture.dns_unread:
+    if capture.dns.unread:
         lines.append(
-            f"  dns {capture.dns_unread} more messages NOT READ, past the"
-            f" {len(capture.lookups)} lookups that are kept"
+            f"  dns {capture.dns.unread} more messages NOT READ, past the"
+            f" {len(capture.dns.lookups)} lookups that are kept"
         )
-    if capture.dns_cut:
+    if capture.dns.cut:
         lines.append(
-            f"  dns {capture.dns_cut} times what was sent to a resolver over TCP"
+            f"  dns {capture.dns.cut} times what was sent to a resolver over TCP"
             " was NOT READ to its end, too long for the capture: a lookup may"
             " be missing each time"
         )
@@ -432,7 +432,7 @@ def capture_events(
     being its marks at the last reading, only what came since: a
     connection when it starts, and what became of it as an event of its
     own. No further than upto, when what is shown of a capture is held
-    back, see CaptureTail of follow.py. With links, the numbers the
+    back, see CaptureTail of tails.py. With links, the numbers the
     connections are told by, see links_of: given in the order they were
     made, those made to the session among the others."""
     live = past is not None
@@ -464,12 +464,12 @@ def capture_events(
     ]
     events += [
         _flag_event(why, lookup)
-        for why, lookup in capture.flagged[was.flagged : now.flagged]
+        for why, lookup in capture.dns.flagged[was.flagged : now.flagged]
     ]
     if verbose:
         events += [
             _lookup_event(lookup)
-            for lookup in capture.lookups[was.lookups : now.lookups]
+            for lookup in capture.dns.lookups[was.lookups : now.lookups]
         ]
     return events
 
