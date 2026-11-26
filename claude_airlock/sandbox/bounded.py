@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass
 from itertools import islice
 from operator import attrgetter
+from typing import NamedTuple
 
 from ..files import open_plain
 
@@ -36,6 +37,15 @@ MOST_MODULES = 1000
 UNWATCHED = "unwatched"
 
 
+def closed_entry(directory: str) -> str:
+    """What a fingerprint has, as unwatched, for a directory that is there
+    and cannot be looked into: a session can take the right to list one
+    away, and what it left there is found by its name all the same, by
+    make, git and Claude. Said where it is, so one it closed shows as a
+    change, and one that was so already does not."""
+    return f"{directory}: cannot be looked into, what is in it"
+
+
 @dataclass(frozen=True)
 class Bounded:
     """What a look within a bound found, and what it left out: the
@@ -46,6 +56,8 @@ class Bounded:
 
     found: list[str]
     rest: str = ""
+    # The directories that could not be looked into, see closed_entry
+    closed: tuple[str, ...] = ()
 
     @property
     def cut(self) -> bool:
@@ -55,9 +67,12 @@ class Bounded:
     def into(self, fingerprint: dict[str, str]) -> list[str]:
         """What was found, with what was left out said in a fingerprint
         as unwatched: a session that made a tree larger than is watched,
-        for a file to be lost in, has that show as a change."""
+        for a file to be lost in, has that show as a change, and so does
+        one that closed a directory of it."""
         if self.rest:
             fingerprint[self.rest] = UNWATCHED
+        for directory in self.closed:
+            fingerprint[closed_entry(directory)] = UNWATCHED
         return self.found
 
 
@@ -151,15 +166,19 @@ def tree_files(root: str, most: int = MOST_TREE_FILES) -> Bounded:
     if os.path.islink(root):
         return Bounded([root])
     found: list[str] = []
+    closed: list[str] = []
     pending = [root]
     looked = 0
     cut = False
     while pending and len(found) <= most and looked <= most:
         looked += 1
-        entries, more = listed(pending.pop(), most)
-        cut |= more
+        directory = pending.pop()
+        listing = listed(directory, most)
+        cut |= listing.more
+        if listing.closed:
+            closed.append(directory)
         below = []
-        for entry in entries:
+        for entry in listing.entries:
             if entry.is_dir(follow_symlinks=False):
                 below.append(entry.path)
             else:
@@ -167,22 +186,36 @@ def tree_files(root: str, most: int = MOST_TREE_FILES) -> Bounded:
         # The first by its name is the next looked into
         pending += reversed(below)
     if cut or pending or len(found) > most:
-        return Bounded(found[:most], f"{root}: more than {most} files, the rest")
-    return Bounded(found)
+        rest = f"{root}: more than {most} files, the rest"
+        return Bounded(found[:most], rest, tuple(closed))
+    return Bounded(found, closed=tuple(closed))
 
 
-def listed(directory: str, most: int) -> tuple[list[os.DirEntry[str]], bool]:
+class Listing(NamedTuple):
+    """What listed found in a directory: its entries, whether it holds
+    more than those, and whether it is there and could not be read."""
+
+    entries: list[os.DirEntry[str]]
+    more: bool = False
+    closed: bool = False
+
+
+def listed(directory: str, most: int) -> Listing:
     """What a directory holds, in the order of the names, nothing for
     one that cannot be read, and whether it holds more than that. No
     more than could be watched and one: a session can put any number there, and
     which of them are left out is then the directory's own order, not
-    that of the names. So whoever lists says when it was cut."""
+    that of the names. So whoever lists says when it was cut, and when
+    it could not be read, see closed_entry. Not for one that is not
+    there, or is no directory."""
     try:
         with os.scandir(directory) as entries:
             taken = list(islice(entries, most + 1))
+    except (FileNotFoundError, NotADirectoryError):
+        return Listing([])
     except OSError:
-        return [], False
-    return sorted(taken, key=attrgetter("name")), len(taken) > most
+        return Listing([], closed=True)
+    return Listing(sorted(taken, key=attrgetter("name")), len(taken) > most)
 
 
 def module_git_dirs(directory: str) -> Bounded:
@@ -193,14 +226,18 @@ def module_git_dirs(directory: str) -> Bounded:
     depth. Without recursion: a session can nest directories deeper than
     Python calls, and the check must not be made to fail."""
     found: list[str] = []
+    closed: list[str] = []
     pending = [directory]
     looked = 0
     cut = False
     while pending and looked <= MOST_MODULES:
         looked += 1
-        entries, more = listed(pending.pop(), MOST_MODULES)
-        cut |= more
-        for entry in entries:
+        looked_into = pending.pop()
+        listing = listed(looked_into, MOST_MODULES)
+        cut |= listing.more
+        if listing.closed:
+            closed.append(looked_into)
+        for entry in listing.entries:
             if not entry.is_dir(follow_symlinks=False):
                 continue
             if os.path.isfile(os.path.join(entry.path, "HEAD")):
@@ -210,5 +247,5 @@ def module_git_dirs(directory: str) -> Bounded:
                 pending.append(entry.path)
     if cut or pending or len(found) > MOST_MODULES:
         said = f"{directory}: more than {MOST_MODULES} submodules, the rest"
-        return Bounded(found[:MOST_MODULES], said)
-    return Bounded(found)
+        return Bounded(found[:MOST_MODULES], said, tuple(closed))
+    return Bounded(found, closed=tuple(closed))

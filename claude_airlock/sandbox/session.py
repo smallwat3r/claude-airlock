@@ -44,7 +44,7 @@ from ..settings import (
 )
 from .claude_args import is_a_command, says_permissions
 from .ending import Ending
-from .fingerprint import included_configs
+from .fingerprint import home_git_configs, included_configs
 from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
 from .mounts import SHADOWED_NAMES, kept_out, names_secrets
@@ -416,7 +416,36 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
 XDG_GIT_FORWARDED = ("config", "ignore", "attributes", "templates")
 
 
-def git_config_args(host: Host) -> list[str]:
+def _include_withheld(
+    path: str, settings: Settings, host: Host, mounted: Sequence[str]
+) -> str | None:
+    """Why a file the git config includes is not mounted, none when it
+    is. A config can be a link into a directory a session was given
+    (dotfiles kept in a repository), and what it includes is then the
+    session's to name, for the next launch of any project to mount: as
+    for the statusline (see own_statusline_args), not what is in a
+    directory that is never a session's to have, the user's keys and the
+    launcher's settings and records, nor a file whose name says it holds
+    secrets, nor one docker cannot take. Empty, for nothing to say, for
+    what is in the project or a directory mounted next to it, which is
+    there already."""
+    if any(is_under(path, root) for root in mounted):
+        return ""
+    if ":" in path:
+        return "docker takes no path with a colon"
+    patterns = SHADOWED_NAMES + settings.shadow
+    names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
+    if any(names_secrets(name, patterns) for name in names):
+        return "its name is one of secrets"
+    kept = kept_out(path, host)
+    if kept:
+        return f"{kept} is not a session's to have"
+    return None
+
+
+def git_config_args(
+    settings: Settings, host: Host, mounted: Sequence[str]
+) -> list[str]:
     """Forward the git config, read-only, and no credentials with it (see
     XDG_GIT_FORWARDED)."""
     args = []
@@ -431,13 +460,21 @@ def git_config_args(host: Host) -> list[str]:
             target = f"{CONTAINER_HOME}/.config/git/{name}"
             args.append(mount_arg(path, target, "ro,z"))
             forwarded.add(path)
+
     # Files pulled in with include/includeIf (e.g. a work identity under
     # "gitdir:~/work/") live outside the mounts, so without this they
     # silently never apply. Mounted at their host path, the one the config
     # refers to, and those they pull in too. A relative path is taken
-    # from the config that names it, as git takes it.
-    configs = [gitconfig, os.path.join(xdg_git, "config")]
-    for path in included_configs(configs, host.home):
+    # from the config that names it, as git takes it. Not what
+    # _include_withheld keeps back, nor what that includes, which git in
+    # the session cannot read then.
+    def taken(path: str) -> bool:
+        withheld = _include_withheld(path, settings, host, mounted)
+        if withheld:
+            warn(f"{path}, which the git config includes, is not mounted: {withheld}")
+        return withheld is None
+
+    for path in included_configs(home_git_configs(host), host.home, taken):
         if path not in forwarded:
             args.append(mount_arg(path, path, "ro,z"))
             forwarded.add(path)

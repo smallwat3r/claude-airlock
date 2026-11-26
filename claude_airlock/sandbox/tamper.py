@@ -21,6 +21,7 @@ from ..settings import Host
 from .fingerprint import (
     agent_memory_dirs,
     build_fingerprint,
+    home_git_configs,
     host_exec_fingerprint,
     project_names,
 )
@@ -74,6 +75,9 @@ class HostCheck:
     projects: list[str] | None = None
     own_projects: tuple[str, ...] = ()
     projects_taken: bool = False
+    # The user's own git configs, none in a check saved by a version that
+    # did not watch them
+    git_configs: tuple[str, ...] = ()
 
     @classmethod
     def take(
@@ -83,9 +87,12 @@ class HostCheck:
         memory: list[str],
         shared_config: str,
         own_projects: Sequence[str] = (),
+        git_configs: Sequence[str] = (),
     ) -> HostCheck:
         """The check of a session about to start."""
-        before = host_exec_fingerprint(watched, claude_dir, memory, shared_config)
+        before = host_exec_fingerprint(
+            watched, claude_dir, memory, shared_config, git_configs
+        )
         build = build_fingerprint(watched)
         return cls(
             watched,
@@ -97,6 +104,7 @@ class HostCheck:
             project_names(claude_dir),
             tuple(sorted(own_projects)),
             projects_taken=True,
+            git_configs=tuple(git_configs),
         )
 
     def as_fields(self) -> dict[str, object]:
@@ -107,6 +115,7 @@ class HostCheck:
             "build": self.build or {},
             "memory": self.memory,
             "shared_config": self.shared_config,
+            "git_configs": list(self.git_configs),
             **(
                 {"projects": self.projects, "own_projects": list(self.own_projects)}
                 if self.projects_taken
@@ -129,6 +138,7 @@ class HostCheck:
             None if pending.get("projects") is None else _texts(pending["projects"]),
             tuple(_texts(pending.get("own_projects", []))),
             projects_taken="projects" in pending,
+            git_configs=tuple(_texts(pending.get("git_configs", []))),
         )
 
     def report(self, unchecked: str = "") -> None:
@@ -136,7 +146,11 @@ class HostCheck:
         unchecked is the name of an earlier session that ended without
         this check, when the report is the late one for it."""
         after = host_exec_fingerprint(
-            self.watched, self.claude_dir, self.memory, self.shared_config
+            self.watched,
+            self.claude_dir,
+            self.memory,
+            self.shared_config,
+            self.git_configs,
         )
         report_tampering(
             self.before,
@@ -181,6 +195,7 @@ class PendingCheck:
             memory_dirs(host) + agent_memory_dirs(watched),
             shared_config,
             sorted(own_names(host)),
+            home_git_configs(host),
         )
         private_dir(str(file.parent))
         pending = {**Launcher.current().as_fields(), **check.as_fields()}

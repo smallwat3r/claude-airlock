@@ -13,7 +13,7 @@ import re
 import shlex
 import subprocess
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from itertools import islice
 
 from ..files import (
@@ -27,11 +27,12 @@ from ..files import (
     read_plain,
     settings_object,
 )
-from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES
+from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES, Host
 from .bounded import (
     MOST_STAMPED_FILES,
     MOST_TREE_FILES,
     UNWATCHED,
+    closed_entry,
     file_hash,
     file_stamp,
     hash_files,
@@ -220,7 +221,43 @@ SERVERS = "mcpServers"
 SERVERS_BYTES = 16 * 1024 * 1024
 
 
-def _git_says(*args: str) -> bytes | None:
+# What has git read a repository or a config besides the file it is
+# asked about, which the launcher may have been started with
+GIT_READ_ELSEWHERE = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+)
+
+
+def _git_environment(git_dir: str | None = None) -> dict[str, str]:
+    """What git is run with for a config: nothing of a repository, nor
+    the user's own config and the system's. Git reads those as it starts
+    whatever it is asked, and the files they include, and the user's own
+    can be a link into a directory a session was given: a pipe it named
+    there would hold every look for GIT_SECONDS, and a file that is no
+    config would have git list none. From the root, for the same reason:
+    from the project, git would take the repository there for its own,
+    and read the config a session can leave in its place. But for the
+    git directory given, whose config is the one asked about: what it
+    includes on a condition of where the repository is (includeIf
+    "gitdir:") is read only in one."""
+    told = {"GIT_DIR": git_dir} if git_dir else {}
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in GIT_READ_ELSEWHERE
+        and not name.startswith("GIT_CONFIG_KEY_")
+        and not name.startswith("GIT_CONFIG_VALUE_")
+    }
+    unread = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    return {**environment, **unread, **told}
+
+
+def _git_says(*args: str, git_dir: str | None = None) -> bytes | None:
     """What git says when it is asked about a config, none when that
     cannot be had: no git, a config it cannot read, one it was not done
     with within GIT_SECONDS, and one it says more of than GIT_SAID_BYTES.
@@ -233,6 +270,8 @@ def _git_says(*args: str) -> bytes | None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            cwd="/",
+            env=_git_environment(git_dir),
         )
     except OSError:
         return None
@@ -292,10 +331,13 @@ def _included_configs(listing: bytes, config: str, home: str = "") -> list[str]:
     return found
 
 
-def included_configs(configs: Sequence[str], home: str) -> list[str]:
+def included_configs(
+    configs: Sequence[str], home: str, taken: Callable[[str], bool] = lambda _: True
+) -> list[str]:
     """The files that some git configs have git read with them, and
     those that these do, each once and as git takes it (see
-    _included_configs): those that are there, no more than MOST_INCLUDED."""
+    _included_configs): those that are there, no more than MOST_INCLUDED.
+    Not one that taken says no to, nor what that one includes."""
     seen = set(configs)
     pending = list(reversed(configs))
     found: list[str] = []
@@ -305,8 +347,10 @@ def included_configs(configs: Sequence[str], home: str) -> list[str]:
         if listing is None:
             continue
         for path in _included_configs(listing, config, home):
-            if path not in seen and os.path.isfile(path):
-                seen.add(path)
+            if path in seen or not os.path.isfile(path):
+                continue
+            seen.add(path)
+            if taken(path):
                 found.append(path)
                 pending.append(path)
     return found[:MOST_INCLUDED]
@@ -474,12 +518,15 @@ def _worktree_sources(
     is there in the place of such a directory, a link, is hashed as it
     is. No more of them than MOST_WORKTREES, the rest is said to be left
     out."""
-    entries, more = listed(os.path.join(git_dir, GIT_WORKTREES), MOST_WORKTREES)
-    if more:
+    worktrees = os.path.join(git_dir, GIT_WORKTREES)
+    listing = listed(worktrees, MOST_WORKTREES)
+    if listing.more:
         rest = f"{git_dir}: more than {MOST_WORKTREES} working trees, the rest"
         fingerprint[rest] = UNWATCHED
+    if listing.closed:
+        fingerprint[closed_entry(worktrees)] = UNWATCHED
     sources = []
-    for entry in entries[:MOST_WORKTREES]:
+    for entry in listing.entries[:MOST_WORKTREES]:
         if not entry.is_dir(follow_symlinks=False):
             watched.append(entry.path)
             continue
@@ -512,14 +559,15 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
     outside is out of a session's reach, unless it is mounted too and then
     it is the session's choice of what gets read here. By the config of
     the project's git directory, or of the one given."""
-    config = os.path.join(git_dir or os.path.join(directory, ".git"), "config")
+    git_dir = git_dir or os.path.join(directory, ".git")
+    config = os.path.join(git_dir, "config")
     if not os.path.isfile(config):
         # None, or a pipe a session left for git to wait on
         return None
     # With what the config includes, where a project keeps such a setting
-    # as often as in the config itself
+    # as often as in the config itself, on a condition of where it is too
     asked = ("--includes", "--type=path", "--get", "core.hooksPath")
-    said = _git_says("config", "--file", config, *asked)
+    said = _git_says("config", "--file", config, *asked, git_dir=git_dir)
     if said is None:
         return None
     value = said.decode("utf-8", "replace").strip()
@@ -644,11 +692,41 @@ def agent_memory_dirs(directories: Sequence[str]) -> list[str]:
     ]
 
 
+def home_git_configs(host: Host) -> list[str]:
+    """The user's own git configs, which git reads wherever it is run:
+    ~/.gitconfig and the one of ~/.config/git."""
+    return [
+        os.path.join(host.home, ".gitconfig"),
+        os.path.join(host.config_home, "git", "config"),
+    ]
+
+
+def _home_git_configs(
+    configs: Sequence[str], directories: Sequence[str], fingerprint: dict[str, str]
+) -> None:
+    """Add the user's own git configs, as those of a repository are, by
+    what of them a session could have written: each that is, or that they
+    include, which is in a directory it was given, by where it leads.
+    Dotfiles are often kept in a repository, with ~/.gitconfig a link
+    into it, and git on the host runs what a config says (core.fsmonitor,
+    core.pager, an alias) wherever it is run. Not what the user changed
+    on the host meanwhile, which is no session's doing."""
+    roots = [os.path.realpath(directory) for directory in directories]
+    for config in configs:
+        found: dict[str, str] = {}
+        hash_git_config(config, found)
+        for path, stamp in found.items():
+            real = os.path.realpath(path)
+            if any(is_under(real, root) for root in roots):
+                fingerprint[path] = stamp
+
+
 def host_exec_fingerprint(
     directories: list[str],
     claude_dir: str = "",
     memory: Sequence[str] = (),
     shared_config: str = "",
+    git_configs: Sequence[str] = (),
 ) -> dict[str, str]:
     """Hashes, by path, of the files a session can write that run commands
     on the host once it is over, or that Claude follows there. In each
@@ -662,9 +740,11 @@ def host_exec_fingerprint(
     what Claude remembers of the project, the files of the memory
     directories, which is said apart (see _report_memory), and the
     servers of the config the sandboxed sessions share, which is too
-    (see _report_servers). Not seen: a CLAUDE.md below the top of a
+    (see _report_servers). And the user's own git configs, see
+    _home_git_configs. Not seen: a CLAUDE.md below the top of a
     project, and what a script goes on to run."""
     fingerprint: dict[str, str] = {}
+    _home_git_configs(git_configs, directories, fingerprint)
     watched = []
     for directory in directories:
         git_dir = os.path.join(directory, ".git")
@@ -703,8 +783,18 @@ def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
     """The files of one mounted directory that build_fingerprint hashes,
     the git configs it finds on the way hashed as those are."""
     watched: list[str] = []
-    for directory, subdirs, files in os.walk(root):
-        if len(watched) > MOST_BUILD_FILES:
+    closed: list[str] = []
+
+    def not_looked_into(problem: OSError) -> None:
+        if isinstance(problem.filename, str) and not isinstance(
+            problem, (FileNotFoundError, NotADirectoryError)
+        ):
+            closed.append(problem.filename)
+
+    for directory, subdirs, files in os.walk(root, onerror=not_looked_into):
+        # A directory closed counts as a file: a session can close any
+        # number of them, each a part of the fingerprint
+        if len(watched) + len(closed) > MOST_BUILD_FILES:
             break
         names = {*subdirs, *files}
         if directory != root:
@@ -728,6 +818,8 @@ def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
             and name not in BUILD_TREES
             and os.path.join(directory, name) != os.path.join(root, WORKTREES)
         ]
+    for directory in closed[:MOST_BUILD_FILES]:
+        fingerprint[closed_entry(directory)] = UNWATCHED
     return watched
 
 
@@ -749,13 +841,15 @@ def _modules_at_top(checkout: str, fingerprint: dict[str, str]) -> list[str]:
     could be one is watched, a file by how its name ends, a directory or
     a link to one by the file that makes it a package. No more entries
     are looked at than files of a tree are watched, the rest is said."""
-    entries, more = listed(checkout, MOST_TREE_FILES)
-    if more:
+    listing = listed(checkout, MOST_TREE_FILES)
+    if listing.more:
         fingerprint[f"{checkout}: more than {MOST_TREE_FILES} entries, the rest"] = (
             UNWATCHED
         )
+    if listing.closed:
+        fingerprint[closed_entry(checkout)] = UNWATCHED
     found = []
-    for entry in entries:
+    for entry in listing.entries:
         if entry.name in LAUNCHER_TREES:
             continue
         if entry.name.endswith(MODULE_ENDINGS) and not entry.is_dir():

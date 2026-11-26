@@ -113,6 +113,53 @@ class DefaultSessionTest(LauncherTest):
         assert not [flag for flag in flags if "credentials" in flag]
         assert not [flag for flag in flags if flag.startswith(f"--volume={git}:")]
 
+    def test_what_the_git_config_includes_is_not_what_no_session_is_to_have(self):
+        # The config kept in a repository a session was given, which named
+        # what it pleased for the next launch of any project to mount
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        # Each read as a config, as git reads what is included: one that
+        # is not would have git list none of them
+        written = "[a]\n\tb = c\n"
+        (self.home / ".ssh").mkdir()
+        key = self.home / ".ssh" / "id_ed25519"
+        key.write_text(written)
+        os.symlink(key, dotfiles / "key")
+        secret = self.home / ".netrc"
+        secret.write_text(written)
+        colon = self.home / "a:b"
+        colon.write_text("[user]\n\tname = c\n")
+        inner = self.home / "inner.gitconfig"
+        inner.write_text("[user]\n\tname = i\n")
+        # In the project already, and the config it includes is followed
+        # no further: what is in the project is the session's to write
+        beyond = self.home / "beyond.gitconfig"
+        beyond.write_text("[user]\n\tname = b\n")
+        (self.project / "own.gitconfig").write_text(f"[include]\n\tpath = {beyond}\n")
+        kept = self.home / "kept.gitconfig"
+        kept.write_text(f"[include]\n\tpath = {inner}\n")
+        named = [key, dotfiles / "key", secret, colon, self.project / "own.gitconfig"]
+        (dotfiles / "gitconfig").write_text(
+            "".join(f"[include]\n\tpath = {path}\n" for path in [*named, kept])
+        )
+        os.symlink(dotfiles / "gitconfig", self.home / ".gitconfig")
+        launched = self.launch()
+        flags = [call for call in launched.calls if call[0] == "run"][-1]
+        mounts = [flag for flag in flags if flag.startswith("--volume=")]
+        for path in [*named, beyond]:
+            assert not [flag for flag in mounts if str(path) in flag], path
+        # What is no secret is mounted as before, and once
+        assert mounts.count(f"--volume={kept}:{kept}:ro,z") == 1
+        assert mounts.count(f"--volume={inner}:{inner}:ro,z") == 1
+        said = launched.stderr
+        ssh = self.home / ".ssh"
+        assert f"{key}, which the git config includes, is not mounted: {ssh}" in said
+        assert f"{dotfiles / 'key'}, which the git config includes" in said
+        assert f"{secret}, which the git config includes, is not mounted: its" in said
+        assert f"{colon}, which the git config includes, is not mounted: docker" in said
+        assert "own.gitconfig, which" not in said
+        assert launched.status == 0
+
     def test_a_docker_that_does_not_answer_holds_the_launcher_no_longer(self, capsys):
         hung = self.work / "bin" / "docker"
         hung.write_text("#!/bin/sh\nexec sleep 30\n")

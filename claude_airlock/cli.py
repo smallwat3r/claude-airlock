@@ -268,6 +268,7 @@ def session_run_args(
         plan.protected,
     )
     hidden = hidden_files(settings, host, dirs)
+    mounted = [host.project_dir, *(extra.path for extra in dirs)]
     return [
         *base_args(settings, host, name, runtime),
         *session_args(plan.action, os.environ),
@@ -278,10 +279,8 @@ def session_run_args(
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
-        *git_config_args(host),
-        *own_statusline_args(
-            settings, host, [host.project_dir, *(extra.path for extra in dirs)]
-        ),
+        *git_config_args(settings, host, mounted),
+        *own_statusline_args(settings, host, mounted),
         *hidden.args(host),
     ]
 

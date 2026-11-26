@@ -159,6 +159,77 @@ class TamperingTest(LauncherTest):
             watched.hash_git_config(str(config), after)
         assert tampered.differing(before, after) == [str(large)]
 
+    def test_the_users_git_config_a_session_could_write_is_reported(self):
+        # Dotfiles kept in the project, ~/.gitconfig a link into them: git
+        # on the host runs what the session set there, wherever it is run
+        kept = self.project / "gitconfig"
+        kept.write_text("[user]\n\tname = mine\n")
+        home_config = self.home / ".gitconfig"
+        home_config.symlink_to(kept)
+        planted = r'printf "[core]\n\tfsmonitor = evil\n"'
+        result = self.launch(session=f"{planted} >> gitconfig")
+        assert self.REPORT in result.stderr
+        assert f"  {home_config}\n" in result.stderr
+        # One of the home that includes a file of the project, which the
+        # session changed: that file is named
+        home_config.unlink()
+        home_config.write_text(f"[include]\n\tpath = {self.project}/work.gitconfig\n")
+        work = self.project / "work.gitconfig"
+        work.write_text("[user]\n\tname = work\n")
+        result = self.launch(session=f"{planted} >> work.gitconfig")
+        assert f"  {work}\n" in result.stderr
+        assert f"  {home_config}\n" not in result.stderr
+        # And not one no session could write: its changes are the user's
+        result = self.launch(session=f"{planted} >> ~/.gitconfig")
+        assert self.REPORT not in result.stderr
+        xdg = self.home / ".config" / "git"
+        xdg.mkdir(parents=True)
+        (xdg / "config").symlink_to(kept)
+        result = self.launch(session=f"{planted} >> gitconfig")
+        assert f"  {xdg / 'config'}\n" in result.stderr
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root looks into what is closed")
+    def test_a_directory_closed_to_the_check_is_reported(self, cleanup):
+        (self.project / "src").mkdir()
+        # Opened again for the files to be removed once the test is over
+        for opened in ("src", ".git/hooks"):
+            cleanup.callback(os.chmod, self.project / opened, 0o755)
+        # The files are found by their names all the same, by make and git
+        planted = "echo x > src/Makefile && chmod 311 src"
+        result = self.launch(session=planted)
+        closed = "cannot be looked into, what is in it"
+        assert f"  {self.project}/src: {closed}\n" in result.stderr
+        hooks = "echo x > .git/hooks/pre-commit && chmod 311 .git/hooks"
+        result = self.launch(session=hooks)
+        assert self.REPORT in result.stderr
+        assert f"  {self.project}/.git/hooks: {closed}\n" in result.stderr
+        # One that was closed as the session started is no change of its
+        assert closed not in self.launch().stderr
+
+    def test_git_reads_no_config_but_the_one_it_is_asked_about(self, cleanup):
+        # From the project, git would take its repository for its own and
+        # read the config there, a pipe a session left for it to wait on
+        for name in ("a", "b"):
+            subprocess.run(
+                ["git", "init", "-q", str(self.project / "vendor" / name)], check=True
+            )
+        config = self.project / ".git" / "config"
+        config.unlink()
+        os.mkfifo(config)
+        cleanup.enter_context(contextlib.chdir(self.project))
+        # Nor the one the launcher could be told of, nor the user's own,
+        # which can include what is no config
+        (self.home / ".gitconfig").write_text("[include]\n\tpath = ~/.netrc\n")
+        (self.home / ".netrc").write_text("machine x login y\n")
+        told = {"GIT_DIR": str(self.project / ".git"), "HOME": str(self.home)}
+        cleanup.enter_context(unittest.mock.patch.dict(os.environ, told))
+        started = time.monotonic()
+        with unittest.mock.patch.object(watched, "GIT_SECONDS", 5.0):
+            for name in ("a", "b"):
+                nested = self.project / "vendor" / name / ".git" / "config"
+                assert watched.git_listing(str(nested)) is not None
+        assert time.monotonic() - started < 5
+
     def test_a_hooks_directory_an_included_config_names_is_watched(self):
         (self.project / ".git" / "config").write_text(
             "[include]\n\tpath = ../shared.gitconfig\n"
@@ -190,6 +261,21 @@ class TamperingTest(LauncherTest):
         (self.project / ".husky").mkdir()
         result = self.launch(session="echo x > .husky/pre-commit")
         assert f"  {self.project}/.husky/pre-commit\n" in result.stderr
+
+    def test_a_hook_where_a_config_of_this_repository_alone_says_is_reported(self):
+        # Included on a condition of where the repository is, which git
+        # tells only of a repository it is told is the one
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        with open(self.project / ".git" / "config", "a") as config:
+            config.write(
+                f'[includeIf "gitdir:{self.project}/"]\n\tpath = ../hooks.gitconfig\n'
+            )
+        (self.project / "hooks.gitconfig").write_text(
+            "[core]\n\thooksPath = .githooks\n"
+        )
+        (self.project / ".githooks").mkdir()
+        result = self.launch(session="echo x > .githooks/pre-commit")
+        assert f"  {self.project}/.githooks/pre-commit\n" in result.stderr
 
     def test_a_git_directory_told_to_read_another_is_reported(self):
         # With a commondir, git takes its config and hooks from where

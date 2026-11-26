@@ -49,6 +49,10 @@ What a session is given and what it is kept from.
   stays on the host, as git's `store` helper keeps passwords in clear
   there. There is no gpg in the image, so sign the commits on the host
   before pushing.
+- Not an included file that is kept out of every session, or named as a
+  file of secrets is, nor what that one includes: a config kept in a
+  repository a session was given can name any file, for the next launch
+  to mount. The launcher says which it left out.
 - The file `~/.claude/settings.json` runs as its statusline, read-only,
   when it is a file of your home directory, see
   [Statusline](#statusline).
@@ -248,6 +252,11 @@ rather than locked: the launcher warns when a session changed one.
   `rules`, `output-styles`, `workflows` and `routines` of `.claude`.
 - In `~/.claude`: the plugins, and what `CLAUDE_AIRLOCK_RW_CONFIG=1` made
   writable.
+- Your own git config, `~/.gitconfig` and `~/.config/git/config`, with
+  the files they include, where a session could write one: it is, or
+  leads to, a file of the project or of an extra directory, as dotfiles
+  kept in a repository often are. Git on the host runs what it says
+  (`core.fsmonitor`, an alias) wherever it is run.
 
 Said apart, as something to read before you build, test or commit there:
 
@@ -297,7 +306,9 @@ Said apart too, as something to read before the next session here:
 All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:
 `node_modules`, `.venv`, and the working trees of `--worktree`, each the
-whole project again.
+whole project again. A directory the check cannot list is named as one
+it cannot look into, when a session made it so: a file in it is found by
+its name all the same, by make, git and Claude.
 
 The check is bounded, a session can write any number of files of any
 size: 5000 files of each watched directory, 1000 of what Claude remembers
