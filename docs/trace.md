@@ -31,7 +31,7 @@ network, in the order it happened.
 2026-01-02 10:02:41  claude   bash        $ npm ci
 2026-01-02 10:02:41  claude   bash        why: Install the dependencies
 2026-01-02 10:02:41  claude   bash        result: ok, 8.2s, 14 lines out
-2026-01-02 10:02:42  sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  x4
+2026-01-02 10:02:42  sandbox  net         [n1..n4] tcp/https registry.npmjs.org (104.16.3.35):443  x4
 2026-01-02 10:03:05  claude   edit        file: /home/me/code/api/Makefile
 2026-01-02 10:03:05  claude   edit        diff: -	go build ./..
 2026-01-02 10:03:05  claude   edit        diff: +	go build ./...
@@ -91,7 +91,8 @@ through your pager.
   of its own, named after its call (`of: $ make`), or as `of: a call the
   transcript does not have` under the tool `?`.
 - The same thing on the network several times in a row is one line with
-  how often (`x4`).
+  how often (`x4`), and with the numbers of the first and the last of
+  them (`[n1..n4]`, see [The network](#the-network)).
 - When several sessions of the project ran at the same time, the trace of
   one has what the others did on the network too, each of those lines
   starting with the name of its container (`[claude-api-2]`).
@@ -308,19 +309,21 @@ namespace. It records where a connection went and how it ended, not what
 was sent: of HTTPS neither the URL nor the content.
 
 ```
-sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
-sandbox  net         tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
-sandbox  net         tcp/https api.anthropic.com (160.79.104.10):443  left open, at least 4 MB out, 1 MB in  (no call running)
-sandbox  net         tcp/proxy claude-egress-proxy (172.20.0.2):3128  asked for registry.npmjs.org:443  closed after 8.1s, 2 kB out, 41 MB in
-sandbox  net         tcp 203.0.113.9:8443  speaks TLS  closed after 0.4s, 1 kB out, 3 kB in
-sandbox  net         tcp/https cdn.example (203.0.113.7):443  FLAGGED: its hello asks for other.example, it was reached as cdn.example
-sandbox  net         tcp IN from 172.20.0.9 to its port 8080  closed after 0.2s, 1 kB out, 2 kB in
+sandbox  net         [n1] tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in  during: $ npm ci
+sandbox  net         [n2] tcp/postgres 10.0.0.7:5432  REFUSED  during: $ make test
+sandbox  net         [n3] tcp/https api.anthropic.com (160.79.104.10):443  left open, at least 4 MB out, 1 MB in  (no call running)
+sandbox  net         [n4] tcp/proxy claude-egress-proxy (172.20.0.2):3128  asked for registry.npmjs.org:443  closed after 8.1s, 2 kB out, 41 MB in
+sandbox  net         [n5] tcp 203.0.113.9:8443  speaks TLS  closed after 0.4s, 1 kB out, 3 kB in
+sandbox  net         [n6] tcp/https cdn.example (203.0.113.7):443  left open
+sandbox  net         [n6] tcp/https cdn.example (203.0.113.7):443  FLAGGED: its hello asks for other.example, it was reached as cdn.example
+sandbox  net         [n7] tcp IN from 172.20.0.9 to its port 8080  closed after 0.2s, 1 kB out, 2 kB in
 sandbox  net         udp/https www.google.com (142.250.74.4):443  212 packets, 31 kB out
 sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually long name
 ```
 
 | On the line | Means |
 | --- | --- |
+| `[n3]` | The number of the connection, on every line that tells of it. What was sent over it and what came back have it too, with a number of their own after it (`[n3.8]`), see [On the wire](#on-the-wire) |
 | `closed after` | How long the connection was open, with the bytes each way |
 | `left open` | It had not ended when the session did, with how much it had carried by then when that is 4 kB or more: no less than that, see [What comes in](#what-comes-in) |
 | `REFUSED`, `NO ANSWER` | The other end refused, or did not answer |
@@ -335,6 +338,13 @@ sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually lo
 The name of a destination is what the session looked up or asked for, the
 address is what was reached. Trust the address where the two matter.
 
+- A connection has a number, in the order the connections of the trace
+  were made, those made to the session among the others. It is what
+  ties the lines of one connection together, a session keeps several
+  to one place: the trace of another span of time numbers them from 1
+  again, and so does `--trace --follow`, each time it is started.
+  `--json` tells a connection by its `source_port`, its `address` and
+  `port`, and when it was `opened`.
 - The name is the one the address had when the connection was made: the
   last answer before it, so a lookup made later does not rename it. An
   answer counts when it comes from a resolver in reply to a query the
@@ -469,7 +479,7 @@ time that is 16 MB more one way, no more often than every 10 seconds,
 while the session is followed and in line mode:
 
 ```
-sandbox  net         tcp/https releases.example (203.0.113.20):443  still open after 42s, 2 kB out, 160 MB in so far
+sandbox  net         [n9] tcp/https releases.example (203.0.113.20):443  still open after 42s, 2 kB out, 160 MB in so far
 ```
 
 Not one to the model's API, whose every upload and answer has a line,
@@ -576,7 +586,7 @@ on to do. Unless `CLAUDE_AIRLOCK_PROC_LOG=0`, a second sidecar notes each
 process it sees in the session and which one holds each connection:
 
 ```
-sandbox  net   tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
+sandbox  net   [n5] tcp/https example.com (93.184.215.14):443  closed after 0.2s, 1 kB out, 2 kB in  by: [812] curl -sS https://example.com < bash < claude  during: $ make deploy
 ```
 
 A socket that starts to wait for connections is a line too (`listen`),
@@ -771,7 +781,7 @@ claude   request  claude-fable-5-2  sent 415 kB: tools 61 kB, system 14 kB, mess
 | `no step of the transcript` | The answer is no step of the session's transcript nor of those of its subagents: the model was asked besides the conversation |
 | `of session` | Claude Code says the request is of another session of the project, which ran at the same time or went on in the same container (`/clear`) |
 | `NO ANSWER was noted` | The request was written out and no answer to it was by the time the session was over: a turn that was interrupted, or a request that failed |
-| `wire:` | Where the capture saw the request go: how much was sent to the model's API in one go, when, and on which connection, by when that was opened. See [On the wire](#on-the-wire) |
+| `wire:` | Where the capture saw the request go: the upload to the model's API that carried it, by its number, and how much that sent in one go. See [On the wire](#on-the-wire) |
 
 The header says how many there were, how much they sent in all and where
 the bodies are:
@@ -832,9 +842,9 @@ the model is one, the conversation sent again, and so is a push or a
 file sent somewhere:
 
 ```
-sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  upload of 414 kB in 0.3s
-sandbox  net      tcp/ssh github.com (140.82.121.4):22  upload of 2 MB in 1.4s  by: [812] ssh git@github.com < git < bash < claude  during: $ git push
-sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  closed after 660.0s, 4 MB out, 1 MB in, 44 uploads
+sandbox  net      [n2.8] tcp/https api.anthropic.com (160.79.104.10):443  upload of 414 kB in 0.3s
+sandbox  net      [n5.1] tcp/ssh github.com (140.82.121.4):22  upload of 2 MB in 1.4s  by: [812] ssh git@github.com < git < bash < claude  during: $ git push
+sandbox  net      [n2] tcp/https api.anthropic.com (160.79.104.10):443  closed after 660.0s, 4 MB out, 1 MB in, 44 uploads
 ```
 
 ```
@@ -845,6 +855,10 @@ sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  closed after 
 - An upload of 4 kB or more is a `net` line, at the time it began. One
   shorter is what keeps a connection going, its handshake, or a request
   that asks for something and sends little: a `GET` is none.
+- An upload starts with the number of its connection, then which of the
+  uploads of that length over that connection it is: `[n2.8]` is the
+  eighth over the connection whose own lines start with `[n2]`. What
+  came back for it starts with the same.
 - A connection says how many uploads of that length went over it.
 - An upload says which process made its connection, with the record
   of the processes, as a connection does. One to anywhere but the
@@ -874,7 +888,7 @@ What the model's API sends back after an upload is its answer, a line
 when it is over:
 
 ```
-sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  answer of 38 kB in 14.2s, began 1.2s after the upload of 10:02:41
+sandbox  net      [n2.8] tcp/https api.anthropic.com (160.79.104.10):443  answer of 38 kB in 14.2s, began 1.2s after its upload
 ```
 
 ```
@@ -883,16 +897,16 @@ sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  answer of 38 
 
 - An answer is what came in on the connection of an upload after the
   last of it was sent, until the next thing of 4 kB or more was sent
-  there. It says how long after the last of the upload it began, how
-  much it was and for how long it came: the model sends what it makes
-  as it makes it. What comes in while the upload is still being sent
+  there. It starts with the number of that upload, and says how long
+  after the last of the upload it began, how much it was and for how
+  long it came: the model sends what it makes as it makes it. What comes in while the upload is still being sent
   is not its answer, on a connection that was just made that is the
   other end's side of the handshake. What the other end says of such a
   connection right after a short first request does count, and that
   answer then reads as begun sooner than the model began it.
 - One that was quiet for more than 10 seconds is taken to be over, and
-  what comes after that is `the rest of the answer to the upload of`
-  that time, on a line of its own.
+  what comes after that is `the rest of its answer`, on a line of its
+  own with the same number.
 - Two requests sent over one connection at the same time have their
   answers come back together, as one answer to the later of the two.
 - The capture keeps no more of those packets than their headers and a
@@ -908,10 +922,10 @@ With `CLAUDE_AIRLOCK_API_LOG=1` the two records are put side by side,
 what Claude Code says it sent and what was seen to go:
 
 ```
-claude   request  claude-fable-5-2  sent 412 kB: ...  kept as 000041  wire: 414 kB at 10:02:41 on the connection of 10:02:11
-agent    request  claude-haiku-5-5  sent 53 kB: ...  kept as 000042  agent:builtin:general-purpose  wire: with another request in 467 kB at 10:02:44 on the connection of 10:02:11
+claude   request  claude-fable-5-2  sent 412 kB: ...  kept as 000041  wire: [n2.8] 414 kB
+agent    request  claude-haiku-5-5  sent 53 kB: ...  kept as 000042  agent:builtin:general-purpose  wire: with another request in [n2.9] 467 kB
 claude   request  claude-fable-5-2  sent 415 kB: ...  kept as 000044  wire: no upload of its size seen
-sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  upload of 12 kB in 0.1s, no request noted for it
+sandbox  net      [n2.11] tcp/https api.anthropic.com (160.79.104.10):443  upload of 12 kB in 0.1s, no request noted for it
 ```
 
 ```
@@ -926,10 +940,13 @@ sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  upload of 12 
   before it took. The nearest in length of those. `wire:` says how much
   the upload sent, which should be a little more than the request: the
   encryption and the headers of the request come on top.
-- The connection is named by when it was opened, the time of its `net`
-  line. `--json` has it whole as `wire`: `address`, `port`,
-  `source_port`, `opened`, and of the upload `at`, `seconds`, `bytes`
-  and whether it is `shared` with another request.
+- The upload is named by its number, which the answer to the request
+  starts with too, and whose first part is the number of the
+  connection. One over a connection the capture did not see open says
+  so (`on a connection not seen to open`). `--json` has it whole as
+  `wire`: `address`, `port`, `source_port`, `opened`, and of the upload
+  `at`, `seconds`, `bytes` and whether it is `shared` with another
+  request.
 - A request that shares its upload with the one before says
   `with another request in`.
 - `no upload of its size seen` says the capture saw nothing of that
@@ -1028,16 +1045,24 @@ it, so it can be started and stopped at any time.
 # session     3fa9c0de-...  Fix the build
 2026-01-02 10:02:41  claude   bash        [7] $ npm ci
 2026-01-02 10:02:41  claude   bash        why: Install the dependencies
-2026-01-02 10:02:42  sandbox  net         tcp/https registry.npmjs.org (104.16.3.35):443  during: [7] $ npm ci
+2026-01-02 10:02:42  sandbox  net         [n4] tcp/https registry.npmjs.org (104.16.3.35):443  during: [7] $ npm ci
 2026-01-02 10:02:49  claude   bash        [7] result: ok, 8.2s, 14 lines out
+2026-01-02 10:02:50  sandbox  net         [n4] tcp/https registry.npmjs.org (104.16.3.35):443  closed after 8.1s, 2 kB out, 41 MB in
+2026-01-02 10:02:52  agent    grep        [a2.3] pattern: go build
 ```
 
 - A tool call shows when it is issued, and its result on a line of its own
   when that comes. The two have the same number (`[7]`).
+- Each subagent counts its calls on its own. One has a number from when
+  it first does something, which its lines start with (`[a2]`), and its
+  calls and their results have theirs after that: `[a2.3]` is the third
+  call of the second subagent.
 - A connection shows half a second after it was made, with what is
   known of it by then: the process that made it, what it asked a proxy
   for. What became of it is a line of its own when it ends, and how far
-  it has got while it is open, see [What comes in](#what-comes-in).
+  it has got while it is open, see [What comes in](#what-comes-in). All
+  with the number of the connection (`[n4]`), as what is sent over it
+  and what comes back are, see [On the wire](#on-the-wire).
 - A destination no session of the project was noted to reach before
   says so where it is first reached (`NEW for this project`, `new` in
   `--json`), by the record the launcher keeps of what each project

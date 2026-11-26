@@ -53,7 +53,8 @@ and CPU the sandbox uses](img/line-mode.png)
   open to it or mounted beyond the defaults.
 - Each tool call, with the reason claude gives for it, and its result:
   the files a command changed, and who allowed the call when that was
-  not the permission mode.
+  not the permission mode. The two start with the number of the call
+  (`[7]`).
 - What claude was given besides your prompts: the files of instructions
   it read (each `CLAUDE.md`), a file that changed since it read it, a
   line you typed while it worked.
@@ -62,7 +63,8 @@ and CPU the sandbox uses](img/line-mode.png)
   and again when they change.
 - Each reply, and what its subagents do: each call of theirs, and how
   many of them run and how far each is, see
-  [The subagents](#the-subagents).
+  [The subagents](#the-subagents). The lines of one subagent start
+  with its number (`[a2]`), its calls with theirs after it (`[a2.3]`).
 - What the session writes besides, to its errors or as a line that is no
   message of Claude Code's. No more of it than can be read: past 500
   lines within 5 seconds a line says how many more were left out, and
@@ -80,11 +82,13 @@ and CPU the sandbox uses](img/line-mode.png)
   [The requests to the model](trace.md#the-requests-to-the-model).
 - Every connection the session opens, with the process that made it,
   and how it ended: closed after how long and how much it carried, or
-  what went wrong (`REFUSED`, `NO ANSWER`). One to a destination the
-  project did not reach before says so (`NEW for this project`), one
-  through a proxy what it asked the proxy for, and one that is not what
-  it looks is `FLAGGED`: a hello for another name than it was reached
-  by, a port that speaks something else than its use, see
+  what went wrong (`REFUSED`, `NO ANSWER`). Every line of one starts
+  with its number (`[n2]`), and so does what is sent over it and what
+  comes back (`[n2.8]`). One to a destination the project did not
+  reach before says so (`NEW for this project`), one through a proxy
+  what it asked the proxy for, and one that is not what it looks is
+  `FLAGGED`: a hello for another name than it was reached by, a port
+  that speaks something else than its use, see
   [What a connection is](trace.md#what-a-connection-is).
 - Every connection made to the session from outside it (`IN from`), and
   each socket that starts to wait for them on more than its own

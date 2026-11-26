@@ -36,6 +36,7 @@ from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
 from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import stream
+from claude_airlock.report.layout import Layout
 from claude_airlock.report.transcript import WalkOptions
 from claude_airlock.settings import Host
 
@@ -230,6 +231,56 @@ class FollowTest(LauncherTest):
         assert "$ echo during the follow" in shown
         assert "$ echo before the follow" not in shown
 
+    def test_what_a_subagent_does_says_which_subagent_it_is_of(self):
+        theirs = self.file.with_suffix("") / "subagents"
+        theirs.mkdir(parents=True)
+        # One that did something before the following began, and no more
+        add(theirs / "agent-a0.jsonl", call("s0", "Bash", command="echo before"))
+        host = Host(str(self.home), str(self.project), "", str(self.state))
+        follower = follow.Follower(host, verbose=False)
+
+        def of_agent(entry: dict) -> dict:
+            return {**entry, "isSidechain": True}
+
+        def says(text: str, second: int) -> dict:
+            said = {"content": [{"type": "text", "text": text}]}
+            return of_agent(
+                {"type": "assistant", "timestamp": at(second), "message": said}
+            )
+
+        with mock.patch.object(follow.CaptureSidecar, "running", return_value=[]):
+            follower.poll()
+            # Two at work side by side, each in a transcript that counts
+            # its calls from 1, as that of claude does
+            add(self.file, call("t1", "Bash", command="make"))
+            add(
+                theirs / "agent-a1.jsonl",
+                says("looking for the bug", 1),
+                of_agent(call("s1", "Bash", 2, command="grep bug")),
+                of_agent(result("s1", "found", 4)),
+            )
+            add(
+                theirs / "agent-a2.jsonl",
+                of_agent(call("s1", "Bash", 3, command="pytest")),
+                of_agent(call("s2", "Read", 5, file_path="go.mod")),
+            )
+            shown = []
+            for _ in range(follow.LOOK_EVERY + 1):
+                shown += [event for _, event in follower.poll().events]
+        said = "".join(line + "\n" for line in Layout().events(shown))
+        for expected in (
+            "claude   bash        [1] $ make\n",
+            # Numbered when it first does something, not one that does
+            # nothing: what it says by its number, its calls after that
+            "agent    reply       [a1] looking for the bug\n",
+            "agent    bash        [a1.1] $ grep bug\n",
+            "agent    bash        [a1.1] of: $ grep bug\n",
+            "agent    bash        [a2.1] $ pytest\n",
+            "agent    read        [a2.2] file: go.mod\n",
+        ):
+            assert expected in said, said
+        assert "echo before" not in said
+
     def test_subagents_past_those_that_are_followed_are_said_once(self):
         theirs = self.file.with_suffix("") / "subagents"
         theirs.mkdir(parents=True)
@@ -305,7 +356,7 @@ class FollowTest(LauncherTest):
         # The session was ended there. A day later it goes on, and the
         # model takes its next step: no result of the call comes any more
         left, issued = taken(120, call("t3", "Bash", command="ls"), step="m2")
-        assert (left.number, left.details) == (1, ["of: $ run t1", transcript.WENT_ON])
+        assert (left.link, left.details) == ("1", ["of: $ run t1", transcript.WENT_ON])
         assert left.fields == {"stage": Stage.RESULT, "tool": "Bash", "id": "t1"}
         assert issued.details == ["$ ls"]
         assert reached(110) == ["during: [3] $ ls"]
@@ -511,7 +562,9 @@ class FollowNetworkTest(LauncherTest):
         following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
         shown = following.until("203.0.113.9")
         assert "# network     following the capture of claude-proj" in shown
-        assert "sandbox  net         tcp/https good.test (198.51.100.7):443" in shown
+        assert (
+            "sandbox  net         [n1] tcp/https good.test (198.51.100.7):443" in shown
+        )
         assert "lookup" not in shown
         # Made a while ago: a connection is shown once it has had the
         # moment in which what tells of it comes
@@ -525,7 +578,8 @@ class FollowNetworkTest(LauncherTest):
             growing.write(more[-10:])
         add(self.file, self.last)
         shown = following.until(DONE)
-        assert shown.count("sandbox  net         tcp/redis 192.0.2.44:6379") == 1
+        # Numbered after those the capture had before
+        assert shown.count("sandbox  net         [n4] tcp/redis 192.0.2.44:6379") == 1
         assert "198.51.100.7" not in shown
         # Every part of the capture is read by one command, from where
         # each was read to
@@ -795,7 +849,9 @@ class FollowNetworkTest(LauncherTest):
         )
         following = Following(self, FAKE_PS=self.ps, FAKE_CAPTURE=str(captured))
         shown = following.until(them)
-        assert "sandbox  net         tcp IN from 172.20.0.9 to its port 8080" in shown
+        assert (
+            "sandbox  net         [n1] tcp IN from 172.20.0.9 to its port 8080" in shown
+        )
 
 
 class CaptureTailTest:
@@ -897,6 +953,8 @@ class CaptureTailTest:
         opened, closed = self.fed(tail, [])
         assert (opened.fields["stage"], closed.fields["stage"]) == ("open", "outcome")
         assert closed.fields["opened"] == opened.when
+        # What became of it is tied to the line that said it opened
+        assert (old.link, opened.link, closed.link) == ("n1", "n2", "n2")
         assert self.fed(tail, []) == []
 
     def test_what_is_known_a_moment_later_is_on_the_line_of_the_connection(self):
@@ -955,6 +1013,8 @@ class CaptureTailTest:
             now[0] += 2
             (later,) = tail._still_open()
             assert later.fields["bytes_in"] == 3 * step
+            # Each by the number of the connection
+            assert (event.link, later.link) == ("n1", "n1")
         # A line of its own is not what a call is said to have made
         timeline = stream.Timeline()
         timeline.take(event)

@@ -1748,7 +1748,8 @@ class CaptureSessionTest(LauncherTest):
             "#   tcp/postgres 10.0.0.7:5432 x1",
             f"#   tcp sni.test (203.0.113.9):{UNNAMED} x1",
             "#   dns 1 names looked up",
-            "sandbox  net         tcp/postgres 10.0.0.7:5432",
+            # The second connection that was made
+            "sandbox  net         [n2] tcp/postgres 10.0.0.7:5432",
         ):
             assert expected in stdout
         assert ":8000" not in stdout
@@ -1781,7 +1782,7 @@ class CaptureSessionTest(LauncherTest):
             "#   tcp/https [2001:db8::9]:443 x1",
             "#   dns 1 lookups FLAGGED, see --failed",
             "sandbox  net         udp/https quic.test (198.51.100.8):443  1 packet, 108 B out",
-            "sandbox  net         tcp/https [2001:db8::9]:443",
+            "sandbox  net         [n1] tcp/https [2001:db8::9]:443",
             f"sandbox  dns         lookup {tunnel} A FLAGGED: an unusually long name",
         ):
             assert expected in stdout
@@ -1828,10 +1829,12 @@ class CaptureSessionTest(LauncherTest):
         stdout = self.detailed("--verbose")
         during = "  during: $ curl plain.test/a\n"
         for expected in (
-            "tcp/http 198.51.100.7:80  closed after 1.0s, 2 kB out, 20 kB in" + during,
+            # Each connection by its number, in the order they were made
+            "[n1] tcp/http 198.51.100.7:80  closed after 1.0s, 2 kB out, 20 kB in"
+            + during,
             "net         http GET http://plain.test/a" + during,
-            "tcp/https 198.51.100.8:443  REFUSED" + during,
-            "tcp/ssh 198.51.100.7:22  (no call running)\n",
+            "[n2] tcp/https 198.51.100.8:443  REFUSED" + during,
+            "[n3] tcp/ssh 198.51.100.7:22  (no call running)\n",
             "dns         lookup nope.test A FAILED: no such name\n",
             "#   1 connections REFUSED or without an answer",
             "#   http 1 requests in the clear",
@@ -1841,7 +1844,9 @@ class CaptureSessionTest(LauncherTest):
     def test_what_went_wrong_on_the_network_stands_out(self):
         coloured = self.detailed("--verbose", FORCE_COLOR="1")
         alert = "\x1b[1;31msandbox  "
-        assert alert + "net         tcp/https 198.51.100.8:443  REFUSED" in coloured
+        assert (
+            alert + "net         [n2] tcp/https 198.51.100.8:443  REFUSED" in coloured
+        )
         assert alert + "dns         lookup nope.test" in coloured
 
     def test_json_has_how_a_connection_went(self):

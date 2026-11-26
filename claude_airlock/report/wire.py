@@ -21,6 +21,10 @@ And what came back from the model's API after each upload there (see
 answers.py of recording): how long the answer took to begin, how much it
 was and for how long it came.
 
+An upload, what came back for it and the request it carried are tied by
+one number, which starts with that of their connection (see links.py):
+the three are lines of different times, with others between them.
+
 Of a session behind the egress filter every packet goes to the proxy.
 Where an upload went is then told by what its connection first asked the
 proxy for (CONNECT), which the capture has: an upload over a tunnel to
@@ -36,7 +40,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
 
 from ..events import Event, Kind, Who, flat
 from ..recording.answers import Answer
@@ -45,6 +48,7 @@ from ..recording.model_api import is_model_host
 from ..recording.pcap import Capture
 from ..recording.uploads import ELSEWHERE_PART, UPLOADS_PART, Upload
 from ..settings import EGRESS_PORT
+from .links import Links, links_of
 from .net_events import name_container, name_processes
 from .recorded import Recorded
 from .shown import over, reached, size
@@ -93,10 +97,12 @@ class Sent:
     model's host, see _tunnelled_to_model. Of any other, those sent to
     the addresses of the model's API, which is the part of the capture
     they are in: a name is not taken for it there, the session can ask
-    any proxy it reaches for any name."""
+    any proxy it reaches for any name. With links, the numbers the
+    connections of the capture are told by, see links_of."""
 
     capture: Capture
     filtered: bool = False
+    links: Links | None = None
 
     @property
     def taken(self) -> bool:
@@ -190,15 +196,12 @@ class Wire:
         shared = id(upload) in self._taken
         self._taken[id(upload)] = self._taken.get(id(upload), 0) + (sent or upload.sent)
         connection = capture.connection_of(upload.key, upload.began)
-        opened = (
-            f"the connection of {_clock(connection.when)}"
-            if connection
-            else "a connection not seen to open"
-        )
         among = "with another request in " if shared else ""
-        event.notes.append(
-            f"wire: {among}{size(upload.sent)} at {_clock(upload.began)} on {opened}"
-        )
+        # By the number of the upload, which its answer has too, and
+        # the line of its connection the start of it
+        tied = links_of(seen.links).of_upload(capture, upload)
+        unseen = "" if connection else " on a connection not seen to open"
+        event.notes.append(f"wire: {among}[{tied}] {size(upload.sent)}{unseen}")
         event.fields["wire"] = {
             **_upload_fields(upload),
             "shared": shared,
@@ -215,10 +218,6 @@ class Wire:
         ]
 
 
-def _clock(when: float) -> str:
-    return f"{datetime.fromtimestamp(when):%H:%M:%S}"
-
-
 def _upload_fields(upload: Upload) -> dict[str, object]:
     source_port, address, port = upload.key
     return {
@@ -232,13 +231,18 @@ def _upload_fields(upload: Upload) -> dict[str, object]:
 
 
 def upload_event(
-    capture: Capture, upload: Upload, to_model: bool, unnoted: bool = False
+    capture: Capture,
+    upload: Upload,
+    to_model: bool,
+    unnoted: bool = False,
+    links: Links | None = None,
 ) -> Event:
     """An upload as an event: where it went, how much and for how long,
     and whether that was the model's API. Unnoted, it is said that no
     request was noted for it, of one to the model by a session whose
     requests are: not said to be wrong, Claude Code asks that host for
-    more than the model."""
+    more than the model. Tied to its connection and to what came back
+    for it by its number, with links those the capture is told by."""
     source_port, address, port = upload.key
     connection = capture.connection_of(upload.key, upload.began)
     asked = connection.asked if connection else ""
@@ -263,25 +267,25 @@ def upload_event(
         **({"opened": connection.when} if connection else {}),
         **({"unnoted": True} if unnoted else {}),
     }
-    return Event(upload.began, Who.SANDBOX, Kind.NET, [detail], fields)
+    tied = links_of(links).of_upload(capture, upload)
+    return Event(upload.began, Who.SANDBOX, Kind.NET, [detail], fields, tied)
 
 
-def answer_event(capture: Capture, answer: Answer) -> Event:
+def answer_event(capture: Capture, answer: Answer, links: Links | None = None) -> Event:
     """What came back from the model's API after an upload, as an event
     at the time it began: how much, for how long, and how long after the
     upload it began. The rest of one that was quiet for a while says it
-    is that."""
+    is that. Which upload it is to is said by its number, that of the
+    upload, with links those the capture is told by."""
     source_port, address, port = answer.key
     connection = capture.connection_of(answer.key, answer.began)
     where = reached(capture, address, port, "tcp", answer.began)
     about = f"{size(answer.received)} in {answer.seconds:.1f}s"
     if answer.rest:
-        said = f"the rest of the answer to the upload of {_clock(answer.upload.began)}"
-        detail = f"{where}  {said}, {about}"
+        detail = f"{where}  the rest of its answer, {about}"
     else:
         detail = (
-            f"{where}  answer of {about}, began {answer.waited:.1f}s after the"
-            f" upload of {_clock(answer.upload.began)}"
+            f"{where}  answer of {about}, began {answer.waited:.1f}s after its upload"
         )
     fields: dict[str, object] = {
         "protocol": over("tcp", port),
@@ -299,7 +303,8 @@ def answer_event(capture: Capture, answer: Answer) -> Event:
         **({"opened": connection.when} if connection else {}),
         **({"rest": True} if answer.rest else {}),
     }
-    return Event(answer.began, Who.SANDBOX, Kind.NET, [detail], fields)
+    tied = links_of(links).of_upload(capture, answer.upload)
+    return Event(answer.began, Who.SANDBOX, Kind.NET, [detail], fields, tied)
 
 
 def on_the_wire(
@@ -316,7 +321,7 @@ def on_the_wire(
     With what that comes to as summary rows, none when no capture took
     what a session sends."""
     captured = [
-        (found.session, Sent(found.capture, bool(found.session.ip)))
+        (found.session, Sent(found.capture, bool(found.session.ip), found.links))
         for found in recorded.captured
         if found.capture
         and {UPLOADS_PART, ELSEWHERE_PART} & found.capture.part_packets.keys()
@@ -342,16 +347,17 @@ def on_the_wire(
     for session, seen in captured:
         capture = seen.capture
         unnoted = session.name in noted
+        tied = links_of(seen.links)
         found = [
-            upload_event(capture, upload, to_model=True, unnoted=unnoted)
+            upload_event(capture, upload, True, unnoted, tied)
             for upload in wire.unaccounted(seen)
         ]
         found += [
-            upload_event(capture, upload, to_model=False)
+            upload_event(capture, upload, False, links=tied)
             for upload in seen.others
             if upload.sized
         ]
-        found += [answer_event(capture, answer) for answer in capture.answers.all]
+        found += [answer_event(capture, answer, tied) for answer in capture.answers.all]
         found.sort(key=lambda event: event.when)
         record = recorded.processes_of(session)
         if record:

@@ -466,7 +466,7 @@ def call_label(event: Event) -> str:
     if event.fields.get("tool") != "Bash":
         _, found, value = first.partition(": ")
         first = f"{event.what} {value if found else first}".rstrip()
-    return f"[{event.number}] {first}" if event.number is not None else first
+    return f"[{event.link}] {first}" if event.link else first
 
 
 def written_paths(entries: list[dict]) -> Iterator[str]:

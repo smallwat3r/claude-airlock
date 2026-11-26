@@ -129,9 +129,14 @@ class Event:
     details: list[str]
     # The same as named values, for --json
     fields: dict
-    # Of a tool call that is followed as it runs, and of its result: the
-    # number the two are matched by, in the order the calls were issued
-    number: int | None = None
+    # What ties it to other events, said in brackets ahead of its first
+    # line. A tool call that is followed as it runs and its result have
+    # the number of the call, in the order the calls were issued (7),
+    # those of a subagent after the number of the subagent (a3.7), which
+    # its other lines have alone (a3). A connection and what became of it
+    # have the number of the connection (n2), and each thing sent over it
+    # with what came back that number and its own (n2.8), see links.py.
+    link: str = ""
     # Said ahead of its first line: the container it is of, how it came
     tag: str = ""
     # Said after its first line, each found out after the event was made:

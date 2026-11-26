@@ -30,6 +30,7 @@ from ..recording.pcap import (
 from ..recording.processes import ProcessRecord, shown_lineage
 from ..recording.records import TracedSession
 from ..recording.uploads import LEAST
+from .links import Links, links_of
 from .recorded import Recorded, Traced
 from .shown import (
     DROPPED,
@@ -192,13 +193,15 @@ def _uploads_on(capture: Capture, connection: Connection) -> int:
 def _connection_event(
     capture: Capture,
     connection: Connection,
+    links: Links,
     live: bool = False,
     ending: tuple[float, Went] | None = None,
 ) -> Event:
     """A connection as an event. Of a capture that is all there it says
     how the connection went. Live there are two or more: one as it opens,
     and one for each thing that became of it, ending being when and what
-    (no answer, refused or closed)."""
+    (no answer, refused or closed). Each is tied to the others, and to
+    what went over the connection, by its number, see links.py."""
     address, port = connection.address, connection.port
     fields: dict = {
         "protocol": "tcp" if connection.inbound else over("tcp", port),
@@ -243,7 +246,8 @@ def _connection_event(
     detail = "  ".join(filter(None, [detail, *said]))
     failed = outcome.wrong and not connection.inbound
     wrong = Wrong.THROUGHOUT if failed else Wrong.NO
-    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=wrong)
+    tied = links.of(connection)
+    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, tied, wrong=wrong)
 
 
 def _told_of(connection: Connection) -> dict:
@@ -264,10 +268,11 @@ def _told_of(connection: Connection) -> dict:
 
 
 def _noticed_event(
-    capture: Capture, when: float, what: str, found: Connection
+    capture: Capture, links: Links, when: float, what: str, found: Connection
 ) -> Event:
     """What stands out of a connection, see Capture.noticed of pcap.py,
-    as an event of its own at the time it was found."""
+    as an event of its own at the time it was found, tied to the
+    connection by its number."""
     fields = {
         "protocol": over("tcp", found.port),
         "name": capture.name_of(found.address, found.when),
@@ -279,7 +284,15 @@ def _noticed_event(
     }
     where = reached(capture, found.address, found.port, "tcp", found.when)
     detail = f"{where}  {flat(f'FLAGGED: {what}')}"
-    return Event(when, Who.SANDBOX, Kind.NET, [detail], fields, wrong=Wrong.THROUGHOUT)
+    return Event(
+        when,
+        Who.SANDBOX,
+        Kind.NET,
+        [detail],
+        fields,
+        links.of(found),
+        wrong=Wrong.THROUGHOUT,
+    )
 
 
 def _flow_event(capture: Capture, flow: Flow, live: bool = False) -> Event:
@@ -399,6 +412,7 @@ def capture_events(
     verbose: bool,
     past: Marks | None = None,
     upto: Marks | None = None,
+    links: Links | None = None,
 ) -> list[Event]:
     """One event per connection, made by the session or to it, per place
     something was sent to by another protocol, per plain HTTP request,
@@ -408,19 +422,26 @@ def capture_events(
     being its marks at the last reading, only what came since: a
     connection when it starts, and what became of it as an event of its
     own. No further than upto, when what is shown of a capture is held
-    back, see CaptureTail of follow.py."""
+    back, see CaptureTail of follow.py. With links, the numbers the
+    connections are told by, see links_of: given in the order they were
+    made, those made to the session among the others."""
     live = past is not None
+    tied = links_of(links)
     was, now = past or Marks(), upto or capture.marks()
     started = capture.connections[was.connections : now.connections]
     started += capture.inbound[was.inbound : now.inbound]
-    events = [_connection_event(capture, connection, live) for connection in started]
+    for connection in sorted(started, key=lambda made: made.when):
+        tied.of(connection)
+    events = [
+        _connection_event(capture, connection, tied, live) for connection in started
+    ]
     if live:
         events += [
-            _connection_event(capture, connection, live, (when, what))
+            _connection_event(capture, connection, tied, live, (when, what))
             for when, what, connection in capture.endings[was.endings : now.endings]
         ]
     events += [
-        _noticed_event(capture, *found)
+        _noticed_event(capture, tied, *found)
         for found in capture.noticed[was.noticed : now.noticed]
     ]
     events += [
@@ -592,7 +613,7 @@ def _captured_connections(
     heading = f"  captured in {name} from {began:%H:%M:%S} to {ended:%H:%M:%S}"
     if capture is None:
         return [heading, "  its capture is no longer kept"], []
-    events = capture_events(capture, verbose)
+    events = capture_events(capture, verbose, links=found.links)
     record = recorded.processes_of(session)
     if record:
         name_processes(events, record)

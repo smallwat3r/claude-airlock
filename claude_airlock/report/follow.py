@@ -15,7 +15,8 @@ each socket that waits for them (see procwatch.py).
 
 Three things differ from the trace of a session that is over. A tool call
 is shown when it is issued and its result when that comes, as an event of
-its own, the two having the same number. Of a prompt or a reply only the
+its own, the two having the same number, those of a subagent after the
+number of the subagent (see Walk). Of a prompt or a reply only the
 first line is shown, whoever follows is after what the session does, what
 it says is on its own screen. And a connection is shown half a second
 after it was made, with what is known of it by then: the process that
@@ -44,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import itertools
 import math
 import os
 import sys
@@ -65,7 +67,7 @@ from ..projects import (
     subagents_unread,
     transcript_files,
 )
-from ..recording.answers import OVER
+from ..recording.answers import OVER, Answer
 from ..recording.capture import (
     PARTS,
     CaptureSidecar,
@@ -89,11 +91,12 @@ from ..recording.processes import (
 )
 from ..recording.procwatch import HEALTH_EVERY as SAID_EVERY
 from ..recording.records import recorded_sessions
-from ..recording.uploads import PAUSE
+from ..recording.uploads import PAUSE, Upload
 from ..settings import Host
 from .digest import destination_key, known_destinations
 from .entries import read_entries, session_files, title
 from .layout import Layout, event_json
+from .links import Links
 from .net_events import (
     capture_events,
     listener_events,
@@ -178,7 +181,12 @@ class TranscriptTail:
     held in memory."""
 
     def __init__(
-        self, path: Path, project_dir: str, options: WalkOptions, offset: int = 0
+        self,
+        path: Path,
+        project_dir: str,
+        options: WalkOptions,
+        offset: int = 0,
+        agents: Iterator[int] | None = None,
     ):
         self.path = path
         self._offset = offset
@@ -186,7 +194,8 @@ class TranscriptTail:
         self._partial = b""
         # Whether what is read is the rest of a line that was too long
         self._dropping = False
-        self._walk = Walk(project_dir, options)
+        # With agents, of a subagent: what it does says which it is of
+        self._walk = Walk(project_dir, options, agents=agents)
         self._title: str | None = None
         # The looks in a row that left some of it unread, and whether
         # that was said, see newly_behind
@@ -331,11 +340,36 @@ class Traffic:
         return ", ".join(parts)
 
 
+class NewlyOver[Item]:
+    """Of a list that grows at its end, the items that are over since it
+    was last asked: each is given once, when it is found to be over,
+    whatever those before it are. One that goes on for long does not
+    hold back those that began after it."""
+
+    def __init__(self) -> None:
+        # Those before this place were given, and of those from it on
+        # the ones noted here, each by what it is
+        self._before = 0
+        self._given: set[int] = set()
+
+    def of(self, items: Sequence[Item], over: Callable[[Item], bool]) -> list[Item]:
+        found = []
+        for item in items[self._before :]:
+            if id(item) not in self._given and over(item):
+                self._given.add(id(item))
+                found.append(item)
+        while self._before < len(items) and id(items[self._before]) in self._given:
+            self._given.discard(id(items[self._before]))
+            self._before += 1
+        return found
+
+
 class CaptureTail:
     """The capture of a running session, read as it grows. With known,
     the destinations its project was noted to reach, for the ones that
-    are new to be said, and with filtered, whether the session is behind
-    the egress filter."""
+    are new to be said, with filtered, whether the session is behind
+    the egress filter, and with numbers, the count its connections are
+    numbered by when other captures are too, see links.py."""
 
     def __init__(
         self,
@@ -343,6 +377,7 @@ class CaptureTail:
         verbose: bool,
         known: frozenset[str] | None = None,
         filtered: bool = False,
+        numbers: Iterator[int] | None = None,
     ):
         self.sidecar = sidecar
         self.session = CaptureSidecar.session_of(sidecar)
@@ -350,20 +385,23 @@ class CaptureTail:
         # Where each part of the capture has been read to, and its reader
         self._offsets = {part.name: 0 for part in PARTS}
         self._readers = {part.name: PcapReader() for part in PARTS}
-        # How many of the uploads were looked at, those to the model's
-        # API and those to anywhere else
-        self._uploads_seen = {True: 0, False: 0}
+        # Which of the uploads were shown, those to the model's API and
+        # those to anywhere else, and which of the answers
+        self._uploads_told = {True: NewlyOver[Upload](), False: NewlyOver[Upload]()}
+        self._answers_told = NewlyOver[Answer]()
         # What it has read so far, for what places a request on the wire
         self.capture = Capture()
         self.filtered = filtered
+        # What its lines are tied by, and what it saw go to the model's
+        # API as given out to the requests that are noted, see wire.py:
+        # for as long as the capture is, whose uploads that knows by
+        # what they are
+        self.links = Links(numbers)
+        self.wire = Wire()
         # How much of it was shown, and how much it held at the last
         # look: what was there then has had its moment, see SETTLE
         self._shown = Marks()
         self._read = Marks()
-        # The answers before this one were shown, and of those from it
-        # on the ones that were
-        self._answers_seen = 0
-        self._answers_said: set[int] = set()
         # Of each connection said to be still open, how much it had
         # carried each way then, and when that was
         self._progress: dict[int, tuple[int, int, float]] = {}
@@ -380,7 +418,7 @@ class CaptureTail:
     @property
     def seen(self) -> Sent:
         """What it saw the session send, told apart, see wire.py."""
-        return Sent(self.capture, self.filtered)
+        return Sent(self.capture, self.filtered, self.links)
 
     def poll(self) -> list[Event]:
         """What the capture has since the last time: the connections that
@@ -403,7 +441,9 @@ class CaptureTail:
             )
             self.capture.look_at_hellos()
         upto = self._settled()
-        events = capture_events(self.capture, self._verbose, self._shown, upto)
+        events = capture_events(
+            self.capture, self._verbose, self._shown, upto, self.links
+        )
         self._shown, self._read = upto, self.capture.marks()
         self._say_new(events)
         return [
@@ -470,20 +510,21 @@ class CaptureTail:
         API and to anywhere else, those long enough to be worth a line,
         each as an event: one is over once nothing was sent on its
         connection for longer than the pause that ends it, by the clock
-        of this side."""
+        of this side. Each when it is, see NewlyOver: one that goes on,
+        a long push or a connection that is sent a little to all the
+        time, does not keep the others from showing."""
         events = []
         seen = self.seen
+        quiet = time.time() - UPLOAD_OVER
         parts = ((True, self.capture.uploads), (False, self.capture.elsewhere))
         for to_model, part in parts:
-            uploads = part.all
-            while self._uploads_seen[to_model] < len(uploads):
-                upload = uploads[self._uploads_seen[to_model]]
-                if time.time() - upload.ended <= UPLOAD_OVER:
-                    break
-                self._uploads_seen[to_model] += 1
+            told = self._uploads_told[to_model]
+            for upload in told.of(part.all, lambda sent: sent.ended < quiet):
                 if upload.sized:
                     model = to_model or seen.to_model(upload)
-                    events.append(upload_event(self.capture, upload, model))
+                    events.append(
+                        upload_event(self.capture, upload, model, links=self.links)
+                    )
         return events
 
     def _answers_over(self) -> list[Event]:
@@ -491,21 +532,13 @@ class CaptureTail:
         time, each as an event: one is over once another began on its
         connection, or nothing came on it for longer than the pause that
         ends one, by the clock of this side."""
-        events = []
         answers = self.capture.answers
-        for answer in answers.all[self._answers_seen :]:
-            over = answers.superseded(answer)
-            over = over or time.time() - answer.ended > ANSWER_OVER
-            if over and id(answer) not in self._answers_said:
-                self._answers_said.add(id(answer))
-                events.append(answer_event(self.capture, answer))
-        while (
-            self._answers_seen < len(answers.all)
-            and id(answers.all[self._answers_seen]) in self._answers_said
-        ):
-            self._answers_said.discard(id(answers.all[self._answers_seen]))
-            self._answers_seen += 1
-        return events
+        quiet = time.time() - ANSWER_OVER
+        over = self._answers_told.of(
+            answers.all,
+            lambda answer: answers.superseded(answer) or answer.ended < quiet,
+        )
+        return [answer_event(self.capture, answer, self.links) for answer in over]
 
     def _still_open(self) -> list[Event]:
         """The connections that are still open and have carried a lot
@@ -534,7 +567,9 @@ class CaptureTail:
             more = max(out - said_out, back - said_back) >= PROGRESS_STEP
             if more and now - said_at >= PROGRESS_EVERY:
                 self._progress[id(connection)] = (out, back, now)
-                events.append(_progress_event(self.capture, connection, out, back))
+                events.append(
+                    _progress_event(self.capture, connection, out, back, self.links)
+                )
         return events
 
     def traffic(self) -> Traffic:
@@ -585,10 +620,11 @@ class CaptureTail:
 
 
 def _progress_event(
-    capture: Capture, connection: Connection, out: int, back: int
+    capture: Capture, connection: Connection, out: int, back: int, links: Links
 ) -> Event:
     """A connection that is still open, as an event of now: for how long
-    it has been, and how much it has carried so far."""
+    it has been, and how much it has carried so far. Tied to the line
+    that said it opened by its number."""
     address, port = connection.address, connection.port
     open_for = round(max(time.time() - connection.when, 0.0), 1)
     asked = f"  asked for {flat(connection.asked)}" if connection.asked else ""
@@ -609,7 +645,8 @@ def _progress_event(
         "bytes_out": out,
         "bytes_in": back,
     }
-    return Event(time.time(), Who.SANDBOX, Kind.NET, [detail], fields)
+    tied = links.of(connection)
+    return Event(time.time(), Who.SANDBOX, Kind.NET, [detail], fields, tied)
 
 
 class WatcherTail:
@@ -802,9 +839,12 @@ class Follower:
         # the Docker socket, and what a chat found changed in what Claude
         # Code says
         self._noted = NewlyNoted(host, container)
-        # What the captures saw go to the model's API, given out to the
-        # requests that are noted, see wire.py
-        self._wire = Wire()
+        # What the connections of the captures are numbered by, all of
+        # them by one count, and the subagents that are followed, each
+        # when it first does something: a number is used once in what
+        # is shown, see links.py and Walk
+        self._numbers = itertools.count(1)
+        self._agents = itertools.count(1)
 
     def title(self, path: Path) -> str:
         return self._tails[path].title
@@ -925,12 +965,13 @@ class Follower:
                     continue
                 noted = self._subagent_sizes.pop(path, 0)
                 # A result always names its call: the calls of a subagent
-                # are numbered on their own, as those of its session are
+                # are numbered on their own, after the number it is given
                 tail = TranscriptTail(
                     path,
                     project_root(session, self._host),
                     dataclasses.replace(self._walked, name_results=True),
                     size if self._rounds == 0 else min(noted, size),
+                    self._agents,
                 )
                 self._subagents[path] = (session, tail)
 
@@ -978,7 +1019,9 @@ class Follower:
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
                 self._known = known_destinations(self._host)
-                tail = CaptureTail(sidecar, self._verbose, self._known)
+                tail = CaptureTail(
+                    sidecar, self._verbose, self._known, numbers=self._numbers
+                )
                 self._captures[(sidecar, started)] = tail
                 # No call from before it was started runs in it
                 self._timeline.began(tail.session, started)
@@ -1139,11 +1182,11 @@ class Follower:
         found and the requests to the model, each of those with where
         the capture of its session saw it go."""
         noted = self._noted.poll()
-        captures = {tail.session: tail.seen for tail in self._captures.values()}
+        captures = {tail.session: tail for tail in self._captures.values()}
         for event in noted:
-            seen = captures.get(str(event.fields.get("container")))
-            if event.kind is Kind.REQUEST and seen:
-                self._wire.place(event, seen)
+            tail = captures.get(str(event.fields.get("container")))
+            if event.kind is Kind.REQUEST and tail:
+                tail.wire.place(event, tail.seen)
         found.events += [(None, event) for event in noted]
 
     def traffic(self) -> Traffic:

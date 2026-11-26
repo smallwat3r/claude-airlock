@@ -733,7 +733,9 @@ class TraceTest(LauncherTest):
         def reached(when: float, where: str, **fields: object) -> Event:
             wrong = Wrong.THROUGHOUT if fields else Wrong.NO
             line = f"tcp/https {where}:443"
-            return Event(when, Who.SANDBOX, "net", [line], fields, wrong=wrong)
+            # Each a connection of its own, by its number
+            link = f"n{when:.0f}"
+            return Event(when, Who.SANDBOX, "net", [line], fields, link, wrong=wrong)
 
         said = Event(5.0, Who.CLAUDE, "reply", ["done"], {})
         events = [
@@ -756,6 +758,11 @@ class TraceTest(LauncherTest):
             (7.0, "tcp/https a.test:443"),
         ]
         assert events[0].details == ["tcp/https a.test:443"]
+        # The one that stands for several says from which to which
+        assert [event.link for event in shown] == ["n1..n3", "n4", "", "", "n6", "n7"]
+        assert events[0].link == "n1"
+        (first, *_) = Layout().events(events)
+        assert first.endswith("sandbox  net         [n1..n3] tcp/https a.test:443  x3")
 
     def test_at_a_terminal_an_event_says_when_who_and_what_once(self):
         day = 24 * 3600.0

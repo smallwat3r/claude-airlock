@@ -9,6 +9,7 @@ And of a transcript, what it holds next to what the launcher copied of it
 
 from __future__ import annotations
 
+import itertools
 import subprocess
 from dataclasses import dataclass
 from functools import cached_property
@@ -23,6 +24,7 @@ from ..recording.records import TracedSession, recorded_sessions
 from ..recording.started import stay_between
 from ..settings import Host
 from .entries import read_entries, unreadable_lines
+from .links import Links
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,9 @@ class Traced:
     session: TracedSession
     capture: Capture | None = None
     processes: ProcessRecord | None = None
+    # The numbers the connections of its capture are told by, see
+    # links.py: none without a capture, and for one told of alone
+    links: Links | None = None
 
 
 @dataclass(frozen=True)
@@ -75,15 +80,16 @@ class Recorded:
     @cached_property
     def traced(self) -> list[Traced]:
         """Each session with its capture and the record of its
-        processes."""
-        return [
-            Traced(
-                session,
-                session_capture(self.host, session),
-                session_record(self.host, session),
-            )
-            for session in self.sessions
-        ]
+        processes. The connections of the captures are numbered by one
+        count, see links.py."""
+        numbers = itertools.count(1)
+        found = []
+        for session in self.sessions:
+            capture = session_capture(self.host, session)
+            links = Links(numbers) if capture else None
+            record = session_record(self.host, session)
+            found.append(Traced(session, capture, record, links))
+        return found
 
     @cached_property
     def proxy_log(self) -> ProxyLog | None:

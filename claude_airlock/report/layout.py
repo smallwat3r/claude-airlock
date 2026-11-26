@@ -135,25 +135,32 @@ def folded(events: Iterable[Event]) -> list[Event]:
     """The events with each run of the same thing on the network as one,
     said to have happened so many times. What Claude Code itself keeps
     reaching comes by the dozen, and would bury the one connection that
-    a command made."""
-    runs: list[tuple[Event, int]] = []
+    a command made. Each of a run is tied to other events by a number of
+    its own (see Event.link): the one that stands for them says from
+    which to which they go (n3..n6), the others of those numbers are in
+    it."""
+    runs: list[tuple[Event, int, str]] = []
     for event in events:
-        last, count = runs[-1] if runs else (None, 0)
+        first, count, _ = runs[-1] if runs else (None, 0, "")
         if (
-            last
+            first
             and event.kind in (Kind.NET, Kind.DNS)
             and (event.who, event.what, event.lines)
-            == (last.who, last.what, last.lines)
-            and went_wrong(event) == went_wrong(last)
+            == (first.who, first.what, first.lines)
+            and went_wrong(event) == went_wrong(first)
         ):
-            runs[-1] = (last, count + 1)
+            runs[-1] = (first, count + 1, event.link)
         else:
-            runs.append((event, 1))
+            runs.append((event, 1, event.link))
     return [
         event
         if count == 1
-        else dataclasses.replace(event, notes=[*event.notes, f"x{count}"])
-        for event, count in runs
+        else dataclasses.replace(
+            event,
+            notes=[*event.notes, f"x{count}"],
+            link=event.link if last in ("", event.link) else f"{event.link}..{last}",
+        )
+        for event, count, last in runs
     ]
 
 
@@ -246,7 +253,8 @@ class Layout:
         return [line for event in folded(events) for line in self.event(event)]
 
     def event(self, event: Event) -> list[Shown]:
-        """An event as its lines, a call that has a number named by it."""
+        """An event as its lines, what it is tied to others by ahead of
+        the first, see Event.link."""
         clock = f"{datetime.fromtimestamp(event.when):%Y-%m-%d %H:%M:%S}"
         lines: list[Shown] = []
         if self.compact:
@@ -268,7 +276,7 @@ class Layout:
         ]
         for at, (index, line) in enumerate(shown):
             first = at == 0
-            text = f"[{event.number}] {line}" if first and event.number else line
+            text = f"[{event.link}] {line}" if first and event.link else line
             if self.compact and not first:
                 # Under the first line, which said when, who and what
                 clock, about = " " * len(clock), " " * len(about)

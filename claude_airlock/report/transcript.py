@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat
@@ -197,8 +198,8 @@ class OpenCall:
     # Its event, to add the result to. None in a live walk, where the
     # result is an event of its own.
     event: Event | None
-    # Its number in a live walk, see Event
-    number: int | None = None
+    # What it and its result are tied by in a live walk, see Event.link
+    link: str = ""
     # Where what it reads is said to be from, see said_source
     source: str = ""
 
@@ -208,7 +209,7 @@ def _open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
     and the call itself. Its result is added to the event when the two
     are told as a whole, and is an event of its own when not."""
     name = event.fields["tool"]
-    # Before the event has its number: a result shows that itself
+    # Before the event has what it is tied by: a result shows that itself
     label = (call_label(event) or name)[:CALL_LABEL_WIDTH]
     started = {"timestamp": entry.get("timestamp")}
     source = said_source(block.get("input"))
@@ -274,6 +275,13 @@ class Walk:
     shown. What a live walk remembers is bounded, the transcript is the
     session's to write.
 
+    Live, the walk of a subagent's transcript is given agents, where it
+    takes the number of its subagent from when it has its first event:
+    every event of it then says which subagent it is of (a3), and its
+    calls are numbered after that (a3.1). Several subagents run side by
+    side, each in a transcript of its own that counts its calls from 1,
+    as that of their session does.
+
     Live, a call is taken to run until its result comes. One whose
     result never does is told as that when the model takes its next
     step, which it does once it has the results of the last: the session
@@ -296,6 +304,7 @@ class Walk:
         options: WalkOptions = WalkOptions(),
         usage: dict[str, dict] | None = None,
         other: OtherPart | None = None,
+        agents: Iterator[int] | None = None,
     ):
         self._project_dir = project_dir
         self._verbose = options.verbose
@@ -311,6 +320,10 @@ class Walk:
         self.added = 0
         # How many calls a live walk has seen
         self._calls = 0
+        # Where the walk of a subagent's transcript takes the number of
+        # its subagent from, and that number once it has one
+        self._agents = agents
+        self._agent: int | None = None
         # What each step used when that is known ahead, else the entry
         # that starts a step is taken at its word
         self._usage = usage or {}
@@ -330,7 +343,32 @@ class Walk:
         self._asides = Asides(options.verbose)
 
     def take(self, entry: dict) -> list[Event]:
-        """The events an entry adds."""
+        """The events an entry adds, each of a subagent's transcript
+        that is followed said to be of that subagent, see Walk."""
+        events = self._taken(entry)
+        if self._agents is not None and events:
+            of_agent = self._of_agent()
+            for event in events:
+                event.link = event.link or of_agent
+        return events
+
+    def _of_agent(self) -> str:
+        """What the events of a subagent's transcript are tied by: the
+        number of the subagent, taken when its first event comes."""
+        if self._agents is None:
+            return ""
+        if self._agent is None:
+            self._agent = next(self._agents)
+        return f"a{self._agent}"
+
+    def _link(self) -> str:
+        """What the call a live walk saw last and its result are tied
+        by: how many calls it has seen, of a subagent after the number
+        of the subagent."""
+        of_agent = self._of_agent()
+        return f"{of_agent}.{self._calls}" if of_agent else str(self._calls)
+
+    def _taken(self, entry: dict) -> list[Event]:
         kind = entry.get("type")
         if kind == UNREADABLE:
             return [_unreadable_event(self._when, entry)]
@@ -401,7 +439,7 @@ class Walk:
                 call.name.lower(),
                 ["of: " + call.label, WENT_ON],
                 {"stage": Stage.RESULT, "tool": call.name, "id": name},
-                call.number,
+                call.link,
                 call=True,
             )
             for name, call in left
@@ -496,7 +534,7 @@ class Walk:
         issued = _open_call(event, entry, block, whole=not self._live)
         if self._live:
             self._calls += 1
-            event.number = issued.number = self._calls
+            event.link = issued.link = self._link()
             event.fields = {"stage": Stage.CALL, **event.fields}
             # Of the step its side is at, when the entry names it
             _, in_step = self._at.get(_side_of(who, entry), ("", []))
@@ -585,7 +623,7 @@ class Walk:
             issued.name.lower(),
             details,
             fields,
-            issued.number,
+            issued.link,
             call=True,
         )
         tell_result(event, ended, self._verbose)

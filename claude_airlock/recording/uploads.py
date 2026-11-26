@@ -150,6 +150,17 @@ class Uploads:
         found = sized[at - 1] if at else None
         return found if found and found.began >= since else None
 
+    def place(self, upload: Upload, since: float) -> int:
+        """Which of those sent over its connection an upload is, of the
+        ones long enough to be worth a line: 1 for the first since the
+        connection was made. None of them is 0, one that is too short
+        or is of another part of the capture."""
+        sized = self._sized.get(upload.key, [])
+        first = bisect.bisect_left(sized, since, key=lambda sent: sent.began)
+        at = bisect.bisect_left(sized, upload.began, key=lambda sent: sent.began)
+        found = at < len(sized) and sized[at] is upload
+        return at - first + 1 if found and at >= first else 0
+
     def between(self, start: float, end: float) -> list[Upload]:
         """Those that began between two times, the first first."""
         first = bisect.bisect_left(self.all, start, key=lambda upload: upload.began)

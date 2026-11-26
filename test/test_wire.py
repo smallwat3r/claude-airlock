@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +23,7 @@ from claude_airlock.recording import capture as capture_module
 from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import api_events, wire
 from claude_airlock.report.layout import Layout
+from claude_airlock.report.links import Links
 from claude_airlock.report.net_events import capture_events
 from claude_airlock.report.recorded import Recorded
 
@@ -110,9 +110,6 @@ class WireTest(LauncherTest):
                 part = directory / f"c.pcap.{name}"
                 part.write_bytes(pcap_file(frames, asked=False))
         return capture_module.read_parts(file)
-
-    def clock(self, when: float) -> str:
-        return f"{datetime.fromtimestamp(when):%H:%M:%S}"
 
     def test_what_is_sent_without_a_pause_is_one_upload(self):
         now = self.now
@@ -249,12 +246,13 @@ class WireTest(LauncherTest):
             opened(now - 30), [*sent(now, 80_000, 1), *sent(now + 9, 81_000, 80_001)]
         )
         first, second = request(now - 0.2, 79_500), request(now + 8.9, 80_600)
-        placer = wire.Wire()
-        placer.place(first, wire.Sent(capture))
-        placer.place(second, wire.Sent(capture))
-        connection = f"on the connection of {self.clock(now - 30)}"
-        assert first.notes == [f"wire: 80 kB at {self.clock(now)} {connection}"]
-        assert second.notes == [f"wire: 81 kB at {self.clock(now + 9)} {connection}"]
+        placer, seen = wire.Wire(), wire.Sent(capture, links=Links())
+        placer.place(first, seen)
+        placer.place(second, seen)
+        # By the number of its upload: of its connection, then which of
+        # the uploads over that
+        assert first.notes == ["wire: [n1.1] 80 kB"]
+        assert second.notes == ["wire: [n1.2] 81 kB"]
         assert first.fields["wire"] == {
             "address": API,
             "port": 443,
@@ -274,8 +272,8 @@ class WireTest(LauncherTest):
         placer = wire.Wire()
         placer.place(claudes, wire.Sent(capture))
         placer.place(subagents, wire.Sent(capture))
-        assert claudes.notes[0].startswith("wire: 130 kB at")
-        assert subagents.notes[0].startswith("wire: with another request in 130 kB")
+        assert claudes.notes == ["wire: [n1.1] 130 kB"]
+        assert subagents.notes == ["wire: with another request in [n1.1] 130 kB"]
         assert subagents.fields["wire"]["shared"] is True
 
     def test_a_request_takes_the_upload_of_its_length_not_the_nearest(self):
@@ -387,22 +385,23 @@ class WireTest(LauncherTest):
         self.note(now - 5, 70_000)
         self.write_transcript("0a", prompts_at(now - 40, now + 40))
         stdout = self.launch("--trace").stdout
-        connection = f"on the connection of {self.clock(now - 30)}"
         for expected in (
             "# requests    2 to the model, 149 kB sent, the bodies of 2 NOT KEPT",
             (
                 "# requests    1 seen on the wire, 1 NOT SEEN there,"
                 " 1 uploads to the model's API with no request noted"
             ),
-            f"bodies NOT KEPT  wire: 80 kB at {self.clock(now - 20)} {connection}\n",
+            # The request names the upload it is in, the first over the
+            # connection: the one after it is the one nothing is noted for
+            "bodies NOT KEPT  wire: [n1.1] 80 kB\n",
             f"bodies NOT KEPT  {wire.NOT_SEEN}\n",
             (
-                f"sandbox  net         tcp/https {API}:443  upload of 12 kB in 0.0s,"
-                " no request noted for it\n"
+                f"sandbox  net         [n1.2] tcp/https {API}:443  upload of 12 kB"
+                " in 0.0s, no request noted for it\n"
             ),
             (
-                f"tcp/https {API}:443  left open, at least 92 kB out, 2 uploads"
-                "  (no call running)\n"
+                f"sandbox  net         [n1] tcp/https {API}:443  left open, at least"
+                " 92 kB out, 2 uploads  (no call running)\n"
             ),
         ):
             assert expected in stdout, stdout
@@ -439,11 +438,11 @@ class WireTest(LauncherTest):
         stdout = self.launch("--trace").stdout
         for expected in (
             "# uploads     2 to the model's API, 92 kB sent\n",
-            f"sandbox  net         tcp/https {API}:443  upload of 80 kB in 0.0s\n",
-            f"sandbox  net         tcp/https {API}:443  upload of 12 kB in 0.0s\n",
+            f"sandbox  net         [n1.1] tcp/https {API}:443  upload of 80 kB in 0.0s\n",
+            f"sandbox  net         [n1.2] tcp/https {API}:443  upload of 12 kB in 0.0s\n",
             (
-                f"tcp/https {API}:443  left open, at least 92 kB out, 2 uploads"
-                "  (no call running)\n"
+                f"sandbox  net         [n1] tcp/https {API}:443  left open, at least"
+                " 92 kB out, 2 uploads  (no call running)\n"
             ),
         ):
             assert expected in stdout, stdout
@@ -499,8 +498,10 @@ class WireTest(LauncherTest):
             "# uploads     1 elsewhere, 50 kB sent\n",
             # Of the call it was sent during, as a connection is: not
             # what goes to the model, which no call makes
-            f"tcp/ssh {there}:22  upload of 50 kB in 0.0s  during: $ git push\n",
-            f"tcp/https {API}:443  upload of 80 kB in 0.0s\n",
+            # The second connection that was made, and the first thing
+            # sent over it
+            f"[n2.1] tcp/ssh {there}:22  upload of 50 kB in 0.0s  during: $ git push\n",
+            f"[n1.1] tcp/https {API}:443  upload of 80 kB in 0.0s\n",
         ):
             assert expected in stdout, stdout
         assert "upload of 200 B" not in stdout
@@ -543,8 +544,89 @@ class WireTest(LauncherTest):
         found = follow.Round()
         follower._poll_notes(found)
         ((_, event),) = found.events
-        assert event.notes[0].startswith("wire: 80 kB at ")
-        assert event.notes[0].endswith(f"on the connection of {self.clock(now - 30)}")
+        assert event.notes == ["wire: [n1.1] 80 kB"]
+
+    def test_what_goes_over_a_connection_is_told_by_its_number(self):
+        now = self.now
+        # Two connections from one port to one place, one after the
+        # other: each counts what was sent over it
+        again = [
+            (now - 20, tcp(API, 443, sequence=99_999_999), True),
+            (now - 19.99, answer(API, 443), False),
+        ]
+        capture = self.captured(
+            [*opened(now - 60), *again],
+            [
+                *sent(now - 50, 80_000, 1),
+                *sent(now - 45, 300, 80_001),
+                *sent(now - 40, 60_000, 80_301),
+                *sent(now - 10, 70_000, 100_000_000),
+            ],
+            came_back=came(now - 48, 3_000, 1),
+        )
+        links = Links()
+        made = capture_events(capture, verbose=False, links=links)
+        assert [event.link for event in made] == ["n1", "n2"]
+        went = [
+            wire.upload_event(capture, upload, True, links=links)
+            for upload in capture.uploads.all
+        ]
+        # The one too short for a line is not counted, and has the
+        # number of its connection alone
+        assert [event.link for event in went] == ["n1.1", "n1", "n1.2", "n2.1"]
+        (came_then,) = capture.answers.all
+        assert wire.answer_event(capture, came_then, links).link == "n1.1"
+        (line,) = Layout().events(went[:1])
+        assert line.endswith(
+            f"  sandbox  net         [n1.1] tcp/https {API}:443  upload of 80 kB in 0.0s"
+        )
+        # A capture that did not see a connection open numbers it all
+        # the same, by where it is from and where it goes
+        unseen = self.captured([], sent(now, 80_000, 1))
+        asked = request(now - 0.1, 79_000)
+        wire.Wire().place(asked, wire.Sent(unseen))
+        assert asked.notes == ["wire: [n1.1] 80 kB on a connection not seen to open"]
+
+    def test_an_upload_that_goes_on_does_not_hold_back_those_after_it(self):
+        tail = follow.CaptureTail(f"{CONTAINER}.capture", verbose=False)
+        began, there = time.time() - 3, "198.51.100.7"
+        # Sent to a little all the time, from before the other began
+        # until well after now: it has no pause that ends it
+        going_on = [
+            (began + 0.4 * n, tcp(there, 22, 0x18, b"x" * 1000, 1 + 1000 * n), True)
+            for n in range(20)
+        ]
+        pushed = tcp(there, 2222, 0x18, filled(30_000, b"SSH-"), sequence=1)
+        frames = sorted([*going_on, (began + 0.5, pushed, True)], key=lambda at: at[0])
+        tail.capture = self.captured(opened(self.now - 90), None, frames)
+        (over,) = tail._uploads_over()
+        assert (over.fields["port"], over.fields["bytes_out"]) == (2222, 30_000)
+        assert tail._uploads_over() == []
+        # And is shown itself once it is over, the other not again
+        with mock.patch.object(follow, "UPLOAD_OVER", -60.0):
+            (last,) = tail._uploads_over()
+        assert (last.fields["port"], last.fields["bytes_out"]) == (22, 20_000)
+        assert tail._uploads_over() == []
+
+    def test_what_a_capture_saw_go_is_given_out_to_its_own_requests(self):
+        # Two sessions in a row, each with a capture of its own: what
+        # the first one's requests took is not held against the second
+        now = self.now
+        follower = follow.Follower(self.host, verbose=False, container=CONTAINER)
+        notes = []
+        for started in (now - 200, now - 60):
+            tail = follow.CaptureTail(
+                f"{CONTAINER}.capture", verbose=False, numbers=follower._numbers
+            )
+            tail.capture = self.captured(opened(started), sent(time.time(), 80_000, 1))
+            follower._captures = {(tail.sidecar, started): tail}
+            time.sleep(0.01)
+            self.note(time.time(), 79_000)
+            found = follow.Round()
+            follower._poll_notes(found)
+            notes += [event.notes for _, event in found.events]
+        # Neither with another request, and each by a number of its own
+        assert notes == [["wire: [n1.1] 80 kB"], ["wire: [n2.1] 80 kB"]]
 
     def test_what_comes_back_after_an_upload_is_its_answer(self):
         now = self.now
@@ -589,11 +671,17 @@ class WireTest(LauncherTest):
         assert (first.received, first.rest) == (2_000, False)
         assert (rest.received, rest.rest) == (700, True)
         assert rest.upload is first.upload
-        said = wire.answer_event(capture, rest).details[0]
-        assert said == (
-            f"tcp/https {API}:443  the rest of the answer to the upload of"
-            f" {self.clock(now)}, 700 B in 0.0s"
+        links = Links()
+        began, went_on = (
+            wire.answer_event(capture, answer, links) for answer in (first, rest)
         )
+        assert went_on.details == [
+            f"tcp/https {API}:443  the rest of its answer, 700 B in 0.0s"
+        ]
+        # Both by the number of the upload they are to
+        (upload,) = capture.uploads.all
+        sent_then = wire.upload_event(capture, upload, True, links=links)
+        assert [sent_then.link, began.link, went_on.link] == ["n1.1"] * 3
 
     def test_only_what_comes_in_is_an_answer(self):
         now = self.now
@@ -613,9 +701,10 @@ class WireTest(LauncherTest):
         stdout = self.launch("--trace").stdout
         for expected in (
             "# answers     1 from the model's API, 3 kB received\n",
+            f"sandbox  net         [n1.1] tcp/https {API}:443  upload of 80 kB in 0.0s\n",
             (
-                f"sandbox  net         tcp/https {API}:443  answer of 3 kB in 0.0s,"
-                f" began 1.5s after the upload of {self.clock(now - 20)}\n"
+                f"sandbox  net         [n1.1] tcp/https {API}:443  answer of 3 kB in"
+                " 0.0s, began 1.5s after its upload\n"
             ),
         ):
             assert expected in stdout, stdout
@@ -674,8 +763,11 @@ class WireTest(LauncherTest):
         assert (seen.others, seen.taken) == ([], True)
         asked = request(now - 0.1, 79_000)
         wire.Wire().place(asked, seen)
-        assert asked.notes[0].startswith("wire: 80 kB at ")
+        # What asked the proxy was too short for a line, and is not
+        # counted among the uploads over the tunnel
+        assert asked.notes == ["wire: [n1.1] 80 kB"]
         event = wire.upload_event(capture, upload, seen.to_model(upload))
+        assert event.link == "n1.1"
         asked_for = "tcp/proxy 172.20.0.2:3128  asked for api.anthropic.com:443"
         assert event.details == [f"{asked_for}  upload of 80 kB in 0.0s"]
         assert (event.fields["asked"], event.fields["model_api"]) == (
