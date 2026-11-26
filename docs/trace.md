@@ -76,6 +76,12 @@ through your pager.
   [What it read](#what-it-read).
 - A prompt typed while claude worked says so, claude was given it with
   the next result.
+- A transcript is the session's to write. A second result under the id
+  of a call is told as a result of its own (`of:` and the call), with
+  `--follow` too, so one the session wrote ahead of the real one does
+  not stand in for it. A call under the id of one still waiting for its
+  result says so in capitals, and is told with none: the result is the
+  first one's.
 - Long commands, diffs and replies are cut to a few lines, and the output
   of a call is shown only when it failed. `--verbose` shows more.
 - What a command feeds a program in a here-document is said as so many

@@ -361,6 +361,20 @@ class TraceTest:
             assert summary.planted_reads(entries) == 1, added
             assert summary.planted_shown(events(entries)) == 1, added
             assert "injection" in dict(summary.overview(entries))
+        # Nor such a call written while the first runs, ahead of its
+        # result: the result is the first one's, and the second is said
+        # to be under its id, and told with none
+        ahead = [read[0], renamed, read[1]]
+        shown = events(ahead)
+        assert summary.planted_shown(shown) == 1
+        assert "injection" in dict(summary.overview(ahead))
+        first, second = shown
+        assert first.details[0] == "url: https://example.org"
+        assert first.details[1] == "result: ok, 1.0s, 2 lines out"
+        assert second.details[1] == transcript.REUSED_ID
+        assert second.details[2].startswith("result: none recorded")
+        assert second.wrong
+        assert 1 in second.alerts
         # Nor a call that failed one that did not
         failed = [call("c2"), result("c2", "no rule", failed=True)]
         assert dict(summary.overview(failed))["failed"] == "1"

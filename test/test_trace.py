@@ -28,7 +28,7 @@ from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.door_events import use_event
 from claude_airlock.report.entries import read_entries
 from claude_airlock.report.heredocs import without_heredocs
-from claude_airlock.report.layout import Layout, event_json, folded
+from claude_airlock.report.layout import Layout, event_json, folded, went_wrong
 from claude_airlock.report.stream import Filter
 from claude_airlock.report.transcript import WalkOptions
 from claude_airlock.report.unseen import ran_between
@@ -1195,6 +1195,26 @@ class TakenOutTest(LauncherTest):
         # Followed, a result without its call is of before the following
         walk = transcript.Walk("/p", WalkOptions(live=True))
         assert walk.take(lone) == []
+        # Nor, followed, one that comes after a result the session wrote
+        # ahead of it, which said all went well
+        walk = transcript.Walk("/p", WalkOptions(live=True))
+        script = TraceTest.call("t1", "Bash", command="./setup.sh")
+        failing = {
+            **TraceTest.result("t1", "no\nboom", failed=True),
+            "toolUseResult": {"bashEditDiff": {"changedFiles": ["/home/me/.bashrc"]}},
+        }
+        followed = [
+            event
+            for entry in [script, TraceTest.result("t1", "ok"), failing]
+            for event in walk.take(entry)
+        ]
+        later = followed[-1]
+        assert later.details[:2] == [
+            "of: $ ./setup.sh",
+            "result: FAILED, 2.0s, 2 lines out",
+        ]
+        assert "changed: /home/me/.bashrc  OUTSIDE PROJECT" in later.details
+        assert went_wrong(later)
 
     def test_what_was_taken_out_and_is_no_event_is_counted(self):
         mode = {

@@ -47,6 +47,8 @@ NO_CALL = "a call the transcript does not have"
 NO_TOOL = "?"
 # What is said, live, of a call the model went on without a result of
 WENT_ON = "result: none recorded, the session went on without one"
+# What is said of a call under the id of one that waits for its result
+REUSED_ID = "THE ID OF A CALL BEFORE IT, whose result it is not told with"
 # Of the entries that are no event of a trace, how many kinds are named
 # when they are counted, and how much of the name of one
 UNTOLD_KINDS = 8
@@ -330,6 +332,11 @@ class Walk:
         # An entry without a time of its own happened with the one before
         self._when = 0.0
         self._open: dict[str, OpenCall] = {}
+        # Live, the calls that had a result, by their ids: what else comes
+        # as the result of one is told as a result of its own
+        self._answered: dict[str, OpenCall] = {}
+        # How many calls came under the id of one that waits for its result
+        self._reused = 0
         # The call shown last, when nothing of the session came after it
         self._last_call: str | None = None
         # The steps of the model whose usage was shown
@@ -532,6 +539,16 @@ class Walk:
         )
         call = str(block.get("id"))
         issued = _open_call(event, entry, block, whole=not self._live)
+        key = call
+        if self._waits(call):
+            # A transcript is the session's to add to: a call it wrote
+            # under the id of one that runs would take its result, and
+            # the call before would be told with none. Kept apart, it is
+            # told with none itself, and said to be so.
+            self._reused += 1
+            key = f"{call}\0{self._reused}"
+            event.say(REUSED_ID, alert=True)
+            event.went_wrong()
         if self._live:
             self._calls += 1
             event.link = issued.link = self._link()
@@ -539,21 +556,33 @@ class Walk:
             # Of the step its side is at, when the entry names it
             _, in_step = self._at.get(_side_of(who, entry), ("", []))
             if step_of(entry) and len(in_step) < MOST_REMEMBERED:
-                in_step.append(call)
-        self._open[call] = issued
+                in_step.append(key)
+        self._open[key] = issued
         self._remember(self._open)
-        self._last_call = call
+        # A result that comes is not this call's, and is named
+        self._last_call = call if key == call else None
         return event
+
+    def _waits(self, call: str) -> bool:
+        """Whether a call of that id waits for its result."""
+        issued = self._open.get(call)
+        return issued is not None and (self._live or issued.event is not None)
 
     def _issued(self, call: str, entry: dict) -> OpenCall | None:
         """The call a result is of, by its id and the entry of the
-        result. Live it is let go of with its result, and there is none
-        for a result whose call was not seen: that is of before the
-        following began. Else it is kept, for what else comes as its
-        result, and a call that was not seen is known all the same, see
-        _elsewhere."""
+        result. Live it is let go of with its result, and kept among
+        those answered, for what else comes as its result: a session can
+        write one ahead of the real one, which says the call failed.
+        There is none for a result whose call was not seen: that is of
+        before the following began. Else it is kept, for what else comes
+        as its result, and a call that was not seen is known all the
+        same, see _elsewhere."""
         if self._live:
-            return self._open.pop(call, None)
+            issued = self._open.pop(call, None) or self._answered.get(call)
+            if issued is not None:
+                self._answered[call] = issued
+                self._remember(self._answered)
+            return issued
         issued = self._open.get(call)
         if issued is None:
             # Kept as the others are: found once, however many results
