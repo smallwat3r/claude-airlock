@@ -215,7 +215,8 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 - Values are taken literally, without quotes. A leading `~` is your home
   directory in the settings that take a path. A value in quotes, or with
   blanks around it, stops the launcher: taken as it is, it would hide or
-  protect nothing.
+  protect nothing. So does a comment after a value, a comment is a line
+  of its own.
 - A name given twice stops the launcher, as an unknown one does.
 - The file is only read from your config directory, never from the
   project, which a session can write to.

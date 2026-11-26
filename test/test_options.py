@@ -376,6 +376,24 @@ class ConfigFileTest(LauncherTest):
         self.write_config("CLAUDE_AIRLOCK_SHADOW=*.pem:it's")
         assert self.launch().status == 0
 
+    def test_a_value_with_a_comment_after_it_is_refused(
+        self, subtests: pytest.Subtests
+    ):
+        # The comment would be a part of the last name, which then hides
+        # or protects nothing
+        for line in (
+            "CLAUDE_AIRLOCK_SHADOW=*.pem:.npmrc # more secrets",
+            "CLAUDE_AIRLOCK_PROTECT=~/kit\t# the skills",
+        ):
+            with subtests.test(line=line):
+                self.write_config(line)
+                refused = self.launch()
+                self.assert_refused(refused, "a comment goes on a line of its own")
+                assert line in refused.stderr
+        # A # that is part of a name is one, and a comment on its own line
+        self.write_config("# what is hidden", "CLAUDE_AIRLOCK_SHADOW=*.pem:c#.key")
+        assert self.launch().status == 0
+
     def test_rejects_per_project_settings(self):
         self.write_config("CLAUDE_AIRLOCK_EXTRA_DIRS=/tmp")
         self.assert_refused(self.launch(), "not a known setting")

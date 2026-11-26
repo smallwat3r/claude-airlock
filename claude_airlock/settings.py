@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import os
+import re
 import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ CONFIG_FILES = ("settings.json", "CLAUDE.md")
 CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
+# What a value of the config file ends with when a comment was written
+# after it, as a shell would take one: a blank, then a #
+_COMMENT_AFTER = re.compile(r"\s#")
 # What a session is told of itself under that prefix: its container, the
 # directories mounted next to the project, and the kernel it runs on when
 # that is not the host's. Not settings, and not taken for a misspelled
@@ -439,8 +443,10 @@ def _read_config_file(path: str) -> dict[str, str]:
     leave a restriction off, nor a later line undo an earlier one. So
     does a value in quotes or with blanks around it, written as a shell
     would take it: taken as it is, it names nothing, and what it was to
-    hide or protect would be left open without a word. So does a file
-    that cannot be read, which would say nothing.
+    hide or protect would be left open without a word. And so does a
+    value with a comment after it, for the same reason: a comment is a
+    line of its own. So does a file that cannot be read, which would say
+    nothing.
     Deliberately not read from the project, the session can write there
     and could switch its own sandboxing off for the next run."""
     values: dict[str, str] = {}
@@ -467,6 +473,11 @@ def _read_config_file(path: str) -> dict[str, str]:
             raise Fatal(
                 f"{path}: a value is taken as it is written, without quotes"
                 f" and without blanks around it: {line}"
+            )
+        if _COMMENT_AFTER.search(value):
+            raise Fatal(
+                f"{path}: a value is taken as it is written, to the end of its"
+                f" line: a comment goes on a line of its own: {line}"
             )
         values[name] = value
     return values
