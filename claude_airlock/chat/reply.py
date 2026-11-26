@@ -240,14 +240,24 @@ class ReplyWriter:
             if not self._colour:
                 return [Styled(line)]
             return [] if closing else [Styled(painted(CODE, line))]
-        opening = _FENCE.match(line)
+        opening = _opening_fence(line)
         if opening:
-            self._fence = opening[1]
+            self._fence = opening
             return [] if self._colour else [Styled(line)]
         if self._colour:
             line = _marked(line)
         parts = wrapped(line, self._width) if self._width else [line]
         return _styled(parts) if self._colour else [Styled(part) for part in parts]
+
+
+def _opening_fence(line: str) -> str:
+    """The marks a line opens a block of code with, empty when it opens
+    none. Not a run of backticks with another after it on the line, as
+    Markdown has it: that is a span of code the line starts with."""
+    opening = _FENCE.match(line)
+    if not opening or ("`" in opening[1] and "`" in line[opening.end() :]):
+        return ""
+    return opening[1]
 
 
 def reply_lines(text: str, width: int | None, colour: bool) -> list[Styled]:
