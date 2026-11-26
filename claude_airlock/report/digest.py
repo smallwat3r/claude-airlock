@@ -348,21 +348,37 @@ def _session_digest(
 ) -> list[str]:
     """The lines about a session of this project that has just ended:
     the container of that name, started at that time. lengths as for
-    _transcript_lines."""
+    _transcript_lines. A part that cannot be read, or whose record cannot
+    be written (a full disk), says so and leaves the others as they are."""
     end = time.time()
-    sessions = [
-        found
-        for found in recorded_sessions(host, start, end)
-        if found.name == session and found.start >= start - 1
-    ]
-    recorded = Recorded(host, sessions, start, end)
-    noted_rows, _ = noted_events(host, start, end, session)
-    return [
-        *_network_lines(host, recorded),
-        *_denied_lines(recorded),
-        *_transcript_lines(host, start, lengths),
-        *(f"{about} {said}" for about, said in noted_rows),
-    ]
+
+    def network() -> list[str]:
+        sessions = [
+            found
+            for found in recorded_sessions(host, start, end)
+            if found.name == session and found.start >= start - 1
+        ]
+        recorded = Recorded(host, sessions, start, end)
+        return [*_network_lines(host, recorded), *_denied_lines(recorded)]
+
+    def noted() -> list[str]:
+        rows, _ = noted_events(host, start, end, session)
+        return [f"{about} {said}" for about, said in rows]
+
+    def transcript() -> list[str]:
+        return _transcript_lines(host, start, lengths)
+
+    lines = []
+    for about, part in (
+        ("the network", network),
+        ("the transcript", transcript),
+        ("what the launcher noted", noted),
+    ):
+        try:
+            lines += part()
+        except (OSError, Fatal) as problem:
+            lines.append(f"{about} could not be looked at: {flat(str(problem))[:200]}")
+    return lines
 
 
 def report_session(
@@ -380,8 +396,6 @@ def report_session(
     matters more."""
     try:
         lines = _session_digest(host, session, start, lengths)
-    except (OSError, Fatal):
-        lines = []
     except Exception as problem:  # noqa: BLE001
         # What it reads is a session's to write. Said, and the check that
         # follows is still made.

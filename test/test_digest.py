@@ -165,6 +165,21 @@ class DigestTest(LauncherTest):
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
         assert "  written outside the project:\n    /home/me/.bashrc\n" in said
 
+    def test_a_part_that_cannot_be_worked_out_leaves_the_others(self, capsys):
+        start = time.time() - 5
+        stamp = prompts_at(time.time())[0]["timestamp"]
+        write = {"type": "tool_use", "id": "c1", "name": "Write"}
+        write["input"] = {"file_path": "/home/me/.bashrc", "content": "x"}
+        entry = {"type": "assistant", "timestamp": stamp}
+        entry["message"] = {"content": [write]}
+        self.write_transcript("0a", [entry])
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch.object(digest, "Recorded", side_effect=full):
+            digest.report_session(self.host, "claude-proj", start)
+        said = capsys.readouterr().err
+        assert "  the network could not be looked at: [Errno 28] No space" in said
+        assert "  written outside the project:\n    /home/me/.bashrc\n" in said
+
     def test_what_an_earlier_session_did_is_not_said_again_of_a_resumed_one(self):
         # A resumed session goes on in the transcript of the one before
         stamp = prompts_at(time.time())[0]["timestamp"]
