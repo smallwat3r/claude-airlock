@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import fcntl
 import json
 import os
 import pty
@@ -39,7 +40,7 @@ atexit.register(shutil.rmtree, COMPILED, ignore_errors=True)
 # a build was given, says it is the docker of FAKE_VERSION, answers docker info
 # with FAKE_INFO, and runs FAKE_SESSION (a shell snippet) in place of the container
 FAKE_DOCKER = f"""#!{sys.executable}
-import json, os, shutil, subprocess, sys
+import fcntl, json, os, shutil, subprocess, sys
 args = sys.argv[1:]
 # The parts of a capture that are not the main one have a file of their
 # own, given by these, or none
@@ -52,7 +53,10 @@ OTHER_PARTS = {{
     "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
     "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
 }}
+# The launcher runs several at once: a line is written and the log read
+# under its lock, never half of one
 with open(os.environ["FAKE_LOG"], "a") as log:
+    fcntl.flock(log, fcntl.LOCK_EX)
     log.write(json.dumps(args) + "\\n")
 if args[:2] == ["network", "inspect"] and "FAKE_NETWORK" in os.environ:
     print(os.environ["FAKE_NETWORK"])
@@ -67,8 +71,10 @@ if args[1:2] == ["inspect"] and "Running" in args[2]:
         sys.exit(0)
 # A container that is still there once it was removed
 left = os.environ.get("FAKE_LEFT", "")
-with open(os.environ["FAKE_LOG"]) as log:
-    left = left if ["rm", "--force", left] in map(json.loads, log) else ""
+if left:
+    with open(os.environ["FAKE_LOG"]) as log:
+        fcntl.flock(log, fcntl.LOCK_SH)
+        left = left if ["rm", "--force", left] in map(json.loads, log) else ""
 if args[:2] == ["container", "inspect"] and args[2:] == [left]:
     sys.exit(0)
 if args[1:2] == ["inspect"]:
@@ -351,7 +357,10 @@ class LauncherTest:
         log = self.work / "log"
         if not log.exists():
             return []
-        return [json.loads(line) for line in log.read_text().splitlines()]
+        # Under the lock the fake writes it with, see FAKE_DOCKER
+        with open(log) as calls:
+            fcntl.flock(calls, fcntl.LOCK_SH)
+            return [json.loads(line) for line in calls.read().splitlines()]
 
     def launch(
         self, *args: str, cwd: str | Path | None = None, session: str = "", **env: str
