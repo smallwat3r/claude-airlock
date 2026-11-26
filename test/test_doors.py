@@ -17,17 +17,11 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import (
-    LauncherTest,
-    follow,
-    mounts_host_sockets,
-    prompts_at,
-    settings,
-)
+from harness import LauncherTest, mounts_host_sockets, prompts_at
 
-from claude_airlock import errors
+from claude_airlock import errors, settings
 from claude_airlock.recording import doors, socket_watch, ssh_agent, started
-from claude_airlock.report import door_events
+from claude_airlock.report import door_events, follow
 from claude_airlock.sandbox import networks, socket_proxy
 
 KEY = b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(range(32))
@@ -109,7 +103,9 @@ class AgentDoorTest(LauncherTest):
             tempfile.TemporaryDirectory(dir="/tmp")
         )
 
-    def through_the_door(self, *requests: bytes, refuse: bool = False) -> list[bytes]:
+    def through_the_door(
+        self, *requests: bytes, refuse: bool = False
+    ) -> list[bytes | None]:
         """What the agent answers to requests sent through a door, one
         connection for them all."""
         agent = self.agent = FakeAgent(self.directory, refuse)
@@ -120,7 +116,7 @@ class AgentDoorTest(LauncherTest):
         door = self.door = ssh_agent.AgentDoor(short, "claude-proj", agent.path)
         self.cleanup.callback(door.close)
         self.host = short
-        answers = []
+        answers: list[bytes | None] = []
         with socket.socket(socket.AF_UNIX) as client:
             client.connect(door.path)
             for request in requests:

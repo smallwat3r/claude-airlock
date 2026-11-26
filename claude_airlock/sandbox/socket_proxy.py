@@ -14,7 +14,7 @@ from ..docker import (
     env_arg,
     mount_arg,
 )
-from ..settings import DOCKERFILE_DIR, Settings, SocketAccess
+from ..settings import DOCKERFILE_DIR, Settings, SocketAccess, variable
 from .networks import FILTER_NET, OPEN_NET, SOCKET_PROXIES
 from .shared_proxy import config_hash, proxy_current, start_shared_proxy
 
@@ -124,5 +124,5 @@ def socket_proxy_args(settings: Settings) -> list[str]:
     return [
         env_arg("DOCKER_HOST", f"tcp://{socket_proxy_name(settings)}:2375"),
         # Said in docker/CLAUDE-airlock.md
-        env_arg("CLAUDE_AIRLOCK_DOCKER_SOCKET", settings.docker_socket.value),
+        env_arg(variable("docker_socket"), settings.docker_socket.value),
     ]

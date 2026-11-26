@@ -12,12 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import (
-    LauncherTest,
-    settings,
-)
+from harness import LauncherTest
 
-from claude_airlock import docker, launcher
+from claude_airlock import docker, launcher, settings
 from claude_airlock.sandbox import session, socket_proxy
 
 

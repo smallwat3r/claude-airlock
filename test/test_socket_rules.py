@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 
 import pytest
-from harness import settings
 
+from claude_airlock import settings
 from claude_airlock.sandbox.socket_proxy import PROXY_RULES
 
 DOCKERFILE_DIR = settings.DOCKERFILE_DIR

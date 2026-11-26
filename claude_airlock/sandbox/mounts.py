@@ -12,9 +12,9 @@ from dataclasses import dataclass
 
 from ..docker import covered_arg, env_arg, held_arg, hidden_arg, mount_arg
 from ..errors import Fatal
-from ..files import expand_home, private_dir
+from ..files import expand_home, is_under, is_within, overlap, private_dir
 from ..notice import warn
-from ..settings import SESSION_DIRS, Host, Settings
+from ..settings import SESSION_DIRS, Host, Settings, variable
 
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
@@ -54,17 +54,9 @@ def kept_out(path: str, host: Host, but: Sequence[str] = ()) -> str:
         if kept in but:
             continue
         for file, directory in ((path, kept), (real, os.path.realpath(kept))):
-            if file.startswith(directory.rstrip("/") + "/"):
+            if is_under(file, directory):
                 return kept
     return ""
-
-
-def _reaches(one: str, other: str) -> bool:
-    """Whether one of two directories is the other or is inside it,
-    either way round: mounting the first brings in the second, or a part
-    of it."""
-    one, other = one.rstrip("/") + "/", other.rstrip("/") + "/"
-    return one.startswith(other) or other.startswith(one)
 
 
 def refuse_unsafe_dir(path: str, host: Host) -> None:
@@ -75,10 +67,11 @@ def refuse_unsafe_dir(path: str, host: Host) -> None:
     it leads, a link to the home directory is the home directory."""
     real = os.path.realpath(path)
     for home, directory in ((host.home, path), (os.path.realpath(host.home), real)):
-        if (home.rstrip("/") + "/").startswith(directory.rstrip("/") + "/"):
+        if is_within(os.path.normpath(home), os.path.normpath(directory)):
             raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
     for kept in _kept_out(host):
-        if _reaches(path, kept) or _reaches(real, os.path.realpath(kept)):
+        # Mounting the one brings in the other, or a part of it
+        if overlap(path, kept) or overlap(real, os.path.realpath(kept)):
             raise Fatal(
                 f"refusing to mount {path}: {kept} is not a session's to have,"
                 " it would defeat the sandbox"
@@ -94,7 +87,7 @@ def refuse_links_out(dirs: list[ExtraDir], host: Host) -> None:
     writable = [host.project_dir, *(each.path for each in dirs if not each.read_only)]
     for extra in dirs:
         for root in writable:
-            inside = extra.path.startswith(root.rstrip("/") + "/")
+            inside = is_under(extra.path, root)
             if inside and _within(extra.path, root) is None:
                 raise Fatal(
                     f"refusing to mount {extra.path}: it is a link out of {root},"
@@ -170,7 +163,7 @@ def _within(path: str, root: str) -> str | None:
     none when it is not under it. By where the two lead, either can be
     reached through a link."""
     real_path, real_root = os.path.realpath(path), os.path.realpath(root)
-    if real_path != real_root and not real_path.startswith(real_root + os.sep):
+    if not is_within(real_path, real_root):
         return None
     return os.path.normpath(os.path.join(root, os.path.relpath(real_path, real_root)))
 
@@ -246,11 +239,7 @@ def _held_in_place(
     read_only = [*(d.path for d in dirs if d.read_only), *inside]
     held: dict[str, None] = {}
     for path in (*inside, *hidden, *(d.path for d in dirs)):
-        above = [
-            root
-            for root in (*writable, *read_only)
-            if root != path and path.startswith(root + os.sep)
-        ]
+        above = [root for root in (*writable, *read_only) if is_under(path, root)]
         root = max(above, key=len, default=None)
         if root is None or root in read_only:
             continue
@@ -286,7 +275,7 @@ def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
 def protect_env_args(inside: list[str]) -> list[str]:
     """The session is told what it cannot change of what it has mounted,
     see docker/CLAUDE-airlock.md."""
-    return [env_arg("CLAUDE_AIRLOCK_PROTECT", ":".join(inside))] if inside else []
+    return [env_arg(variable("protect"), ":".join(inside))] if inside else []
 
 
 @dataclass(frozen=True)

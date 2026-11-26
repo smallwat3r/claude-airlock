@@ -21,7 +21,7 @@ from ..errors import Fatal
 from ..events import flat, labelled
 from ..report.entries import session_files, sessions_named
 from ..report.trace import session_rows
-from ..settings import Host
+from ..settings import Host, variable
 from .console import Page
 from .said import Session, is_number, is_session_id
 from .turn import Turns
@@ -36,7 +36,7 @@ STATUS = ("/status", "/statusline")
 # type back. The launcher carries the host's login to the session, see
 # sandbox/login.py
 LOGIN = ("/login", "/logout")
-NATIVE_UI = "CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock"
+NATIVE_UI = f"{variable('line_mode')}=0 claude-airlock"
 # What a line starts with that is a command for the sandbox, not a word of
 # its own: the command follows it
 SHELL = "!"

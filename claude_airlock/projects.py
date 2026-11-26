@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 
+from .files import is_within
 from .settings import CONTAINER_HOME, Host
 
 # The subagents of one session whose transcripts are read
@@ -33,7 +34,7 @@ def project_roots(host: Host) -> list[str]:
     second, one run on the host the first."""
     roots = [host.project_dir]
     home = host.home.rstrip(os.sep)
-    if host.project_dir == home or host.project_dir.startswith(home + os.sep):
+    if is_within(host.project_dir, home):
         sandboxed = CONTAINER_HOME + host.project_dir[len(home) :]
         if sandboxed != host.project_dir:
             roots.append(sandboxed)

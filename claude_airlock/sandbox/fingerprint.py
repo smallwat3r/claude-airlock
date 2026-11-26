@@ -18,9 +18,13 @@ from itertools import islice
 
 from ..files import (
     SETTINGS_BYTES,
+    NotRead,
     expand_home,
+    is_under,
     json_object,
     open_plain,
+    overlap,
+    read_plain,
     settings_object,
 )
 from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES
@@ -272,18 +276,6 @@ def _listing_hash(listing: bytes) -> str:
     return sha256_hex(b"\0".join(_lasting_entries(listing)))
 
 
-def git_config_hash(file: str) -> str:
-    """Hash of a git config without its branch tracking entries, they change
-    on every push -u or checkout and cannot run anything, see
-    _lasting_entries for those that are kept. One that cannot
-    be read says so: the file is the session's, which can take the right
-    to read it away, and the check must not be made to fail. Nor to wait,
-    nor to hold more than a config takes, see git_listing: one git has no
-    listing of is hashed as the file it is."""
-    listing = git_listing(file)
-    return file_hash(file) if listing is None else _listing_hash(listing)
-
-
 def _included_configs(listing: bytes, config: str) -> list[str]:
     """The files a git config has git read with it, by its listing:
     those of include.path, and of includeIf whatever its condition, which
@@ -300,8 +292,14 @@ def _included_configs(listing: bytes, config: str) -> list[str]:
 
 
 def hash_git_config(config: str, fingerprint: dict[str, str]) -> None:
-    """Add a git config to a fingerprint as git_config_hash has it, and
-    the files it includes, theirs too, each by its own path. Git reads
+    """Add a git config to a fingerprint without its branch tracking
+    entries, they change on every push -u or checkout and cannot run
+    anything, see _lasting_entries for those that are kept. One that
+    cannot be read says so: the file is the session's, which can take
+    the right to read it away, and the check must not be made to fail.
+    Nor to wait, nor to hold more than a config takes, see git_listing:
+    one git has no listing of is hashed as the file it is. With the
+    files it includes, theirs too, each by its own path. Git reads
     them as part of the config, and one that is in the project is the
     session's to write with the config itself left as it was. One that
     is not there yet shows as a change once it is. No more of them than
@@ -374,15 +372,12 @@ def _servers_hash(config: str) -> str:
     The file is a session's to write, so one that is not a plain file
     says so, and one too large or too odd to read is told from one
     written since as file_stamp does."""
-    file = open_plain(config)
-    if file is None:
+    content = read_plain(config, SERVERS_BYTES)
+    if content is NotRead.ABSENT:
         return "absent"
-    try:
-        with file:
-            content = file.read(SERVERS_BYTES + 1)
-    except OSError:
+    if content is NotRead.UNREADABLE:
         return "unreadable"
-    held = None if len(content) > SERVERS_BYTES else json_object(content)
+    held = None if isinstance(content, NotRead) else json_object(content)
     if held is None:
         return "not read: " + file_stamp(config)
     try:
@@ -420,14 +415,12 @@ def common_dir(git_dir: str) -> str | None:
     file says, from the git directory. A linked worktree has one, and a
     session can write one into any git directory, to have git read a
     config and hooks the check would not look at."""
-    file = open_plain(os.path.join(git_dir, COMMON_DIR), links=True)
-    if file is None:
+    # Its line break is not counted
+    named = read_plain(
+        os.path.join(git_dir, COMMON_DIR), COMMON_DIR_BYTES + 2, links=True
+    )
+    if isinstance(named, NotRead):
         return None
-    with file:
-        try:
-            named = file.read(COMMON_DIR_BYTES + 1)
-        except OSError:
-            return None
     named = named.rstrip(b"\r\n")
     if not named or len(named) > COMMON_DIR_BYTES or b"\0" in named:
         # What git cannot follow either. The file is hashed as it is.
@@ -510,7 +503,7 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
         return None
     value = said.decode("utf-8", "replace").strip()
     hooks = os.path.realpath(os.path.join(directory, value))
-    inside = hooks.startswith(os.path.realpath(directory) + os.sep)
+    inside = is_under(hooks, os.path.realpath(directory))
     return (
         os.path.normpath(os.path.join(directory, value)) if value and inside else None
     )
@@ -564,15 +557,8 @@ def _import_text(file: str) -> str:
     """What a file of instructions says, nothing for one that is not
     there, is no plain file or is past what is read of one, as
     settings_object has it of a settings file."""
-    opened = open_plain(file, links=True)
-    if opened is None:
-        return ""
-    try:
-        with opened:
-            content = opened.read(SETTINGS_BYTES + 1)
-    except OSError:
-        return ""
-    return "" if len(content) > SETTINGS_BYTES else content.decode("utf-8", "replace")
+    content = read_plain(file, SETTINGS_BYTES, links=True)
+    return "" if isinstance(content, NotRead) else content.decode("utf-8", "replace")
 
 
 def imported_files(instructions: str) -> list[str]:
@@ -612,10 +598,10 @@ def _claude_files(
     its instructions name to be read with them, and without what Claude
     Code notes for itself of its routines."""
     watched = [os.path.join(root, name) for name in files]
-    noted = os.path.join(root, ROUTINES_STATE) + os.sep
+    noted = os.path.join(root, ROUTINES_STATE)
     for name in trees:
         found = tree_files(os.path.join(root, name)).into(fingerprint)
-        watched += [path for path in found if not path.startswith(noted)]
+        watched += [path for path in found if not is_under(path, noted)]
     for name in command_files:
         watched += _named_files(os.path.join(root, name), root)
     for name in files:
@@ -724,16 +710,12 @@ def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
     return watched
 
 
-def reaches_launcher(directories: Sequence[str], checkout: str = "") -> bool:
+def reaches_launcher(directories: Sequence[str]) -> bool:
     """Whether one of the directories a session is given holds the
     launcher's own checkout, or a part of it: by where each leads, a
     link to the checkout is the checkout."""
-    launcher = os.path.realpath(checkout or CHECKOUT_DIR) + os.sep
-    for directory in directories:
-        mounted = os.path.realpath(directory) + os.sep
-        if launcher.startswith(mounted) or mounted.startswith(launcher):
-            return True
-    return False
+    launcher = os.path.realpath(CHECKOUT_DIR)
+    return any(overlap(os.path.realpath(d), launcher) for d in directories)
 
 
 def _modules_at_top(checkout: str, fingerprint: dict[str, str]) -> list[str]:
@@ -767,7 +749,7 @@ def _modules_at_top(checkout: str, fingerprint: dict[str, str]) -> list[str]:
 
 
 def _launcher_files(
-    directories: Sequence[str], fingerprint: dict[str, str], checkout: str = ""
+    directories: Sequence[str], fingerprint: dict[str, str]
 ) -> list[str]:
     """The files of the launcher itself, when a session can write them:
     its checkout is the project, or in it, or mounted next to it. They
@@ -776,26 +758,23 @@ def _launcher_files(
     host with the next launch. And what Python would run in their place
     from the top of the checkout, see _modules_at_top. Not what Python
     compiled of them, which changes without a session's doing."""
-    checkout = checkout or CHECKOUT_DIR
-    if not reaches_launcher(directories, checkout):
+    if not reaches_launcher(directories):
         return []
     compiled = os.sep + COMPILED + os.sep
     return [
         path
         for tree in LAUNCHER_TREES
-        for path in tree_files(os.path.join(checkout, tree)).into(fingerprint)
+        for path in tree_files(os.path.join(CHECKOUT_DIR, tree)).into(fingerprint)
         if compiled not in path
-    ] + _modules_at_top(checkout, fingerprint)
+    ] + _modules_at_top(CHECKOUT_DIR, fingerprint)
 
 
-def is_launcher_file(path: str, checkout: str = "") -> bool:
+def is_launcher_file(path: str) -> bool:
     """Whether a path of a fingerprint is of the launcher itself, see
     _launcher_files: in one of its trees, or what Python would take for
     a module or a package at the top of its checkout."""
-    checkout = checkout or CHECKOUT_DIR
-    if path.startswith(
-        tuple(os.path.join(checkout, tree) + os.sep for tree in LAUNCHER_TREES)
-    ):
+    checkout = CHECKOUT_DIR
+    if any(is_under(path, os.path.join(checkout, tree)) for tree in LAUNCHER_TREES):
         return True
     above, name = os.path.split(path)
     if above == checkout:
@@ -812,15 +791,10 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     repository that is there, or that a session planted there."""
     fingerprint: dict[str, str] = {}
     watched: list[str] = []
-    try:
-        # First, should there be more files than are hashed
-        watched += _launcher_files(directories, fingerprint)
-        for root in directories:
-            watched += _build_files(root, fingerprint)
-    except RecursionError:
-        # Directories nested deeper than Python walks, a session's doing:
-        # said as a change, the check must not be made to fail
-        fingerprint["directories nested too deep to look into"] = UNWATCHED
+    # First, should there be more files than are hashed
+    watched += _launcher_files(directories, fingerprint)
+    for root in directories:
+        watched += _build_files(root, fingerprint)
     hash_files(watched[:MOST_BUILD_FILES], fingerprint)
     if len(watched) > MOST_BUILD_FILES:
         fingerprint[f"more than {MOST_BUILD_FILES} such files, the rest"] = UNWATCHED

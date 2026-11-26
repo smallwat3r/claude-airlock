@@ -37,7 +37,7 @@ from pathlib import Path
 from ..docker import env_arg, mount_arg, project_slug
 from ..files import bounded_lines, json_object, private_dir, write_whole
 from ..projects import project_roots, transcript_dirs
-from ..settings import CONTAINER_CLAUDE, Host, Settings
+from ..settings import CONTAINER_CLAUDE, Host, Settings, variable
 from .mounts import empty_dir
 
 # What Claude Code names the transcripts of a worktree after: the project's
@@ -144,7 +144,7 @@ def history_args(settings: Settings, host: Host) -> list[str]:
         shared = _prepare_shared(host)
         return [
             # Said in docker/CLAUDE-airlock.md
-            env_arg("CLAUDE_AIRLOCK_SHARED_HISTORY", 1),
+            env_arg(variable("shared_history"), 1),
             *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
         ]
     others = _other_projects(host)

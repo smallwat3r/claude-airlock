@@ -26,7 +26,7 @@ from collections.abc import Callable
 from ..docker import NOT_FOUND, docker_popen
 from ..errors import Fatal
 from ..events import clean
-from ..files import MOST_LINE_HELD, held_size, json_object
+from ..files import MOST_LINE_HELD, bounded_lines, held_size, json_object
 from ..notice import warn
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
@@ -189,34 +189,19 @@ class Agent:
         line that is too long, or holds too much once read, is not: what
         stands for it is, once for the whole of it (see Unread)."""
         out = self._process.stdout
-        dropping = False
         try:
-            while out:
-                line = out.readline(LINE_LIMIT)
-                if not line:
-                    break
-                # Without its end, a line shorter than the limit is the
-                # last one, written as claude ended: a line all the same
-                whole = line.endswith(b"\n") or len(line) < LINE_LIMIT
+            for line in bounded_lines(out, LINE_LIMIT) if out else ():
                 # What it takes once read, which is what waits: a line
                 # of small values takes dozens of times its length
-                held = held_size(line)
-                if not whole or dropping or held > MOST_LINE_HELD:
-                    # The rest of a line that was too long goes with its
-                    # start, and is said with its end
-                    if whole:
-                        self.messages.put(Unread.LINE)
-                else:
-                    # Not an object: claude run for something else than a
-                    # conversation, which is then shown as it is written
-                    plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
-                    found = json_object(line)
-                    said = plain if found is None else found
-                    self.messages.put(said, held)
-                dropping = not whole
-            if dropping:
-                # One that was too long and ended with claude
-                self.messages.put(Unread.LINE)
+                held = 0 if line is None else held_size(line)
+                if line is None or held > MOST_LINE_HELD:
+                    self.messages.put(Unread.LINE)
+                    continue
+                # Not an object: claude run for something else than a
+                # conversation, which is then shown as it is written
+                plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
+                found = json_object(line)
+                self.messages.put(plain if found is None else found, held)
         finally:
             # What it had to say for itself as it ended comes first
             self._errors.join(1.0)

@@ -10,9 +10,9 @@ import re
 from pathlib import Path
 
 import pytest
-from harness import ROOT, LauncherTest, settings
+from harness import ROOT, LauncherTest
 
-from claude_airlock import errors
+from claude_airlock import errors, settings
 
 NAMED = re.compile(r"CLAUDE_AIRLOCK_[A-Z_]+")
 # What a session is told that is not a setting: its container's name, the
@@ -29,6 +29,11 @@ class SettingsListTest(LauncherTest):
     def test_every_setting_has_its_field_and_no_field_is_without_one(self):
         fields = [field.name for field in dataclasses.fields(settings.Settings)]
         assert [s.field for s in settings.SETTINGS] == fields
+
+    def test_a_session_is_told_a_setting_by_its_variable_alone(self):
+        assert settings.variable("net_filter") == "CLAUDE_AIRLOCK_NET_FILTER"
+        with pytest.raises(KeyError):
+            settings.variable("netfilter")
 
     def test_the_defaults_are_read_as_the_defaults(self):
         missing = str(self.work / "no-config")

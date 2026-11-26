@@ -20,7 +20,7 @@ from ..docker import (
 )
 from ..errors import Fatal
 from ..files import lock_file
-from ..settings import EGRESS_PORT, Host, Settings
+from ..settings import EGRESS_PORT, Host, Settings, variable
 from .egress_proxy import egress_proxy_current, rotate_access_log, start_egress_proxy
 from .networks import EGRESS_PROXY, SOCKET_PROXY_NAMES, ensure_network
 from .proxy_use import (
@@ -129,7 +129,7 @@ def network_args(
         env_arg("NO_PROXY", no_proxy),
         env_arg("no_proxy", no_proxy),
         # Told to the session, see docker/CLAUDE-airlock.md
-        *([env_arg("CLAUDE_AIRLOCK_NET_ASK", 1)] if settings.net_ask and asked else []),
+        *([env_arg(variable("net_ask"), 1)] if settings.net_ask and asked else []),
         # Direct port 22 is blocked on the internal net, so tunnel
         # git-over-SSH through the proxy as a CONNECT to :22
         env_arg(

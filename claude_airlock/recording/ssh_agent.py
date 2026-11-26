@@ -31,7 +31,7 @@ from ..files import private_dir
 from ..notice import warn
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
-from ..settings import Host, Settings
+from ..settings import Host, Settings, variable
 from .doors import BY_LAUNCHER, AgentUse, Door, SessionUses
 
 # The connections a session can have to the agent at once, and the seconds
@@ -404,7 +404,7 @@ def ssh_agent_door(
             mount,
             env_arg("SSH_AUTH_SOCK", AGENT_TARGET),
             # Said in docker/CLAUDE-airlock.md
-            env_arg("CLAUDE_AIRLOCK_SSH_AGENT", 1),
+            env_arg(variable("ssh_agent"), 1),
         ]
     finally:
         if door:

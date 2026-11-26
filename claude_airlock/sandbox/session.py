@@ -27,6 +27,7 @@ from ..docker import (
 )
 from ..files import (
     expand_home,
+    is_under,
     private_dir,
     settings_object,
     try_lock_file,
@@ -40,6 +41,7 @@ from ..settings import (
     SESSION_SANDBOX,
     Host,
     Settings,
+    variable,
 )
 from .claude_args import is_a_command, says_permissions
 from .ending import Ending
@@ -211,17 +213,17 @@ def base_args(
         # For a statusline of the user's own to show the sandbox and the
         # network mode in the Claude UI
         env_arg(SESSION_SANDBOX, name),
-        env_arg("CLAUDE_AIRLOCK_NET_FILTER", int(settings.net_filter)),
+        env_arg(variable("net_filter"), int(settings.net_filter)),
         # The session is told its settings, so that Claude can name the one
         # behind something it could not do (see docker/CLAUDE-airlock.md).
         # The other switches are only set when they are on, by the code
         # that acts on them.
-        env_arg("CLAUDE_AIRLOCK_NET_LOG", int(settings.net_log)),
-        env_arg("CLAUDE_AIRLOCK_PROC_LOG", int(settings.proc_log)),
-        env_arg("CLAUDE_AIRLOCK_CACHE", int(settings.cache)),
-        env_arg("CLAUDE_AIRLOCK_MEMORY", settings.memory),
-        env_arg("CLAUDE_AIRLOCK_PIDS", settings.pids),
-        *([env_arg("CLAUDE_AIRLOCK_CPUS", settings.cpus)] if settings.cpus else []),
+        env_arg(variable("net_log"), int(settings.net_log)),
+        env_arg(variable("proc_log"), int(settings.proc_log)),
+        env_arg(variable("cache"), int(settings.cache)),
+        env_arg(variable("memory"), settings.memory),
+        env_arg(variable("pids"), settings.pids),
+        *([env_arg(variable("cpus"), settings.cpus)] if settings.cpus else []),
         # And of a kernel of its own, under which it is ended as a whole
         # at a limit and has to keep well below it, see runtime.py
         *([env_arg(SESSION_KERNEL, runtime.KIND)] if runtime.KIND else []),
@@ -307,11 +309,11 @@ def own_statusline_args(
     besides itself has to be in the image, or in a directory mounted
     next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
     for path in _configured_statusline(host):
-        if not path.startswith(host.home + os.sep) or ":" in path:
+        if not is_under(path, host.home) or ":" in path:
             continue
         if not os.path.isfile(path):
             continue
-        if any(path.startswith(root + os.sep) for root in mounted):
+        if any(is_under(path, root) for root in mounted):
             continue
         patterns = SHADOWED_NAMES + settings.shadow
         names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}

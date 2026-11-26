@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from ..events import clean, flat
+from ..files import is_within
 from .brief import PREVIEW_WIDTH
 from .entries import (
     block_text,
@@ -54,7 +55,7 @@ def outside(path: str, project_dir: str) -> bool:
     somewhere else than it did for the session, or be gone, so a write
     through one to a place outside is not told as that."""
     absolute = os.path.normpath(os.path.join(project_dir, path))
-    return absolute != project_dir and not absolute.startswith(project_dir + os.sep)
+    return not is_within(absolute, project_dir)
 
 
 def outside_flag(path: str, project_dir: str) -> str:

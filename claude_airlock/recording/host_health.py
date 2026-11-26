@@ -43,7 +43,7 @@ from pathlib import Path
 
 from ..background import ASK_EVERY, in_background, wait_for
 from ..docker import docker_output
-from ..files import json_object, private_dir
+from ..files import is_under, json_object, private_dir
 from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..settings import Host
@@ -90,7 +90,7 @@ def cgroup_of(pid: int, container: str, proc: str = "/proc") -> str:
         # Version 2 has a single line: 0::/system.slice/docker-<id>.scope
         if line.startswith("0::/") and container in line:
             directory = os.path.normpath(CGROUPS + line[3:])
-            if directory.startswith(CGROUPS + "/") and os.path.isdir(directory):
+            if is_under(directory, CGROUPS) and os.path.isdir(directory):
                 return directory
     return ""
 

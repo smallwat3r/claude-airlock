@@ -19,18 +19,20 @@ import unittest.mock
 from pathlib import Path
 
 import pytest
-from harness import (
-    LAUNCHER,
-    ROOT,
-    LauncherTest,
-    launcher,
-)
+from harness import LAUNCHER, ROOT, LauncherTest
 
-from claude_airlock import cli, files
+from claude_airlock import cli, files, launcher
 from claude_airlock.errors import Fatal
 from claude_airlock.sandbox import bounded, tamper, tampered
 from claude_airlock.sandbox import fingerprint as watched
 from claude_airlock.sandbox.ending import Ending
+
+
+def config_hash(config: str) -> str:
+    """What the fingerprint of a session has of a git config."""
+    fingerprint: dict[str, str] = {}
+    watched.hash_git_config(config, fingerprint)
+    return fingerprint[config]
 
 
 class TamperingTest(LauncherTest):
@@ -89,9 +91,7 @@ class TamperingTest(LauncherTest):
         slow.chmod(0o755)
         started = time.monotonic()
         with unittest.mock.patch.object(watched, "GIT_SECONDS", 0.2):
-            assert watched.git_config_hash(str(config)) == bounded.file_hash(
-                str(config)
-            )
+            assert config_hash(str(config)) == bounded.file_hash(str(config))
             assert watched.moved_hooks_dir(str(self.project)) is None
         assert time.monotonic() - started < 30
 
@@ -101,7 +101,7 @@ class TamperingTest(LauncherTest):
         config = self.project / ".git" / "config"
         config.write_text(f'[a "{"s" * 200_000}"]\n' + "k\n" * 100_000)
         assert watched.git_listing(str(config)) is None
-        assert watched.git_config_hash(str(config)) == bounded.file_hash(str(config))
+        assert config_hash(str(config)) == bounded.file_hash(str(config))
         # Nor is git given a file no config comes near
         config.write_text("[core]\n\tbare = false\n")
         assert watched.git_listing(str(config)) is not None
@@ -174,7 +174,7 @@ class TamperingTest(LauncherTest):
         pipe = self.work / "pipe"
         os.mkfifo(pipe)
         assert bounded.file_hash(str(pipe)) == "unreadable"
-        assert watched.git_config_hash(str(pipe)) == "unreadable"
+        assert config_hash(str(pipe)) == "unreadable"
         assert bounded.file_hash(str(self.work / "none")) == "unreadable"
         # A link to one says where it leads, and is not opened either
         link = self.work / "link"
@@ -701,7 +701,7 @@ class LauncherItselfTest:
     changed there named: it starts and sandboxes the next session."""
 
     @pytest.fixture(autouse=True)
-    def checkout(self, tmp_path: Path, cleanup: contextlib.ExitStack) -> None:
+    def checkout_made(self, tmp_path: Path, cleanup: contextlib.ExitStack) -> None:
         self.checkout = tmp_path / "code" / "claude-airlock"
         for name in (
             "bin/claude-airlock",

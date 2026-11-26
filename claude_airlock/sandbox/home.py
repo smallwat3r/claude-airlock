@@ -41,6 +41,7 @@ from ..settings import (
     CONTAINER_STATE,
     Host,
     Settings,
+    variable,
 )
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .login import LOGIN
@@ -252,7 +253,7 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     ]
     if settings.rw_config:
         # Said in docker/CLAUDE-airlock.md
-        args.append(env_arg("CLAUDE_AIRLOCK_RW_CONFIG", 1))
+        args.append(env_arg(variable("rw_config"), 1))
     return args
 
 

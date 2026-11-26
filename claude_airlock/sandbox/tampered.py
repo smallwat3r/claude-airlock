@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
+from ..files import is_within
 from ..notice import warn
 from ..settings import CHECKOUT_DIR, NAME
 from .fingerprint import (
@@ -138,8 +139,7 @@ def report_tampering(
     name of an earlier session that ended without this check, when the
     report is the late one for it."""
     differ = differing(before, after)
-    roots = tuple(directory + os.sep for directory in memory)
-    remembered = [path for path in differ if path in memory or path.startswith(roots)]
+    remembered = [path for path in differ if any(is_within(path, d) for d in memory)]
     _report_memory(remembered, unchecked)
     # Not for a check saved by a version that did not watch them
     if shared_config and shared_config in differ and shared_config in before:
