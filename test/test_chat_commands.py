@@ -268,7 +268,7 @@ class CommandsTest(LauncherTest):
     def typing(self, chat: talk.Chat, typed: Iterator[str | None]) -> list[str]:
         """Have a chat read the lines someone types, each when the one
         before is done with, and do what they ask. What it wrote."""
-        chat._read = lambda _prompt, headed=False: next(typed)  # type: ignore[method-assign]
+        chat._read = lambda prompt, headed=False: next(typed)  # type: ignore[method-assign]
         with written() as lines:
             chat._converse()
         return lines
@@ -343,7 +343,7 @@ class CommandsTest(LauncherTest):
             chat._asked.start(AnsweredClaude())
             chat._hosts.look()
             self.asked(chat)
-            chat._read = read  # type: ignore[method-assign]
+            chat._read = read
             chat._converse()
             chat._asker.give_up()
             assert chat._asked.answered_within(PATIENCE)

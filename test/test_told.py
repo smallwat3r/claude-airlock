@@ -471,7 +471,7 @@ class HostileTest:
     """A transcript is the session's to write: no shape of these entries
     stops the reading, and none of them reaches a terminal as it is."""
 
-    ODD = (
+    ODD: tuple[object, ...] = (
         None,
         7,
         1e999,

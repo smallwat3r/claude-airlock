@@ -10,8 +10,9 @@ import re
 import time
 
 from fakes import INFO, gvisor
-from harness import LauncherTest, prompts_at, settings
+from harness import LauncherTest, prompts_at
 
+from claude_airlock import settings
 from claude_airlock.events import Who
 from claude_airlock.recording import started
 from claude_airlock.report.noted import NewlyNoted, noted_events
@@ -55,6 +56,7 @@ class StartTest:
             event = started.start_event(
                 {**note(5.0, "claude-proj"), **dataclasses.asdict(start)}
             )
+            assert event is not None
             return next(d for d in event.details if d.startswith("network: "))
 
         filtered = settings.Settings(net_filter=True, net_ask=True)

@@ -5,10 +5,15 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import sys
 import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
+
+# The package is not installed: the checks import it from the checkout
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # The processes one worker is given of the limit of a sandbox the checks
 # run in, which makes 8 workers of the default limit of 512. Far more

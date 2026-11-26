@@ -166,7 +166,7 @@ class TasksTest:
         assert running.others == 3
         # One that does not say which it is, is none
         assert started.started(system("task_started", task_id=7)) is None
-        assert started.ended(task_over(["x"])) is None  # type: ignore[arg-type]
+        assert started.ended(task_over(["x"])) is None
         assert started.running == running
 
     def test_what_a_subagent_started_for_itself_is_no_task_of_claudes(self):

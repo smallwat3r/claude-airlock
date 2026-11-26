@@ -253,6 +253,45 @@ class TalkTest(LauncherTest):
             "# chat        the session ended",
         ]
 
+    def test_a_message_that_cannot_be_shown_is_said_and_the_next_one_is(self):
+        claude = RecordedClaude()
+        chat = a_chat(self.host, claude)
+        shown: list[dict] = []
+
+        def heard(message: dict) -> None:
+            if message.get("type") == "odd":
+                raise ValueError("odd")
+            shown.append(message)
+
+        for message in ({"type": "odd"}, {"type": "fine"}, None):
+            claude.messages.put(message)
+        with written() as lines, unittest.mock.patch.object(chat, "_heard", heard):
+            chat._listen()
+        assert lines == [
+            "# chat        FAILED to show a message: ValueError('odd')",
+            "# chat        the session ended",
+        ]
+        assert shown == [{"type": "fine"}]
+
+    def test_messages_that_cannot_be_shown_in_a_row_end_what_is_shown(self):
+        claude = RecordedClaude()
+        chat = a_chat(self.host, claude)
+        for _ in range(talk.MOST_FAILED + 2):
+            claude.messages.put({"type": "odd"})
+        failing = unittest.mock.Mock(side_effect=ValueError("odd"))
+        with written() as lines, unittest.mock.patch.object(chat, "_heard", failing):
+            chat._listen()
+        # The user is told, and can leave: the chat holds the session as
+        # ended, it is not waited for
+        assert (
+            lines[-1]
+            == "# chat        FAILED, nothing more is shown: ValueError('odd')"
+        )
+        assert len(lines) == talk.MOST_FAILED
+        assert failing.call_count == talk.MOST_FAILED
+        with written(), pytest.raises(KeyboardInterrupt):
+            chat._read("> ")
+
     def test_a_line_is_not_waited_for_once_claude_has_ended(self):
         chat = a_chat(self.host)
         chat._session_ended()
@@ -268,7 +307,7 @@ class TalkTest(LauncherTest):
             asked.append(prompt)
             return "y"
 
-        chat._asker.ask = ask  # type: ignore[method-assign]
+        chat._asker.ask = ask
         # The project is under the home of the container for the session,
         # whose paths these are, wherever it is on the host
         for path in ("/home/sandbox/proj/a.py", "/etc/hosts"):

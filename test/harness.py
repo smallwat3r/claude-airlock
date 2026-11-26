@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import importlib
 import json
 import os
 import pty
@@ -22,6 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from claude_airlock import settings
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-airlock"
@@ -143,22 +144,6 @@ if args[0] == "build":
 if args[0] == "run" and "--detach" not in args and "FAKE_SESSION" in os.environ:
     sys.exit(subprocess.run(os.environ["FAKE_SESSION"], shell=True).returncode)
 """
-
-
-sys.path.insert(0, str(ROOT))
-MODULES = (
-    "recording.capture",
-    "report.follow",
-    "sandbox.image",
-    "launcher",
-    "sandbox.network",
-    "recording.pcap",
-    "recording.records",
-)
-capture, follow, image, launcher, network, pcap, records, settings, transcript = (
-    importlib.import_module(f"claude_airlock.{name}")
-    for name in (*MODULES, "settings", "report.transcript")
-)
 
 
 def prompts_at(*times: float) -> list[dict]:
@@ -369,7 +354,7 @@ class LauncherTest:
         return [json.loads(line) for line in log.read_text().splitlines()]
 
     def launch(
-        self, *args: str, cwd: Path | None = None, session: str = "", **env: str
+        self, *args: str, cwd: str | Path | None = None, session: str = "", **env: str
     ):
         """Run the launcher. Keyword arguments are its environment. Without
         the network capture and the record of processes unless asked for,

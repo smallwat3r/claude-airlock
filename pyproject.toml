@@ -60,7 +60,10 @@ max-returns = 8
 
 [tool.mypy]
 python_version = "3.13"
-files = ["claude_airlock", "bin/claude-airlock"]
+files = ["claude_airlock", "bin/claude-airlock", "docker/update-pins.py", "test"]
+# The checks are classes of methods that take no annotations: what they
+# call is checked, and their bodies are not, without a note for each
+disable_error_code = ["annotation-unchecked"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 

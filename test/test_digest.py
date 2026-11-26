@@ -42,7 +42,7 @@ def uploaded(address: str, port: int, megabytes: int) -> list[bytes]:
 
 class DigestTest(LauncherTest):
     @pytest.fixture(autouse=True)
-    def capture_file(self, sandbox: None) -> None:
+    def capture_file_made(self, sandbox: None) -> None:
         self.capture_file = self.work / "capture.pcap"
 
     def session(
@@ -170,7 +170,7 @@ class DigestTest(LauncherTest):
         stamp = prompts_at(time.time())[0]["timestamp"]
 
         def wrote(call: str, path: str) -> dict:
-            write = {"type": "tool_use", "id": call, "name": "Write"}
+            write: dict[str, object] = {"type": "tool_use", "id": call, "name": "Write"}
             write["input"] = {"file_path": path, "content": "x"}
             entry = {"type": "assistant", "timestamp": stamp}
             return {**entry, "message": {"content": [write]}}

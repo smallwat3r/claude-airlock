@@ -4,7 +4,6 @@ side writes of it is carried to the other."""
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import subprocess
@@ -13,9 +12,10 @@ import unittest.mock
 from pathlib import Path
 
 import pytest
-from harness import LauncherTest, settings
+from harness import LauncherTest
 
-login = importlib.import_module("claude_airlock.sandbox.login")
+from claude_airlock import settings
+from claude_airlock.sandbox import login
 
 LOGIN = ".credentials.json"
 ITEM = "Claude Code-credentials"
@@ -275,7 +275,7 @@ class KeychainTest(LauncherTest):
     security of our own (see FAKE_SECURITY)."""
 
     @pytest.fixture(autouse=True)
-    def keychain(self, sandbox: None) -> None:
+    def keychain_made(self, sandbox: None) -> None:
         self.keychain = self.home / "Library" / "Keychains" / "login.keychain-db"
         self.keychain.parent.mkdir(parents=True)
         self.keychain.touch()

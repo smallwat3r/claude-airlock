@@ -9,12 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from harness import (
-    LAUNCHER,
-    LauncherTest,
-    image,
-    settings,
-)
+from harness import LAUNCHER, LauncherTest
+
+from claude_airlock import settings
+from claude_airlock.sandbox import image
 
 
 class ImageTest(LauncherTest):

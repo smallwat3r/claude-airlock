@@ -12,7 +12,7 @@ from records import only_file, require
 from claude_airlock.recording.processes import read_record
 
 file = only_file(sys.argv[1])
-require(file.endswith(".jsonl"), f"the record was not finished: {file}")
+require(file.suffix == ".jsonl", f"the record was not finished: {file}")
 record = read_record(file)
 require(record.outside and not record.processes, record)
 measured = [s for s in record.samples if s.memory and s.cpu is not None]

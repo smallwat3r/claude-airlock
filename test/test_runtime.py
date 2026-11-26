@@ -14,8 +14,9 @@ from unittest import mock
 import conftest
 import pytest
 from fakes import GIB, HOSTNET, INFO, FakeSession, docker_info, gvisor
-from harness import LauncherTest, prompts_at, settings
+from harness import LauncherTest, prompts_at
 
+from claude_airlock import settings
 from claude_airlock.launcher import Launcher
 from claude_airlock.recording import host_health, processes
 from claude_airlock.sandbox import runtime
@@ -165,7 +166,10 @@ class LaunchTest(LauncherTest):
                 json.dumps({"t": now + 1, **line}) + "\n" for line in [started, *lines]
             )
         )
-        session = {"name": "claude-proj", "project": str(self.project)}
+        session: dict[str, object] = {
+            "name": "claude-proj",
+            "project": str(self.project),
+        }
         session.update(start=now, processes=name, end=now + 10)
         (self.state / "net-sessions.jsonl").write_text(json.dumps(session) + "\n")
         self.write_transcript("0a", prompts_at(now, now + 10))
@@ -192,7 +196,7 @@ class LaunchTest(LauncherTest):
 
 class HostHealthTest(LauncherTest):
     @pytest.fixture(autouse=True)
-    def cgroups(self, sandbox: None) -> None:
+    def cgroups_made(self, sandbox: None) -> None:
         # A fake cgroup tree of a host, holding the cgroup of one container
         self.cgroups = self.work / "cgroup"
         self.cgroup = self.cgroups / "system.slice" / f"docker-{CONTAINER}.scope"

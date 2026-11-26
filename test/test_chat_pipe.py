@@ -12,6 +12,7 @@ import threading
 import time
 import unittest.mock
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from chat_harness import PATIENCE, page, written
@@ -176,7 +177,7 @@ class PipeTest:
         asked = agent.request("set_permission_mode", mode="plan")
         agent.respond("r1", {"behavior": "allow"})
         agent.refuse("r2", "no")
-        sent = [agent.messages.get(timeout=PATIENCE) for _ in range(4)]
+        sent: list[Any] = [agent.messages.get(timeout=PATIENCE) for _ in range(4)]
         agent.close()
         assert agent.status() == 0
         assert asked == "chat-1"

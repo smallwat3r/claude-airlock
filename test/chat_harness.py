@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Any
 
 import pytest
 from harness import LAUNCHER, LauncherTest, Terminal
@@ -252,7 +253,7 @@ def page(layout: Layout | None = None) -> console.Page:
 
 def a_chat(
     host: Host,
-    claude: object = None,
+    claude: Any = None,
     guard: guarding.Guard | None = None,
     hosts: WaitingHosts | None = None,
     typed: bool = False,
@@ -275,7 +276,7 @@ def a_chat(
         guard=guard,
         hosts=hosts,
     )
-    chat._agent = claude  # type: ignore[assignment]
+    chat._agent = claude
     return chat
 
 
@@ -374,6 +375,7 @@ USED = {"total_tokens": 20502, "tool_uses": 2, "duration_ms": 2521}
 
 def lines_now(lines: list[str]) -> str:
     """What was written so far, where written gives it at its end."""
+    assert isinstance(sys.stdout, io.StringIO)
     return sys.stdout.getvalue() + "\n".join(lines)
 
 
