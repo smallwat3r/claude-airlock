@@ -13,37 +13,14 @@ from unittest import mock
 
 import conftest
 import pytest
+from fakes import GIB, HOSTNET, INFO, FakeSession, docker_info, gvisor
 from harness import LauncherTest, prompts_at, settings
-from test_processes import GIB, FakeSession
 
 from claude_airlock.launcher import Launcher
 from claude_airlock.recording import host_health, processes
 from claude_airlock.sandbox import runtime
 
-HOSTNET = ["--network=host", "--host-uds=open"]
 CONTAINER = "0a1b2c3d4e5f"
-
-
-def docker_info(default: str = "runc", **runtimes: list[str] | None) -> str:
-    """The answer of docker info to what session_runtime asks: the
-    default runtime, then every runtime by name. Each keyword is a runsc
-    runtime with the given arguments."""
-    listed: dict[str, dict] = {"runc": {"path": "runc"}}
-    for name, args in runtimes.items():
-        about: dict = {"path": "/usr/local/bin/runsc"}
-        if args:
-            about["runtimeArgs"] = args
-        listed[name.replace("_", "-")] = about
-    return f"{json.dumps(default)}\n{json.dumps(listed)}"
-
-
-INFO = docker_info(runsc=None, runsc_hostnet=HOSTNET)
-
-
-def gvisor(*args: str, path: str = "/usr/local/bin/runsc") -> runtime.Runtime:
-    """The runtime of a runsc registered under the name gv with these
-    arguments."""
-    return runtime.known_runtime(runtime.Registered("gv", path, args=args))
 
 
 class RuntimeTest:

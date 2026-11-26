@@ -9,66 +9,12 @@ import json
 
 import pytest
 from harness import LauncherTest
+from transcribed import PROJECT, at, attached, call, events, prompt, result, step
 
 from claude_airlock.events import Event, Who
 from claude_airlock.report import summary, transcript
 from claude_airlock.report.layout import Layout, alerting, event_json, went_wrong
 from claude_airlock.report.transcript import WalkOptions
-
-PROJECT = "/p"
-
-
-def at(second: int) -> str:
-    return f"2026-01-02T10:00:{second:02d}Z"
-
-
-def prompt(text: str, second: int = 0, **more) -> dict:
-    return {
-        "type": "user",
-        "timestamp": at(second),
-        "message": {"content": text},
-        **more,
-    }
-
-
-def call(tool_id: str, name: str = "Bash", second: int = 1, **tool_input) -> dict:
-    block = {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
-    return {
-        "type": "assistant",
-        "timestamp": at(second),
-        "message": {"content": [block]},
-    }
-
-
-def result(tool_id: str, output: str = "", second: int = 2, **more) -> dict:
-    block = {"type": "tool_result", "tool_use_id": tool_id, "content": output}
-    failed = bool(more.pop("failed", False))
-    return {
-        "type": "user",
-        "timestamp": at(second),
-        "message": {"content": [{**block, "is_error": failed}]},
-        **more,
-    }
-
-
-def attached(kind: str, second: int = 0, **given) -> dict:
-    return {
-        "type": "attachment",
-        "timestamp": at(second),
-        "attachment": {"type": kind, **given},
-    }
-
-
-def step(step_id: str, second: int, **usage: int) -> dict:
-    return {
-        "type": "assistant",
-        "timestamp": at(second),
-        "message": {"id": step_id, "usage": usage, "content": []},
-    }
-
-
-def events(entries: list[dict], verbose: bool = False) -> list[Event]:
-    return transcript.transcript_events(entries, PROJECT, verbose)
 
 
 def shown(entries: list[dict], verbose: bool = False) -> list[tuple[str, list[str]]]:

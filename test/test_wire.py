@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 from harness import LauncherTest, follow, pcap, prompts_at, records
-from test_capture import answer, ipv4, ipv6, pcap_file, tcp, tcp_header, udp
+from packets import answer, ipv4, ipv6, pcap_file, tcp, tcp_header, udp
 
 from claude_airlock.events import Event, Kind
 from claude_airlock.recording import answers, api_calls, uploads

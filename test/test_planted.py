@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 import unittest.mock
 
-from test_told import PROJECT, attached, call, events, result
+from transcribed import PROJECT, attached, call, events, result
 
 from claude_airlock.report import planted as planted_module
 from claude_airlock.report import summary, transcript

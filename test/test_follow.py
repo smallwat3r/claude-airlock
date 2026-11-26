@@ -21,7 +21,7 @@ from unittest import mock
 import pytest
 from harness import LAUNCHER, LauncherTest, follow, pcap, transcript
 from harness import capture as capture_module
-from test_capture import (
+from packets import (
     answer,
     dns_response,
     knock,
@@ -31,6 +31,7 @@ from test_capture import (
     taken_up,
     tcp,
 )
+from transcribed import at, call, prompt, result
 
 from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
@@ -38,39 +39,12 @@ from claude_airlock.recording.pcap_file import PcapReader
 from claude_airlock.report import stream
 from claude_airlock.report.layout import Layout
 from claude_airlock.report.transcript import WalkOptions
-from claude_airlock.settings import Host
 
 # Marks the last thing a test wrote: what came before it has been shown
 # once this is
 DONE = "that is all"
 # A test that waits for what never comes fails after this many seconds
 PATIENCE = 30.0
-
-
-def at(second: int) -> str:
-    return f"2026-01-02T10:00:{second:02d}Z"
-
-
-def prompt(text: str, second: int = 0) -> dict:
-    return {"type": "user", "timestamp": at(second), "message": {"content": text}}
-
-
-def call(tool_id: str, name: str, second: int = 1, **tool_input) -> dict:
-    block = {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
-    return {
-        "type": "assistant",
-        "timestamp": at(second),
-        "message": {"content": [block]},
-    }
-
-
-def result(tool_id: str, output: str, second: int = 3, failed: bool = False) -> dict:
-    block = {"type": "tool_result", "tool_use_id": tool_id, "content": output}
-    return {
-        "type": "user",
-        "timestamp": at(second),
-        "message": {"content": [{**block, "is_error": failed}]},
-    }
 
 
 def add(file: Path, *entries: dict) -> None:
@@ -139,7 +113,7 @@ class FollowTest(LauncherTest):
         shown = following.until("why: Build")
         assert "claude   bash        [1] $ make" in shown
         assert "result:" not in shown
-        add(self.file, result("t1", "no rule", failed=True))
+        add(self.file, result("t1", "no rule", 3, failed=True))
         shown = following.until("out: no rule")
         assert "claude   bash        [1] result: FAILED, 2.0s, 1 line out" in shown
         assert "of: " not in shown
@@ -151,8 +125,8 @@ class FollowTest(LauncherTest):
             self.file,
             call("t1", "Bash", command="make"),
             call("t2", "Read", file_path="go.mod"),
-            result("t1", "done"),
-            result("t9", "of a call that was never seen"),
+            result("t1", "done", 3),
+            result("t9", "of a call that was never seen", 3),
             prompt(DONE, 4),
         )
         shown = following.until(DONE)
@@ -166,9 +140,9 @@ class FollowTest(LauncherTest):
         add(
             self.file,
             call("t1", "Bash", command="make"),
-            result("t1", "no rule", failed=True),
+            result("t1", "no rule", 3, failed=True),
             call("t2", "Bash", command="ls"),
-            result("t2", "go.mod"),
+            result("t2", "go.mod", 3),
             call("t3", "Write", 4, file_path="/etc/motd", content="hi"),
         )
         shown = following.until("OUTSIDE PROJECT")
@@ -184,7 +158,7 @@ class FollowTest(LauncherTest):
             self.file,
             call("t1", "Bash", command="make"),
             call("t2", "Read", file_path="go.mod"),
-            result("t2", "module x"),
+            result("t2", "module x", 3),
         )
         shown = following.until('"stage": "result"')
         assert [json.loads(line)["what"] for line in shown.splitlines()] == [
@@ -217,8 +191,7 @@ class FollowTest(LauncherTest):
         old = earlier.with_suffix("") / "subagents" / "agent-a1.jsonl"
         old.parent.mkdir(parents=True)
         add(old, call("s1", "Bash", command="echo before the follow"))
-        host = Host(str(self.home), str(self.project), "", str(self.state))
-        follower = follow.Follower(host, verbose=False)
+        follower = follow.Follower(self.host, verbose=False)
         with mock.patch.object(follow.CaptureSidecar, "running", return_value=[]):
             follower.poll()
             # The earlier session goes on, with a subagent of now
@@ -236,8 +209,7 @@ class FollowTest(LauncherTest):
         theirs.mkdir(parents=True)
         # One that did something before the following began, and no more
         add(theirs / "agent-a0.jsonl", call("s0", "Bash", command="echo before"))
-        host = Host(str(self.home), str(self.project), "", str(self.state))
-        follower = follow.Follower(host, verbose=False)
+        follower = follow.Follower(self.host, verbose=False)
 
         def of_agent(entry: dict) -> dict:
             return {**entry, "isSidechain": True}
@@ -286,8 +258,7 @@ class FollowTest(LauncherTest):
         theirs.mkdir(parents=True)
         for name in ("agent-!1.jsonl", "agent-!2.jsonl", "agent-a1.jsonl"):
             (theirs / name).touch()
-        host = Host(str(self.home), str(self.project), "", str(self.state))
-        follower = follow.Follower(host, verbose=False)
+        follower = follow.Follower(self.host, verbose=False)
         with (
             mock.patch.object(follow.CaptureSidecar, "running", return_value=[]),
             mock.patch.object(projects, "MOST_SUBAGENTS", 2),
@@ -351,7 +322,7 @@ class FollowTest(LauncherTest):
         # says nothing of the other
         first = [call(name, "Bash", command=f"run {name}") for name in ("t1", "t2")]
         taken(86400, *first, step="m1")
-        taken(86390, result("t2", "ok"))
+        taken(86390, result("t2", "ok", 3))
         assert reached(86380) == ["during: [1] $ run t1"]
         # The session was ended there. A day later it goes on, and the
         # model takes its next step: no result of the call comes any more
@@ -360,11 +331,11 @@ class FollowTest(LauncherTest):
         assert left.fields == {"stage": Stage.RESULT, "tool": "Bash", "id": "t1"}
         assert issued.details == ["$ ls"]
         assert reached(110) == ["during: [3] $ ls"]
-        taken(100, result("t3", "ok"))
+        taken(100, result("t3", "ok", 3))
         assert reached(60) == ["(no call running)"]
         # Said once, and a result that comes after all is still told
         assert len(taken(50, call("t4", "Read", file_path="a"), step="m3")) == 1
-        (late,) = taken(40, result("t1", "done"))
+        (late,) = taken(40, result("t1", "done", 3))
         assert late.details[0] == "of: $ run t1"
         # An entry that names no step tells nothing of the calls before
         taken(30, call("t5", "Bash", command="make"))
@@ -409,7 +380,7 @@ class FollowTest(LauncherTest):
 
     def test_json_tells_a_call_from_its_result(self):
         following = Following(self, "--json")
-        add(self.file, call("t1", "Bash", command="make"), result("t1", "done"))
+        add(self.file, call("t1", "Bash", command="make"), result("t1", "done", 3))
         add(self.file, prompt(DONE, 4))
         said = map(json.loads, following.until(DONE).splitlines())
         asked, issued, ended, _ = (event for event in said if event["what"] != "record")
@@ -481,11 +452,10 @@ class FollowTest(LauncherTest):
         assert "# session     0b  the first" in following.until("the first")
 
     def test_as_json_lines_the_events_are_walked_for_their_values_alone(self):
-        host = Host(str(self.home), str(self.project), "", str(self.state))
         for form, lines in (("--json", False), ("--verbose", True)):
             with mock.patch.object(follow, "Follower") as made:
                 made.return_value.poll.side_effect = KeyboardInterrupt
-                assert follow.follow(host, [form]) == 0
+                assert follow.follow(self.host, [form]) == 0
             assert made.call_args.kwargs["lines"] is lines
 
     def test_a_list_cannot_be_followed(self):

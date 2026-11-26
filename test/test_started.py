@@ -9,8 +9,8 @@ import json
 import re
 import time
 
+from fakes import INFO, gvisor
 from harness import LauncherTest, prompts_at, settings
-from test_runtime import INFO, gvisor
 
 from claude_airlock.events import Who
 from claude_airlock.recording import started

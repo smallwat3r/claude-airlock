@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 from harness import LauncherTest, prompts_at
-from test_capture import (
+from packets import (
     answer,
     client_hello,
     dns_failure,

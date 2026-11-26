@@ -40,6 +40,17 @@ atexit.register(shutil.rmtree, COMPILED, ignore_errors=True)
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, shutil, subprocess, sys
 args = sys.argv[1:]
+# The parts of a capture that are not the main one have a file of their
+# own, given by these, or none
+OTHER_PARTS = {{
+    "/dns.pcap": "FAKE_CAPTURE_DNS",
+    "/direct.pcap": "FAKE_CAPTURE_DIRECT",
+    "/flows.pcap": "FAKE_CAPTURE_FLOWS",
+    "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
+    "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
+    "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
+    "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
+}}
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps(args) + "\\n")
 if args[:2] == ["network", "inspect"] and "FAKE_NETWORK" in os.environ:
@@ -90,17 +101,7 @@ elif args[0] == "cp" and args[1].endswith(".status"):
         sys.exit(1)
     open(args[-1], "w").write(code + "\\n")
 elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
-    # The parts that are not the main one have a file of their own, or none
-    other = {{
-        "/dns.pcap": "FAKE_CAPTURE_DNS",
-        "/direct.pcap": "FAKE_CAPTURE_DIRECT",
-        "/flows.pcap": "FAKE_CAPTURE_FLOWS",
-        "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
-        "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
-        "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
-        "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
-    }}
-    where = [env for path, env in other.items() if args[1].endswith(path)]
+    where = [env for path, env in OTHER_PARTS.items() if args[1].endswith(path)]
     source = os.environ.get(where[0]) if where else os.environ["FAKE_CAPTURE"]
     if source is None:
         sys.exit(1)
@@ -116,20 +117,11 @@ if reading and "FAKE_CAPTURE" not in os.environ:
     sys.exit(1)
 if reading:
     # Each part from where it was read to, as the sidecar's script gives
-    # them: how many bytes, then those bytes
-    other = {{
-        "/dns.pcap": "FAKE_CAPTURE_DNS",
-        "/direct.pcap": "FAKE_CAPTURE_DIRECT",
-        "/flows.pcap": "FAKE_CAPTURE_FLOWS",
-        "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
-        "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
-        "/answers.pcap": "FAKE_CAPTURE_ANSWERS",
-        "/downloads.pcap": "FAKE_CAPTURE_DOWNLOADS",
-    }}
-    # After the most it is to give in all, which no check comes near
+    # them: how many bytes, then those bytes. After the most it is to
+    # give in all, which no check comes near
     for wanted in args[7:]:
         file, _, start = wanted.rpartition(":")
-        source = os.environ.get(other.get(file, "FAKE_CAPTURE"))
+        source = os.environ.get(OTHER_PARTS.get(file, "FAKE_CAPTURE"))
         held = b""
         if source is not None:
             with open(source, "rb") as captured:
