@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from ..files import is_within
 from ..notice import warn
 from ..settings import CHECKOUT_DIR, NAME
+from .bounded import left_out
 from .fingerprint import (
     CONFIG_WATCHED_TREES,
     MOST_PROJECTS,
@@ -68,6 +69,23 @@ def report_build_changes(
         " project, have changed:",
         *_first_named(changed),
         "Read them before you build, test or commit there outside the sandbox.",
+    )
+
+
+def report_left_out(*fingerprints: dict[str, str]) -> None:
+    """Say, as a session starts, what is larger already than the check
+    of what it changes watches (see left_out): what a session changes
+    past that goes unseen. Said at the end too when a session made it
+    so, this is for what was so before."""
+    cut = sorted({path for each in fingerprints for path in left_out(each)})
+    if not cut:
+        return
+    warn(
+        "the check of what this session changes watches no more than a part"
+        " of these, a change to the rest is not said when it ends:",
+        *_first_named(cut),
+        "Review what changed there yourself (git status) before you build or"
+        " commit outside the sandbox.",
     )
 
 

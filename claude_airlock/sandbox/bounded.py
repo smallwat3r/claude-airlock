@@ -37,6 +37,21 @@ MOST_MODULES = 1000
 UNWATCHED = "unwatched"
 
 
+# How the entry of what a count left out ends, see Bounded
+LEFT_OUT = ", the rest"
+
+
+def left_out(fingerprint: dict[str, str]) -> list[str]:
+    """What a fingerprint says it left out past a count, in the order of
+    the names: a tree, a list or a chain larger than is watched. Not a
+    directory that could not be looked into, see closed_entry."""
+    return sorted(
+        path
+        for path, stamp in fingerprint.items()
+        if stamp == UNWATCHED and path.endswith(LEFT_OUT)
+    )
+
+
 def closed_entry(directory: str) -> str:
     """What a fingerprint has, as unwatched, for a directory that is there
     and cannot be looked into: a session can take the right to list one

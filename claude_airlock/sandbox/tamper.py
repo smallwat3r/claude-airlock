@@ -30,6 +30,7 @@ from .home import CONFIG
 from .tampered import (
     planted_projects,
     report_build_changes,
+    report_left_out,
     report_projects,
     report_tampering,
 )
@@ -197,6 +198,7 @@ class PendingCheck:
             sorted(own_names(host)),
             home_git_configs(host),
         )
+        report_left_out(check.before, check.build or {})
         private_dir(str(file.parent))
         pending = {**Launcher.current().as_fields(), **check.as_fields()}
         write_whole(str(file), json.dumps(pending))
