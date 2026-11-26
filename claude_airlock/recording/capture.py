@@ -17,7 +17,12 @@ and says, what goes to port 53 anywhere else and what is not TCP, is
 captured by a tcpdump of its own, with its own file and its own packet
 limit: a session that floods one cannot use up what the others have,
 whatever it sends to port 53 leaves the lookups it has the resolver make
-recorded. The session joins that namespace,
+recorded. Two parts more have the headers of what the session sends over
+TCP, and nothing of what that carries: one of what goes to the model's
+API, one of what goes anywhere else. When each thing was sent, how long it
+was and over which connection is told by them, a request to the model as
+a push to a repository (see uploads.py). The session joins that
+namespace,
 so the capture is running before its first packet. It holds no capabilities
 and is in another process namespace, so it can neither capture itself nor
 see, stop or edit the capture, which stays in the sidecar until the
@@ -39,11 +44,13 @@ from ..docker import container_running, docker, docker_bytes, docker_ok
 from ..errors import Fatal
 from ..sandbox.network import namespace_args
 from ..settings import Host, Settings
+from .model_api import MODEL_API
 from .packets import RESOLVER
 from .payloads import HTTP_METHODS
 from .pcap import Capture, read_capture
 from .records import TracedSession
 from .sidecar import Sidecar
+from .uploads import ELSEWHERE_PART, UPLOADS_PART
 
 CAPTURE_SUFFIX = ".capture"
 CAPTURE_LABEL = "claude-airlock.capture"
@@ -53,7 +60,11 @@ CAPTURE_FILE = "/capture.pcap"
 # when a capture ran into it. The limit is each part's own.
 PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
-# Captures are a few kB each as a rule, the oldest go once there are more
+# Of a packet taken for when it was sent and how long it was alone: its
+# headers, with the options IP and TCP can have, and nothing it carries
+HEADERS_LENGTH = 160
+# Captures are a few kB each as a rule, and some hundred with the headers
+# of what a session sent: the oldest go once there are more
 KEPT_CAPTURES = 100
 # Where the TCP of the capture is told apart from the rest, for the filter.
 # The filter's tcp[] is of IPv4 alone, over IPv6 the same is spelled by
@@ -75,14 +86,16 @@ _ENDS6 = f"({_TCP6} and ip6[53:1] & 0x07 != 0)"
 # what is left of the packet's length once its headers are taken off. Not
 # of the session's own within itself, as of what starts a connection.
 SAMPLED_BITS = 0x3FFF
+# A packet of TCP that carries something: what is left of its length
+# once its headers are taken off
+_CARRIES = f"ip[2:2] - ((ip[0:1] & 0x0f) << 2) - {_PAYLOAD} != 0"
+_CARRIES6 = "ip6[4:2] - ((ip6[52:1] & 0xf0) >> 2) != 0"
 _SAMPLED = (
-    f"(tcp[4:2] & {SAMPLED_BITS:#x} = 0"
-    f" and ip[2:2] - ((ip[0:1] & 0x0f) << 2) - {_PAYLOAD} != 0"
-    " and not dst net 127.0.0.0/8)"
+    f"(tcp[4:2] & {SAMPLED_BITS:#x} = 0 and {_CARRIES} and not dst net 127.0.0.0/8)"
 )
 _SAMPLED6 = (
     f"({_TCP6} and ip6[44:2] & {SAMPLED_BITS:#x} = 0"
-    " and ip6[4:2] - ((ip6[52:1] & 0xf0) >> 2) != 0 and not dst host ::1)"
+    f" and {_CARRIES6} and not dst host ::1)"
 )
 
 
@@ -96,6 +109,17 @@ class Part:
     file: str
     suffix: str
     filter: str
+    # How much of each packet is kept, that of the others when 0
+    snap: int = 0
+
+    @property
+    def started(self) -> str:
+        """What starts its tcpdump in the script of the sidecar, given
+        its filter as the argument of that number. A length of its own
+        comes after that of the others, and is the one that counts."""
+        number = PARTS.index(self) + 1
+        snap = f" -s {self.snap}" if self.snap else ""
+        return f'tcpdump $common{snap} -w {self.file} "${number}" &\n{self.name}=$!'
 
 
 def _http_methods(load: str) -> str:
@@ -153,11 +177,55 @@ FLOWS_FILTER = (
     f" or (outbound and ip6 and not {_TCP6} and not dst host ::1)"
     ")"
 )
+# What the session sends to the model's API that carries something, by
+# the addresses of that (see model_api.py): every packet of it, for when
+# each request went and how long it was. The headers alone, see
+# HEADERS_LENGTH. Not what comes back. Of a session behind the egress
+# proxy this part has nothing, its packets all go to the proxy.
+_TO_THE_MODEL = {
+    version: " or ".join(
+        f"dst net {network}" for network in MODEL_API if network.version == version
+    )
+    for version in (4, 6)
+}
+UPLOADS_FILTER = (
+    "outbound and ("
+    f"(ip and tcp and ({_TO_THE_MODEL[4]}) and {_CARRIES})"
+    f" or ({_TCP6} and ({_TO_THE_MODEL[6]}) and {_CARRIES6})"
+    ")"
+)
+# And what it sends over TCP to anywhere else, the same of it: a push, a
+# file sent somewhere, whatever goes to the egress proxy. In a part of its
+# own, a session can send any amount of it and what tells of its requests
+# to the model is not to be used up by that. Not within itself, nor to
+# port 53, which has its part.
+ELSEWHERE_FILTER = (
+    f"outbound and {_NOT_DNS} and ("
+    f"(ip and tcp and not ({_TO_THE_MODEL[4]}) and not dst net 127.0.0.0/8"
+    f" and {_CARRIES})"
+    f" or ({_TCP6} and not ({_TO_THE_MODEL[6]}) and not dst host ::1"
+    f" and {_CARRIES6})"
+    ")"
+)
 PARTS = (
     Part("tcp", CAPTURE_FILE, "", TCP_FILTER),
     Part("dns", "/dns.pcap", ".dns", DNS_FILTER),
     Part("direct", "/direct.pcap", ".direct", DIRECT_FILTER),
     Part("flows", "/flows.pcap", ".flows", FLOWS_FILTER),
+    Part(
+        UPLOADS_PART,
+        "/uploads.pcap",
+        f".{UPLOADS_PART}",
+        UPLOADS_FILTER,
+        snap=HEADERS_LENGTH,
+    ),
+    Part(
+        ELSEWHERE_PART,
+        "/elsewhere.pcap",
+        f".{ELSEWHERE_PART}",
+        ELSEWHERE_FILTER,
+        snap=HEADERS_LENGTH,
+    ),
 )
 # What is added to the file of a part for the one it leaves its exit status
 # in, when tcpdump ends before it is told to, see CAPTURE_SCRIPT
@@ -182,10 +250,7 @@ SAID_LINES = 100
 # never got to write its file failed to start, which is said by ending
 # with its status (see _start_capture).
 _COMMON = f"-i any -p -n -U -Z root --immediate-mode -s {SNAP_LENGTH} -c {PACKET_LIMIT}"
-_STARTED = "\n".join(
-    f'tcpdump $common -w {part.file} "${number}" &\n{part.name}=$!'
-    for number, part in enumerate(PARTS, 1)
-)
+_STARTED = "\n".join(part.started for part in PARTS)
 _STOPPED = " ".join(f'"${part.name}"' for part in PARTS)
 _CHECKED = "\n".join(
     f'  check {part.name} {part.file} "${part.name}"' for part in PARTS

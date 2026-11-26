@@ -137,6 +137,18 @@ def _how_it_went(connection: Connection, outcome: Went) -> str:
     return went
 
 
+def _uploads_on(capture: Capture, connection: Connection) -> int:
+    """How many times something long enough to be worth a line was sent
+    over a connection, as far as the capture took that, see uploads.py."""
+    key = (connection.source_port, connection.address, connection.port)
+    ended = math.inf if connection.ended is None else connection.ended
+    return sum(
+        upload.sized
+        for part in (capture.uploads, capture.elsewhere)
+        for upload in part.on(key, connection.when, ended)
+    )
+
+
 def _connection_event(
     capture: Capture,
     connection: Connection,
@@ -170,6 +182,11 @@ def _connection_event(
             bytes_in=connection.received,
         )
     went = _how_it_went(connection, outcome)
+    uploads = _uploads_on(capture, connection) if went else 0
+    if uploads:
+        # When the capture took what is sent over it
+        went += f", {uploads} uploads"
+        fields["uploads"] = uploads
     detail = reached(capture, address, port, "tcp", connection.when)
     detail += f"  {went}" if went else ""
     wrong = Wrong.THROUGHOUT if outcome.wrong else Wrong.NO
@@ -311,7 +328,7 @@ def capture_events(
     return events
 
 
-def _name_processes(events: list[Event], record: ProcessRecord) -> None:
+def name_processes(events: list[Event], record: ProcessRecord) -> None:
     """Say of each connection which process made it, where one was noted
     to hold it: by its ports, so this is not a guess by the clock."""
     for event in events:
@@ -454,7 +471,7 @@ def _captured_connections(
     events = capture_events(capture, verbose)
     record = recorded.processes_of(session)
     if record:
-        _name_processes(events, record)
+        name_processes(events, record)
     name_container(events, session.name, recorded.several)
     stopped = [f"  {STOPPED.format(flat(session.stopped))}"] if session.stopped else []
     if session.dropped:

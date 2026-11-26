@@ -126,6 +126,7 @@ def _fields(call: Call, container: str, gone: bool) -> dict[str, object]:
         "request_id": call.request_id,
         "message_id": call.message_id,
         "message_uuid": call.message_uuid,
+        "asked": call.asked,
         "sent": call.sent,
         **{part.value: taken for part, taken in call.parts.items()},
         "tool_count": call.tool_count,

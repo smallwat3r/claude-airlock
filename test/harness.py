@@ -95,6 +95,8 @@ elif args[0] == "cp" and "FAKE_CAPTURE" in os.environ:
         "/dns.pcap": "FAKE_CAPTURE_DNS",
         "/direct.pcap": "FAKE_CAPTURE_DIRECT",
         "/flows.pcap": "FAKE_CAPTURE_FLOWS",
+        "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
+        "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
     }}
     where = [env for path, env in other.items() if args[1].endswith(path)]
     source = os.environ.get(where[0]) if where else os.environ["FAKE_CAPTURE"]
@@ -112,6 +114,8 @@ if args[0] == "exec" and args[2:4] == ["tail", "-c"] and "FAKE_CAPTURE" in os.en
         "/dns.pcap": "FAKE_CAPTURE_DNS",
         "/direct.pcap": "FAKE_CAPTURE_DIRECT",
         "/flows.pcap": "FAKE_CAPTURE_FLOWS",
+        "/uploads.pcap": "FAKE_CAPTURE_UPLOADS",
+        "/elsewhere.pcap": "FAKE_CAPTURE_ELSEWHERE",
     }}
     source = os.environ.get(other.get(args[5], "FAKE_CAPTURE"))
     if source is None:

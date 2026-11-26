@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -76,6 +77,14 @@ def count(value: object) -> int | None:
     return value
 
 
+def moment(value: object) -> float | None:
+    """A time a session gives, as seconds since the epoch, none for what
+    is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) and value > 0 else None
+
+
 def shown_text(said: Mapping, key: str) -> str:
     """A value of a line as text on one line, empty for one that is not
     text."""
@@ -118,6 +127,9 @@ class Call:
     message_uuid: str = ""
     # Whether Claude Code said an answer came
     answered: bool = False
+    # When the request was written out to be sent, as its file says, none
+    # for one that was not found
+    asked: float | None = None
     # How long the request was, none for one that was not found, and how
     # much of it each part took, of one that reads as a request
     sent: int | None = None
@@ -147,6 +159,7 @@ class Call:
             "request_id": self.request_id,
             "message_id": self.message_id,
             "message_uuid": self.message_uuid,
+            "asked": self.asked,
             "sent": self.sent,
             **{part.value: size for part, size in self.parts.items()},
             "tool_count": self.tool_count,
@@ -178,6 +191,7 @@ class Call:
             message_id=shown_text(said, "message_id"),
             message_uuid=shown_text(said, "message_uuid"),
             answered=said.get("answered") is True,
+            asked=moment(said.get("asked")),
             sent=count(said.get("sent")),
             parts={
                 part: size

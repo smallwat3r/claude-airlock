@@ -113,7 +113,12 @@ class Timeline:
         call = fields.get("id")
         if event.call and isinstance(call, str):
             self._note(event, call)
-        elif event.kind is Kind.NET and fields.get("stage") != Stage.OUTCOME:
+        elif (
+            event.kind is Kind.NET
+            and fields.get("stage") != Stage.OUTCOME
+            # Not what Claude Code sends to the model, which no call makes
+            and not fields.get("model_api")
+        ):
             self._mark(event)
 
     def _note(self, event: Event, call: str) -> None:

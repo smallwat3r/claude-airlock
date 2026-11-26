@@ -79,6 +79,7 @@ from .summary import planted_shown, summary
 from .trace_args import picked_session, trace_options
 from .transcript import WalkOptions, left_events, taken_out_events
 from .unseen import mark_unseen, unseen_summary
+from .wire import on_the_wire
 
 # What an event of what was taken out of a transcript says of itself
 REMOVED = "REMOVED FROM THE TRANSCRIPT"
@@ -267,8 +268,12 @@ def session_events(
         net_lines += unseen_summary(mark_unseen(told, recorded.watched))
         # Over all of the sessions' stay, as the network is, see stay
         noted_rows, noted = noted_events(host, *recorded.stay)
-        # Each request to the model next to the steps the transcripts have
+        # Each request to the model next to the steps the transcripts have,
+        # and where the capture of its session saw it go
         place_calls(noted, path.stem, _steps_told([own, *subagents], unread))
+        wire_rows, wire_events = on_the_wire(noted, recorded)
+        noted_rows += wire_rows
+        net_events += wire_events
     header = [
         *_session_header(own, subagents, project_dir, planted, unread, taken),
         *(

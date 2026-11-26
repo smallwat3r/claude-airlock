@@ -17,7 +17,6 @@ the trace has the address."""
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import time
 from collections import Counter
@@ -37,6 +36,7 @@ from ..projects import (
     subagents_unread,
 )
 from ..recording.capture import parts_cut_short
+from ..recording.model_api import is_model_api, is_model_host
 from ..recording.pcap import Capture
 from ..recording.recorder import copied_at, last_written, removed_transcripts
 from ..recording.records import recorded_sessions
@@ -51,34 +51,15 @@ from .recorded import ReadTranscript, Recorded
 from .shown import DROPPED, LOG_SHORT, SILENT, STOPPED, reached, size
 from .summary import planted_reads
 
-# To one destination in one session, from this many bytes on it is said
-LARGE_UPLOAD = 10_000_000
-# Where Claude Code sends the conversation, again with every step: the
-# addresses Anthropic publishes for its API. Told by address, a name is
-# the session's to choose. A session that reaches the model another way
+# To one destination in one session, from this many bytes on it is said.
+# Not to the model's API, where the conversation goes again with every
+# step (see model_api.py): a session that reaches the model another way
 # has that way said as a large upload, which it is.
-MODEL_API = (
-    ipaddress.ip_network("160.79.104.0/23"),
-    ipaddress.ip_network("2607:6bc0::/48"),
-)
-MODEL_DOMAIN = "anthropic.com"
+LARGE_UPLOAD = 10_000_000
 # Of one kind of thing, how many are said
 MOST_SAID = 8
 # The destinations kept per project, the ones reached longest ago go first
 KEPT_DESTINATIONS = 2000
-
-
-def _is_model_api(address: str) -> bool:
-    try:
-        found = ipaddress.ip_address(address)
-    except ValueError:
-        return False
-    return any(found in network for network in MODEL_API)
-
-
-def _is_model_host(host: str) -> bool:
-    """The same by name, as a filtered session asks its proxy for it."""
-    return host == MODEL_DOMAIN or host.endswith("." + MODEL_DOMAIN)
 
 
 def _destinations(capture: Capture) -> dict[str, str]:
@@ -104,14 +85,14 @@ def _uploads(capture: Capture, filtered: bool) -> list[str]:
     sent: Counter[str] = Counter()
     for connection in capture.connections:
         behind_proxy = filtered and connection.port == EGRESS_PORT
-        if not behind_proxy and not _is_model_api(connection.address):
+        if not behind_proxy and not is_model_api(connection.address):
             where = reached(
                 capture, connection.address, connection.port, "tcp", connection.when
             )
             # None of one left open, or reset by the other end: not known
             sent[where] += connection.sent or 0
     for flow in capture.flows:
-        if not _is_model_api(flow.address):
+        if not is_model_api(flow.address):
             where = reached(capture, flow.address, flow.port, flow.transport, flow.when)
             sent[where] += flow.sent
     return [
@@ -231,7 +212,7 @@ def _denied_lines(recorded: Recorded) -> list[str]:
     # of a session whose every connection is to the proxy
     sent: Counter[str] = Counter()
     for request in made:
-        if not request.denied and request.sent and not _is_model_host(request.host):
+        if not request.denied and request.sent and not is_model_host(request.host):
             sent[flat(f"{request.host}:{request.port}")] += request.sent
     return [
         *(

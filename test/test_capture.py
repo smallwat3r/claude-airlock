@@ -322,15 +322,24 @@ class CaptureFileTest:
             "dns": [dns_query("a.test"), dns_response("a.test", there)],
             "direct": [direct, tcp("9.9.9.9", 53, 0x18, b"\x00\x01x")],
             "flows": [ipv4(17, "172.20.0.5", there, udp(4433))],
-            # A packet with nothing in it, one outside what is sampled,
-            # and the session's own within itself
+            # What is sent to the model's API, outside what is sampled,
+            # and the same to anywhere else
+            "uploads": [
+                tcp("160.79.104.10", 443, 0x10, b"x" * 100, sequence=window + 65536)
+            ],
+            "elsewhere": [tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65536)],
+            # A packet with nothing in it, and the session's own within
+            # itself
             "": [
                 tcp(there, 443, 0x10, b"", sequence=window),
-                tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65536),
                 tcp("127.0.0.1", 8000, 0x10, b"x", sequence=window),
                 tcp("127.0.0.1", 8000),
             ],
         }
+        # What is sent anywhere is in its part whatever else has it: the
+        # packets of that part are read for when they went and how long
+        # they were alone, and not as those of the others are
+        carrying = packets["tcp"][3:] + packets["elsewhere"]
         every = [packet for some in packets.values() for packet in some]
         frames = [(1.0 + at, packet, True) for at, packet in enumerate(every)]
         with tempfile.TemporaryDirectory() as directory:
@@ -348,6 +357,8 @@ class CaptureFileTest:
                     frame[16:] for _, _, frame in PcapReader().feed(kept.read_bytes())
                 ]
         # Each packet in the part that is to have it, and in no other
+        assert taken.pop("elsewhere") == carrying
+        del packets["elsewhere"]
         assert taken == {part: some for part, some in packets.items() if part}
 
     def test_the_name_of_an_address_is_found_among_any_number_of_answers(self):
@@ -1007,11 +1018,14 @@ class CaptureSessionTest(LauncherTest):
         # It runs tcpdump and outlives it: the session's way out is the
         # sidecar's, and would go with one that ended at its packet limit
         script = sidecar[sidecar.index("-c") + 1]
-        assert script.count("tcpdump $common") == len(capture_module.PARTS) == 4
+        assert script.count("tcpdump $common") == len(capture_module.PARTS) == 6
         for number, part in enumerate(capture_module.PARTS, 1):
-            assert f'tcpdump $common -w {part.file} "${number}" &' in script
+            # Of what is sent somewhere the headers alone
+            snap = " -s 160" if part.name in ("uploads", "elsewhere") else ""
+            assert f'tcpdump $common{snap} -w {part.file} "${number}" &' in script
             assert f'check {part.name} {part.file} "${part.name}"' in script
-        assert """trap 'kill "$tcp" "$dns" "$direct" "$flows" 2>""" in script
+        stopped = '"$tcp" "$dns" "$direct" "$flows" "$uploads" "$elsewhere"'
+        assert f"trap 'kill {stopped} 2>" in script
         assert "while :" in script
         # A tcpdump for each part, and the filter of each after the script
         filters = sidecar[sidecar.index("sh", sidecar.index("-c")) + 1 :]

@@ -197,10 +197,12 @@ class Claimed:
 @dataclass(frozen=True)
 class Body:
     """The file of a request or of an answer as it was found in a drop:
-    how long it is, what it holds unless that was too long to read, and
-    the object that is when it reads as one."""
+    how long it is, when it says it was written, what it holds unless
+    that was too long to read, and the object that is when it reads as
+    one."""
 
     size: int = 0
+    written: float | None = None
     data: bytes | None = None
     held: dict | None = None
 
@@ -216,16 +218,17 @@ class Body:
             return cls()
         try:
             with file:
-                size = os.fstat(file.fileno()).st_size
+                about = os.fstat(file.fileno())
+                size, written = about.st_size, round(about.st_mtime, 3)
                 if size > most:
-                    return cls(size)
+                    return cls(size, written)
                 # As long as it was when measured: what it gains meanwhile
                 # is not read, a session can go on writing for ever
                 data = file.read(size)
         except OSError:
             return cls()
         held = json_object(data) if held_size(data) <= MOST_LINE_HELD else None
-        return cls(len(data), data, held)
+        return cls(len(data), written, data, held)
 
 
 def _written_size(value: object) -> int:
@@ -246,12 +249,14 @@ def _length(asked: Mapping, part: Part) -> int | None:
 
 
 def with_request(call: Call, request: Body) -> Call:
-    """A request with what its body measures: how long it is, and once
-    it is read how much of it the definitions of the tools, the system
-    prompt and the conversation take, how many tools and messages there
-    are, and whether Claude Code says it left the body out. The model of
-    one no line of the index named is the one its body names."""
+    """A request with what its body measures: how long it is and when
+    it was written out, which is when it was sent, and once it is read
+    how much of it the definitions of the tools, the system prompt and
+    the conversation take, how many tools and messages there are, and
+    whether Claude Code says it left the body out. The model of one no
+    line of the index named is the one its body names."""
     asked = request.held
+    call = dataclasses.replace(call, asked=request.written)
     if asked is None:
         return dataclasses.replace(call, sent=request.size or None)
     return dataclasses.replace(

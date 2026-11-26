@@ -37,6 +37,7 @@ from .payloads import (
     unanswered,
 )
 from .pcap_file import pcap_frames
+from .uploads import ELSEWHERE_PART, UPLOADS_PART, Key, Uploads
 
 # What a lookup is flagged for: a name or one label of it longer than
 # names are, or this many different names under one parent. Data can be
@@ -323,6 +324,11 @@ class Capture:
     requests: list[Request] = field(default_factory=list)
     # Each place something was sent to by another protocol than TCP
     flows: list[Flow] = field(default_factory=list)
+    # What was sent to the model's API, a run of packets at a time, and
+    # what was sent anywhere else, when the capture took those parts, see
+    # uploads.py
+    uploads: Uploads = field(default_factory=Uploads)
+    elsewhere: Uploads = field(default_factory=Uploads)
     packets: int = 0
     # How many each part of the capture had, by its name: each has a
     # packet limit of its own
@@ -560,6 +566,17 @@ class Capture:
         known = {address: said.names[-1] for address, said in self._answered.items()}
         return {**self._hello, **known}
 
+    def connection_of(self, key: Key, when: float) -> Connection | None:
+        """The connection something was sent on at a time, by the
+        session's port and the other end: the last one from that port
+        opened by then. None when the capture has none, it began later
+        or its part ran into its packet limit."""
+        for connection in reversed(self.connections):
+            known = (connection.source_port, connection.address, connection.port)
+            if known == key and connection.when <= when:
+                return connection
+        return None
+
     def name_of(self, address: str, when: float | None = None) -> str | None:
         """The name an address was looked up under, as of a time: the last
         answer that came before it, so that what the session had looked up
@@ -699,11 +716,15 @@ def take_frames(
     """Add what captured frames tell to a capture, those of the part of it
     that is named. A packet that cannot be made sense of is counted and
     passed over."""
+    # Those of the uploads are counted alone: the part of the TCP has what
+    # starts and ends their connections, and its own count of each
+    uploads = {UPLOADS_PART: capture.uploads, ELSEWHERE_PART: capture.elsewhere}
+    take = uploads[part].add if part in uploads else capture.add
     for when, link_type, frame in frames:
         capture.packets += 1
         capture.part_packets[part] = capture.part_packets.get(part, 0) + 1
         try:
-            capture.add(parse_packet(when, link_type, frame))
+            take(parse_packet(when, link_type, frame))
         except NotThis:
             continue
 

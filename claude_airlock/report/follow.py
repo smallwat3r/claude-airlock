@@ -44,7 +44,7 @@ from typing import Self
 
 from ..docker import running_containers
 from ..errors import Fatal
-from ..events import Event, clean, flat, labelled
+from ..events import Event, Kind, clean, flat, labelled
 from ..files import LINE_LIMIT, line_entry, open_plain
 from ..projects import (
     MOST_SUBAGENTS,
@@ -68,6 +68,7 @@ from ..recording.pcap_file import PcapReader
 from ..recording.processes import SILENT_BEATS, Watcher, said_since
 from ..recording.procwatch import HEALTH_EVERY as SAID_EVERY
 from ..recording.records import recorded_sessions
+from ..recording.uploads import PAUSE
 from ..settings import Host
 from .entries import read_entries, session_files, title
 from .layout import Layout, event_json
@@ -83,6 +84,7 @@ from .stream import (
 )
 from .trace_args import USAGE, picked_session, trace_options
 from .transcript import Walk, WalkOptions
+from .wire import Wire, upload_event
 
 # Seconds between two looks at what is followed
 INTERVAL = 1.0
@@ -96,6 +98,10 @@ HISTORY = 10
 HEALTH_EVERY = 10.0
 # Seconds between two looks at whether a tcpdump of a capture has died
 DIED_EVERY = 5.0
+# Seconds after its last packet that an upload is
+# shown: twice the pause that ends one, for what the clock of the capture
+# and this one are apart
+UPLOAD_OVER = 2 * PAUSE
 # Seconds without a word on how a session is doing after which what says
 # it is taken to have ended, or hung: it says so every SAID_EVERY
 SILENT_AFTER = SILENT_BEATS * SAID_EVERY
@@ -242,7 +248,11 @@ class CaptureTail:
         # Where each part of the capture has been read to, and its reader
         self._offsets = {part.name: 0 for part in PARTS}
         self._readers = {part.name: PcapReader() for part in PARTS}
-        self._capture = Capture()
+        # How many of the uploads were looked at, those to the model's
+        # API and those to anywhere else
+        self._uploads_seen = {True: 0, False: 0}
+        # What it has read so far, for what places a request on the wire
+        self.capture = Capture()
         self._said_cut_short = False
         # The parts already said to have died, and when that was last asked
         self._said_died = ""
@@ -253,14 +263,34 @@ class CaptureTail:
         opened, what became of the open ones, the plain HTTP requests, and
         with --verbose the lookups. Nothing while it cannot be read: it can
         again later, or its session has ended."""
-        past = self._capture.marks()
+        past = self.capture.marks()
         for part in PARTS:
             data = captured_since(self.sidecar, self._offsets[part.name], part.file)
             if data:
                 self._offsets[part.name] += len(data)
                 frames = self._readers[part.name].feed(data)
-                take_frames(self._capture, frames, part.name)
-        return capture_events(self._capture, self._verbose, past)
+                take_frames(self.capture, frames, part.name)
+        events = capture_events(self.capture, self._verbose, past)
+        return events + self._uploads_over()
+
+    def _uploads_over(self) -> list[Event]:
+        """The uploads that are over since the last time, to the model's
+        API and to anywhere else, those long enough to be worth a line,
+        each as an event: one is over once nothing was sent on its
+        connection for longer than the pause that ends it, by the clock
+        of this side."""
+        events = []
+        parts = ((True, self.capture.uploads), (False, self.capture.elsewhere))
+        for to_model, part in parts:
+            uploads = part.all
+            while self._uploads_seen[to_model] < len(uploads):
+                upload = uploads[self._uploads_seen[to_model]]
+                if time.time() - upload.ended <= UPLOAD_OVER:
+                    break
+                self._uploads_seen[to_model] += 1
+                if upload.sized:
+                    events.append(upload_event(self.capture, upload, to_model))
+        return events
 
     def newly_died(self) -> str:
         """The parts whose tcpdump is found to have died since the last
@@ -279,7 +309,7 @@ class CaptureTail:
 
     def newly_cut_short(self) -> bool:
         """Whether the capture ran into its packet limit, once."""
-        if self._said_cut_short or not cut_short(self._capture):
+        if self._said_cut_short or not cut_short(self.capture):
             return False
         self._said_cut_short = True
         return True
@@ -414,6 +444,9 @@ class Follower:
         # the Docker socket, and what a chat found changed in what Claude
         # Code says
         self._noted = NewlyNoted(host, container)
+        # What the captures saw go to the model's API, given out to the
+        # requests that are noted, see wire.py
+        self._wire = Wire()
 
     def title(self, path: Path) -> str:
         return self._tails[path].title
@@ -711,9 +744,16 @@ class Follower:
 
     def _poll_notes(self, found: Round) -> None:
         """What the launchers of the project's sessions noted since the
-        last time: the starts, the uses of the doors, and the changes
-        chats found."""
-        found.events += [(None, event) for event in self._noted.poll()]
+        last time: the starts, the uses of the doors, the changes chats
+        found and the requests to the model, each of those with where
+        the capture of its session saw it go."""
+        noted = self._noted.poll()
+        captures = {tail.session: tail.capture for tail in self._captures.values()}
+        for event in noted:
+            capture = captures.get(str(event.fields.get("container")))
+            if event.kind is Kind.REQUEST and capture:
+                self._wire.place(event, capture)
+        found.events += [(None, event) for event in noted]
 
     def _keep_latest(self, found: Round) -> None:
         """Of what happened before the following began, the last few.

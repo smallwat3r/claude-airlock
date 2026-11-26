@@ -338,16 +338,26 @@ address is what was reached. Trust the address where the two matter.
   end of both sides: what is sent after the other side closed counts too.
   The numbers start over every 4 GB, so the capture takes one packet of
   every gigabyte a connection carries, and a longer one is counted right.
-- The capture has four parts, each with a limit of 100,000 packets of its
+- The capture has six parts, each with a limit of 100,000 packets of its
   own: `tcp` (the start, answer and end of connections, the TLS hello,
   plain HTTP), `dns` (what Docker's resolver is asked and says), `direct`
-  (what goes to port 53 anywhere else) and `flows` (what is not TCP). A
+  (what goes to port 53 anywhere else), `flows` (what is not TCP),
+  `uploads` (what is sent to the model's API) and `elsewhere` (what is
+  sent over TCP to anywhere else, see below). A
   session that floods one cannot fill what the others have: whatever it
   sends to port 53, the lookups the resolver makes for it and its
   connections to that port are still recorded. A part that reaches its
   limit is said as `STOPPED at its packet limit` with its name, and one
   whose tcpdump ended before the session did as `INCOMPLETE`, what came
   after is not in it. `--follow` says so too, within a few seconds of it.
+- Of what the session sends over TCP, `uploads` and `elsewhere` have
+  the headers of every packet that carries something, 160 bytes of each
+  and nothing of what it carries: the first of what goes to the
+  addresses of the model's API, the second of the rest. From them the
+  launcher tells when each thing was sent, how long it was and over
+  which connection, see [On the wire](#on-the-wire). Two parts, so that
+  a session that sends a lot somewhere does not use up what its
+  requests to the model are told by.
 - Packets that come faster than they are taken are dropped, and what
   they told of, a connection made in that burst, is in no part. Each
   tcpdump says how many when it ends, and a capture that dropped any is
@@ -645,6 +655,7 @@ claude   request  claude-fable-5-2  sent 415 kB: tools 61 kB, system 14 kB, mess
 | `no step of the transcript` | The answer is no step of the session's transcript nor of those of its subagents: the model was asked besides the conversation |
 | `of session` | Claude Code says the request is of another session of the project, which ran at the same time or went on in the same container (`/clear`) |
 | `NO ANSWER was noted` | The request was written out and no answer to it was by the time the session was over: a turn that was interrupted, or a request that failed |
+| `wire:` | Where the capture saw the request go: how much was sent to the model's API in one go, when, and on which connection, by when that was opened. See [On the wire](#on-the-wire) |
 
 The header says how many there were, how much they sent in all and where
 the bodies are:
@@ -693,6 +704,93 @@ the bodies are:
 - A trace of a session that still runs has its requests up to a few
   seconds ago: one is noted a moment after its answer is in the
   transcript.
+
+### On the wire
+
+What a session sends shows from outside it, whatever the session says
+of it and without `CLAUDE_AIRLOCK_API_LOG`. With the capture on
+(`CLAUDE_AIRLOCK_NET_LOG`, the default) the launcher takes the headers
+of what the session sends over TCP, and each run of packets on one
+connection without a pause of half a second is an upload. A request to
+the model is one, the conversation sent again, and so is a push or a
+file sent somewhere:
+
+```
+sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  upload of 414 kB in 0.3s
+sandbox  net      tcp/ssh github.com (140.82.121.4):22  upload of 2 MB in 1.4s  by: [812] ssh git@github.com < git < bash < claude  during: $ git push
+sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  closed after 660.0s, 4 MB out, 1 MB in, 44 uploads
+```
+
+```
+# uploads     44 to the model's API, 4 MB sent
+# uploads     1 elsewhere, 2 MB sent
+```
+
+- An upload of 4 kB or more is a `net` line, at the time it began. One
+  shorter is what keeps a connection going, its handshake, or a request
+  that asks for something and sends little: a `GET` is none.
+- A connection says how many uploads of that length went over it.
+- An upload to anywhere but the model's API says which call it was sent
+  during and, with the record of the processes, which process made its
+  connection, as a connection does. One to the model does not: no call
+  makes those.
+- The capture keeps the headers of those packets alone, so nothing here
+  tells what an upload held, nor which model it asked. One the capture
+  lost packets of is counted by the next packet, one sent again once.
+- Two things sent at the same moment over one connection, a request of
+  claude's and one of a subagent, are one upload: nothing on the wire
+  tells them apart.
+- `--json` has `upload` on such a line, with `bytes_out`, `seconds`,
+  the `address`, `port` and `source_port` of its connection, and
+  `model_api` for whether it went to the model's API, which is told by
+  the address.
+- Line mode and `--trace --follow` show an upload a second after its
+  last packet.
+- Of a session behind the egress filter (`CLAUDE_AIRLOCK_NET_FILTER=1`)
+  every upload is one to the proxy, all its packets go there: which of
+  them are for the model is not told apart. Nothing is told for a
+  session run with `CLAUDE_AIRLOCK_NET_LOG=0`.
+
+With `CLAUDE_AIRLOCK_API_LOG=1` the two records are put side by side,
+what Claude Code says it sent and what was seen to go:
+
+```
+claude   request  claude-fable-5-2  sent 412 kB: ...  kept as 000041  wire: 414 kB at 10:02:41 on the connection of 10:02:11
+agent    request  claude-haiku-5-5  sent 53 kB: ...  kept as 000042  agent:builtin:general-purpose  wire: with another request in 467 kB at 10:02:44 on the connection of 10:02:11
+claude   request  claude-fable-5-2  sent 415 kB: ...  kept as 000044  wire: no upload of its size seen
+sandbox  net      tcp/https api.anthropic.com (160.79.104.10):443  upload of 12 kB in 0.1s, no request noted for it
+```
+
+```
+# requests    44 to the model, 9 MB sent, 1 without an answer
+# requests    43 seen on the wire, 1 NOT SEEN there, 2 uploads to the model's API with no request noted
+```
+
+- A request is looked for by when Claude Code wrote it out, which is
+  when it sent it, and by its length: the upload that began about then
+  (from a minute before, when it still went on, to 5 seconds after) and
+  has at least half the length of the request left that no request
+  before it took. The nearest in length of those. `wire:` says how much
+  the upload sent, which should be a little more than the request: the
+  encryption and the headers of the request come on top.
+- The connection is named by when it was opened, the time of its `net`
+  line. `--json` has it whole as `wire`: `address`, `port`,
+  `source_port`, `opened`, and of the upload `at`, `seconds`, `bytes`
+  and whether it is `shared` with another request.
+- A request that shares its upload with the one before says
+  `with another request in`.
+- `no upload of its size seen` says the capture saw nothing of that
+  length go to the model's API then. That is worth a look: the request
+  went another way, or was not sent as it is said to have been.
+- In a trace, an upload a request accounts for is told on the line of
+  that request and has no line of its own. One that no request accounts
+  for says so (`unnoted` in `--json`). It need not be wrong, Claude Code
+  asks that host for more than the model, but it is what went there
+  that the session's own record does not tell of. What went anywhere
+  else is never a request to the model, and no request is placed in it.
+- While a session runs, a request says where it went as it is noted,
+  under the line of its upload, which came when it was sent: a request
+  is noted once it is answered, which can be minutes later.
 
 ## When a session ends
 
@@ -744,7 +842,7 @@ log:
 | What | Holds | How much |
 | --- | --- | --- |
 | `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB, more by what a session has logged within 10 seconds |
-| `captures` | The capture of each session | A few kB each as a rule, the latest 100 |
+| `captures` | The capture of each session | A few kB, and the headers of what the session sent: some hundred kB each as a rule, 18 MB at most for what went to the model and as much for the rest. The latest 100 |
 | `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
 | `transcripts` | The launcher's copy of each transcript | For 30 days, 2 GB a session at most |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |

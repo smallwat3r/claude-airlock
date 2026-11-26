@@ -74,12 +74,15 @@ and CPU the sandbox uses](img/line-mode.png)
 - What each step of the model used: the tokens it wrote and read, and
   whether it missed the cache.
 - With `CLAUDE_AIRLOCK_API_LOG=1`, each request to the model once it
-  is answered: how much was sent and what of, the tokens the API counted
-  and why the model stopped, see
+  is answered: how much was sent and what of, the tokens the API counted,
+  why the model stopped, and where the capture saw it go, see
   [The requests to the model](trace.md#the-requests-to-the-model).
 - Every connection the session opens, and how it ended: closed after how
   long and how much it carried, or what went wrong (`REFUSED`,
   `NO ANSWER`).
+- Each thing of 4 kB or more the session sends, as the capture sees it
+  go: a request to the model, a push, a file sent somewhere, with how
+  much it was, see [On the wire](trace.md#on-the-wire).
 - Each request the egress filter refused (`DENIED`), and each use of the
   SSH agent and of the Docker socket.
 - With `CLAUDE_AIRLOCK_NET_ASK=1`, a host the egress filter does not
