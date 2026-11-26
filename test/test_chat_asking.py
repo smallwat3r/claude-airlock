@@ -40,7 +40,7 @@ class AskingTest:
         asker = an_asker()
         self.asked: list[str] = []
 
-        def ask(prompt: str) -> str | None:
+        def ask(prompt: str, style: str = "") -> str | None:
             self.asked.append(prompt)
             return answers.pop(0)
 
@@ -64,9 +64,8 @@ class AskingTest:
             with unittest.mock.patch.object(asking, "TOO_SOON", 0.0):
                 assert asker.take("yes")
             assert asker.asking
-            # Then entered as the question came, however long ago it was
-            # put: counted from when it could be read
-            asker._question.put -= 60
+            # Then entered as the question came: counted from when it
+            # could be read
             before_the_user(asker)
             assert asker.take("yes")
             assert asker.asking
@@ -120,7 +119,7 @@ class AskingTest:
         def put(stale: str = "") -> asking.Question:
             """A question that is before the user, long enough to be
             read."""
-            asker._question = question = asking.Question("allow? ", stale)
+            asker._question = question = asking.Question(stale)
             before_the_user(asker)
             clock[0] += asking.SEEN_TOO_SOON
             return question
@@ -236,7 +235,7 @@ class AskingTest:
     def test_a_question_is_answered_once_and_not_by_a_line_typed_before_it(self):
         asker = an_asker()
         assert not asker.take("hello")
-        asker._question = stale = asking.Question("allow? ", stale="fix the")
+        asker._question = stale = asking.Question(stale="fix the")
         before_the_user(asker)
         with written():
             # Meant as a prompt, typed on since
@@ -247,13 +246,13 @@ class AskingTest:
         assert stale.said == "y"
         # What was being typed dropped, the line entered then is typed
         # with the question to read: its answer, and no prompt for claude
-        asker._question = dropped = asking.Question("allow? ", stale="fix the")
+        asker._question = dropped = asking.Question(stale="fix the")
         before_the_user(asker)
         with written():
             assert asker.take("y")
         assert dropped.said == "y"
         # Given up, it has no answer
-        asker._question = left = asking.Question("allow? ")
+        asker._question = left = asking.Question()
         asker.give_up()
         assert left.answered.is_set()
         assert left.said is None
@@ -262,8 +261,8 @@ class AskingTest:
         # The one it was read for is given up on and the next put, by
         # another thread, between the look at the question and its end
         asker = an_asker()
-        first = asking.Question("allow? ")
-        following = asking.Question("and this? ")
+        first = asking.Question()
+        following = asking.Question()
         asker._question = first
         before_the_user(asker)
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from claude_airlock.events import Event
 from claude_airlock.report import transcript
+from claude_airlock.report.transcript import WalkOptions
 
 PROJECT = "/p"
 
@@ -60,4 +61,5 @@ def step(step_id: str, second: int, **usage: int) -> dict:
 
 
 def events(entries: list[dict], verbose: bool = False) -> list[Event]:
-    return transcript.transcript_events(entries, PROJECT, verbose)
+    """The events of a transcript that is all there."""
+    return transcript.left_events(entries, [], PROJECT, WalkOptions(verbose))

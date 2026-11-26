@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import unittest.mock
 from pathlib import Path
@@ -14,13 +15,14 @@ from pathlib import Path
 import pytest
 from harness import LauncherTest, prompts_at
 
+from claude_airlock import files
 from claude_airlock.recording import recorder
 
 
 def call(number: int, when: float, command: str) -> list[dict]:
     """The entries of a command that ran: its call and its result."""
     stamp = prompts_at(when)[0]["timestamp"]
-    use = {"type": "tool_use", "id": f"c{number}", "name": "Bash"}
+    use: dict[str, object] = {"type": "tool_use", "id": f"c{number}", "name": "Bash"}
     use["input"] = {"command": command}
     result = {"type": "tool_result", "tool_use_id": f"c{number}", "content": "ok"}
     return [
@@ -188,14 +190,22 @@ class RecorderTest(LauncherTest):
 
     def test_a_copy_put_aside_meanwhile_is_not_added_to(self):
         recorder.catch_up(self.transcript, self.copy)
-        with open(self.copy, "ab") as held:
-            assert recorder.still_at(held.fileno(), self.copy)
+        before = self.copy.read_bytes()
+        with self.transcript.open("a") as transcript:
+            transcript.write(json.dumps(prompts_at(time.time())[0]) + "\n")
+        aside = self.copy.with_name(self.copy.name + ".1" + recorder.ASIDE_SUFFIX)
+        with files.open_locked(self.copy, "ab"):
+            catching_up = threading.Thread(
+                target=recorder.catch_up, args=(self.transcript, self.copy)
+            )
+            catching_up.start()
+            time.sleep(0.2)
             # What the launcher that had the lock did with it
-            aside = self.copy.with_name(self.copy.name + ".1" + recorder.ASIDE_SUFFIX)
             os.replace(self.copy, aside)
-            assert not recorder.still_at(held.fileno(), self.copy)
             self.copy.write_bytes(b"")
-            assert not recorder.still_at(held.fileno(), self.copy)
+        catching_up.join(10)
+        assert aside.read_bytes() == before
+        assert self.copy.read_bytes() == self.transcript.read_bytes()
 
     def test_a_session_is_copied_while_it_runs(self):
         added = json.dumps(prompts_at(time.time())[0])

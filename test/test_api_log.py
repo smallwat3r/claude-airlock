@@ -14,13 +14,13 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LauncherTest, follow, prompts_at, settings
+from harness import LauncherTest, prompts_at
 
-from claude_airlock import errors
+from claude_airlock import errors, settings
 from claude_airlock.events import Kind, Who
 from claude_airlock.files import try_lock_file
 from claude_airlock.recording import api_calls, api_log, started
-from claude_airlock.report import api_events
+from claude_airlock.report import api_events, follow
 from claude_airlock.report.layout import Layout
 from claude_airlock.sandbox.runtime import DOCKERS_OWN
 
@@ -117,6 +117,11 @@ class ApiLogTest(LauncherTest):
 
     def events(self) -> list:
         return api_events.call_events(self.host, 0, time.time() + 60)[1]
+
+    def kept_dir(self) -> Path:
+        """Where the bodies of the one session that kept some are."""
+        (directory,) = self.bodies.iterdir()
+        return directory
 
     def kept(self) -> list[str]:
         return sorted(
@@ -238,13 +243,13 @@ class ApiLogTest(LauncherTest):
             "output_tokens": 25,
             "thinking_tokens": 0,
         }
-        name = Path(self.keeper.kept_dir).name
+        name = self.kept_dir().name
         assert note["kept"] == f"{name}/000001"
         assert self.kept() == [
             f"{name}/000001.request.json",
             f"{name}/000001.response.json",
         ]
-        kept = Path(self.keeper.kept_dir, "000001.request.json")
+        kept = Path(self.kept_dir(), "000001.request.json")
         assert kept.read_bytes() == written(asked)
         # For the user alone, as a transcript is
         assert kept.stat().st_mode & 0o777 == 0o600
@@ -296,7 +301,7 @@ class ApiLogTest(LauncherTest):
         assert first["received"] == 16
         assert second["usage"]["output_tokens"] == 25
         # Kept as it was found
-        kept = Path(self.keeper.kept_dir, "000001.response.json")
+        kept = Path(self.kept_dir(), "000001.response.json")
         assert kept.read_bytes() == b'{"usage": {"outp'
 
     def test_the_last_look_waits_for_nothing(self):
@@ -684,7 +689,7 @@ class ApiLogTest(LauncherTest):
         [said] = self.notes()
         # As it is noted, nothing is asked of where the bodies are
         assert "kept as 000001" in api_events.call_event(said).details[0]
-        api_log.shutil.rmtree(self.keeper.kept_dir)
+        api_log.shutil.rmtree(self.kept_dir())
         rows, [event] = api_events.call_events(self.host, 0, time.time() + 60)
         assert rows == [
             (
@@ -825,7 +830,7 @@ class ApiLogTest(LauncherTest):
             SESSION, [*prompts_at(now - 5), step, *prompts_at(now + 5)]
         )
         stdout = self.launch("--trace").stdout
-        name = Path(self.keeper.kept_dir).name
+        name = self.kept_dir().name
         for expected in (
             "# requests    2 to the model, 446 B sent",
             f"# requests    bodies kept in {self.bodies / name}",

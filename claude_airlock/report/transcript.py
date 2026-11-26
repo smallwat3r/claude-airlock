@@ -689,10 +689,3 @@ def taken_out_events(
         when = times[0].timestamp() if times else 0.0
         events.append(_untold_event(when, untold))
     return events
-
-
-def transcript_events(
-    entries: list[dict], project_dir: str, verbose: bool
-) -> list[Event]:
-    """The events of a transcript that is all there."""
-    return left_events(entries, [], project_dir, WalkOptions(verbose))

@@ -15,18 +15,14 @@ import unittest.mock
 from datetime import UTC, datetime
 
 import pytest
-from harness import (
-    LAUNCHER,
-    LauncherTest,
-    prompts_at,
-    transcript,
-)
+from harness import LAUNCHER, LauncherTest, prompts_at
+from transcribed import events
 
 from claude_airlock import files, projects
 from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean
 from claude_airlock.recording import egress_log, recorder
 from claude_airlock.recording.changes import change_event
-from claude_airlock.report import calls, trace
+from claude_airlock.report import calls, trace, transcript
 from claude_airlock.report import entries as entries_module
 from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.door_events import use_event
@@ -1166,7 +1162,7 @@ class TakenOutTest(LauncherTest):
             "result: FAILED, 1 line out",
             "out: no",
         ]
-        (shown,) = transcript.transcript_events([lone], "/p", False)
+        (shown,) = events([lone])
         assert (shown.who, shown.what, shown.details) == (Who.AGENT, "?", told)
         assert (shown.fields["stage"], shown.fields["id"]) == (Stage.RESULT, "t9")
         _, (was,) = self.events([], [lone])
@@ -1174,7 +1170,7 @@ class TakenOutTest(LauncherTest):
         # A second result of a call is not left out for the first
         call = TraceTest.call("t1", "Bash", command="make")
         twice = [call, TraceTest.result("t1", "ok"), TraceTest.result("t1", "no", True)]
-        first, again = transcript.transcript_events(twice, "/p", False)
+        first, again = events(twice)
         assert first.details == ["$ make", "result: ok, 2.0s, 1 line out"]
         assert again.details[:2] == ["of: $ make", "result: FAILED, 2.0s, 1 line out"]
         # Followed, a result without its call is of before the following
@@ -1473,8 +1469,8 @@ class CommandTest:
     )
 
     def test_a_command_shows_as_typed_and_with_what_it_said(self):
-        events = transcript.transcript_events(list(self.ENTRIES), "/p", False)
-        shown = [(e.who, e.what, e.details) for e in events]
+        found = events(list(self.ENTRIES))
+        shown = [(e.who, e.what, e.details) for e in found]
         assert shown == [
             (Who.USER, "prompt", ["/model sonnet"]),
             (Who.CLAUDE, "command", ["Set model to Sonnet[2J", "for this session"]),

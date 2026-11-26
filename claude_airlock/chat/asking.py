@@ -102,13 +102,11 @@ DIFF_STYLES = {"  diff: -": RED, "  diff: +": GREEN, "  diff: @": CYAN}
 class Question:
     """What the user is asked while a turn runs, and what they say to it."""
 
-    def __init__(self, prompt: str, stale: str = ""):
-        self.prompt = prompt
+    def __init__(self, stale: str = ""):
         # What was typed of a line when the question was put, empty for
         # nothing: that line was meant as a prompt, and is not taken for
         # the answer, see meant_before
         self.stale = stale
-        self.put = time.monotonic()
         self.answered = threading.Event()
         # None for no answer: the input ended, or Ctrl-C
         self.said: str | None = None
@@ -365,7 +363,7 @@ class Asker:
             return None
         if self._page.layout.colour:
             prompt = painted(style, prompt)
-        question = Question(prompt, stale=self._console.typed())
+        question = Question(stale=self._console.typed())
         if question.stale.strip():
             # It is written again after the question, where it looks like
             # the answer

@@ -123,16 +123,6 @@ def put_aside(copy: Path) -> list[Path]:
     return sorted(copy.parent.glob(f"{glob.escape(copy.name)}.*{ASIDE_SUFFIX}"))
 
 
-def still_at(descriptor: int, path: Path) -> bool:
-    """Whether an open file is still the one at a path, and not one that
-    was renamed or removed since it was opened."""
-    try:
-        opened, there = os.fstat(descriptor), os.stat(path)
-    except OSError:
-        return False
-    return (opened.st_dev, opened.st_ino) == (there.st_dev, there.st_ino)
-
-
 @dataclass(frozen=True)
 class Beyond:
     """What the copies of a transcript do not hold. Of one that was
@@ -235,11 +225,9 @@ def catch_up(transcript: Path, copy: Path, most: int = MOST_COPIED) -> int:
         return 0
     private_dir(str(copy.parent))
     added = 0
+    # The copy that is there once locked: one put aside by the launcher
+    # that had the lock is let go of, see open_locked
     with source, open_locked(copy, "ab") as kept:
-        if not still_at(kept.fileno(), copy):
-            # Put aside by the launcher that had the lock: this is no
-            # longer the copy, the next look opens the one that is
-            return 0
         have = os.fstat(kept.fileno()).st_size
         if os.fstat(source.fileno()).st_size < have:
             # Rewritten. What it held is kept, and a new copy starts with

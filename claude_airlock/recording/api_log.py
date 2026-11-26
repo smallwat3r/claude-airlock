@@ -72,14 +72,12 @@ from ..files import (
     write_whole,
 )
 from ..notice import warn
-from ..settings import CONTAINER_HOME, Host, Settings
+from ..settings import CONTAINER_HOME, Host, Settings, variable
 from .api_calls import Call, Part, SessionCalls, Tokens, count, noted_text
 
 # Where a session has its drop, and what tells Claude Code to write there
 DROP_TARGET = f"{CONTAINER_HOME}/.local/state/api-log"
 WRITE_BODIES = "OTEL_LOG_RAW_API_BODIES"
-# What a session is told the setting by, see docker/CLAUDE-airlock.md
-SESSION_TOLD = "CLAUDE_AIRLOCK_API_LOG"
 # The index Claude Code adds a line to with each answer
 INDEX = "index.jsonl"
 # Seconds between two looks at the drop
@@ -151,7 +149,8 @@ def api_log_args(drop: str) -> list[str]:
     return [
         mount_arg(drop, DROP_TARGET, "z"),
         env_arg(WRITE_BODIES, f"file:{DROP_TARGET}"),
-        env_arg(SESSION_TOLD, 1),
+        # The session is told the setting, see docker/CLAUDE-airlock.md
+        env_arg(variable("api_log"), 1),
     ]
 
 
@@ -517,11 +516,6 @@ class Keeper:
         return cls(
             Drop(drop), Shelf(host, session, started), SessionCalls(host, session)
         )
-
-    @property
-    def kept_dir(self) -> str:
-        """Where the bodies of this session are kept."""
-        return self._shelf.directory
 
     @property
     def unkept(self) -> int:
