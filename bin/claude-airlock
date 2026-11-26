@@ -2,7 +2,8 @@
 """claude-airlock - Run Claude Code inside a sandboxed Docker container.
 
 Builds the sandbox image on first use, then runs claude inside a container
-with the project directory mounted read-write and ~/.claude persisted.
+with the project directory mounted read-write, and a ~/.claude of the
+sandbox's own.
 
   claude-airlock [--add-dir DIR]... [--add-dir-ro DIR]... [claude args]...
   claude-airlock --shell [bash args]   bash in the same sandbox, not claude.
@@ -110,7 +111,18 @@ def main() -> int:
     compile_apart()
     # The package sits next to bin/ in the checkout, it is not installed.
     # realpath, so this script can be symlinked into a directory on PATH.
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    # Looked for there last, and not at all in the directory of this
+    # script, which Python puts first: a session that has the checkout
+    # mounted could leave a module in either under a name of the standard
+    # library (textwrap.py), for the next launch to run in its place.
+    # What it leaves at the top of the checkout under a name the standard
+    # library does not have is named by the check of what it changed, see
+    # _modules_at_top of sandbox/fingerprint.py.
+    here = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [
+        place for place in sys.path if os.path.realpath(place or os.curdir) != here
+    ]
+    sys.path.append(os.path.dirname(here))
     from claude_airlock.cli import cli
 
     return cli(__doc__ or "")

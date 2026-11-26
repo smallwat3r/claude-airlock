@@ -752,6 +752,41 @@ class LauncherItselfTest:
         assert f"  {self.checkout}/Makefile\n" in tools
         assert "bin/claude-airlock" not in tools
 
+    def test_what_python_would_run_from_the_top_of_the_checkout_is_named(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # The launcher looks for its package at the top of its checkout:
+        # a module left there, or a package, is its own to run
+        mounted = [str(self.checkout)]
+        before = watched.build_fingerprint(mounted)
+        planted = [
+            self.checkout / "readline.py",
+            self.checkout / "fast.so",
+            self.checkout / "readline" / "__init__.py",
+        ]
+        for file in planted:
+            file.parent.mkdir(exist_ok=True)
+            file.write_text("import os\n")
+        # Not what is no module: a file of another kind, a directory
+        # without the file that makes it a package
+        (self.checkout / "notes.txt").write_text("more\n")
+        (self.checkout / "docs").mkdir()
+        (self.checkout / "docs" / "trace.py").write_text("import os\n")
+        after = watched.build_fingerprint(mounted)
+        assert tampered.differing(before, after) == sorted(map(str, planted))
+        tampered.report_build_changes(before, after)
+        itself = capsys.readouterr().err
+        assert "files of claude-airlock itself have changed" in itself
+        assert f"  {self.checkout}/readline.py\n" in itself
+        # A link to a directory is a package as the directory is
+        (self.checkout / "linked").symlink_to(self.checkout / "readline")
+        again = watched.build_fingerprint(mounted)
+        assert tampered.differing(after, again) == [
+            str(self.checkout / "linked" / "__init__.py")
+        ]
+        assert watched.is_launcher_file(str(self.checkout / "linked" / "__init__.py"))
+        assert not watched.is_launcher_file(str(self.checkout / "docs" / "trace.py"))
+
     def test_a_session_that_cannot_write_the_launcher_has_nothing_of_it_watched(
         self, tmp_path: Path
     ):
@@ -835,6 +870,39 @@ class CompiledApartTest(LauncherTest):
         assert ran.exists()
         ran.unlink()
         result = self.run_launcher(checkout / "bin" / "claude-airlock")
+        assert result.returncode == 0, result.stderr
+        assert not ran.exists()
+
+    def test_a_module_left_under_a_name_of_the_standard_library_is_not_run(self):
+        # A copy of the checkout a session could write, with a module at
+        # its top and one next to the launcher, each named as one the
+        # launcher takes from the standard library
+        checkout = self.work / "checkout"
+        for name in ("bin", "claude_airlock"):
+            shutil.copytree(
+                ROOT / name, checkout / name, ignore=shutil.ignore_patterns("*.pyc")
+            )
+        ran = self.work / "ran"
+        for directory in (checkout, checkout / "bin"):
+            for name in ("textwrap", "shlex", "json", "subprocess"):
+                planted = f"open({str(ran)!r}, 'a').write({name!r} ' ')\n"
+                (directory / f"{name}.py").write_text(planted)
+        # It is what Python runs from the directory of a script
+        (checkout / "bin" / "other").write_text("import textwrap\n")
+        subprocess.run(
+            [sys.executable, str(checkout / "bin" / "other")],
+            env={"PATH": os.environ["PATH"]},
+            check=True,
+        )
+        assert ran.read_text() == "textwrap "
+        ran.unlink()
+        result = self.run_launcher(checkout / "bin" / "claude-airlock")
+        assert result.returncode == 0, result.stderr
+        assert "claude-airlock --trace" in result.stdout
+        assert not ran.exists()
+        # Through a link to the launcher too, as it is put on PATH
+        (self.work / "on-path").symlink_to(checkout / "bin" / "claude-airlock")
+        result = self.run_launcher(self.work / "on-path")
         assert result.returncode == 0, result.stderr
         assert not ran.exists()
 

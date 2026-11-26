@@ -6,6 +6,7 @@ by tampered.py. Read within bounds, see bounded.py."""
 
 from __future__ import annotations
 
+import importlib.machinery
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from ..files import (
 from ..settings import CHECKOUT_DIR, CONFIG_FILES, CONFIG_TREES
 from .bounded import (
     MOST_STAMPED_FILES,
+    MOST_TREE_FILES,
     UNWATCHED,
     file_hash,
     file_stamp,
@@ -186,6 +188,12 @@ MOST_WORKTREES = 200
 # programs, its modules, and the parts of the image with the rules of the
 # two proxies. Watched when a session can write them, see _launcher_files.
 LAUNCHER_TREES = ("bin", "claude_airlock", "docker")
+# What Python takes for a module in a directory it looks for them in, by
+# how the name of the file ends, and for a package, by the file a
+# directory has: the launcher looks for its package at the top of its
+# checkout, see _modules_at_top
+MODULE_ENDINGS = tuple(importlib.machinery.all_suffixes())
+PACKAGE_FILES = tuple("__init__" + ending for ending in MODULE_ENDINGS)
 # Where Python keeps what it compiled of the modules, written again
 # whenever one changed or another Python runs them
 COMPILED = "__pycache__"
@@ -728,6 +736,36 @@ def reaches_launcher(directories: Sequence[str], checkout: str = "") -> bool:
     return False
 
 
+def _modules_at_top(checkout: str, fingerprint: dict[str, str]) -> list[str]:
+    """What Python would take for a module or a package at the top of
+    the launcher's checkout, besides the launcher's own: the launcher
+    looks for its package there (see bin/claude-airlock), after
+    everywhere else, so a module left there under a name the standard
+    library has is not run. One under a name it does not have on the
+    Python at hand is: readline is tried, and missing from some. So what
+    could be one is watched, a file by how its name ends, a directory or
+    a link to one by the file that makes it a package. No more entries
+    are looked at than files of a tree are watched, the rest is said."""
+    entries, more = listed(checkout, MOST_TREE_FILES)
+    if more:
+        fingerprint[f"{checkout}: more than {MOST_TREE_FILES} entries, the rest"] = (
+            UNWATCHED
+        )
+    found = []
+    for entry in entries:
+        if entry.name in LAUNCHER_TREES:
+            continue
+        if entry.name.endswith(MODULE_ENDINGS) and not entry.is_dir():
+            found.append(entry.path)
+        elif entry.is_dir():
+            found += [
+                path
+                for name in PACKAGE_FILES
+                if os.path.lexists(path := os.path.join(entry.path, name))
+            ]
+    return found
+
+
 def _launcher_files(
     directories: Sequence[str], fingerprint: dict[str, str], checkout: str = ""
 ) -> list[str]:
@@ -735,8 +773,9 @@ def _launcher_files(
     its checkout is the project, or in it, or mounted next to it. They
     decide how the next session is sandboxed, its mounts, what its
     filter lets through, the rules of the socket proxy, and run on the
-    host with the next launch. Not what Python compiled of them, which
-    changes without a session's doing."""
+    host with the next launch. And what Python would run in their place
+    from the top of the checkout, see _modules_at_top. Not what Python
+    compiled of them, which changes without a session's doing."""
     checkout = checkout or CHECKOUT_DIR
     if not reaches_launcher(directories, checkout):
         return []
@@ -746,16 +785,22 @@ def _launcher_files(
         for tree in LAUNCHER_TREES
         for path in tree_files(os.path.join(checkout, tree)).into(fingerprint)
         if compiled not in path
-    ]
+    ] + _modules_at_top(checkout, fingerprint)
 
 
 def is_launcher_file(path: str, checkout: str = "") -> bool:
     """Whether a path of a fingerprint is of the launcher itself, see
-    _launcher_files."""
+    _launcher_files: in one of its trees, or what Python would take for
+    a module or a package at the top of its checkout."""
     checkout = checkout or CHECKOUT_DIR
-    return path.startswith(
+    if path.startswith(
         tuple(os.path.join(checkout, tree) + os.sep for tree in LAUNCHER_TREES)
-    )
+    ):
+        return True
+    above, name = os.path.split(path)
+    if above == checkout:
+        return name.endswith(MODULE_ENDINGS)
+    return name in PACKAGE_FILES and os.path.dirname(above) == checkout
 
 
 def build_fingerprint(directories: list[str]) -> dict[str, str]:

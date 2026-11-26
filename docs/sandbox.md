@@ -289,6 +289,10 @@ Said apart too, as something to read before the next session here:
   what Python compiled of the modules (`__pycache__`), which changes
   without a session's doing. The launcher does not run it either: it
   keeps what it compiles with its own records, where no session writes.
+  Watched too: what Python would take for a module or a package at the
+  top of the checkout, where the launcher finds its own. One named as a
+  module of the standard library is not run, the launcher looks there
+  last.
 
 All name a file however it was changed, by a command as by an edit, and
 only when what it holds is no longer what it was. Not looked into:
