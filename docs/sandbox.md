@@ -269,7 +269,8 @@ Said apart, as something to read before you build, test or commit there:
   an editor runs (`.vscode`, `.devcontainer`, `.dir-locals.el`).
 - Below the top of a project: `CLAUDE.md` and the `.claude` of a
   subdirectory, and the config and hooks of a repository that is there, or
-  that a session planted there.
+  that a session planted there, with its submodules and the hooks its
+  `core.hooksPath` names, as at the top.
 
 Said apart too, as something to read before the next session here:
 
@@ -310,7 +311,11 @@ only when what it holds is no longer what it was. Not looked into:
 `node_modules`, `.venv`, and the working trees of `--worktree`, each the
 whole project again. A directory the check cannot list is named as one
 it cannot look into, when a session made it so: a file in it is found by
-its name all the same, by make, git and Claude.
+its name all the same, by make, git and Claude. A link to a directory is
+followed when it leads into the project or an extra directory, so hooks
+or skills kept elsewhere in the project, or in a repository of dotfiles
+that is the project, are watched where git and Claude find them. One
+that leads anywhere else is watched as the link.
 
 The check is bounded, a session can write any number of files of any
 size: 5000 files of each watched directory, 1000 of what Claude remembers
@@ -323,7 +328,8 @@ it holds as a file. The plugins, thousands of files as they come, are not read: 
 100 000 of them are told from one written since by when they changed. What is past a
 count is said as `the rest`, unwatched, when a session made it so, and
 so is a watched directory with more entries or more directories below it
-than that. A file
+than that. A launch says which are past a count already as the session
+starts: a change there goes unseen, review it yourself. A file
 past 64 MB is read that far, one past what is read in all is not read:
 both are still told from one written since by when they changed.
 

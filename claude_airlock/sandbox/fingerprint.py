@@ -548,27 +548,53 @@ def _worktree_sources(
     return sources
 
 
-def git_files(git_dir: str, fingerprint: dict[str, str]) -> list[str]:
+def git_files(
+    git_dir: str, fingerprint: dict[str, str], within: Sequence[str] = ()
+) -> list[str]:
     """What is watched of one git directory: the files to hash, its
     configs hashed as those are, with the files they include. The file
     that has git read another directory, and the config and hooks of
-    both, then those of the working trees it keeps."""
+    both, then those of the working trees it keeps. The hooks through a
+    link that leads into a directory within, see tree_files."""
     watched = [os.path.join(git_dir, COMMON_DIR)]
     sources = git_sources(git_dir)
     sources += _worktree_sources(git_dir, watched, fingerprint)
     for source in dict.fromkeys(sources):
         for config in _git_configs(source):
             hash_git_config(config, fingerprint)
-        watched += tree_files(os.path.join(source, "hooks")).into(fingerprint)
+        hooks = tree_files(os.path.join(source, "hooks"), within=within)
+        watched += hooks.into(fingerprint)
     return watched
 
 
-def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
+def repository_files(
+    directory: str, fingerprint: dict[str, str], within: Sequence[str] = ()
+) -> list[str]:
+    """What is watched of the repository of a directory, its .git, at the
+    top of a project or below it: the files to hash, the git configs
+    hashed as those are. Its config and hooks, those of its submodules,
+    and those of the directory its core.hooksPath names."""
+    git_dir = os.path.join(directory, ".git")
+    # A file, in a working tree or a submodule: where its directory is
+    watched = [git_dir]
+    modules = module_git_dirs(os.path.join(git_dir, "modules")).into(fingerprint)
+    for each in (git_dir, *modules):
+        watched += git_files(each, fingerprint, within)
+    for source in git_sources(git_dir):
+        moved = moved_hooks_dir(directory, source, within)
+        if moved:
+            watched += tree_files(moved, within=within).into(fingerprint)
+    return watched
+
+
+def moved_hooks_dir(
+    directory: str, git_dir: str | None = None, within: Sequence[str] = ()
+) -> str | None:
     """The directory core.hooksPath has git take its hooks from in place of
-    .git/hooks (husky and the like), when it is inside the project. One
-    outside is out of a session's reach, unless it is mounted too and then
-    it is the session's choice of what gets read here. By the config of
-    the project's git directory, or of the one given."""
+    .git/hooks (husky and the like), when it is in the project, or in a
+    directory within, those a session was given: one elsewhere is out
+    of a session's reach. By the config of the project's git directory,
+    or of the one given."""
     git_dir = git_dir or os.path.join(directory, ".git")
     config = os.path.join(git_dir, "config")
     if not os.path.isfile(config):
@@ -582,7 +608,8 @@ def moved_hooks_dir(directory: str, git_dir: str | None = None) -> str | None:
         return None
     value = said.decode("utf-8", "replace").strip()
     hooks = os.path.realpath(os.path.join(directory, value))
-    inside = is_under(hooks, os.path.realpath(directory))
+    roots = (directory, *within)
+    inside = any(is_under(hooks, os.path.realpath(root)) for root in roots)
     return (
         os.path.normpath(os.path.join(directory, value)) if value and inside else None
     )
@@ -677,15 +704,17 @@ def _claude_files(
     trees: tuple[str, ...],
     command_files: tuple[str, ...],
     fingerprint: dict[str, str],
+    within: Sequence[str] = (),
 ) -> list[str]:
     """What is watched of a project or of ~/.claude for Claude's sake,
-    what is not said in the fingerprint, see tree_files. With the files
-    its instructions name to be read with them, and without what Claude
-    Code notes for itself of its routines."""
+    what is not said in the fingerprint, see tree_files, which follows a
+    link into a directory within. With the files its instructions name
+    to be read with them, and without what Claude Code notes for itself
+    of its routines."""
     watched = [os.path.join(root, name) for name in files]
     noted = os.path.join(root, ROUTINES_STATE)
     for name in trees:
-        found = tree_files(os.path.join(root, name)).into(fingerprint)
+        found = tree_files(os.path.join(root, name), within=within).into(fingerprint)
         watched += [path for path in found if not is_under(path, noted)]
     for name in command_files:
         watched += _named_files(os.path.join(root, name), root)
@@ -763,23 +792,24 @@ def host_exec_fingerprint(
     _home_git_configs(git_configs, directories, fingerprint)
     watched = []
     for directory in directories:
-        git_dir = os.path.join(directory, ".git")
-        # A file, in a working tree or a submodule: where its directory is
-        watched.append(git_dir)
-        modules = module_git_dirs(os.path.join(git_dir, "modules")).into(fingerprint)
-        for each in (git_dir, *modules):
-            watched += git_files(each, fingerprint)
-        for source in git_sources(git_dir):
-            moved = moved_hooks_dir(directory, source)
-            if moved:
-                watched += tree_files(moved).into(fingerprint)
+        watched += repository_files(directory, fingerprint, directories)
         watched += _claude_files(
-            directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
+            directory,
+            PROJECT_FILES,
+            PROJECT_TREES,
+            COMMAND_FILES,
+            fingerprint,
+            directories,
         )
     if claude_dir:
         files = (*CONFIG_FILES, *CONFIG_WATCHED_FILES)
         watched += _claude_files(
-            claude_dir, files, CONFIG_TREES, ("settings.json",), fingerprint
+            claude_dir,
+            files,
+            CONFIG_TREES,
+            ("settings.json",),
+            fingerprint,
+            directories,
         )
     for directory in memory:
         watched += tree_files(directory, MOST_MEMORY_FILES).into(fingerprint)
@@ -795,9 +825,12 @@ def host_exec_fingerprint(
     return fingerprint
 
 
-def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
+def _build_files(
+    root: str, fingerprint: dict[str, str], within: Sequence[str]
+) -> list[str]:
     """The files of one mounted directory that build_fingerprint hashes,
-    the git configs it finds on the way hashed as those are."""
+    the git configs it finds on the way hashed as those are. Through a
+    link into a directory within, see tree_files."""
     watched: list[str] = []
     closed: list[str] = []
 
@@ -814,22 +847,28 @@ def _build_files(root: str, fingerprint: dict[str, str]) -> list[str]:
             break
         names = {*subdirs, *files}
         if directory != root:
-            watched += _below_the_top(directory, names, fingerprint)
+            watched += _below_the_top(directory, names, fingerprint, within)
         if GIT_HEAD in files:
             # A git directory by what it holds, without a .git to say so:
             # git takes it for one from there on down, with the config
             # and the hooks a session left in it (core.fsmonitor runs a
             # command on git status). At the top too, where only the .git
             # of the project is looked for.
-            watched += git_files(directory, fingerprint)
-        watched += [os.path.join(directory, name) for name in BUILD_FILES & names]
+            watched += git_files(directory, fingerprint, within)
+        built = sorted(BUILD_FILES & names)
+        watched += [os.path.join(directory, name) for name in built]
         for name in sorted(BUILD_TREES.intersection(subdirs)):
-            watched += tree_files(os.path.join(directory, name)).into(fingerprint)
+            tree = tree_files(os.path.join(directory, name), within=within)
+            watched += tree.into(fingerprint)
         if WORKFLOWS[0] in subdirs:
-            watched += tree_files(os.path.join(directory, *WORKFLOWS)).into(fingerprint)
+            tree = tree_files(os.path.join(directory, *WORKFLOWS), within=within)
+            watched += tree.into(fingerprint)
+        # In the order of their names: where there are more files than
+        # are watched, the same ones fall past the count at the start and
+        # at the end of a session, whatever order the directory keeps
         subdirs[:] = [
             name
-            for name in subdirs
+            for name in sorted(subdirs)
             if name not in NOT_LOOKED_INTO
             and name not in BUILD_TREES
             and os.path.join(directory, name) != os.path.join(root, WORKTREES)
@@ -925,7 +964,7 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
     # First, should there be more files than are hashed
     watched += _launcher_files(directories, fingerprint)
     for root in directories:
-        watched += _build_files(root, fingerprint)
+        watched += _build_files(root, fingerprint, directories)
     hash_files(watched[:MOST_BUILD_FILES], fingerprint)
     if len(watched) > MOST_BUILD_FILES:
         fingerprint[f"more than {MOST_BUILD_FILES} such files, the rest"] = UNWATCHED
@@ -933,21 +972,21 @@ def build_fingerprint(directories: list[str]) -> dict[str, str]:
 
 
 def _below_the_top(
-    directory: str, names: set[str], fingerprint: dict[str, str]
+    directory: str, names: set[str], fingerprint: dict[str, str], within: Sequence[str]
 ) -> list[str]:
     """What is watched of a directory below the top of a project for
     git's and Claude's sake, as host_exec_fingerprint does of the top:
-    the files to hash, the git configs hashed as those are."""
+    the files to hash, the git configs hashed as those are. Of its
+    repository as much as of the one at the top, see repository_files: a
+    project can be a directory of clones, each with its submodules and
+    the hooks of a hook manager."""
     watched: list[str] = []
     if CLAUDE_MARKS & names:
         watched += _claude_files(
-            directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint
+            directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint, within
         )
     if ".git" in names:
-        git_dir = os.path.join(directory, ".git")
-        # A file, in a working tree or a submodule: where its directory is
-        watched.append(git_dir)
-        watched += git_files(git_dir, fingerprint)
+        watched += repository_files(directory, fingerprint, within)
     return watched
 
 

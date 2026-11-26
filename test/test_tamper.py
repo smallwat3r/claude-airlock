@@ -672,6 +672,28 @@ class TamperingTest(LauncherTest):
         assert f"  {self.project}/.claude/skills\n" in result.stderr
         assert "/etc/" not in result.stderr
 
+    def test_what_a_link_into_the_project_leads_to_is_watched(self):
+        # Hooks and skills kept in a repository, linked to where git and
+        # Claude look: changed behind the link, with the link as it was
+        kept = self.project / "kept"
+        (kept / "hooks").mkdir(parents=True)
+        (kept / "commands").mkdir()
+        hooks = self.project / ".git" / "hooks"
+        shutil.rmtree(hooks)
+        hooks.symlink_to(kept / "hooks")
+        commands = self.home / ".claude" / "commands"
+        shutil.rmtree(commands, ignore_errors=True)
+        commands.symlink_to(kept / "commands")
+        result = self.launch(
+            session="echo x > kept/hooks/pre-commit; echo x > kept/commands/ship.md"
+        )
+        assert f"  {hooks}/pre-commit\n" in result.stderr
+        assert f"  {commands}/ship.md\n" in result.stderr
+        # A link to where it was already looked is looked into once
+        (kept / "hooks" / "again").symlink_to(kept / "hooks")
+        assert self.REPORT in self.launch(session="ln -s . kept/hooks/loop").stderr
+        assert "Traceback" not in self.launch(session="echo y > kept/hooks/x").stderr
+
     def test_what_a_session_nests_too_deep_does_not_stop_the_check(self):
         # Deeper than Python can remove again, so rm clears it away
         modules = self.project / ".git" / "modules"
@@ -771,6 +793,25 @@ class BuildFilesTest(LauncherTest):
         ):
             assert f"  {self.project}/{changed}\n" in result.stderr
 
+    def test_a_repository_below_the_top_is_watched_as_the_top_one_is(self):
+        # A directory of clones, each with its submodules and the hooks of
+        # a hook manager
+        app = self.project / "app"
+        lib = app / ".git" / "modules" / "lib"
+        (lib / "hooks").mkdir(parents=True)
+        (lib / "HEAD").write_text("ref: refs/heads/main\n")
+        (lib / "config").write_text("[core]\n\tbare = false\n")
+        (app / ".git" / "config").write_text("[core]\n\thooksPath = .githooks\n")
+        (app / ".githooks").mkdir()
+        result = self.launch(
+            session=r'printf "[core]\n\tfsmonitor = evil\n" >> app/.git/modules/lib/config;'
+            " echo x > app/.git/modules/lib/hooks/pre-commit;"
+            " echo x > app/.githooks/pre-commit"
+        )
+        for changed in ("config", "hooks/pre-commit"):
+            assert f"  {lib}/{changed}\n" in result.stderr
+        assert f"  {app}/.githooks/pre-commit\n" in result.stderr
+
     def test_a_repository_without_a_dot_git_is_one_all_the_same(self):
         # git takes a directory that holds these for one of its own
         result = self.launch(
@@ -790,6 +831,18 @@ class BuildFilesTest(LauncherTest):
             " echo all: > .claude/worktrees/w/Makefile"
         )
         assert self.REPORT not in result.stderr
+
+    def test_what_is_past_what_is_watched_as_a_session_starts_is_said(self):
+        skills = self.project / ".claude" / "skills"
+        skills.mkdir(parents=True)
+        for n in range(bounded.MOST_TREE_FILES + 1):
+            (skills / f"{n:05}.md").touch()
+        result = self.launch()
+        assert "watches no more than a part of these" in result.stderr
+        assert f"  {skills}: more than {bounded.MOST_TREE_FILES} files" in result.stderr
+        # Not where all of it is watched
+        shutil.rmtree(skills)
+        assert "watches no more than a part" not in self.launch().stderr
 
     def test_many_changes_are_counted_past_the_first(self):
         made = "; ".join(f"mkdir p{n}; echo all: > p{n}/Makefile" for n in range(25))

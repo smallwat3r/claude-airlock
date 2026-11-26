@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import islice
 from operator import attrgetter
 from typing import NamedTuple
 
-from ..files import open_plain
+from ..files import is_under, open_plain
 
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
@@ -164,30 +165,53 @@ def _stamp(about: os.stat_result) -> str:
     return f"{about.st_ino}:{about.st_size}:{about.st_mtime_ns}:{about.st_ctime_ns}"
 
 
-def tree_files(root: str, most: int = MOST_TREE_FILES) -> Bounded:
+def _leads_within(link: str, within: Sequence[str]) -> str:
+    """Where a link to a directory leads, when that is in one of the
+    directories given, empty when it leads elsewhere or to no directory."""
+    real = os.path.realpath(link)
+    if not os.path.isdir(real):
+        return ""
+    return real if any(is_under(real, root) for root in within) else ""
+
+
+def tree_files(
+    root: str, most: int = MOST_TREE_FILES, within: Sequence[str] = ()
+) -> Bounded:
     """The files under a directory, no more than most of them: of a tree
     with more the rest is said to be left out, see Bounded. A link to a
-    directory is
-    listed and not entered, the root too: a session can point one at the
-    whole disk, and the link itself is what changed then. In the order of
-    their names, the files of a directory ahead of what is below it: the
-    same ones at the start and the end of a session, where there are more
-    than are watched. Without recursion, as module_git_dirs and for the
-    same reason. No more directories are looked into than files are
-    watched, and one that holds more than that is not listed whole: both
-    leave files unseen that are no part of the count, a session can
-    make any number of directories for one file to be lost among, so
-    both have the rest said to be left out as well."""
-    if os.path.islink(root):
-        return Bounded([root])
+    directory is listed, and entered only when it leads into one of the
+    directories within, those a session was given: a session can point
+    one at the whole disk, and the link itself is what changed then, but
+    what a link that was there leads to in the project it can change
+    with the link as it was (hooks or skills kept in a repository of
+    dotfiles). Each directory once, by where it is, however many links
+    lead to it. In the order of their names, the files of a directory
+    ahead of what is below it: the same ones at the start and the end of
+    a session, where there are more than are watched. Without recursion,
+    as module_git_dirs and for the same reason. No more directories are
+    looked into than files are watched, and one that holds more than
+    that is not listed whole: both leave files unseen that are no part
+    of the count, a session can make any number of directories for one
+    file to be lost among, so both have the rest said to be left out as
+    well."""
+    roots = [os.path.realpath(directory) for directory in within]
     found: list[str] = []
     closed: list[str] = []
+    seen: set[str] = set()
+    if os.path.islink(root):
+        found.append(root)
+        if not _leads_within(root, roots):
+            return Bounded(found)
     pending = [root]
     looked = 0
     cut = False
     while pending and len(found) <= most and looked <= most:
         looked += 1
         directory = pending.pop()
+        real = os.path.realpath(directory)
+        if real in seen:
+            continue
+        seen.add(real)
         listing = listed(directory, most)
         cut |= listing.more
         if listing.closed:
@@ -196,8 +220,10 @@ def tree_files(root: str, most: int = MOST_TREE_FILES) -> Bounded:
         for entry in listing.entries:
             if entry.is_dir(follow_symlinks=False):
                 below.append(entry.path)
-            else:
-                found.append(entry.path)
+                continue
+            found.append(entry.path)
+            if entry.is_symlink() and _leads_within(entry.path, roots):
+                below.append(entry.path)
         # The first by its name is the next looked into
         pending += reversed(below)
     if cut or pending or len(found) > most:
