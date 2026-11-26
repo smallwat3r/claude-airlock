@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from ..events import clean, flat
 from ..files import is_within
+from ..settings import CONTAINER_HOME
 from .brief import PREVIEW_WIDTH
 from .entries import (
     block_text,
@@ -46,15 +47,30 @@ _ADDRESS_END = ".,:"
 HUNK_SPANS = ("oldStart", "oldLines", "newStart", "newLines")
 # What follows the name of a written file that is not in the project
 OUTSIDE_FLAG = "  OUTSIDE PROJECT"
+# What Claude Code trims from around a path it is given, as JavaScript's
+# trim does: the blanks and line breaks, and the mark of byte order
+_AROUND = re.compile(r"^[\s\ufeff]+|[\s\ufeff]+$")
+
+
+def as_written_to(path: str) -> str:
+    """A path a tool of Claude Code was given as Claude Code takes it:
+    without the blanks around it, and a leading ~ as the home of the
+    session's container, where the file then is. Written as " /etc/x" or
+    "~/.bashrc", it is not in the project, whatever it reads as."""
+    path = _AROUND.sub("", path)
+    if path == "~" or path.startswith("~/"):
+        return CONTAINER_HOME + path[1:]
+    return path
 
 
 def outside(path: str, project_dir: str) -> bool:
     """Whether a path a session wrote to is outside its project, by the
-    path as it is written. Not by where the links on it lead: the trace
-    is made later and on the host, where a link of the project may lead
-    somewhere else than it did for the session, or be gone, so a write
-    through one to a place outside is not told as that."""
-    absolute = os.path.normpath(os.path.join(project_dir, path))
+    path as it is written, as Claude Code takes it (see as_written_to).
+    Not by where the links on it lead: the trace is made later and on
+    the host, where a link of the project may lead somewhere else than
+    it did for the session, or be gone, so a write through one to a
+    place outside is not told as that."""
+    absolute = os.path.normpath(os.path.join(project_dir, as_written_to(path)))
     return not is_within(absolute, project_dir)
 
 

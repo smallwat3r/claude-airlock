@@ -133,9 +133,11 @@ claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
   outside the project is among what `--failed` keeps and what the
   launcher says [when a session ends](#when-a-session-ends).
 - `OUTSIDE PROJECT` goes by the path as it is written, for a tool's
-  write too. A file reached through a link of the project that leads
-  out of it is not told apart: the trace is made later and on the host,
-  where the link may lead elsewhere or be gone.
+  write too, as Claude Code takes it: without the blanks around it, and
+  with a leading `~` as the home of the session's container. A file
+  reached through a link of the project that leads out of it is not told
+  apart: the trace is made later and on the host, where the link may
+  lead elsewhere or be gone.
 - It is what Claude Code noticed of the command, not all a command can
   write: a file it had not seen before may be missing. The record of
   [what ran](#what-ran) says which processes there were.

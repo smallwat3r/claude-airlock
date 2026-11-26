@@ -22,7 +22,7 @@ from claude_airlock import files, projects
 from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean
 from claude_airlock.recording import egress_log, recorder
 from claude_airlock.recording.changes import change_event
-from claude_airlock.report import calls, summary, trace, transcript
+from claude_airlock.report import calls, outcomes, summary, trace, transcript
 from claude_airlock.report import entries as entries_module
 from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.door_events import use_event
@@ -304,6 +304,15 @@ class TraceTest(LauncherTest):
         assert edit["outside_project"]
         assert not write["outside_project"]
         assert "failed" not in write
+
+    def test_a_path_as_claude_code_takes_it_is_outside_when_that_is(self):
+        # It trims a path and takes ~ for the home, the container's
+        for written in ("~/.bashrc", "~", " /etc/x", "/etc/x\n", "\ufeff/etc/x"):
+            assert outcomes.outside(written, "/p"), repr(written)
+            assert outcomes.outside_flag(written, "/p") == outcomes.OUTSIDE_FLAG
+        for inside in ("src/x", " src/x", "~user/x", "/p/x "):
+            assert not outcomes.outside(inside, "/p"), repr(inside)
+        assert outcomes.as_written_to("~/.bashrc") == "/home/sandbox/.bashrc"
 
     def test_only_writes_outside_the_project_are_flagged(self):
         stdout = self.launch("--trace").stdout
