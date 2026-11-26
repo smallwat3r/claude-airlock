@@ -608,6 +608,11 @@ A connection the sidecar saw and found no process for says
 `by: a process that cannot be looked into`: a process can close itself to
 the others of its user, its connection is noted all the same.
 
+A process is named by its program, not by what it calls itself. One
+whose program could not be read, gone before the sidecar looked or
+closed to it, is named by its own command line, and marked: `git?`, and
+`exe: NOT READABLE, it is named as it says itself` with `--verbose`.
+
 While the session runs the record stays in the sidecar, where the
 session cannot reach it. The sidecar says aloud which process holds each
 connection and each socket that waits on more than the session's

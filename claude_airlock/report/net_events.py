@@ -27,7 +27,11 @@ from ..recording.pcap import (
     Request,
     Went,
 )
-from ..recording.processes import ProcessRecord, shown_lineage
+from ..recording.processes import (
+    UNREADABLE_PROGRAM,
+    ProcessRecord,
+    shown_lineage,
+)
 from ..recording.records import TracedSession
 from ..recording.uploads import LEAST
 from .links import Links, links_of
@@ -509,8 +513,7 @@ def _process_events(record: ProcessRecord) -> list[Event]:
     for process in record.processes:
         parent = record.process(process.parent, process.when)
         details = [flat(f"[{process.pid}] {process.command}")[:PROCESS_WIDTH]]
-        if process.program:
-            details.append("exe: " + flat(process.program))
+        details.append("exe: " + (flat(process.program) or UNREADABLE_PROGRAM))
         if parent:
             details.append(flat(f"parent: [{parent.pid}] {parent.name}"))
         fields = {

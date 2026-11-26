@@ -388,6 +388,27 @@ class RecordTest:
         )
         assert record.processes[0].command == "x -D"
 
+    def test_a_process_whose_program_cannot_be_read_is_named_as_its_own_word(self):
+        # One that keeps its program from being read, and calls itself
+        # git: its command line is all there is, and is said to be that
+        record = noted(
+            ran(1.0, 4, 1, "bash"),
+            {"t": 2, "pid": 5, "ppid": 4, "exe": "", "argv": ["/usr/bin/git", "fetch"]},
+            {"t": 3, "pid": 6, "ppid": 5, "exe": "/usr/bin/curl", "argv": ["curl"]},
+        )
+        hidden = record.processes[1]
+        assert (hidden.name, hidden.command) == ("git?", "git? fetch")
+        assert processes.shown_lineage(record.lineage(6, 4.0)) == (
+            "[6] curl < git? < bash"
+        )
+        ran_then = net_events._process_events(record)
+        assert ran_then[1].details == [
+            "[5] git? fetch",
+            "exe: NOT READABLE, it is named as it says itself",
+            "parent: [4] bash",
+        ]
+        assert ran_then[2].details[1:] == ["exe: /usr/bin/curl", "parent: [5] git?"]
+
     def test_a_line_that_does_not_hold_up_is_passed_over(self):
         record = processes.ProcessRecord()
         for line in (

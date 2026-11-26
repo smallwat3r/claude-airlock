@@ -215,6 +215,13 @@ def processes_recorded(
             watcher.collect(host)
 
 
+# What is said of a process whose program could not be read: it ended
+# before the watcher looked, or made itself one that is not looked into
+# (prctl PR_SET_DUMPABLE), which leaves the command line it wrote for
+# itself readable. The name is then its own word
+UNREADABLE_PROGRAM = "NOT READABLE, it is named as it says itself"
+
+
 @dataclass(frozen=True)
 class Process:
     """A process as it was noted: when, what it ran and whose child it
@@ -228,9 +235,13 @@ class Process:
 
     @property
     def name(self) -> str:
-        """What it is called for short: its program, else what it says
-        it is."""
-        return os.path.basename(self.program or (self.argv[0] if self.argv else "?"))
+        """What it is called for short: its program. Where that could
+        not be read, what it says it is, marked as that (git?): a
+        process can keep its program from being read and call itself
+        anything, see UNREADABLE_PROGRAM."""
+        if self.program:
+            return os.path.basename(self.program)
+        return os.path.basename(self.argv[0] if self.argv else "") + "?"
 
     @property
     def command(self) -> str:
