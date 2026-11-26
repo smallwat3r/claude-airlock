@@ -300,6 +300,25 @@ class ConsoleTest(LauncherTest):
             assert screens.columns_of(padded) == 2, f"U+{ord(unseen):04X}"
             assert screens.erased("> ", padded, 10) == "\r\x1b[J"
 
+    def test_a_question_with_tabs_has_only_the_rows_it_takes_erased(self):
+        # A terminal moves a tab to the next stop and at its edge by none:
+        # written as they are, these would take two rows of sixty and be
+        # counted for four, and the call shown whole above the question
+        # would be erased a row at a time by what is written meanwhile
+        out = io.StringIO()
+        screen = console.Console(str(self.project), out=out, columns=lambda: 60)
+        screen._redrawn, screen._reading, screen._shown = True, "> ", "> "
+        asked = "allow bash $ echo hi" + "\t" * 190 + "? [y/a/N] "
+        with unittest.mock.patch.object(console.readline, "get_line_buffer") as typed:
+            typed.return_value = ""
+            screen.ask(asked)
+            screen.write(["one"])
+        assert "\t" not in out.getvalue()
+        shown = asked.replace("\t", " ")
+        # Each written as many columns as are counted for it, 220
+        assert out.getvalue() == f"\r\x1b[J{shown}\x1b[3A\r\x1b[Jone\n{shown}"
+        assert screens.spaced("a\tb") == "a b"
+
     def test_a_line_is_written_again_with_the_cursor_where_it_was(self):
         out = io.StringIO()
         screen = console.Console(str(self.project), out=out, columns=lambda: 10)

@@ -111,6 +111,18 @@ def first_row(line: str, columns: int) -> str:
     return line
 
 
+def spaced(prompt: str) -> str:
+    """A prompt with each tab written as a space. A terminal moves a tab
+    to the next stop, and at its edge by none, where it is counted a
+    column (see columns_of): a question that names a command with tabs
+    in it would have rows above it erased each time it is written again,
+    those that showed the call whole. A space takes the column it is
+    counted for, and readline counts it too. One, not the spaces to the
+    stop: the tabs of a question are the session's, and as many stops
+    would make its rows push the call whole out of sight."""
+    return prompt.replace("\t", " ")
+
+
 def _rows_above(text: str, columns: int) -> int:
     """How many rows a prompt and what is typed after it take above
     the row their end is on. What ends at the edge has its end on the

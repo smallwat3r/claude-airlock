@@ -67,7 +67,15 @@ from typing import TextIO
 
 from ..events import Event, clean, labelled
 from ..report.layout import Layout, Shown, Styled, painted, prefixed
-from .screen import SGR, cursor_back, erased, first_row, shown_typed, uncounted
+from .screen import (
+    SGR,
+    cursor_back,
+    erased,
+    first_row,
+    shown_typed,
+    spaced,
+    uncounted,
+)
 
 try:
     import readline
@@ -429,6 +437,7 @@ class Console:
         not. Ctrl-C ends it as KeyboardInterrupt when the handler of the
         signal asks for it, see interrupt."""
         line: str | None = None
+        prompt = spaced(prompt)
         try:
             typed = self._line(prompt, headed)
             if self.interactive:
@@ -707,6 +716,7 @@ class Console:
         read too, or with none for the usual one again. For a question
         that comes while the user is at the prompt, and for one that is
         over without a line: the line being read is not its answer."""
+        prompt = spaced(prompt) if prompt is not None else None
         with self._lock:
             # One that differs starts as not yet before the user
             was, self._asked = self._asked, prompt
