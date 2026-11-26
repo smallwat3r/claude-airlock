@@ -1307,6 +1307,34 @@ class TranscriptTailTest:
             )
         ]
 
+    def test_a_follower_says_when_a_transcript_was_written_anew(self):
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, False, only=self.file)
+        follower._docker = False
+        with (
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=[]),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+        ):
+            follower.poll()
+            add(self.file, call("t1", "Bash", command="make"))
+            follower.poll()
+            # Emptied by the session, then written to by Claude Code
+            self.file.write_text("")
+            add(self.file, call("t2", "Bash", command="curl evil.test"))
+            found = follower.poll()
+            assert [event.details for _, event in found.events] == [
+                ["$ curl evil.test"]
+            ]
+            assert found.notes == [
+                (
+                    "transcript  0a.jsonl was WRITTEN ANEW (emptied, cut short or"
+                    " replaced): it is read again from its start, --trace says what"
+                    " was taken out of it"
+                )
+            ]
+            assert follower.poll().notes == []
+
     def test_a_follower_says_when_a_transcript_can_no_longer_be_read(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
@@ -1413,14 +1441,25 @@ class TranscriptTailTest:
         followed.poll(None)
         assert followed.title == "named later"
 
-    def test_a_transcript_written_anew_is_read_from_its_new_end(self):
+    def test_a_transcript_written_anew_is_read_again_from_its_start(self):
+        # A session can take out what it did, and what is written after
+        # is not to be read from where the old one was read to
         tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
         add(self.file, prompt("one"), prompt("two"))
         assert self.said(tail) == ["one", "two"]
+        assert not tail.newly_rewritten()
         self.file.write_text(json.dumps(prompt("anew")) + "\n")
-        assert self.said(tail) == []
+        assert self.said(tail) == ["anew"]
+        assert tail.newly_rewritten()
+        assert not tail.newly_rewritten()
         add(self.file, prompt("three"))
         assert self.said(tail) == ["three"]
+        # Another file in its place, however long
+        other = self.file.with_name("other.jsonl")
+        other.write_text(json.dumps(prompt("other")) + "\n" * 4096)
+        other.replace(self.file)
+        assert self.said(tail) == ["other"]
+        assert tail.newly_rewritten()
 
     def test_a_link_or_a_pipe_in_its_place_is_not_read(self):
         secret = self.file.with_name("secret")

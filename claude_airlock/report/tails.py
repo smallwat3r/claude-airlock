@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import BinaryIO, Self
 
 from ..events import Event, Kind, Stage, Who, flat
 from ..files import LINE_LIMIT, line_entry, open_plain
@@ -84,6 +84,10 @@ NEW = "NEW for this project"
 # it is taken to have ended, or hung: it says so every SAID_EVERY
 SILENT_AFTER = SILENT_BEATS * SAID_EVERY
 READ_SIZE = 1 << 20
+# Of what was read of a transcript, how much of its end is kept to find it
+# there again: one emptied and written to past where it was read to has a
+# size that says nothing, what is before that place does
+KEPT_END = 64
 # How much of a transcript one look takes in, once what it held when the
 # following began is read: a session can write to it as fast as it is
 # read, and whoever looks has more to do than that (a chat listens to
@@ -138,6 +142,13 @@ class TranscriptTail:
         # whether that was said, see newly_unread
         self._unread = 0
         self._said_unread = False
+        # The file it is, by its device and inode, once it was opened, and
+        # whether it was found written anew since that was said, see
+        # newly_rewritten
+        self._file: tuple[int, int] | None = None
+        self._rewritten = False
+        # The last bytes read of it, up to where it was read to
+        self._read_end = b""
         # Whether it is read from within and not from its start, see
         # latest: what it holds before is not looked at
         self.cut = False
@@ -190,6 +201,16 @@ class TranscriptTail:
         said, self._said_behind = self._said_behind, True
         return not said
 
+    def newly_rewritten(self) -> bool:
+        """Whether it was found written anew since the last time it was
+        asked: emptied or cut short, written to past where it was read to
+        too, or another file put in its place. A session can do that to its own transcript, to have
+        what it did taken out, and what is written after would be read
+        from where the one before was read to. It is read again from its
+        start, and that is not to pass for what it always held."""
+        said, self._rewritten = self._rewritten, False
+        return said
+
     def newly_unread(self) -> bool:
         """Whether UNREAD_AFTER looks in a row found it no file that can
         be read, said once until it can be again: it was moved, removed,
@@ -206,7 +227,8 @@ class TranscriptTail:
     def _new_lines(self, most: int | None) -> Iterator[bytes | None]:
         """The lines completed since the last time, none while it is not
         a plain file that can be read (see open_plain), which is counted
-        for newly_unread. None in the place of a line that was too long
+        for newly_unread. From the start again of one written anew, see
+        newly_rewritten. None in the place of a line that was too long
         to hold. No further than the file went when it was opened, and
         than most bytes when there is a most: what is written meanwhile
         does not keep the look going."""
@@ -216,10 +238,13 @@ class TranscriptTail:
             return
         self._unread = 0
         with file:
-            size = os.fstat(file.fileno()).st_size
-            if size < self._offset:
-                # Written anew and shorter: from where it ends now
-                self._offset, self._partial, self._dropping = size, b"", False
+            about = os.fstat(file.fileno())
+            size, this = about.st_size, (about.st_dev, about.st_ino)
+            if self._written_anew(file, size, this):
+                # From its start, and said, see newly_rewritten
+                self._offset, self._partial, self._dropping = 0, b"", False
+                self._rewritten, self.cut, self._read_end = True, False, b""
+            self._file = this
             end = size if most is None else min(size, self._offset + most)
             self._behind = self._behind + 1 if end < size else 0
             file.seek(self._offset)
@@ -228,6 +253,7 @@ class TranscriptTail:
                 if not data:
                     return
                 self._offset += len(data)
+                self._read_end = (self._read_end + data)[-KEPT_END:]
                 if self._dropping:
                     # The rest of the line that was too long, to its end:
                     # said once, and none of it kept
@@ -238,6 +264,17 @@ class TranscriptTail:
                 if len(self._partial) > LINE_LIMIT:
                     self._partial, self._dropping = b"", True
                     yield None
+
+    def _written_anew(self, file: BinaryIO, size: int, this: tuple[int, int]) -> bool:
+        """Whether the file at its path is not the one read so far: another
+        one, one shorter than what was read of it, or one that no longer
+        has what was read last where it was read."""
+        if size < self._offset or self._file not in (None, this):
+            return True
+        if not self._read_end:
+            return False
+        file.seek(self._offset - len(self._read_end))
+        return file.read(len(self._read_end)) != self._read_end
 
     def _events(self, entry: dict) -> list[Event]:
         if entry.get("type") == "ai-title":

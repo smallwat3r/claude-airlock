@@ -1100,6 +1100,12 @@ it, so it can be started and stopped at any time.
   removed, or with a link put in its place, says so once (`NOT SHOWN`):
   a link is not followed, and what its session does from there on is in
   no line.
+- A transcript written anew, emptied, cut short or replaced, says so
+  (`WRITTEN ANEW`) and is read again from its start: what is written to
+  it next is shown, and `--trace` says what was taken out. It is known
+  by what was read of it last, which is no longer where it was: one
+  changed further up and as long as before is not told apart, `--trace`
+  says what changed there.
 - A transcript a session writes to faster than it is read says so once
   (`LATE`): what is shown of it comes behind, and catches up when the
   session writes less. A result with a picture in it is not enough.

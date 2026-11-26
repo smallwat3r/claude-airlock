@@ -247,14 +247,22 @@ class Follower:
     @staticmethod
     def _note_behind(tail: TranscriptTail, found: Round) -> None:
         """Say that a transcript is written faster than it is read, when
-        a look first leaves some of it unread, and that one can no
-        longer be read at all, when it first cannot."""
+        a look first leaves some of it unread, that one was written anew,
+        when it is found so, and that one can no longer be read at all,
+        when it first cannot."""
         if tail.newly_behind():
             late = (
                 f"{flat(tail.path.name)} is written faster than it is read,"
                 " what is shown of it is LATE"
             )
             found.notes.append(labelled("transcript", late))
+        if tail.newly_rewritten():
+            anew = (
+                f"{flat(tail.path.name)} was WRITTEN ANEW (emptied, cut short or"
+                " replaced): it is read again from its start, --trace says what"
+                " was taken out of it"
+            )
+            found.notes.append(labelled("transcript", anew))
         if tail.newly_unread():
             gone = (
                 f"{flat(tail.path.name)} is no longer a file that can be read"
