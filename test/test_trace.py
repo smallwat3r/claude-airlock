@@ -73,8 +73,12 @@ RUN_BY_BASH = (
     "echo a\\ # <<X >/dev/null\n: <<Y\nX\necho RAN\nY",
     "echo $(true)# <<X >/dev/null\n: <<Y\nX\necho RAN\nY",
     "echo $((1))# <<X >/dev/null\n: <<Y\nX\necho RAN\nY",
-    # A word that stands for a <<
+    # A word that stands for a <<, by an alias however it is made: posix
+    # mode has a shell take them with no line that says so
     "shopt -s expand_aliases\nalias a='cat <<X'\na >/dev/null\n: <<Y\nX\necho RAN\nY",
+    "set -o posix\nBASH_ALIASES[a]='cat <<X'\na >/dev/null\n: <<Y\nX\necho RAN\nY",
+    "set -o posix\nal\\ias a='cat <<X'\na >/dev/null\n: <<Y\nX\necho RAN\nY",
+    "set -o posix\n'al''ias' a='cat <<X'\na >/dev/null\n: <<Y\nX\necho RAN\nY",
 )
 
 

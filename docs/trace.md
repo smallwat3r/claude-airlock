@@ -89,10 +89,11 @@ through your pager.
   is certain that bash reads those lines as that and does no more with
   them than hand them on: after anything the launcher does not read for
   certain (a word like `<<\EOF` or `<<"$x"`, a backquote, a line that
-  ends in `\`, an `alias`), and for one whose word is not quoted that
-  holds a `$( )` the shell runs, the lines are left as they are. An
-  alias from before the command can still start one where no line says
-  so.
+  ends in `\`, an `alias`, quoted or escaped too, or `BASH_ALIASES`),
+  and for one whose word is not quoted that holds a `$( )` the shell
+  runs, the lines are left as they are. An alias from before the
+  command, or one whose name a shell has to work out (`al$x`), can still
+  start one where no line says so.
 - A result whose call is not ahead of it in the transcript is on lines
   of its own, named after its call (`of: $ make`), or as `of: a call the
   transcript does not have` under the tool `?`.

@@ -44,8 +44,11 @@ _READ_AT = {
 _BEFORE_COMMENT = " \t;&|()<>"
 _ENDS_EITHER = ")"
 # What has a word of a command stand for others, a << among them, where
-# none is written: an alias, by its name anywhere in a line
+# none is written: an alias, by its name anywhere in a line, whatever its
+# case (BASH_ALIASES[a]= makes one too), and with what a shell takes out
+# of a word before it runs it (al\ias, 'al''ias')
 _ALIAS = "alias"
+_TAKEN_OUT = re.compile(r"[\\'\"]")
 # The one ${ } that is read: a name and no more
 _PARAMETER = re.compile(r"\$\{\w+\}")
 # What a subscript follows, as in the name[1<<2]=x a shell takes whole
@@ -97,8 +100,9 @@ class _Command:
     a subscript, a # right after a ) (a comment after a subshell, part
     of a word after a $( )), a \\ before a line break outside quotes (the
     next line goes on in the middle of this one, where a # starts no
-    comment and a < may be the second of two), the name of an alias
-    (one can stand for the << of a here-document), a ( or ) after a
+    comment and a < may be the second of two), the name of an alias,
+    escaped or quoted too, and BASH_ALIASES (one can stand for the << of
+    a here-document), a ( or ) after a
     here-document on its line, and a line that starts a here-document
     and ends within a quote or a subscript: what it holds then starts
     after a line the shell still reads as command.
@@ -127,7 +131,7 @@ class _Command:
         starts: list[_Start] = []
         at = 0
         self._escaped = -1
-        if _ALIAS in line:
+        if _ALIAS in _TAKEN_OUT.sub("", line).lower():
             self._within = _DOUBT
         while self._within != _DOUBT:
             found = _READ_AT[self._within].search(line, at)
