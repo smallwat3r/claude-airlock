@@ -19,7 +19,7 @@ from harness import LAUNCHER, LauncherTest, prompts_at
 from transcribed import events
 
 from claude_airlock import files, projects
-from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean
+from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean, labelled
 from claude_airlock.recording import egress_log, recorder
 from claude_airlock.recording.changes import change_event
 from claude_airlock.report import calls, outcomes, summary, trace, transcript
@@ -312,11 +312,41 @@ class TraceTest(LauncherTest):
     def test_a_path_as_claude_code_takes_it_is_outside_when_that_is(self):
         # It trims a path and takes ~ for the home, the container's
         for written in ("~/.bashrc", "~", " /etc/x", "/etc/x\n", "\ufeff/etc/x"):
-            assert outcomes.outside(written, "/p"), repr(written)
-            assert outcomes.outside_flag(written, "/p") == outcomes.OUTSIDE_FLAG
+            assert outcomes.outside(written, "/p", None), repr(written)
+            flag = outcomes.outside_flag(written, "/p", None)
+            assert flag == outcomes.OUTSIDE_FLAG
         for inside in ("src/x", " src/x", "~user/x", "/p/x "):
-            assert not outcomes.outside(inside, "/p"), repr(inside)
+            assert not outcomes.outside(inside, "/p", None), repr(inside)
         assert outcomes.as_written_to("~/.bashrc") == "/home/sandbox/.bashrc"
+
+    def test_a_path_that_is_not_absolute_is_from_where_the_session_was(self):
+        # Claude Code takes it from its working directory, which can be
+        # one next to the project
+        assert outcomes.outside("notes.md", "/p", "/other")
+        assert outcomes.outside("../notes.md", "/p", "/p")
+        assert not outcomes.outside("../notes.md", "/p", "/p/sub")
+        assert not outcomes.outside("notes.md", "/p", "/p/sub")
+        # Not by a directory that is none, nor for a path that is absolute
+        for cwd in (None, 7, "sub", ""):
+            assert outcomes.working_dir(cwd) is None
+            assert outcomes.entry_cwd({"cwd": cwd}) is None
+        assert outcomes.entry_cwd({"cwd": "/other"}) == "/other"
+        assert not outcomes.outside("/p/notes.md", "/p", "/other")
+        block = {"type": "tool_use", "id": "c1", "name": "Write"}
+        block["input"] = {"file_path": "notes.md", "content": "x"}
+        entry = {"type": "assistant", "cwd": "/other", "message": {}}
+        event = calls.call_event(1e9, Who.CLAUDE, entry, block, "/p", False)
+        assert event.fields["outside_project"]
+        assert event.details[0] == "file: notes.md (1 lines)" + outcomes.OUTSIDE_FLAG
+        assert 0 in event.alerts
+        entry["message"] = {"content": [block]}
+        lines = summary.summary([entry], "/p", 0)
+        assert "  notes.md x1" + outcomes.OUTSIDE_FLAG in lines
+        # What a command was seen to change, from where it ran
+        changed = {"type": "user", "cwd": "/other"}
+        changed["toolUseResult"] = {"bashEditDiff": {"changedFiles": ["notes.md"]}}
+        (file,) = outcomes.files_changed(changed, "/p")
+        assert file.outside
 
     def test_only_writes_outside_the_project_are_flagged(self):
         stdout = self.launch("--trace").stdout
@@ -409,6 +439,61 @@ class TraceTest(LauncherTest):
                 "type": files.UNREADABLE,
                 "text": "(a line too long to read)",
             }
+
+    def test_what_the_strings_of_a_line_hold_takes_no_more_than_its_length(self):
+        # A comma within a string sets no value apart, and a line that
+        # is not read takes nothing: neither stops the reading early
+        texts = [{"type": "x", "text": "," * 100_000} for _ in range(5)]
+        path = self.write_transcript("0a", [*texts, *prompts_at(1e9)])
+        line = path.read_bytes().splitlines(keepends=True)[0]
+        # Counted as values, the commas would take 8 MB each
+        assert files.held_size(line) < 3 * len(line)
+        with unittest.mock.patch.object(entries_module, "MOST_HELD", 2_000_000):
+            read = entries_module.read_transcript(path)
+        assert read.whole
+        assert read.entries[:5] == texts
+        assert read.entries[-1]["type"] == "user"
+        # Too heavy to read, each is a line that says so, and takes no
+        # more than such a line
+        light = files.held_size(path.read_bytes().splitlines(keepends=True)[-1])
+        with (
+            unittest.mock.patch.object(entries_module, "MOST_HELD", 2 * light),
+            unittest.mock.patch.object(files, "MOST_LINE_HELD", light),
+        ):
+            read = entries_module.read_transcript(path)
+        assert read.whole
+        assert [entry["type"] for entry in read.entries] == [
+            *[files.UNREADABLE] * 5,
+            "user",
+        ]
+
+    def test_a_transcript_that_says_nowhere_when_it_ran_says_so_of_records(self):
+        # The records are looked through for the time of the session
+        path = self.write_transcript("0a", [{"type": "user", "message": {}}])
+        header, _ = trace.session_events(path, self.host, False)
+        assert labelled("network", trace.NO_TIME) in header
+
+    def test_whether_a_transcript_was_read_whole_is_the_reading_s_to_say(self):
+        path = self.write_transcript("0a", prompts_at(1e9, 1e9 + 1))
+        assert entries_module.read_transcript(path).whole
+        first = len(path.read_bytes().splitlines(keepends=True)[0])
+        with unittest.mock.patch.object(entries_module, "MOST_READ", first):
+            assert not entries_module.read_transcript(path).whole
+        with unittest.mock.patch.object(entries_module, "MOST_HELD", 1):
+            assert not entries_module.read_transcript(path).whole
+        # Not an entry that says the same, which is the session's to write
+        said = {"type": files.UNREADABLE, "text": entries_module.NOT_ALL_READ}
+        forged = self.write_transcript("0b", [*prompts_at(1e9), said])
+        assert entries_module.read_transcript(forged).whole
+        step = {"type": "assistant", "message": {"id": "msg_1"}}
+        read = trace.ReadTranscript.read(self.host, forged)
+        assert trace._steps_told([read], 0) == set()
+        steps = self.write_transcript("0c", [step, said])
+        read = trace.ReadTranscript.read(self.host, steps)
+        assert trace._steps_told([read], 0) == {"msg_1"}
+        with unittest.mock.patch.object(entries_module, "MOST_HELD", 1):
+            read = trace.ReadTranscript.read(self.host, steps)
+        assert trace._steps_told([read], 0) is None
 
     def test_an_edit_is_compared_as_far_as_its_first_lines(self):
         # Comparing takes the square of the lines, a session's to write
@@ -772,6 +857,10 @@ class TraceTest(LauncherTest):
         assert events[0].link == "n1"
         (first, *_) = Layout().events(events)
         assert first.endswith("sandbox  net         [n1..n3] tcp/https a.test:443  x3")
+        # Next to each other once one between them is left out, as what
+        # is chosen can be: they are no run, n2 is none of them
+        apart = [reached(1.0, "a.test"), reached(3.0, "a.test"), reached(4.0, "a.test")]
+        assert [event.link for event in folded(apart)] == ["n1", "n3..n4"]
 
     def test_at_a_terminal_an_event_says_when_who_and_what_once(self):
         day = 24 * 3600.0
@@ -969,10 +1058,10 @@ class TraceTest(LauncherTest):
         entries = [
             {"type": "user", "gitBranch": f"b{n}" + "x" * 5000} for n in range(9)
         ]
-        branch = dict(summary.overview(entries))["branch"]
+        branch = dict(summary.overview(entries, 0))["branch"]
         assert branch.endswith(", and 4 more")
         assert len(branch) < summary.MOST_LISTED * 210
-        assert dict(summary.overview([]))["branch"] == "?"
+        assert dict(summary.overview([], 0))["branch"] == "?"
 
     def test_a_header_line_cannot_be_forged(self):
         forged = "main\ntranscript  as the launcher copied it (9 lines)"

@@ -63,20 +63,36 @@ def as_written_to(path: str) -> str:
     return path
 
 
-def outside(path: str, project_dir: str) -> bool:
+def working_dir(value: object) -> str | None:
+    """The directory the session was in, as an entry names it (its cwd),
+    none for what is no absolute path: a path that is not absolute is
+    from there, see outside."""
+    return value if isinstance(value, str) and os.path.isabs(value) else None
+
+
+def entry_cwd(entry: dict) -> str | None:
+    """The directory the session was in at an entry, see working_dir."""
+    return working_dir(entry.get("cwd"))
+
+
+def outside(path: str, project_dir: str, cwd: str | None) -> bool:
     """Whether a path a session wrote to is outside its project, by the
-    path as it is written, as Claude Code takes it (see as_written_to).
-    Not by where the links on it lead: the trace is made later and on
-    the host, where a link of the project may lead somewhere else than
-    it did for the session, or be gone, so a write through one to a
-    place outside is not told as that."""
-    absolute = os.path.normpath(os.path.join(project_dir, as_written_to(path)))
+    path as it is written, as Claude Code takes it (see as_written_to),
+    and one that is not absolute from the directory the session was in
+    then (cwd, see working_dir): it can be one next to the project, and
+    is the project when none is known. Not by where the links on it
+    lead: the trace is made later and on the host, where a link of the
+    project may lead somewhere else than it did for the session, or be
+    gone, so a write through one to a place outside is not told as
+    that."""
+    absolute = os.path.normpath(os.path.join(cwd or project_dir, as_written_to(path)))
     return not is_within(absolute, project_dir)
 
 
-def outside_flag(path: str, project_dir: str) -> str:
-    """What follows the name of a written file that is not in the project."""
-    return OUTSIDE_FLAG if outside(path, project_dir) else ""
+def outside_flag(path: str, project_dir: str, cwd: str | None) -> str:
+    """What follows the name of a written file that is not in the
+    project, see outside."""
+    return OUTSIDE_FLAG if outside(path, project_dir, cwd) else ""
 
 
 @dataclass(frozen=True)
@@ -169,7 +185,9 @@ def files_changed(entry: dict, project_dir: str) -> list[ChangedFile]:
     """The files a command changed, as Claude Code noted with its result.
     All of them, one past what is shown may be the one outside the
     project. This is what Claude Code noticed, a command can write what
-    it did not."""
+    it did not. A path that is not absolute is from where the command
+    ran, see outside."""
+    cwd = entry_cwd(entry)
     result = entry.get("toolUseResult")
     noted = result.get("bashEditDiff") if isinstance(result, dict) else None
     if not isinstance(noted, dict):
@@ -183,13 +201,13 @@ def files_changed(entry: dict, project_dir: str) -> list[ChangedFile]:
         changed[path] = ChangedFile(
             path,
             created=bool(file.get("created")),
-            outside=outside(path, project_dir),
+            outside=outside(path, project_dir, cwd),
             diff=tuple(line for hunk in hunks for line in _hunk_lines(hunk)),
         )
     for path in every(noted.get("changedFiles")):
         if isinstance(path, str) and path not in changed:
             changed[path] = ChangedFile(
-                path, created=False, outside=outside(path, project_dir)
+                path, created=False, outside=outside(path, project_dir, cwd)
             )
     return list(changed.values())
 

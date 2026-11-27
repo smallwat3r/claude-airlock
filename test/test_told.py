@@ -219,7 +219,7 @@ class ToldTest:
 
     def test_the_header_names_the_instructions_read(self):
         read = attached("instructions", files=list(self.FILES))
-        assert summary.summary([read, read], PROJECT)[-3:] == [
+        assert summary.summary([read, read], PROJECT, 0)[-3:] == [
             "instructions read",
             "  /etc/claude-code/CLAUDE.md (Managed)",
             "  /p/CLAUDE.md[2J (Project)",
@@ -653,7 +653,7 @@ class HostileTest:
                 for line in layout.event(event):
                     assert "\x1b" not in line
             summary.planted_shown(found)
-        summary.summary(entries, PROJECT)
+        summary.summary(entries, PROJECT, 0)
 
 
 class TraceTest(LauncherTest):

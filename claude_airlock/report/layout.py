@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, NewType
 
-from ..events import Event, Kind, Wrong, clean, flat, labelled
+from ..events import Event, Kind, Wrong, clean, connection_number, flat, labelled
 
 # Of the column that says what an event is, a longer name is cut to it
 WHAT_WIDTH = 10
@@ -138,16 +138,19 @@ def folded(events: Iterable[Event]) -> list[Event]:
     a command made. Each of a run is tied to other events by a number of
     its own (see Event.link): the one that stands for them says from
     which to which they go (n3..n6), the others of those numbers are in
-    it."""
+    it. So a run goes on only with the number after its last: of what is
+    chosen, one between them may have been left out, and is not one of
+    the run."""
     runs: list[tuple[Event, int, str]] = []
     for event in events:
-        first, count, _ = runs[-1] if runs else (None, 0, "")
+        first, count, last = runs[-1] if runs else (None, 0, "")
         if (
             first
             and event.kind in (Kind.NET, Kind.DNS)
             and (event.who, event.what, event.lines)
             == (first.who, first.what, first.lines)
             and went_wrong(event) == went_wrong(first)
+            and _goes_on(last, event.link)
         ):
             runs[-1] = (first, count + 1, event.link)
         else:
@@ -162,6 +165,16 @@ def folded(events: Iterable[Event]) -> list[Event]:
         )
         for event, count, last in runs
     ]
+
+
+def _goes_on(last: str, link: str) -> bool:
+    """Whether what an event is tied by goes on a run whose last event
+    is tied by another: by the same, which is none for a lookup, or as
+    the connection with the number after that of the last."""
+    if link == last:
+        return True
+    before, after = connection_number(last), connection_number(link)
+    return before is not None and after == before + 1
 
 
 def prefixed(start: str, texts: list[str]) -> list[str]:

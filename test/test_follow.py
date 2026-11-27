@@ -1026,6 +1026,20 @@ class CaptureTailTest:
             "1 connection to 1 host, 2 DENIED"
         )
 
+    def test_a_connection_that_fails_after_it_was_summed_is_counted_then(self):
+        tail = self.tail()
+        self.fed(tail, [(4.0, tcp("10.0.0.7", 5432), True)])
+        assert tail.traffic().said == "1 connection to 1 host"
+        # Refused once the summary was said: counted with the next
+        self.fed(tail, [(4.1, answer("10.0.0.7", 5432, flags=0x14), False)])
+        assert tail.traffic() == tails.Traffic(failed=1)
+        assert not tail.traffic()
+        # And one that is not answered, once it is found not to be
+        self.fed(tail, [(5.0, tcp("10.0.0.8", 5432, sequence=7), True)])
+        assert tail.traffic().failed == 0
+        self.fed(tail, [(6.0, tcp("10.0.0.8", 5432, sequence=7), True)])
+        assert tail.traffic().failed == 1
+
     def test_a_follower_sums_what_its_sessions_did(self):
         follower = follow.Follower(mock.Mock(project_dir="/proj"), verbose=False)
         tail = self.tail()
@@ -1440,6 +1454,64 @@ class TranscriptTailTest:
         followed = tails.TranscriptTail(self.file, "/proj", options)
         followed.poll(None)
         assert followed.title == "named later"
+
+    def test_a_transcript_read_from_within_a_line_lets_that_line_go(self):
+        # Its length can be taken while a line of it is being written:
+        # the rest of that line is no line of its own
+        add(self.file, prompt("one"))
+        within = self.file.stat().st_size - 10
+        add(self.file, prompt("two"))
+        options = WalkOptions(live=True)
+        tail = tails.TranscriptTail(self.file, "/proj", options, within)
+        assert self.said(tail) == ["two"]
+        # From where a line starts, that line is whole
+        start = len(json.dumps(prompt("one"))) + 1
+        tail = tails.TranscriptTail(self.file, "/proj", options, start)
+        assert self.said(tail) == ["two"]
+
+    def test_no_more_transcripts_are_followed_than_there_are_room_for(self):
+        # A session can write any number into the directory of them
+        many = [self.file.with_name(f"{n}.jsonl") for n in range(5)]
+        for path in many:
+            path.touch()
+        follower = follow.Follower(mock.Mock(project_dir="/proj"), verbose=False)
+        found = mock.patch.object(follow, "transcript_files", return_value=many)
+        with (
+            found,
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "MOST_FOLLOWED", 3),
+        ):
+            follower._look_for_transcripts(follow.Round())
+            for path in many:
+                add(path, prompt("hello"))
+            later = follow.Round()
+            follower._rounds = 1
+            follower._look_for_transcripts(later)
+            follower._look_for_transcripts(later)
+        assert len(follower._tails) == 3
+        assert later.notes == [
+            (
+                "transcripts NOT ALL FOLLOWED: more than 3 were written to, what"
+                " the sessions of the others do is not shown"
+            )
+        ]
+        # Nor more of their subagents, all of them together
+        theirs = mock.patch.object(follow, "subagent_files", return_value=many)
+        with (
+            theirs,
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "MOST_FOLLOWED_SUBAGENTS", 2),
+        ):
+            agents = follow.Round()
+            follower._look_for_subagents(agents)
+            follower._look_for_subagents(agents)
+        assert len(follower._subagents) == 2
+        assert agents.notes == [
+            (
+                "subagents   NOT ALL FOLLOWED: more than 2 of the sessions"
+                " followed, what the subagents of the others do is not shown"
+            )
+        ]
 
     def test_a_transcript_written_anew_is_read_again_from_its_start(self):
         # A session can take out what it did, and what is written after

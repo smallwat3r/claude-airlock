@@ -296,7 +296,9 @@ def _transcript_lines(
         read = ReadTranscript.read(host, path)
         added = _added_since(read, (lengths or {}).get(path, 0))
         written.extend(
-            flat(file) for file in written_paths(added) if outside(file, project_dir)
+            flat(file)
+            for file, cwd in written_paths(added)
+            if outside(file, project_dir, cwd)
         )
         compared = read.compared
         # A subagent's is named by its session

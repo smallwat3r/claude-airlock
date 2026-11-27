@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Self
+from typing import BinaryIO, NamedTuple, Self
 
 from ..events import Event, Kind, Stage, Who, flat
 from ..files import LINE_LIMIT, line_entry, open_plain
@@ -112,6 +112,26 @@ MOST_HISTORY = 4 << 20
 TITLE_BYTES = 1 << 20
 
 
+class Streak:
+    """The looks in a row that found something, said once there are so
+    many of them, and again only after a look that found nothing."""
+
+    def __init__(self, after: int) -> None:
+        self._after = after
+        self._count = 0
+        self._said = False
+
+    def look(self, found: bool) -> None:
+        self._count = self._count + 1 if found else 0
+
+    def newly(self) -> bool:
+        if self._count < self._after:
+            self._said = self._said and bool(self._count)
+            return False
+        said, self._said = self._said, True
+        return not said
+
+
 class TranscriptTail:
     """A transcript read as it grows, from a place in it onward. It is
     the session's to write: a line longer than LINE_LIMIT is dropped, not
@@ -126,22 +146,23 @@ class TranscriptTail:
         agents: Iterator[int] | None = None,
     ):
         self.path = path
-        self._offset = offset
+        # From the byte before a place within it: what is read first is
+        # let go of up to the end of its line, as the rest of one too long
+        # to hold is, and a line that starts right there is whole. A
+        # length taken while a line was being written ends within it.
+        self._offset = max(offset - 1, 0)
         # The start of a line whose end is not written yet
         self._partial = b""
-        # Whether what is read is the rest of a line that was too long
-        self._dropping = False
+        # Whether what is read is the rest of a line that is not taken
+        # in: one too long, or one it is read from within
+        self._dropping = offset > 0
         # With agents, of a subagent: what it does says which it is of
         self._walk = Walk(project_dir, options, agents=agents)
         self._title: str | None = None
-        # The looks in a row that left some of it unread, and whether
-        # that was said, see newly_behind
-        self._behind = 0
-        self._said_behind = False
-        # The looks in a row that found it no file that can be read, and
-        # whether that was said, see newly_unread
-        self._unread = 0
-        self._said_unread = False
+        # The looks that left some of it unread, see newly_behind, and
+        # those that found it no file that can be read, see newly_unread
+        self._behind = Streak(LATE_AFTER)
+        self._unread = Streak(UNREAD_AFTER)
         # The file it is, by its device and inode, once it was opened, and
         # whether it was found written anew since that was said, see
         # newly_rewritten
@@ -159,16 +180,12 @@ class TranscriptTail:
         begin, for what happened before it was followed. A call from
         before that is not known: its result is not shown when it comes,
         as of a transcript that is followed from where it ends."""
-        tail = cls(path, project_dir, options)
         try:
-            start = path.lstat().st_size - MOST_HISTORY
+            start = max(path.lstat().st_size - MOST_HISTORY, 0)
         except OSError:
             start = 0
-        if start > 0:
-            # From the byte before: what is read first is let go of up to
-            # the end of its line, as the rest of one too long to hold is,
-            # and a line that starts right there is whole
-            tail._offset, tail._dropping, tail.cut = start - 1, True, True
+        tail = cls(path, project_dir, options, start)
+        tail.cut = start > 0
         return tail
 
     @property
@@ -195,11 +212,7 @@ class TranscriptTail:
         """Whether LATE_AFTER looks in a row left some of it unread,
         said once until one reads it to its end again: it is written
         faster than it is read, and what is shown of it is late."""
-        if self._behind < LATE_AFTER:
-            self._said_behind = self._said_behind and bool(self._behind)
-            return False
-        said, self._said_behind = self._said_behind, True
-        return not said
+        return self._behind.newly()
 
     def newly_rewritten(self) -> bool:
         """Whether it was found written anew since the last time it was
@@ -218,11 +231,7 @@ class TranscriptTail:
         open_plain). A session can do that to its own transcript and go
         on writing through the link: what it does from then on is in no
         line, and is not to pass for nothing done."""
-        if self._unread < UNREAD_AFTER:
-            self._said_unread = self._said_unread and bool(self._unread)
-            return False
-        said, self._said_unread = self._said_unread, True
-        return not said
+        return self._unread.newly()
 
     def _new_lines(self, most: int | None) -> Iterator[bytes | None]:
         """The lines completed since the last time, none while it is not
@@ -233,10 +242,9 @@ class TranscriptTail:
         than most bytes when there is a most: what is written meanwhile
         does not keep the look going."""
         file = open_plain(self.path)
+        self._unread.look(file is None)
         if file is None:
-            self._unread += 1
             return
-        self._unread = 0
         with file:
             about = os.fstat(file.fileno())
             size, this = about.st_size, (about.st_dev, about.st_ino)
@@ -246,7 +254,7 @@ class TranscriptTail:
                 self._rewritten, self.cut, self._read_end = True, False, b""
             self._file = this
             end = size if most is None else min(size, self._offset + most)
-            self._behind = self._behind + 1 if end < size else 0
+            self._behind.look(end < size)
             file.seek(self._offset)
             while self._offset < end:
                 data = file.read(min(READ_SIZE, end - self._offset))
@@ -255,8 +263,8 @@ class TranscriptTail:
                 self._offset += len(data)
                 self._read_end = (self._read_end + data)[-KEPT_END:]
                 if self._dropping:
-                    # The rest of the line that was too long, to its end:
-                    # said once, and none of it kept
+                    # The rest of a line that is not taken in, to its end:
+                    # one too long is said once, and none of it is kept
                     _, ended, data = data.partition(b"\n")
                     self._dropping = not ended
                 *lines, self._partial = (self._partial + data).split(b"\n")
@@ -285,8 +293,8 @@ class TranscriptTail:
 @dataclass(frozen=True)
 class Traffic:
     """What sessions did on the network in some time, summed: the
-    connections they made and to how many places, those of them that
-    were refused or not answered, the requests the egress filter
+    connections they made and to how many places, those that were
+    refused or found not to be answered then, the requests the egress filter
     refused, the connections made to them from outside, and the bytes
     each way, as far as the capture tells of those: of a connection
     still open to anywhere but the model's API, what came in is known to
@@ -328,6 +336,18 @@ class Traffic:
         if self.inbound:
             parts.append(f"{self.inbound} made to it from outside")
         return ", ".join(parts)
+
+
+class Summed(NamedTuple):
+    """How much a capture held when what its session did on the network
+    was last summed, see CaptureTail.traffic: how many connections it
+    made, were made to it and came to an end, and the bytes each way."""
+
+    connections: int = 0
+    inbound: int = 0
+    endings: int = 0
+    sent: int = 0
+    received: int = 0
 
 
 class NewlyOver[Item]:
@@ -411,7 +431,7 @@ class CaptureTail:
         self._known = known
         self._new: set[str] = set()
         # How much there was when what the session did was last summed
-        self._summed = (0, 0, 0, 0)
+        self._summed = Summed()
         self._said_cut_short = False
         # The parts already said to have died, and when that was last asked
         self._said_died = ""
@@ -604,25 +624,38 @@ class CaptureTail:
     def traffic(self) -> Traffic:
         """What the session did on the network since this was last
         asked, see Traffic. Not what its egress filter refused it, which
-        the capture does not tell."""
+        the capture does not tell. A connection fails when it is refused
+        or found not to be answered, which can be after it was summed as
+        made: a failure is counted when it comes, by what became of the
+        connections since."""
         capture = self.capture
-        made, inbound, was_out, was_back = self._summed
-        new = capture.connections[made:]
+        was = self._summed
+        new = capture.connections[was.connections :]
         hosts = {
             connection.asked
             or capture.name_of(connection.address, connection.when)
             or connection.address
             for connection in new
         }
+        failed = sum(
+            what.wrong and not connection.inbound
+            for _, what, connection in capture.endings[was.endings :]
+        )
         out, back = capture.carried()
-        self._summed = (len(capture.connections), len(capture.inbound), out, back)
+        self._summed = Summed(
+            len(capture.connections),
+            len(capture.inbound),
+            len(capture.endings),
+            out,
+            back,
+        )
         return Traffic(
             connections=len(new),
             hosts=len(hosts),
-            failed=sum(connection.failed for connection in new),
-            inbound=len(capture.inbound) - inbound,
-            sent=max(out - was_out, 0),
-            received=max(back - was_back, 0),
+            failed=failed,
+            inbound=len(capture.inbound) - was.inbound,
+            sent=max(out - was.sent, 0),
+            received=max(back - was.received, 0),
         )
 
     def newly_died(self) -> str:

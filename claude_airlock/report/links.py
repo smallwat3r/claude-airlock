@@ -25,6 +25,7 @@ import itertools
 import math
 from collections.abc import Iterator
 
+from ..events import connection_link
 from ..recording.pcap import Capture, Connection
 from ..recording.uploads import Key, Upload
 
@@ -48,7 +49,7 @@ class Links:
         known = id(connection)
         if known not in self._given:
             self._given[known] = (connection, next(self._numbers))
-        return f"n{self._given[known][1]}"
+        return connection_link(self._given[known][1])
 
     def of_upload(self, capture: Capture, upload: Upload) -> str:
         """What an upload of the capture and what came back for it are
@@ -60,7 +61,8 @@ class Links:
         if connection is None:
             if upload.key not in self._unseen:
                 self._unseen[upload.key] = next(self._numbers)
-            over, since = f"n{self._unseen[upload.key]}", -math.inf
+            over = connection_link(self._unseen[upload.key])
+            since = -math.inf
         else:
             over, since = self.of(connection), connection.when
         parts = (capture.uploads, capture.elsewhere)

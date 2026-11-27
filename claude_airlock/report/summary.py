@@ -30,7 +30,7 @@ from .entries import (
     tool_calls,
 )
 from .given import GIVEN, texts_given
-from .outcomes import outside_flag, refused, result_planted
+from .outcomes import OUTSIDE_FLAG, outside, refused, result_planted
 from .planted import INJECTION, read_said
 from .told import INSTRUCTIONS, attachment, instruction_files, instructions_read
 
@@ -117,11 +117,11 @@ def _listed(values: Iterable[object]) -> str:
     return ", ".join(found[:MOST_LISTED]) + (f", and {more} more" if more > 0 else "")
 
 
-def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str, str]]:
+def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
     """The session at a glance, as labelled values: what ran it, when, at
     what cost, how many calls and how many of them failed. With how many
-    of what it read show signs of being planted, counted here unless
-    given."""
+    of what it read show signs of being planted, as its events count them
+    (see planted_shown)."""
     calls = tool_calls(entries)
     times = entry_times(entries)
     last = {str(e.get("type")): e for e in entries}
@@ -177,19 +177,22 @@ def overview(entries: list[dict], planted: int | None = None) -> list[tuple[str,
     not_run = sum(refused(entry) for entry, _ in results)
     if not_run:
         rows.append(("refused", f"{not_run} calls were not allowed to run"))
-    signs = planted_reads(entries) if planted is None else planted
-    if signs:
-        rows.append((INJECTION, f"{read_said(signs)}, see --failed"))
+    if planted:
+        rows.append((INJECTION, f"{read_said(planted)}, see --failed"))
     return rows
 
 
 def _files_written(entries: list[dict], project_dir: str) -> list[str]:
     """Each file the session wrote and how often, flagged when it is
-    outside the project."""
-    written = Counter(written_paths(entries))
+    outside the project: by a path that is not absolute, when it was
+    from a directory outside, see outside."""
+    found = list(written_paths(entries))
+    written = Counter(path for path, _ in found)
+    away = {path for path, cwd in found if outside(path, project_dir, cwd)}
     lines = ["files written"] if written else []
     for path, count in sorted(written.items()):
-        lines.append(f"  {flat(path)} x{count}{outside_flag(path, project_dir)}")
+        flag = OUTSIDE_FLAG if path in away else ""
+        lines.append(f"  {flat(path)} x{count}{flag}")
     return lines
 
 
@@ -210,9 +213,7 @@ def _pages_fetched(entries: list[dict]) -> list[str]:
     return lines + [f"  {flat(host)} x{count}" for host, count in sorted(hosts.items())]
 
 
-def summary(
-    entries: list[dict], project_dir: str, planted: int | None = None
-) -> list[str]:
+def summary(entries: list[dict], project_dir: str, planted: int) -> list[str]:
     """What to know before reading on. planted as for overview."""
     rows = [("project", flat(project_dir)), *overview(entries, planted)]
     return [

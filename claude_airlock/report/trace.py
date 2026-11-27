@@ -50,8 +50,6 @@ from ..recording.started import start_summary
 from ..settings import Host
 from .api_events import place_calls
 from .entries import (
-    NOT_ALL_HELD,
-    NOT_ALL_READ,
     entry_times,
     prompts,
     read_entries,
@@ -83,6 +81,12 @@ from .wire import on_the_wire
 
 # What an event of what was taken out of a transcript says of itself
 REMOVED = "REMOVED FROM THE TRANSCRIPT"
+# What the header says of the records of a session whose transcripts
+# say nowhere when it ran
+NO_TIME = (
+    "NOT LOOKED AT, nor what was noted of the session: its transcript"
+    " says nowhere when it ran"
+)
 
 
 def removed_events(
@@ -158,7 +162,7 @@ def _session_header(
     own: ReadTranscript,
     subagents: list[ReadTranscript],
     project_dir: str,
-    planted: int | None = None,
+    planted: int,
     unread: int = 0,
     taken: Sequence[Event] = (),
 ) -> list[str]:
@@ -206,14 +210,13 @@ def _steps_told(read: Sequence[ReadTranscript], unread: int) -> set[str] | None:
     session and of its subagents tell of, with what was taken out of
     them: what a request to the model is looked for among, see
     place_calls. None when they were not all read, a step that is not
-    among them may then be in what was not."""
-    if unread:
+    among them may then be in what was not: as the reading says, not as
+    an entry does, which is the session's to write."""
+    if unread or not all(of_one.whole for of_one in read):
         return None
     steps: set[str] = set()
     for of_one in read:
         for entry in (*of_one.entries, *of_one.compared.gone):
-            if entry.get("text") in (NOT_ALL_READ, NOT_ALL_HELD):
-                return None
             step = step_of(entry)
             if step:
                 steps.add(step)
@@ -274,6 +277,11 @@ def session_events(
         wire_rows, wire_events = on_the_wire(noted, recorded)
         noted_rows += wire_rows
         net_events += wire_events
+    else:
+        # The records are looked through for when the session ran: none
+        # was, and a header without a word of them would read as if the
+        # session had done nothing there
+        net_lines = [labelled("network", NO_TIME)]
     header = [
         *_session_header(own, subagents, project_dir, planted, unread, taken),
         *(

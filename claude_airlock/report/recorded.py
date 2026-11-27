@@ -23,7 +23,7 @@ from ..recording.recorder import Compared, compare
 from ..recording.records import TracedSession, recorded_sessions
 from ..recording.started import stay_between
 from ..settings import Host
-from .entries import read_entries, unreadable_lines
+from .entries import read_transcript, unreadable_lines
 from .links import Links
 
 
@@ -164,15 +164,17 @@ class Recorded:
 @dataclass(frozen=True)
 class ReadTranscript:
     """A transcript as it is now, next to what the launcher copied of
-    it."""
+    it, and whether it was read whole, see read_transcript."""
 
     path: Path
     entries: list[dict]
     compared: Compared
+    whole: bool
 
     @classmethod
     def read(cls, host: Host, path: Path) -> ReadTranscript:
-        return cls(path, read_entries(path), compare(host, path))
+        entries, whole = read_transcript(path)
+        return cls(path, entries, compare(host, path), whole)
 
     @property
     def known(self) -> list[dict]:

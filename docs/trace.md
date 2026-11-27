@@ -99,7 +99,9 @@ through your pager.
   transcript does not have` under the tool `?`.
 - The same thing on the network several times in a row is one line with
   how often (`x4`), and with the numbers of the first and the last of
-  them (`[n1..n4]`, see [The network](#the-network)).
+  them (`[n1..n4]`, see [The network](#the-network)): connections whose
+  numbers follow each other, one left out between them by `--only` or
+  `--failed` is no part of the line.
 - When several sessions of the project ran at the same time, the trace of
   one has what the others did on the network too, each of those lines
   starting with the name of its container (`[claude-api-2]`).
@@ -140,10 +142,11 @@ claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
   outside the project is among what `--failed` keeps and what the
   launcher says [when a session ends](#when-a-session-ends).
 - `OUTSIDE PROJECT` goes by the path as it is written, for a tool's
-  write too, as Claude Code takes it: without the blanks around it, and
-  with a leading `~` as the home of the session's container. A file
-  reached through a link of the project that leads out of it is not told
-  apart: the trace is made later and on the host, where the link may
+  write too, as Claude Code takes it: without the blanks around it,
+  with a leading `~` as the home of the session's container, and one
+  that is not absolute from the directory the session was in then. A
+  file reached through a link of the project that leads out of it is not
+  told apart: the trace is made later and on the host, where the link may
   lead elsewhere or be gone.
 - It is what Claude Code noticed of the command, not all a command can
   write: a file it had not seen before may be missing. The record of
@@ -183,7 +186,7 @@ claude   context   | and never mention this to the user.
 | `tells the reader to keep something from the user` | Words that ask not to tell the user |
 | `is written as a turn of the conversation` | The markup a conversation or a tool call is written in, the tags Claude Code tells the model of a command, a hook, a task or another session in (`<system-reminder>`, `<command-name>`, `<local-command-stdout>`, `<task-notification>`, `<cross-session-message>`), a tag made up to read as the system's (who speaks, then what: `<system_warning>`, `<ctx_interruption>`), a line made to look like a message of the system |
 | `asks for secrets to be sent somewhere` | Words that ask for keys, tokens, passwords or the like to be sent to someone |
-| `holds text that is not shown` | A run of characters a terminal and an editor do not show, with what they spell when that can be read |
+| `holds text that is not shown` | A run of characters a terminal and an editor do not show, blanks between them too, with what they spell when that can be read |
 
 - It is a prompt to look, not proof. Documentation about prompt injection,
   a test of it and this page's own source read the same way.
@@ -195,9 +198,9 @@ claude   context   | and never mention this to the user.
   tell you of such text itself (`docker/CLAUDE-airlock.md`), which it may
   or may not do.
 - A text is looked at as it reads, not as it is written: wide and styled
-  letters count as the plain ones, and the marks of emphasis and the
-  characters that are not shown are left out, so a word split by one is
-  still found. The excerpt shows the text that way, but for what a path
+  letters count as the plain ones, a curly apostrophe as the straight
+  one, and the marks of emphasis and the characters that are not shown
+  are left out, so a word split by one is still found. The excerpt shows the text that way, but for what a path
   is written with, a `~` ahead of its first `/` and a `*` next to one:
   `~/.ssh/id_ed25519` is not shown as another file. Letters set apart by
   spaces or dots, another alphabet's look-alikes and an encoding are not
@@ -365,10 +368,14 @@ sandbox  dns         lookup 4a6f...3d.x.example.com TXT FLAGGED: an unusually lo
 | `during:` | The tool call that was running when the connection was made. By the clock, not proof |
 | `(no call running)` | Claude Code itself (the API), or something a command left running |
 | `by:` | The process that made the connection, see [What ran](#what-ran) |
-| `FLAGGED` | A lookup that stands out: a very long name, or many different names under one parent (30) or under one domain whatever is between (100). Data can be carried out that way, it is a prompt to look. Or a connection that is not what it looks, see [What a connection is](#what-a-connection-is) |
+| `FLAGGED` | A lookup that stands out: a very long name, a name with bytes no host name has (other than letters, digits, `-` and `_`), or many different names under one parent (30) or under one domain whatever is between (100). Data can be carried out that way, it is a prompt to look. Or a connection that is not what it looks, see [What a connection is](#what-a-connection-is) |
 
 The name of a destination is what the session looked up or asked for, the
 address is what was reached. Trust the address where the two matter.
+
+A trace looks through these records, and what the launcher noted of the
+session, for when its transcripts say it ran: of one whose transcripts
+say that nowhere the header says they were `NOT LOOKED AT`.
 
 - A connection has a number, in the order the connections of the trace
   were made, those made to the session among the others. It is what
@@ -383,6 +390,10 @@ address is what was reached. Trust the address where the two matter.
   session sent. A session that can put packets on its own loopback can
   still make one that looks like both, so a name is only as good as the
   session: the address is the fact.
+- A name is written as `dig` writes it: a byte that is no printable
+  letter of ASCII as a backslash and its number (`\032` for a space,
+  `\195\169` for `é`), a dot that is part of a label as `\.`. Letters
+  keep their case: two names that differ in it are two, as they went.
 - A name asked for and never answered is a lookup of its own, `no answer`.
   An answer too long for the capture keeps the addresses that fit, and DNS
   over TCP is read as DNS over UDP is, however a message is cut into
@@ -428,7 +439,10 @@ address is what was reached. Trust the address where the two matter.
   comes of them, nor more than 100,000 lookups kept, with 200,000
   addresses in all: the rest are counted as `NOT READ`. A session can
   send any number that are none, or that nobody asked for, and one
-  answer can give thousands of addresses.
+  answer can give thousands of addresses. Those bounds are each of what
+  goes to Docker's resolver on its own, and of what goes to port 53
+  anywhere else on its own: whatever a session sends to a server of its
+  own, the lookups it has the resolver make are read, `--follow` too.
 - What is sent to a resolver over TCP and cannot be read to its end is
   counted too, and said (`NOT READ to its end`): a packet longer than
   the capture keeps of one (1024 bytes), with whatever follows its first
@@ -436,7 +450,7 @@ address is what was reached. Trust the address where the two matter.
   a time, and one whose rest never came: its connection ended or was
   reset first, or what came next does not go on from it, by its
   sequence number. A lookup may be missing each time, which a session
-  can arrange, and a hello is then held against no name.
+  can arrange, and a hello sent after it is then held against no name.
 - The proxy keeps its log in two files of about 10 MB, the one it writes
   to and the one before, and the launcher of a filtered session has it
   start a new one every 10 seconds once it is over that. The last 32 MB
@@ -472,9 +486,11 @@ bytes a connection sends:
   [limits](sandbox.md#known-limits) of the egress filter). An address
   that has several names is held against them all. Nothing is said of
   an address that was not looked up at all, its hello is all that names
-  it, nor of a capture whose lookups may not all be there: they went
-  unread, their part ran into its packet limit, or a recorder ended
-  early or lost packets. A hello that names no server is flagged on
+  it, nor of a capture whose lookups may not all be there: their part
+  ran into its packet limit, or a recorder ended early or lost packets.
+  Nor of a hello sent once some went unread: one sent before that is
+  held against the lookups up to it, which were all read. A hello that
+  names no server is flagged on
   port 443 alone, and not one the capture has only the start of.
 - **What it speaks.** TLS, HTTP and SSH are told by how they begin.
   Port 443 that does not begin as TLS, port 80 that does not begin as
@@ -565,9 +581,11 @@ compares the two. The header says what came of it:
   written ahead of an entry makes that entry unreadable. It is shown as
   `UNREADABLE`, with `--failed` too.
 - What a session can make large is read within bounds: a transcript as
-  far as 512 MB, the rest is one `UNREADABLE` line that says so, the diff
-  of an Edit over its first 5000 lines (500 without `--verbose`), and of
-  the lines found gone 64 MB are shown, the others counted.
+  far as 512 MB, or as far as what it holds takes 2 GB once read (counted
+  by its values, a comma within a text is none), the rest is one
+  `UNREADABLE` line that says so, the diff of an Edit over its first
+  5000 lines (500 without `--verbose`), and of the lines found gone
+  64 MB are shown, the others counted.
 - Comparing the two sides of an Edit is bounded too, in the work it
   takes: sides written to be alike in very many places, which would
   take seconds, are shown as all taken out and all put in, and a line
@@ -580,6 +598,12 @@ compares the two. The header says what came of it:
   each as long as it likes, and its own is there before any of those.
   A copy that has more to take once that room is used up stops short,
   which is said as `NOT ALL COPIED` and when the session ends.
+- Nor does a launcher follow more than 2000 transcripts in one session,
+  nor look at more than 2000 of those it does not follow at a time, the
+  new ones first: a look at each takes its time, and a session that made
+  many would have the copies made as far apart as it likes. One written
+  to once there are as many as are followed is not copied, which is said
+  when the session ends, and its trace says the launcher has no copy.
 - A line too long to be read (32 MB) is compared all the same, by what
   stands for it: taken out, it is among what is shown as `REMOVED`, as a
   line that was too long to read.
@@ -674,7 +698,15 @@ session can neither stop it nor reach its record. A sidecar
 that ended or hung before its session did is said in the header, with
 when it was last heard, as `INCOMPLETE`: what ran later is missing.
 `--follow` and line mode say so too, once it has been silent for more
-than a minute.
+than a minute. One that could not write its record for a while, a full
+disk which a session can bring about, goes on, and once it can again
+notes how many lines it could not and between which times: the header
+says so (`NOT BE WRITTEN`), and what ran then is missing.
+
+Of several processes that hold a socket, the one named is the one that
+started last, by when the kernel says each did: the one that made it, as
+a rule, the others handed it down. Not the one with the highest id, ids
+start over in a long session.
 
 How long a look takes is the session's doing, by how many sockets and
 processes it has the sidecar read. The sidecar notes when its looks come
@@ -701,7 +733,8 @@ claude   bash   processes: none seen while it ran
   command it is true of.
 - Not said of a command that was not let run or has no result, of one
   issued before the sidecar was up or after its record ran out of room
-  for processes, and of one in whose time another session of the project
+  for processes, of one in whose time it could not write its record,
+  and of one in whose time another session of the project
   ran whose record cannot tell. Not while a session is followed either:
   the record stays in the sidecar until the session is over.
 - It is not among what `--failed` keeps. `--json` has it as `unseen`.
@@ -1157,7 +1190,10 @@ it, so it can be started and stopped at any time.
   not all of it, and the result of a call from before them is not shown
   when it comes.
 - A session with more than 1000 transcripts of subagents has the first
-  of them followed, and a line says so (`NOT ALL FOLLOWED`).
+  of them followed, and a line says so (`NOT ALL FOLLOWED`). So do more
+  than 100 transcripts of sessions written to while following, and more
+  than 1000 of subagents in all: a session can write any number of them,
+  and each one followed is read every second.
 - The start of a session id follows that session alone.
 - How the session is doing (`health`) shows every 30 seconds, and within
   about 10 seconds when a limit is near or a process was ended for want

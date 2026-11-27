@@ -9,7 +9,7 @@ the session's to write: nothing of them is trusted, see events.py."""
 from __future__ import annotations
 
 import difflib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 from ..events import Event, Who, Wrong, clean, flat, holds_unseen
 from ..sandbox.plugins import plugin_server, skill_plugin
@@ -25,9 +25,11 @@ from .outcomes import (
     OUTSIDE_FLAG,
     ChangedFile,
     Outcome,
+    entry_cwd,
     files_changed,
     outside,
     outside_flag,
+    working_dir,
 )
 from .shown import size
 
@@ -203,13 +205,15 @@ def _file_details(
     name: str,
     path: str,
     tool_input: dict,
+    cwd: str | None,
     project_dir: str,
     verbose: bool,
     diffed: bool = True,
 ) -> list[str]:
     """A call on a file: which one, flagged when it is written outside the
-    project, and what an Edit changes or a Write puts there. Not what an
-    Edit changes unless diffed, see call_details."""
+    project (from the directory the session was in, cwd, see outside),
+    and what an Edit changes or a Write puts there. Not what an Edit
+    changes unless diffed, see call_details."""
     about = "file: " + flat(path)
     changes: list[str] = []
     if name == "Edit" and diffed:
@@ -220,7 +224,7 @@ def _file_details(
         about += f" ({len(content)} lines)"
         changes = ["content: " + line for line in clip(content, verbose)]
     if name in FILE_TOOLS:
-        about += outside_flag(path, project_dir)
+        about += outside_flag(path, project_dir, cwd)
     return [about, *changes]
 
 
@@ -261,16 +265,21 @@ def call_details(
     verbose: bool,
     diffed: bool = True,
 ) -> list[str]:
-    """The lines that describe a tool call. Without diffed, not those of
-    what an Edit changes: comparing its sides is what takes time here,
-    and is not done for lines that no one is shown."""
+    """The lines that describe a tool call, made where the session was in
+    cwd as the entry of the call names it, none when that is not known.
+    Without diffed, not those of what an Edit changes: comparing its
+    sides is what takes time here, and is not done for lines that no one
+    is shown."""
     path = file_path(tool_input)
     if name == "Bash":
         return _bash_details(tool_input, cwd, project_dir, verbose)
     if name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
         return _todo_details(tool_input["todos"], verbose)
     if path is not None:
-        return _file_details(name, path, tool_input, project_dir, verbose, diffed)
+        within = working_dir(cwd)
+        return _file_details(
+            name, path, tool_input, within, project_dir, verbose, diffed
+        )
     if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
         return _question_details(tool_input["questions"])
     # Any other tool: its arguments as they are
@@ -298,17 +307,23 @@ def _told_keys(name: str, tool_input: dict) -> set[str] | None:
     return None
 
 
-def call_whole(name: str, tool_input: dict, project_dir: str) -> list[str]:
+def call_whole(
+    name: str, tool_input: dict, project_dir: str, apart: Collection[str] = ()
+) -> list[str]:
     """The lines of a call with all it would be made with, for what is
     asked before it is: as call_details describes it in full, then every
     argument that does not tell of, as it is. The call of a tool with a
     file among its arguments is otherwise described by the file alone,
     and what is allowed is all of it. Said too when an argument holds
     characters that are not shown, which would be written or run with
-    the rest."""
-    told = _told_keys(name, tool_input)
-    lines = call_details(name, tool_input, None, project_dir, True)
-    for key, value in tool_input.items():
+    the rest. Without the arguments shown apart, a plan as a reply, which
+    are still looked at for those characters."""
+    shown = {key: value for key, value in tool_input.items() if key not in apart}
+    told = _told_keys(name, shown)
+    # Asked before it runs, of no entry that says where the session is:
+    # a path that is not absolute is taken from the project
+    lines = call_details(name, shown, None, project_dir, True)
+    for key, value in shown.items():
         if told is not None and key not in told:
             lines += _argument_lines(flat(key), clean(value))
     unseen = [flat(key) for key, value in tool_input.items() if holds_unseen(value)]
@@ -433,7 +448,7 @@ def call_event(
     alerts: set[int] = set()
     path = file_path(tool_input)
     if name in FILE_TOOLS and path is not None:
-        fields["outside_project"] = outside(path, project_dir)
+        fields["outside_project"] = outside(path, project_dir, working_dir(cwd))
         if fields["outside_project"]:
             # The line that names the file, see _file_details
             alerts.add(0)
@@ -469,16 +484,17 @@ def call_label(event: Event) -> str:
     return f"[{event.link}] {first}" if event.link else first
 
 
-def written_paths(entries: list[dict]) -> Iterator[str]:
+def written_paths(entries: list[dict]) -> Iterator[tuple[str, str | None]]:
     """The path of each file the session wrote, once for every call that
     did: with a tool of its, or by a command that Claude Code saw change
-    the file, see files_changed."""
-    for _, block in tool_calls(entries):
+    the file, see files_changed. Each with the directory the session was
+    in then, which a path that is not absolute is from, see outside."""
+    for entry, block in tool_calls(entries):
         if block.get("name") in FILE_TOOLS:
             path = file_path(call_input(block))
             if path is not None:
-                yield path
+                yield path, entry_cwd(entry)
     for entry in entries:
         if entry.get("type") == "user":
             for file in files_changed(entry, ""):
-                yield file.path
+                yield file.path, entry_cwd(entry)

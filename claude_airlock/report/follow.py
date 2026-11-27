@@ -111,6 +111,14 @@ INTERVAL = 1.0
 LOOK_EVERY = 3
 # The events from before the start that are shown, as tail -f would
 HISTORY = 10
+# Of the transcripts that are written to, how many are followed: those of
+# sessions, and those of their subagents, all of them together. A session
+# can write any number into the directory Claude Code keeps them in, and
+# each that is followed is read at every look.
+MOST_FOLLOWED = 100
+MOST_FOLLOWED_SUBAGENTS = 1000
+# What a line starts with that says some of them are not followed
+NOT_ALL_FOLLOWED = "NOT ALL FOLLOWED"
 # Seconds a capture whose session ended is waited for to be copied out of
 # its sidecar, for a last look at what the sidecar no longer gives: its
 # tcpdump is given 10 seconds to stop, then the copy is made
@@ -164,8 +172,11 @@ class Follower:
         # and each of the subagents of one when the following began
         self._sizes: dict[Path, int] = {}
         self._subagent_sizes: dict[Path, int] = {}
-        # The sessions said to have more subagents than are followed
-        self._unfollowed: set[Path] = set()
+        # What was said not to be followed, each once: of a session that
+        # has more subagents than are followed, the path of its transcript,
+        # and that more transcripts of sessions or of subagents are written
+        # to than are followed (see MOST_FOLLOWED), by what they are of
+        self._said_unfollowed: set[Path | str] = set()
         self._captures: dict[tuple[str, float], CaptureTail] = {}
         # Those whose session ended, until when the copy of each is waited
         # for, see _last_looks
@@ -309,8 +320,22 @@ class Follower:
                 self._sizes[path] = size
                 self._note_subagents(path)
             elif size != self._sizes.get(path, 0):
+                if len(self._tails) >= MOST_FOLLOWED:
+                    said = (
+                        f"more than {MOST_FOLLOWED} were written to, what the"
+                        " sessions of the others do is not shown"
+                    )
+                    self._note_once(found, "transcripts", "transcripts", said)
+                    continue
                 # Grown, or new and so read from its start
                 self._tail(path, self._sizes.get(path, 0))
+
+    def _note_once(self, found: Round, key: Path | str, about: str, said: str) -> None:
+        """Say that some transcripts are not followed, once for what key
+        stands for: what is done in them is in no line."""
+        if key not in self._said_unfollowed:
+            self._said_unfollowed.add(key)
+            found.notes.append(labelled(about, f"{NOT_ALL_FOLLOWED}: {said}"))
 
     def _look_for_subagents(self, found: Round) -> None:
         """Start to follow what the subagents of the followed sessions
@@ -320,15 +345,24 @@ class Follower:
         when the following began, as their session is, see
         _note_subagents: what a subagent did before that is not shown as
         done now. One that is new is read from its start. A session with
-        more of them than are followed is said to have them, once."""
+        more of them than are followed is said to have them, once, and so
+        is that the sessions have more than MOST_FOLLOWED_SUBAGENTS."""
         for session in list(self._tails):
             theirs = subagent_files(session)
             # Only one that has as many as are given can have more
-            if len(theirs) >= MOST_SUBAGENTS and session not in self._unfollowed:
+            if len(theirs) >= MOST_SUBAGENTS and session not in self._said_unfollowed:
                 self._note_unfollowed(session, found)
             for path in theirs:
                 if path in self._subagents:
                     continue
+                if len(self._subagents) >= MOST_FOLLOWED_SUBAGENTS:
+                    said = (
+                        f"more than {MOST_FOLLOWED_SUBAGENTS} of the sessions"
+                        " followed, what the subagents of the others do is not"
+                        " shown"
+                    )
+                    self._note_once(found, "subagents", "subagents", said)
+                    return
                 try:
                     size = path.lstat().st_size
                 except OSError:
@@ -351,13 +385,11 @@ class Follower:
         unread = subagents_unread(session)
         if not unread:
             return
-        self._unfollowed.add(session)
         said = (
-            f"NOT ALL FOLLOWED: {unread} transcripts of {flat(session.stem)}"
-            f" past the first {MOST_SUBAGENTS}, what those subagents do is not"
-            " shown"
+            f"{unread} transcripts of {flat(session.stem)} past the first"
+            f" {MOST_SUBAGENTS}, what those subagents do is not shown"
         )
-        found.notes.append(labelled("subagents", said))
+        self._note_once(found, session, "subagents", said)
 
     def _note_subagents(self, session: Path) -> None:
         """Note how long the transcripts of the subagents of a session

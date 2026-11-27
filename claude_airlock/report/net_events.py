@@ -538,7 +538,7 @@ def listener_events(record: ProcessRecord, past: int = 0) -> list[Event]:
         if listener.open:
             detail += "  OPEN to its network"
         lineage = (
-            record.lineage(max(listener.pids), listener.when) if listener.pids else []
+            record.lineage(listener.holder, listener.when) if listener.pids else []
         )
         if lineage:
             detail += f"  by: {flat(shown_lineage(lineage))}"
@@ -598,6 +598,17 @@ def watched_summary(
         )
     if record.full:
         lines.append("  the record of them STOPPED at its size limit")
+    # What the watcher saw while it could not write, see Unwritten: in
+    # one line, a session can have that be so as often as it likes
+    if record.unwritten:
+        gaps = record.unwritten
+        first = datetime.fromtimestamp(min(gap.since for gap in gaps))
+        last = datetime.fromtimestamp(max(gap.until for gap in gaps))
+        lines.append(
+            f"  {sum(gap.lines for gap in gaps)} lines of the record could NOT"
+            f" BE WRITTEN, {len(gaps)} times from {first:%H:%M:%S} to"
+            f" {last:%H:%M:%S}: a full disk or the like"
+        )
     silent = record.silent_from(until)
     if silent is not None:
         lines.append(f"  {SILENT.format(datetime.fromtimestamp(silent))}")

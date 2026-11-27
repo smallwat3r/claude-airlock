@@ -96,7 +96,9 @@ _CLAUDE_CODE_TAGS = (
 # class for all of them: told apart, a text that takes one of each in
 # turn would have no run of any. A flag of a region takes a few tags, an
 # emoji a selector and a script a joiner here and there, a run of
-# UNSHOWN_RUN of them is something written.
+# UNSHOWN_RUN of them is something written. Blanks between them, no more
+# than UNSHOWN_BLANKS at a time, do not end a run: words written unseen
+# a space apart show as nothing but spaces, and are one text.
 TAG_BASE = 0xE0000
 TAG_SHOWN = TAG_BASE + 0x20
 TAG_LAST = TAG_BASE + 0x7E
@@ -105,12 +107,18 @@ SELECTORS = 16
 MORE_SELECTORS_BASE = 0xE0100
 MORE_SELECTORS = 240
 UNSHOWN_RUN = 8
+UNSHOWN_BLANKS = 16
 _UNSHOWN = (
     "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
     "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb"
     "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff"
 )
-_UNSHOWN_RUN = re.compile(f"[{_UNSHOWN}]{{{UNSHOWN_RUN},}}")
+_UNSHOWN_RUN = re.compile(
+    f"[{_UNSHOWN}](?:\\s{{0,{UNSHOWN_BLANKS}}}[{_UNSHOWN}]){{{UNSHOWN_RUN - 1},}}"
+)
+# The apostrophes a text can be written with but the plain one a pattern
+# looks for: a model reads a curly one as it reads that
+_APOSTROPHES = re.compile("[\u2018\u2019\u02bc\u2032]")
 # What splits a word or sets it off without a model reading it any
 # other way: the marks of emphasis, and the characters that are not shown
 _FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}]+")
@@ -135,7 +143,7 @@ class Sign:
     name: str
     find: Finder
     # Whether it is looked for in the text as it is written, not as it
-    # reads (see as_read): it is about what the reading leaves out
+    # reads (see _as_read): it is about what the reading leaves out
     as_written: bool = False
     # Whether a turn of line mode is stopped for it (see chat/guard.py):
     # markup and text that is not shown are no way to write prose, words
@@ -144,20 +152,28 @@ class Sign:
     stops: bool = False
 
 
-def as_read(text: str) -> str:
-    """A text as a model reads it, whatever was done to the way it is
-    written to pass for something else: its letters in their plain form
-    (a wide or a styled one is the letter it shows), and without what
-    splits a word (see _FILLERS). There is no end to such ways, these
-    are the cheap ones."""
-    return _FILLERS.sub("", unicodedata.normalize("NFKC", text))
+def _plain(text: str) -> str:
+    """The letters of a text in their plain form, as a model reads them:
+    a wide or a styled one is the letter it shows, a curly apostrophe
+    the straight one. A text of ASCII is in that form already."""
+    if text.isascii():
+        return text
+    return _APOSTROPHES.sub("'", unicodedata.normalize("NFKC", text))
 
 
-def _as_shown(text: str) -> str:
-    """A text as it reads (see as_read), with what a path is written
-    with left in it: what is shown of a text is to say which file it
-    names, and ~/.ssh without its ~ names another."""
-    return _SET_OFF.sub("", unicodedata.normalize("NFKC", text))
+def _as_read(plain: str) -> str:
+    """A text in its plain form (see _plain) as a model reads it,
+    whatever was done to the way it is written to pass for something
+    else: without what splits a word (see _FILLERS). There is no end to
+    such ways, these are the cheap ones."""
+    return _FILLERS.sub("", plain)
+
+
+def _as_shown(plain: str) -> str:
+    """A text in its plain form as it reads (see _as_read), with what a
+    path is written with left in it: what is shown of a text is to say
+    which file it names, and ~/.ssh without its ~ names another."""
+    return _SET_OFF.sub("", plain)
 
 
 def _line_start(text: str, at: int) -> int:
@@ -238,12 +254,14 @@ def _written(*patterns: str) -> Finder:
 def _spelled(unshown: str) -> str:
     """What characters that are not shown spell, empty when nothing that
     reads: each tag the ASCII character of its place, each selector of a
-    variation the byte of its place, the bytes read as UTF-8. No more of
-    it than an excerpt."""
+    variation the byte of its place, the bytes read as UTF-8, and a blank
+    between them as a space. No more of it than an excerpt."""
     spelled = bytearray()
     for character in unshown[: 4 * EXCERPT_WIDTH]:
         place = ord(character)
-        if TAG_SHOWN <= place <= TAG_LAST:
+        if character.isspace():
+            spelled.append(ord(" "))
+        elif TAG_SHOWN <= place <= TAG_LAST:
             spelled.append(place - TAG_BASE)
         elif 0 <= place - SELECTOR_BASE < SELECTORS:
             spelled.append(place - SELECTOR_BASE)
@@ -255,12 +273,16 @@ def _spelled(unshown: str) -> str:
 
 def _hidden(text: str) -> str | None:
     """What a text holds that is not shown, none when it holds none: the
-    first run of such characters, of whatever kinds they are, and what
-    they spell when they spell something."""
+    first run of such characters, of whatever kinds they are and with
+    the blanks between them, and what they spell when they spell
+    something."""
     run = _UNSHOWN_RUN.search(text)
     if not run:
         return None
-    said = f"{len(run.group())} characters that are not shown in a row"
+    blanks = sum(map(str.isspace, run.group()))
+    said = f"{len(run.group()) - blanks} characters that are not shown in a row"
+    if blanks:
+        said += ", blanks between them"
     spelled = _spelled(run.group())
     return f'{said}, which spell "{spelled}"' if spelled else said
 
@@ -367,13 +389,14 @@ class Planted:
 def planted(text: object, source: str = "") -> tuple[Planted, ...]:
     """The signs a text shows of being written to instruct who reads it,
     each once, with the first place it is found: in the text as it reads
-    (see as_read), which is how what was found is shown too, but for the
+    (see _as_read), which is how what was found is shown too, but for the
     paths it names (see _as_shown). Each with the file or the page the
     text was read in, when it is known. None for what is no text."""
     if not isinstance(text, str) or not text:
         return ()
     text = text[:MOST_SCANNED]
-    read = as_read(text)
+    plain = _plain(text)
+    read = _as_read(plain)
     # Made when the first sign is found: most texts show none
     shown: str | None = None
     signs = []
@@ -384,7 +407,7 @@ def planted(text: object, source: str = "") -> tuple[Planted, ...]:
         if isinstance(found, str):
             excerpt = found
         else:
-            shown = _as_shown(text) if shown is None else shown
+            shown = _as_shown(plain) if shown is None else shown
             excerpt = _excerpt(read, found, shown)
         if excerpt:
             signs.append(Planted(sign.name, excerpt, sign.stops, source))
