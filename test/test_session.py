@@ -161,6 +161,29 @@ class DefaultSessionTest(LauncherTest):
         assert "own.gitconfig, which" not in said
         assert launched.status == 0
 
+    def test_what_a_config_a_session_can_write_includes_is_not_mounted(self):
+        # A session was given the config kept in a repository: it can name
+        # any file of the home, which reads as a valid git config
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        credentials = self.home / ".aws" / "credentials"
+        credentials.parent.mkdir()
+        credentials.write_text("[default]\n\taws_secret_access_key = k\n")
+        (dotfiles / "gitconfig").write_text(f"[include]\n\tpath = {credentials}\n")
+        os.symlink(dotfiles / "gitconfig", self.home / ".gitconfig")
+        mounted = f"--volume={credentials}:{credentials}:ro,z"
+        launched = self.launch("--add-dir", str(dotfiles))
+        assert launched.status == 0, launched.stderr
+        assert mounted not in [c for c in launched.calls if c[0] == "run"][-1]
+        assert (
+            f"{credentials}, which the git config includes, is not mounted:"
+            f" {self.home / '.gitconfig'}, which includes it, is a session's to"
+            f" write (it leads to {dotfiles / 'gitconfig'})"
+        ) in launched.stderr
+        # Nor once it is no longer given: a session could have written it
+        launched = self.launch()
+        assert mounted not in [c for c in launched.calls if c[0] == "run"][-1]
+
     def test_a_docker_that_does_not_answer_holds_the_launcher_no_longer(self, capsys):
         hung = self.work / "bin" / "docker"
         hung.write_text("#!/bin/sh\nexec sleep 30\n")

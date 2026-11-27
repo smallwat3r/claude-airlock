@@ -94,6 +94,18 @@ class FilesTest(LauncherTest):
         assert list(record.parent.iterdir()) == [record]
         assert record.stat().st_mode & 511 == 384
 
+    def test_a_link_into_a_directory_is_in_it(self):
+        inner = self.project / "inner"
+        inner.mkdir()
+        link = self.home / "link"
+        link.symlink_to(inner)
+        assert files.leads_under(str(inner / "x"), str(self.project))
+        assert files.leads_under(str(link / "x"), str(self.project))
+        # A directory reached through a link the same
+        assert files.leads_under(str(inner / "x"), str(link))
+        assert not files.leads_under(str(self.project), str(self.project))
+        assert not files.leads_under(str(self.home / "other"), str(self.project))
+
     def test_the_end_of_a_file_is_read_in_whole_lines(self):
         file = self.work / "lines"
         file.write_bytes(b"first\nsecond\nthird\n")

@@ -402,6 +402,14 @@ def is_under(path: str, directory: str) -> bool:
     return path.startswith(directory.rstrip(os.sep) + os.sep)
 
 
+def leads_under(path: str, directory: str) -> bool:
+    """Whether a path is under a directory as both are written, or by
+    where they lead: a link into it is in it."""
+    if is_under(path, directory):
+        return True
+    return is_under(os.path.realpath(path), os.path.realpath(directory))
+
+
 def is_within(path: str, directory: str) -> bool:
     """Whether a path is a directory or under it, see is_under."""
     return path == directory or is_under(path, directory)

@@ -1055,8 +1055,10 @@ log:
 
 The directory also holds what is not a record: the launcher's locks, the
 lines typed in line mode, `api-drop`, where a running session leaves its
-requests to the model until the launcher takes them, and `history`, what
-the sessions of each project remember (see
+requests to the model until the launcher takes them, `history`, what
+the sessions of each project remember, and `remembered.json`, the files
+hidden through a link and the directories a session could write, which
+later launches go by (see
 [What is read-only or hidden](sandbox.md#what-is-read-only-or-hidden)).
 
 ## Following a session

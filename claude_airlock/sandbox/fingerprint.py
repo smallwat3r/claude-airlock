@@ -338,12 +338,15 @@ def _included_configs(listing: bytes, config: str, home: str = "") -> list[str]:
 
 
 def included_configs(
-    configs: Sequence[str], home: str, taken: Callable[[str], bool] = lambda _: True
+    configs: Sequence[str],
+    home: str,
+    taken: Callable[[str, str], bool] = lambda _path, _by: True,
 ) -> list[str]:
     """The files that some git configs have git read with them, and
     those that these do, each once and as git takes it (see
     _included_configs): those that are there, no more than MOST_INCLUDED.
-    Not one that taken says no to, nor what that one includes."""
+    Not one that taken says no to, asked with the config that names it,
+    nor what that one includes."""
     seen = set(configs)
     pending = list(reversed(configs))
     found: list[str] = []
@@ -356,7 +359,7 @@ def included_configs(
             if path in seen or not os.path.isfile(path):
                 continue
             seen.add(path)
-            if taken(path):
+            if taken(path, config):
                 found.append(path)
                 pending.append(path)
     return found[:MOST_INCLUDED]

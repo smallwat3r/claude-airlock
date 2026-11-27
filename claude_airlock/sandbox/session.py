@@ -10,6 +10,7 @@ import shlex
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..action import Action
@@ -27,6 +28,7 @@ from ..docker import (
 from ..files import (
     expand_home,
     is_under,
+    leads_under,
     private_dir,
     settings_object,
     try_lock_file,
@@ -422,38 +424,57 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
 XDG_GIT_FORWARDED = ("config", "ignore", "attributes", "templates")
 
 
-def _include_withheld(
-    path: str, settings: Settings, host: Host, mounted: Sequence[str]
-) -> str | None:
-    """Why a file the git config includes is not mounted, none when it
-    is. A config can be a link into a directory a session was given
-    (dotfiles kept in a repository), and what it includes is then the
-    session's to name, for the next launch of any project to mount: as
-    for the statusline (see own_statusline_args), not what is in a
-    directory that is never a session's to have, the user's keys and the
-    launcher's settings and records, nor a file whose name says it holds
-    secrets, nor one docker cannot take. Empty, for nothing to say, for
-    what is in the project or a directory mounted next to it, which is
-    there already."""
-    if any(is_under(path, root) for root in mounted):
-        return ""
-    if ":" in path:
-        return "docker takes no path with a colon"
-    patterns = SHADOWED_NAMES + settings.shadow
-    names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
-    if any(names_secrets(name, patterns) for name in names):
-        return "its name is one of secrets"
-    kept = kept_out(path, host)
-    if kept:
-        return f"{kept} is not a session's to have"
-    return None
+@dataclass(frozen=True)
+class _Includes:
+    """What decides whether a file the git config includes is mounted:
+    the settings, the directories a session is given, and those it can
+    write or could at an earlier launch (written, see remembered.py)."""
+
+    settings: Settings
+    host: Host
+    mounted: Sequence[str]
+    written: Sequence[str]
+
+    def withheld(self, path: str, by: str) -> str | None:
+        """Why a file the git config includes is not mounted, none when
+        it is. Not when the config that names it (by) is, or leads into, a
+        directory a session can write or could: dotfiles kept in a
+        repository, for one. What it includes is then the session's to
+        name, for the next launch of any project to mount,
+        ~/.aws/credentials as well as a config. Nor, as for the statusline
+        (see own_statusline_args), what is in a directory that is never a
+        session's to have, the user's keys and the launcher's settings and
+        records, nor a file whose name says it holds secrets, nor one
+        docker cannot take. Empty, for nothing to say, for what is in the
+        project or a directory mounted next to it, which is there
+        already."""
+        if any(is_under(path, root) for root in self.mounted):
+            return ""
+        if any(leads_under(by, root) for root in self.written):
+            real = os.path.realpath(by)
+            leads = f" (it leads to {real})" if real != by else ""
+            return f"{by}, which includes it, is a session's to write{leads}"
+        if ":" in path:
+            return "docker takes no path with a colon"
+        patterns = SHADOWED_NAMES + self.settings.shadow
+        names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
+        if any(names_secrets(name, patterns) for name in names):
+            return "its name is one of secrets"
+        kept = kept_out(path, self.host)
+        if kept:
+            return f"{kept} is not a session's to have"
+        return None
 
 
 def git_config_args(
-    settings: Settings, host: Host, mounted: Sequence[str]
+    settings: Settings,
+    host: Host,
+    mounted: Sequence[str],
+    written: Sequence[str] = (),
 ) -> list[str]:
     """Forward the git config, read-only, and no credentials with it (see
-    XDG_GIT_FORWARDED)."""
+    XDG_GIT_FORWARDED). Of what it includes, not what a config a session
+    can write, or could (written), names, see _Includes."""
     args = []
     gitconfig = os.path.join(host.home, ".gitconfig")
     if os.path.isfile(gitconfig):
@@ -472,10 +493,12 @@ def git_config_args(
     # silently never apply. Mounted at their host path, the one the config
     # refers to, and those they pull in too. A relative path is taken
     # from the config that names it, as git takes it. Not what
-    # _include_withheld keeps back, nor what that includes, which git in
-    # the session cannot read then.
-    def taken(path: str) -> bool:
-        withheld = _include_withheld(path, settings, host, mounted)
+    # _Includes keeps back, nor what that includes, which git in the
+    # session cannot read then.
+    includes = _Includes(settings, host, mounted, written)
+
+    def taken(path: str, by: str) -> bool:
+        withheld = includes.withheld(path, by)
         if withheld:
             warn(f"{path}, which the git config includes, is not mounted: {withheld}")
         return withheld is None

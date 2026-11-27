@@ -45,19 +45,23 @@ from .sandbox.limits import limits_watched
 from .sandbox.login import login_shared
 from .sandbox.mounts import (
     ExtraDir,
+    Hidden,
     add_extra_dir,
     configured_extra_dirs,
     extra_dir_args,
     hidden_files,
+    mounted_dirs,
     protect_args,
     protect_env_args,
     protected_dirs,
     refuse_links_out,
     refuse_unsafe_dir,
+    writable_dirs,
 )
 from .sandbox.network import network_args, session_network
 from .sandbox.plugins import enabled_plugins
 from .sandbox.proxy_use import sidecars_locked
+from .sandbox.remembered import Remembered, remember
 from .sandbox.runtime import Runtime, say_runtime_notes, session_runtime
 from .sandbox.session import (
     base_args,
@@ -170,8 +174,10 @@ def _main(argv: list[str], usage: str = "") -> int:
     dirs = configured_extra_dirs(settings, host)
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
-    refuse_links_out(dirs, host)
+    refuse_links_out(dirs, host, Remembered.load(host).written)
     dirs, protected = protected_dirs(dirs, settings, host)
+    # A link this session leaves in them is its doing at later launches
+    remember(host, written=writable_dirs(dirs, host))
     plan = Plan(settings, host, image, action, dirs, protected, claude_args)
     return _chats(plan) if plan.is_chat else session(plan)
 
@@ -255,6 +261,16 @@ def _session_watched(
     return processes_recorded(settings, host, name, owner, plan.image.tag)
 
 
+def _hidden(plan: Plan, remembered: Remembered) -> Hidden:
+    """What is hidden from the session of a plan, see hidden_files, with
+    the files hidden through a link remembered: hidden again at later
+    launches, whatever becomes of the links."""
+    linked_before = remembered.hidden_through_links
+    hidden = hidden_files(plan.settings, plan.host, plan.dirs, linked_before)
+    remember(plan.host, hidden_through_links=hidden.linked)
+    return hidden
+
+
 def session_run_args(
     plan: Plan, name: str, runtime: Runtime, capture: str
 ) -> list[str]:
@@ -267,19 +283,20 @@ def session_run_args(
         plan.dirs,
         plan.protected,
     )
-    hidden = hidden_files(settings, host, dirs)
-    mounted = [host.project_dir, *(extra.path for extra in dirs)]
+    remembered = Remembered.load(host)
+    hidden = _hidden(plan, remembered)
+    mounted = mounted_dirs(dirs, host)
     return [
         *base_args(settings, host, name, runtime),
         *session_args(plan.action, os.environ),
         *protect_config_args(settings, host),
         *history_args(settings, host),
         *extra_dir_args(dirs),
-        *protect_args(protected, host, dirs, hidden.files),
+        *protect_args(protected, host, dirs, hidden),
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
-        *git_config_args(settings, host, mounted),
+        *git_config_args(settings, host, mounted, remembered.written),
         *own_statusline_args(settings, host, mounted),
         *hidden.args(host),
     ]
@@ -411,8 +428,8 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
     run_args = session_run_args(plan, name, runtime, capture)
-    watched = [host.project_dir] + [extra.path for extra in plan.dirs]
-    written = [host.project_dir] + [d.path for d in plan.dirs if not d.read_only]
+    watched = mounted_dirs(plan.dirs, host)
+    written = writable_dirs(plan.dirs, host)
     if reaches_launcher(written):
         warn(
             f"this session can write {NAME} itself ({CHECKOUT_DIR}): what"

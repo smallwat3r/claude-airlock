@@ -14,14 +14,16 @@ What a session is given and what it is kept from.
 - An extra directory is named by where it is. A path inside the project,
   or inside another directory a session can write, that leads out of it
   through a link is refused: a session could have left the link there, to
-  be given what it points to the next time.
+  be given what it points to the next time. The same in a directory a
+  session could write at an earlier launch, and cannot now: the launcher
+  keeps the latest 1000 such directories, of every project.
 - Read-only wins. A directory asked for both ways, by `--add-dir` and
   `--add-dir-ro` or their settings, the shared directory too, is mounted
   read-only, whichever was said first. The project itself is always
   writable: asked for read-only, it is refused.
-- A directory mounted inside another stays where it is: the directories
-  between the two cannot be renamed or removed in a session, as with a
-  protected path below.
+- A directory mounted inside another stays where it is, the project
+  too: the directories between the two cannot be renamed or removed in a
+  session, as with a protected path below.
 - As `~/.claude`, a directory of the launcher's that the sandboxed sessions
   share, not yours. Of your own `~/.claude` only the configuration listed
   below, `plugins` and `projects` (the transcripts) are mounted into it.
@@ -50,9 +52,11 @@ What a session is given and what it is kept from.
   there. There is no gpg in the image, so sign the commits on the host
   before pushing.
 - Not an included file that is kept out of every session, or named as a
-  file of secrets is, nor what that one includes: a config kept in a
-  repository a session was given can name any file, for the next launch
-  to mount. The launcher says which it left out.
+  file of secrets is, nor what that one includes. Nor any file a config
+  names that is, or leads into, a directory a session can write, or
+  could at an earlier launch: a config kept in a repository a session was
+  given can name any file, `~/.aws/credentials` as well, for the next
+  launch to mount. The launcher says which it left out.
 - The file `~/.claude/settings.json` runs as its statusline, read-only,
   when it is a file of your home directory, see
   [Statusline](#statusline).
@@ -68,14 +72,19 @@ What a session is given and what it is kept from.
   or removed in a session, their content can: a path that was moved
   aside could be made again with other content, for the host to read. A
   directory mounted from inside a protected path is read-only too,
-  however it was asked for, and the launch says so.
+  however it was asked for, and the launch says so. A path that is, or
+  goes through, a link in a directory a session can write is refused: no
+  mount holds a link, a session could put another in its place. Name
+  the path it leads to. A protected path that is also hidden is hidden.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files read
   as empty. Templates such as `.env.example` stay readable,
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
   Not hidden: one under `node_modules` or `.git`, which are not looked
   into for them, and one made after the session started. Of a link
   under such a name, the file it leads to is hidden, where it is in a
-  mounted directory.
+  mounted directory. It stays hidden at later launches while it is there,
+  the link gone or not: a session can remove the link. The launcher keeps
+  the latest 1000 such files, of every project.
   - The directories above a hidden file cannot be renamed or removed in a
     session (`Device or resource busy`). A session cannot read the file,
     but it could otherwise move it under `node_modules`, where the next

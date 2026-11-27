@@ -181,6 +181,12 @@ class Host:
         return os.path.join(self.state_dir, "door-use.jsonl")
 
     @property
+    def remembered_file(self) -> str:
+        # What earlier launches left that a session could have turned to
+        # its use since, see remembered.py
+        return os.path.join(self.state_dir, "remembered.json")
+
+    @property
     def changes_file(self) -> str:
         # What chats found changed in what Claude Code says, see changes.py
         return os.path.join(self.state_dir, "claude-code-changes.jsonl")

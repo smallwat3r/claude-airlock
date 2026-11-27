@@ -8,11 +8,18 @@ import fnmatch
 import os
 import stat
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..docker import covered_arg, env_arg, held_arg, hidden_arg, mount_arg
 from ..errors import Fatal
-from ..files import expand_home, is_under, is_within, overlap, private_dir
+from ..files import (
+    expand_home,
+    is_under,
+    is_within,
+    leads_under,
+    overlap,
+    private_dir,
+)
 from ..notice import warn
 from ..settings import SESSION_DIRS, Host, Settings, variable
 
@@ -46,6 +53,44 @@ class ExtraDir:
     read_only: bool = False
 
 
+@dataclass(frozen=True)
+class Hidden:
+    """What a session is kept from of what it has mounted: the files of
+    secrets, which read as empty, and the directories that could not be
+    looked into for any, which hold nothing for it. With the files of
+    secrets found through a link that leads to them, see _led_to, which a
+    session can remove: hidden_files is told them again at the next
+    launch, see remembered.py. Those in a directory that is covered too,
+    which is no longer once it is opened again."""
+
+    files: list[str] = field(default_factory=list)
+    covered: list[str] = field(default_factory=list)
+    linked: list[str] = field(default_factory=list)
+
+    def hides(self, path: str) -> bool:
+        """Whether a path is hidden, or in a directory that is covered:
+        nothing else can be mounted there, docker takes one mount at a
+        place, and none in what is covered, which is read-only."""
+        return path in self.files or _in_covered(path, self.covered)
+
+    def args(self, host: Host) -> list[str]:
+        """The mounts that hide them."""
+        hidden = [hidden_arg(path) for path in self.files]
+        if not self.covered:
+            return hidden
+        empty = empty_dir(host)
+        return hidden + [covered_arg(empty, path) for path in self.covered]
+
+
+# What hides nothing, for what is asked with nothing hidden
+NO_SECRETS = Hidden()
+
+
+def _in_covered(path: str, covered: Sequence[str]) -> bool:
+    """Whether a path is one of the directories covered, or in one."""
+    return any(is_within(path, directory) for directory in covered)
+
+
 def _kept_out(host: Host) -> list[str]:
     """The directories of the home that are never a session's to have,
     nor anything in them or around them: the user's keys, and what
@@ -66,13 +111,9 @@ def kept_out(path: str, host: Host, but: Sequence[str] = ()) -> str:
     in, see _kept_out, empty when it is in none. By the path as it is
     written and by where it leads: a link to a key is the key. But for
     the directories given, which whoever asks handles itself."""
-    real = os.path.realpath(path)
     for kept in _kept_out(host):
-        if kept in but:
-            continue
-        for file, directory in ((path, kept), (real, os.path.realpath(kept))):
-            if is_under(file, directory):
-                return kept
+        if kept not in but and leads_under(path, kept):
+            return kept
     return ""
 
 
@@ -95,13 +136,28 @@ def refuse_unsafe_dir(path: str, host: Host) -> None:
             )
 
 
-def refuse_links_out(dirs: list[ExtraDir], host: Host) -> None:
+def mounted_dirs(dirs: list[ExtraDir], host: Host) -> list[str]:
+    """The directories a session is given: the project, and those mounted
+    next to it."""
+    return [host.project_dir, *(each.path for each in dirs)]
+
+
+def writable_dirs(dirs: list[ExtraDir], host: Host) -> list[str]:
+    """The directories a session is given to write: the project, and those
+    mounted next to it that are not read-only."""
+    return [host.project_dir, *(each.path for each in dirs if not each.read_only)]
+
+
+def refuse_links_out(
+    dirs: list[ExtraDir], host: Host, written_before: Sequence[str] = ()
+) -> None:
     """Refuse a directory to mount that is named by a path in the project,
-    or in another directory a session can write, and is not in there: it
-    is reached through a link, which a session could have left for this,
-    to be given the next time what it points to. One the user keeps such
-    a link to is named by where it is."""
-    writable = [host.project_dir, *(each.path for each in dirs if not each.read_only)]
+    or in another directory a session can write, or could at an earlier
+    launch (written_before), and is not in there: it is reached through a
+    link, which a session could have left for this, to be given the next
+    time what it points to. One the user keeps such a link to is named by
+    where it is."""
+    writable = [*writable_dirs(dirs, host), *written_before]
     for extra in dirs:
         for root in writable:
             inside = is_under(extra.path, root)
@@ -185,6 +241,26 @@ def _within(path: str, root: str) -> str | None:
     return os.path.normpath(os.path.join(root, os.path.relpath(real_path, real_root)))
 
 
+def _refuse_protected_link(
+    raw: str, path: str, dirs: list[ExtraDir], host: Host
+) -> None:
+    """Refuse a path to protect that is, or goes through, a link in what
+    a session can write: the read-only mount is where the link leads, and
+    nothing holds the link, which no mount can. A session would replace
+    it with what it likes, which the host reads at the path protected.
+    By the mounted directory the path is in as it is written, the one
+    nearest to it."""
+    roots = mounted_dirs(dirs, host)
+    root = max((r for r in roots if is_under(path, r)), key=len, default=None)
+    if root is None or root not in writable_dirs(dirs, host):
+        return
+    if _within(path, root) != path:
+        raise Fatal(
+            f"cannot protect {raw}: it is, or goes through, a link in {root},"
+            " which a session could replace. Name the path it leads to"
+        )
+
+
 def protected_dirs(
     dirs: list[ExtraDir], settings: Settings, host: Host
 ) -> tuple[list[ExtraDir], list[str]]:
@@ -215,7 +291,8 @@ def protected_dirs(
                     f"{extra.path} is mounted read-only: it is in {raw},"
                     " which CLAUDE_AIRLOCK_PROTECT protects"
                 )
-        roots = [host.project_dir, *(extra.path for extra in dirs)]
+        _refuse_protected_link(raw, path, dirs, host)
+        roots = mounted_dirs(dirs, host)
         found = [mounted for mounted in (_within(path, r) for r in roots) if mounted]
         if not found:
             continue
@@ -235,7 +312,7 @@ def protected_dirs(
 
 
 def _held_in_place(
-    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Sequence[str] = ()
+    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Hidden = NO_SECRETS
 ) -> list[str]:
     """The directories between each protected path and what it is mounted
     in, when that is writable. A session cannot write to a read-only
@@ -248,14 +325,16 @@ def _held_in_place(
     open it.
 
     The same for a directory mounted inside another, read-only or not,
-    which is no more held by being a mount than what is above it. And
-    for each hidden file: a session cannot read it, but it could move a
-    directory above it to where the next launch does not look for files
-    to hide (see SHADOW_PRUNED_DIRS), and read it then."""
-    writable = [host.project_dir, *(d.path for d in dirs if not d.read_only)]
+    the project too, which is no more held by being a mount than what is
+    above it. And for each hidden file and covered directory: a session
+    cannot read it, but it could move a directory above it to where the
+    next launch does not look for files to hide (see SHADOW_PRUNED_DIRS),
+    and read it then. Not what is covered, or in it: one mount at a
+    place, see Hidden.hides."""
+    writable = writable_dirs(dirs, host)
     read_only = [*(d.path for d in dirs if d.read_only), *inside]
     held: dict[str, None] = {}
-    for path in (*inside, *hidden, *(d.path for d in dirs)):
+    for path in (*inside, *hidden.files, *hidden.covered, *mounted_dirs(dirs, host)):
         above = [root for root in (*writable, *read_only) if is_under(path, root)]
         root = max(above, key=len, default=None)
         if root is None or root in read_only:
@@ -270,15 +349,18 @@ def _held_in_place(
             "directories to hold in place above the files hidden and the paths"
             f" protected, {path} among them",
         )
-    return sorted(held)
+    return sorted(path for path in held if not hidden.hides(path))
 
 
 def protect_args(
-    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Sequence[str] = ()
+    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Hidden = NO_SECRETS
 ) -> list[str]:
     """The read-only mounts of protected_dirs, on top of what they are
     in, and the mounts that keep them, the directories mounted inside
-    another and the hidden files where they are, see _held_in_place."""
+    another and the hidden files where they are, see _held_in_place. Not
+    of a protected path that is hidden, or covered: it is read-only
+    there already, and one mount at a place, see Hidden.hides."""
+    inside = [path for path in inside if not hidden.hides(path)]
     held = [held_arg(path) for path in _held_in_place(inside, host, dirs, hidden)]
     return held + [mount_arg(path, path, "ro,z") for path in inside]
 
@@ -299,24 +381,6 @@ def protect_env_args(inside: list[str]) -> list[str]:
     """The session is told what it cannot change of what it has mounted,
     see docker/CLAUDE-airlock.md."""
     return [env_arg(variable("protect"), ":".join(inside))] if inside else []
-
-
-@dataclass(frozen=True)
-class Hidden:
-    """What a session is kept from of what it has mounted: the files of
-    secrets, which read as empty, and the directories that could not be
-    looked into for any, which hold nothing for it."""
-
-    files: list[str]
-    covered: list[str]
-
-    def args(self, host: Host) -> list[str]:
-        """The mounts that hide them."""
-        hidden = [hidden_arg(path) for path in self.files]
-        if not self.covered:
-            return hidden
-        empty = empty_dir(host)
-        return hidden + [covered_arg(empty, path) for path in self.covered]
 
 
 def empty_dir(host: Host) -> str:
@@ -363,10 +427,11 @@ def _led_to(link: str, roots: Sequence[str]) -> list[str]:
 
 def _secrets_in(
     root: str, roots: Sequence[str], patterns: Sequence[str], closed: dict[str, None]
-) -> Iterator[str]:
+) -> Iterator[tuple[str, bool]]:
     """The files of secrets in a mounted directory, as hidden_files has
     them, one at a time, and those links named as one lead to in any of
-    the roots. What cannot be looked into is added to closed."""
+    the roots, each with whether it was found through a link. What
+    cannot be looked into is added to closed."""
 
     def not_listed(problem: OSError) -> None:
         if isinstance(problem.filename, str):
@@ -384,15 +449,34 @@ def _secrets_in(
             if not names_secrets(name, patterns):
                 continue
             path = os.path.join(directory, name)
-            try:
-                mode = os.lstat(path).st_mode
-            except OSError:
-                # Gone since it was listed, a build or another session
-                continue
-            if stat.S_ISREG(mode):
-                yield path
-            elif stat.S_ISLNK(mode):
-                yield from _led_to(path, roots)
+            found, through_a_link = _to_hide(path, roots)
+            yield from ((each, through_a_link) for each in found)
+
+
+def _to_hide(path: str, roots: Sequence[str]) -> tuple[list[str], bool]:
+    """What hiding the secrets at a path takes, and whether they are
+    reached through a link: the file itself, or what a link there leads
+    to, see _led_to. Nothing for what is neither, or gone since it was
+    listed, by a build or another session."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return [], False
+    if stat.S_ISREG(mode):
+        return [path], False
+    if stat.S_ISLNK(mode):
+        return _led_to(path, roots), True
+    return [], False
+
+
+def _hidden_again(path: str, roots: Sequence[str]) -> list[str]:
+    """Where a file that was hidden through a link at an earlier launch
+    is in the roots, as long as it is there, see _to_hide: it can be in
+    none of them at this launch."""
+    found, _ = _to_hide(path, roots)
+    return [
+        inside for each in found for root in roots if (inside := _within(each, root))
+    ]
 
 
 def _refuse_past_most_hidden(
@@ -411,14 +495,22 @@ def _refuse_past_most_hidden(
     )
 
 
-def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden:
+def hidden_files(
+    settings: Settings,
+    host: Host,
+    dirs: list[ExtraDir],
+    linked_before: Sequence[str] = (),
+) -> Hidden:
     """What to shadow: .env files (and direnv's .envrc, which commonly
     exports secrets, plus .netrc and .pypirc, which hold nothing but
     credentials), so they are never visible inside the container. Template
     files (.env.example and friends) stay readable, they exist to be read
     and hold no secrets. Regular files only: a .env directory (some
     virtualenvs) cannot take a /dev/null bind mount and would abort the
-    run. Of a link under such a name, the file it leads to, see _led_to.
+    run. Of a link under such a name, the file it leads to, see _led_to,
+    and of those hidden through a link at an earlier launch (linked_before)
+    those that are still there: a session can remove the link, the file
+    is no less one of secrets for it.
     CLAUDE_AIRLOCK_SHADOW adds name globs, e.g. "*.pem:.npmrc". The
     whole tree is walked on purpose, pruning more directories would be
     faster but could leave a real secret visible.
@@ -435,13 +527,21 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
     # By path, in the order found: a directory mounted next to the project
     # can be inside it, and docker refuses to mount twice at one place
     hidden: dict[str, None] = {}
+    linked: dict[str, None] = {}
     closed: dict[str, None] = {}
-    roots = [host.project_dir] + [extra.path for extra in dirs]
+    roots = mounted_dirs(dirs, host)
     for root in roots:
-        for path in _secrets_in(root, roots, patterns, closed):
+        for path, through_a_link in _secrets_in(root, roots, patterns, closed):
             hidden[path] = None
+            if through_a_link:
+                linked[path] = None
             _refuse_past_most_hidden(root, hidden, closed)
         _refuse_past_most_hidden(root, hidden, closed)
+    for before in linked_before:
+        again = dict.fromkeys(_hidden_again(before, roots))
+        hidden.update(again)
+        linked.update(again)
+    refuse_past_most(len(hidden), MOST_HIDDEN, "files of secrets to hide")
     covered = [directory for directory in closed if openable(directory)]
     if covered:
         warn(
@@ -452,4 +552,6 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
             "Make them yours to read again (chmod u+rx) for a session to see"
             " into them.",
         )
-    return Hidden(list(hidden), covered)
+    # Nothing is mounted in what is covered, see Hidden.hides
+    files = [path for path in hidden if not _in_covered(path, covered)]
+    return Hidden(files, covered, list(linked))

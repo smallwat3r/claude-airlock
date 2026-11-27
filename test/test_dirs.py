@@ -7,9 +7,10 @@ import os
 import tempfile
 import unittest.mock
 from pathlib import Path
+from typing import Any
 
 import pytest
-from harness import LauncherTest
+from harness import LauncherTest, Result
 
 from claude_airlock import settings
 from claude_airlock.docker import covered_arg, mount_arg
@@ -431,14 +432,131 @@ class TooManyMountsTest(LauncherTest):
         deep.mkdir(parents=True)
         (deep / ".env").touch()
         hidden = [str(deep / ".env")]
-        assert len(mounts._held_in_place([], self.host, [], hidden)) == 3
+        assert len(mounts._held_in_place([], self.host, [], mounts.Hidden(hidden))) == 3
         with (
             unittest.mock.patch.object(mounts, "MOST_HELD", 2),
             pytest.raises(
                 Fatal, match=f"more than 2 directories to hold .* {deep}/.env among"
             ),
         ):
-            mounts._held_in_place([], self.host, [], hidden)
+            mounts._held_in_place([], self.host, [], mounts.Hidden(hidden))
 
     def launch_settings(self) -> settings.Settings:
         return settings.load_settings({}, os.devnull)
+
+
+def targets(flags: list[str]) -> list[str]:
+    """Where each mount of a docker run goes, the short way and the long."""
+    found = []
+    for flag in flags:
+        if flag.startswith("--volume="):
+            found.append(flag.split(":")[1])
+        elif flag.startswith("--mount="):
+            found += [
+                p[len("target=") :] for p in flag.split(",") if p.startswith("target=")
+            ]
+    return found
+
+
+class AcrossLaunchesTest(LauncherTest):
+    """What a session can undo of what keeps it in, for the next launch."""
+
+    @pytest.fixture(autouse=True)
+    def outside_made(self, sandbox: None) -> None:
+        self.ref = self.home / "ref"
+        self.outside = self.home / "documents"
+        self.outside.mkdir()
+
+    def launch(self, *args: str, **options: Any) -> Result:
+        """Launch with nothing noted of the launches before it: these
+        look at the session of more than one."""
+        (self.work / "log").unlink(missing_ok=True)
+        return super().launch(*args, **options)
+
+    def test_a_file_hidden_through_a_link_stays_hidden_once_the_link_is_gone(self):
+        secrets = self.project / "config" / "dev.secrets"
+        secrets.parent.mkdir()
+        secrets.write_text("KEY=1\n")
+        (self.project / ".env").unlink()
+        (self.project / ".env").symlink_to("config/dev.secrets")
+        hidden = f"--volume=/dev/null:{secrets}:ro"
+        assert hidden in self.launch().flags
+        # What a session can do: nothing named it a secret then
+        (self.project / ".env").unlink()
+        assert hidden in self.launch().flags
+        # Held where it is, as a file hidden by its own name
+        held = f"--volume={secrets.parent}:{secrets.parent}:z"
+        assert held in self.launch().flags
+        # Gone, and made again by its name: it is no longer remembered
+        secrets.unlink()
+        assert hidden not in self.launch().flags
+        secrets.write_text("KEY=1\n")
+        assert hidden not in self.launch().flags
+
+    def test_a_protected_path_through_a_link_a_session_can_replace_is_refused(self):
+        vendor = self.project / "vendor" / "docs"
+        vendor.mkdir(parents=True)
+        (self.project / "docs").symlink_to("vendor/docs")
+        (self.project / "v").symlink_to("vendor")
+        for raw in ("docs", "v/docs"):
+            result = self.launch(CLAUDE_AIRLOCK_PROTECT=raw)
+            self.assert_refused(result, f"cannot protect {raw}: it is, or goes through")
+        # Out of every mount, as well
+        (self.project / "out").symlink_to(self.outside)
+        result = self.launch(CLAUDE_AIRLOCK_PROTECT="out")
+        self.assert_refused(result, "cannot protect out: it is, or goes through")
+        # Named by where it leads, and a link in what is read-only
+        assert self.launch(CLAUDE_AIRLOCK_PROTECT="vendor/docs").status == 0
+        (self.ref / "docs").mkdir()
+        (self.ref / "linked").symlink_to("docs")
+        result = self.launch(
+            "--add-dir-ro", "~/ref", CLAUDE_AIRLOCK_PROTECT="~/ref/linked"
+        )
+        assert result.status == 0, result.stderr
+
+    def test_a_project_deep_in_a_directory_mounted_with_it_is_held_in_place(self):
+        # Moved under node_modules, the next launch would not look in it
+        mono = self.home / "mono"
+        web = mono / "apps" / "web"
+        web.mkdir(parents=True)
+        (web / ".env").touch()
+        flags = self.launch("--add-dir", str(mono), cwd=web).flags
+        assert f"--volume={mono / 'apps'}:{mono / 'apps'}:z" in flags
+        assert f"--volume=/dev/null:{web / '.env'}:ro" in flags
+
+    @closed_to_its_owner
+    def test_what_is_covered_is_mounted_at_once_only(self):
+        closed = self.project / "closed"
+        closed.mkdir()
+        (closed / "secret").write_text("KEY=1\n")
+        (self.project / ".env").unlink()
+        (self.project / ".env").symlink_to("closed/secret")
+        closed.chmod(0o300)
+        try:
+            result = self.launch(CLAUDE_AIRLOCK_PROTECT="closed")
+        finally:
+            closed.chmod(0o700)
+        assert result.status == 0, result.stderr
+        found = targets(result.flags)
+        assert found.count(str(closed)) == 1
+        assert str(closed / "secret") not in found
+        # Remembered all the same, for once it is opened again
+        (self.project / ".env").unlink()
+        assert f"--volume=/dev/null:{closed / 'secret'}:ro" in self.launch().flags
+
+    def test_a_protected_path_that_is_hidden_is_mounted_once(self):
+        result = self.launch(CLAUDE_AIRLOCK_PROTECT=".env")
+        assert result.status == 0, result.stderr
+        found = targets(result.flags)
+        assert found.count(str(self.project / ".env")) == 1
+        assert f"--volume=/dev/null:{self.project / '.env'}:ro" in result.flags
+
+    def test_a_link_left_where_a_session_could_write_is_refused_later(self):
+        # Writable at one launch, read-only at the next: the link is the
+        # doing of a session all the same
+        assert self.launch("--add-dir", "~/ref").status == 0
+        (self.ref / "more").symlink_to(self.outside)
+        result = self.launch("--add-dir-ro", "~/ref", "--add-dir", "~/ref/more")
+        self.assert_refused(result, f"it is a link out of {self.ref}")
+        result = self.launch("--add-dir-ro", "~/ref/more")
+        self.assert_refused(result, f"it is a link out of {self.ref}")
