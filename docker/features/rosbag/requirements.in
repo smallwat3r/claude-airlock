@@ -1,0 +1,6 @@
+# The Python packages of the rosbag feature, locked with what they need into
+# requirements.txt by docker/update-pins.py
+rosbags==0.11.9
+mcap==1.6.0
+mcap-ros1-support==0.9.0
+mcap-ros2-support==0.6.0

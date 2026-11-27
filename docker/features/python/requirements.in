@@ -1,0 +1,7 @@
+# The Python packages of the python feature, locked with what they need into
+# requirements.txt by docker/update-pins.py
+mypy==2.4.1
+ruff==0.17.5
+black==26.10.1
+pytest==9.2.0
+ipython==9.18.1

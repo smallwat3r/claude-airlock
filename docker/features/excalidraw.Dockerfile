@@ -7,18 +7,16 @@
 
 # The package is made for bundlers and loads its fonts over the network. A
 # session may have neither npm access nor a route out, so it is bundled into
-# one script here and the fonts are kept next to it. React is a peer
-# dependency the export never renders with, it follows the major Excalidraw
-# was built for and is not refreshed by update-pins.py.
-ARG EXCALIDRAW_VERSION=0.18.1
-ARG EXCALIDRAW_ESBUILD_VERSION=0.28.2
-RUN mkdir -p /opt/excalidraw /tmp/excalidraw-build \
+# one script here and the fonts are kept next to it. What it is built from,
+# Excalidraw, esbuild and React, is named in excalidraw/package.json, and
+# with all they need in excalidraw/package-lock.json, by version and
+# checksum (see docker/update-pins.py). Installed without the scripts of
+# the packages: esbuild's only puts the binary of the machine, which comes
+# as a package of its own, in the place of the script that runs it.
+COPY excalidraw/package.json excalidraw/package-lock.json /tmp/excalidraw-build/
+RUN mkdir -p /opt/excalidraw \
     && cd /tmp/excalidraw-build \
-    && npm install --no-audit --no-fund \
-    "@excalidraw/excalidraw@${EXCALIDRAW_VERSION}" \
-    "esbuild@${EXCALIDRAW_ESBUILD_VERSION}" \
-    react@18.3.1 \
-    react-dom@18.3.1 \
+    && npm ci --ignore-scripts --no-audit --no-fund \
     && echo 'export {convertToExcalidrawElements, exportToBlob, exportToSvg, loadFromBlob, serializeAsJSON} from "@excalidraw/excalidraw";' > entry.js \
     && ./node_modules/.bin/esbuild entry.js --bundle --minify --format=iife \
     --global-name=Excalidraw --log-level=error \

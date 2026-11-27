@@ -1,0 +1,3 @@
+# The Python packages of the ble feature, locked with what they need into
+# requirements.txt by docker/update-pins.py
+scapy==2.8.0

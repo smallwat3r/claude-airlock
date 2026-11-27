@@ -1,12 +1,13 @@
 # claude-feat: rosbag
 # claude-feat-md: Rosbag tooling: mcap CLI, sqlite3 CLI, Python rosbags, mcap, mcap-ros1/ros2-support
 
-# Reading, writing and conversion (ROS1 + ROS2, sqlite3 + mcap storage)
+# Reading, writing and conversion (ROS1 + ROS2, sqlite3 + mcap storage),
+# named in rosbag/requirements.in and locked by hash in
+# rosbag/requirements.txt
+COPY rosbag/requirements.txt /tmp/rosbag-requirements.txt
 RUN uv pip install --system --break-system-packages --no-cache \
-    rosbags==0.11.9 \
-    mcap==1.6.0 \
-    mcap-ros1-support==0.9.0 \
-    mcap-ros2-support==0.6.0
+    --require-hashes -r /tmp/rosbag-requirements.txt \
+    && rm /tmp/rosbag-requirements.txt
 
 # sqlite3 CLI, to inspect ROS2 .db3 bags directly
 RUN apt-get update \

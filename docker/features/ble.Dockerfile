@@ -8,6 +8,9 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark \
     && rm -rf /var/lib/apt/lists/*
 
-# HCI, L2CAP, ATT and SMP dissection and crafting from Python
+# HCI, L2CAP, ATT and SMP dissection and crafting from Python: scapy, named
+# in ble/requirements.in and locked by hash in ble/requirements.txt
+COPY ble/requirements.txt /tmp/ble-requirements.txt
 RUN uv pip install --system --break-system-packages --no-cache \
-    scapy==2.8.0
+    --require-hashes -r /tmp/ble-requirements.txt \
+    && rm /tmp/ble-requirements.txt

@@ -65,7 +65,10 @@ What the comment lines of a fragment say:
 | `# claude-feat-lsp: ...` | A language server it installs, as the `lspServers` of a Claude Code plugin (see `docker/features/go.Dockerfile`) |
 
 A fragment that needs files finds those of a `NAME` directory next to it
-in the build context, as `COPY NAME/file ...`.
+in the build context, as `COPY NAME/file ...`. The Python packages of a
+feature are named there in a `requirements.in`, which `update-pins.py`
+locks into the `requirements.txt` next to it, as the bundled features do
+(see `docker/features/python.Dockerfile`).
 
 ## Language servers
 
@@ -82,13 +85,29 @@ without a plugin being enabled on the host. The `python`, `go`, `cpp`,
   set keeps its own image.
 - Old images pile up, several GB each. `claude-airlock --prune` removes
   them all but the one your settings ask for now.
-- Images, downloads and Python packages are pinned by digest, checksum or
-  version. Claude Code's auto-updater is off, so upgrading means
-  refreshing the pins:
+- Images and downloads are pinned by digest or checksum. Claude Code's
+  auto-updater is off, so upgrading means refreshing the pins:
 
 ```
 docker/update-pins.py
 ```
+
+- The Python packages of a feature are locked with all they need, by
+  version and the hashes of their files, in the `requirements.txt` of its
+  directory, for the image's Python (Debian's). They are installed with
+  `--require-hashes`. `update-pins.py` moves a package only to a version
+  that runs on that Python, and makes the lock anew with uv.
+- The npm packages Excalidraw is built from are locked the same way in
+  `docker/features/excalidraw/package-lock.json`, installed with `npm ci`
+  and without running their scripts, and the lock is made anew with npm.
+  The npm packages installed on their own (Claude Code, pyright, the
+  TypeScript language server) need nothing that is not pinned with them,
+  and are pinned by version.
+- Go modules, gopls among them, are checked against the Go checksum
+  database.
+- The Chromium of the `playwright` feature is the build its pinned version
+  names. Playwright downloads it over HTTPS and checks its size alone:
+  there is no checksum of it to check.
 
 - Debian packages are not pinned, they follow the release of the pinned
   base image. Nor are `gh` and `docker-ce-cli`, which come from the apt

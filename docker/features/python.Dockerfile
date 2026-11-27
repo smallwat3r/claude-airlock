@@ -3,13 +3,13 @@
 # claude-feat-lsp: {"pyright": {"command": "pyright-langserver", "args": ["--stdio"], "extensionToLanguage": {".py": "python", ".pyi": "python"}}}
 
 # Python 3 and uv are already in the base image, other features rely on them,
-# so nothing is installed for the interpreter here, only the dev tooling
+# so nothing is installed for the interpreter here, only the dev tooling,
+# named in python/requirements.in and locked by hash in
+# python/requirements.txt
+COPY python/requirements.txt /tmp/python-requirements.txt
 RUN uv pip install --system --break-system-packages --no-cache \
-    mypy==2.4.1 \
-    ruff==0.17.5 \
-    black==26.10.1 \
-    pytest==9.2.0 \
-    ipython==9.18.1
+    --require-hashes -r /tmp/python-requirements.txt \
+    && rm /tmp/python-requirements.txt
 
 # pyright, the language server behind Claude Code's pyright-lsp plugin. From
 # npm, the PyPI package of the same name only downloads this one on first

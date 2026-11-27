@@ -11,7 +11,16 @@ needs no change here.
 Versions come from the upstream release feeds, checksums are computed on the
 freshly downloaded artifacts. All edits happen on in-memory copies written
 out only once everything has resolved, so a failed run never leaves the files
-with mixed pins. PyPI and npm packages are pinned by version only.
+with mixed pins.
+
+The Python packages of a feature are named in a requirements.in in the
+directory of the feature, and locked with all they need into the
+requirements.txt next to it, by version and with the hashes of their
+files, for the Python of the image (uv). A package.json there is locked
+into its package-lock.json (npm). Both locks are made anew on every run,
+so what the packages need is refreshed with them. The versions a
+requirements.in names are those uv takes for its packages on the Python
+of the image, so a package is only moved to one that runs there.
 
 Usage: update-pins.py [file]...   (defaults to all of the above)
 """
@@ -22,11 +31,15 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
+from typing import NamedTuple
 
 REGISTRY_ACCEPT = (
     "application/vnd.oci.image.index.v1+json, "
@@ -43,6 +56,18 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 # checksum, see plain
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+
+HERE = Path(__file__).resolve().parent
+# The Python the packages of the features are installed into, Debian's,
+# by the release of Debian the base image is of
+DEBIAN_PYTHONS = {"bookworm": "3.11.2", "trixie": "3.13.5"}
+BASE_RELEASE = re.compile(r"\bnode:\d+-([a-z]+)-slim@")
+# What a lock says it was made by, the same wherever it was made
+COMPILE_COMMAND = "docker/update-pins.py"
+# The packages of a package.json that are not refreshed. React is a peer
+# dependency of Excalidraw that the export never renders with, it follows
+# the major Excalidraw was built for.
+NPM_HELD = frozenset(("react", "react-dom"))
 
 
 def fetch(url: str, headers: dict | None = None, method: str = "GET"):
@@ -127,8 +152,17 @@ class Pins:
     """The files holding pins, edited in memory and written out together."""
 
     def __init__(self, paths: list[Path]) -> None:
-        self.original = {path: path.read_text() for path in paths}
-        self.texts = dict(self.original)
+        self.original: dict[Path, str | None] = {
+            path: path.read_text() for path in paths
+        }
+        self.texts: dict[Path, str] = {path: path.read_text() for path in paths}
+
+    def put(self, path: Path, text: str) -> None:
+        """Have a file written with this text, one that is not among the
+        files read too: the lock made of one of them."""
+        if path not in self.original:
+            self.original[path] = path.read_text() if path.exists() else None
+        self.texts[path] = text
 
     def has(self, pattern: str) -> bool:
         return any(re.search(pattern, text) for text in self.texts.values())
@@ -156,7 +190,7 @@ class Pins:
             staged = path.with_name(path.name + ".new")
             staged.write_text(self.texts[path])
             # write_text creates a plain file, keep the launcher executable
-            staged.chmod(path.stat().st_mode)
+            staged.chmod(path.stat().st_mode if path.exists() else 0o644)
             staged.replace(path)
         return changed
 
@@ -281,20 +315,160 @@ def pin_npm(packages: dict[str, str]) -> Callable[[Pins], None]:
     return pin
 
 
+def refreshed_manifest(text: str) -> str:
+    """A package.json with each package it depends on at its latest
+    version, but those held (see NPM_HELD)."""
+    manifest = json.loads(text)
+    dependencies = manifest.get("dependencies", {})
+    for package in sorted(set(dependencies) - NPM_HELD):
+        dependencies[package] = plain(npm_latest(package), package)
+        print(package, dependencies[package])
+    return json.dumps(manifest, indent=2) + "\n"
+
+
+def run_tool(command: list[str], cwd: str) -> None:
+    """Run what resolves or makes a lock, or end the run with what it
+    said."""
+    try:
+        done = subprocess.run(command, cwd=cwd, check=False)
+    except FileNotFoundError:
+        sys.exit(f"{command[0]} is needed to make the locks of the features")
+    if done.returncode != 0:
+        sys.exit(f"failed to make a lock: {' '.join(command)}")
+
+
+def resolved(names: list[str]) -> dict[str, str]:
+    """The versions uv takes for packages, together, on the Python of the
+    image: the latest that run there. By their names as PEP 503 writes
+    them."""
+    with tempfile.TemporaryDirectory() as work:
+        Path(work, "wanted.in").write_text("".join(f"{name}\n" for name in names))
+        run_tool(
+            [
+                *("uv", "pip", "compile", "wanted.in"),
+                f"--python-version={image_python()}",
+                "--python-platform=linux",
+                *("--no-header", "--no-annotate", "--quiet"),
+                "--output-file=wanted.txt",
+            ],
+            work,
+        )
+        said = Path(work, "wanted.txt").read_text()
+    return {
+        normalised(name): version
+        for name, version in re.findall(r"(?m)^([\w.-]+)==(\S+)", said)
+    }
+
+
+def normalised(name: str) -> str:
+    """The name of a Python package as PEP 503 compares them."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def refreshed_pins(text: str) -> str:
+    """A text with each Python package it pins (name==version) at the
+    version uv takes for it, see resolved."""
+    names = sorted({name for name, _ in re.findall(PYPI_PIN, text)})
+    if not names:
+        return text
+    versions = resolved(names)
+    for name in names:
+        version = plain(versions.get(normalised(name)), name)
+        # Both plain, so nothing in the replacement is read as more
+        pin = rf"(?<![\w.-]){re.escape(name)}==\d[\w.]*"
+        text = re.sub(pin, f"{name}=={version}", text)
+        print(name, version)
+    return text
+
+
+def python_lock(requirements: str) -> str:
+    """The lock of the Python packages of a feature: every package they
+    need, for the Python of the image on any machine, by version and with
+    the hashes of its files."""
+    with tempfile.TemporaryDirectory() as work:
+        Path(work, "requirements.in").write_text(requirements)
+        run_tool(
+            [
+                *("uv", "pip", "compile", "requirements.in", "--universal"),
+                f"--python-version={image_python()}",
+                "--generate-hashes",
+                f"--custom-compile-command={COMPILE_COMMAND}",
+                "--output-file=requirements.txt",
+                "--quiet",
+            ],
+            work,
+        )
+        return Path(work, "requirements.txt").read_text()
+
+
+def npm_lock(manifest: str) -> str:
+    """The lock of a package.json, made without running a script of any
+    package it names."""
+    with tempfile.TemporaryDirectory() as work:
+        Path(work, "package.json").write_text(manifest)
+        run_tool(
+            [
+                *("npm", "install", "--package-lock-only", "--ignore-scripts"),
+                *("--no-audit", "--no-fund"),
+            ],
+            work,
+        )
+        return Path(work, "package-lock.json").read_text()
+
+
+class Lock(NamedTuple):
+    """A kind of lock of the features: the file it is made from, in the
+    directory of a feature, the one it is written to next to it, what
+    moves the packages the first names to their latest versions, and
+    what locks them with all they need."""
+
+    source: str
+    name: str
+    refresh: Callable[[str], str]
+    make: Callable[[str], str]
+
+    def lock(self, pins: Pins) -> None:
+        """Refresh each file of this kind among the pins, and make its
+        lock anew from what it says then."""
+        for path in sorted(path for path in pins.texts if path.name == self.source):
+            pins.texts[path] = self.refresh(pins.texts[path])
+            pins.put(path.with_name(self.name), self.make(pins.texts[path]))
+            print("locked", path.parent.name, self.name)
+
+
+LOCKS = (
+    Lock("requirements.in", "requirements.txt", refreshed_pins, python_lock),
+    Lock("package.json", "package-lock.json", refreshed_manifest, npm_lock),
+)
+
+
 def pin_gopls(pins: Pins) -> None:
     latest = fetch_json("https://proxy.golang.org/golang.org/x/tools/gopls/@latest")
     pins.set_arg("GOPLS_VERSION", latest["Version"])
     print("gopls", latest["Version"])
 
 
-def pin_pypi(pins: Pins) -> None:
-    for name in sorted({name for name, _ in pins.findall(PYPI_PIN)}):
-        latest = fetch_json(f"https://pypi.org/pypi/{name}/json")["info"]["version"]
-        version = plain(latest, name)
-        pins.substitute(
-            rf"(?<![\w.-]){re.escape(name)}==\d[\w.]*", f"{name}=={version}", name
+@cache
+def image_python() -> str:
+    """The version of the Python of the image, by the Debian release of
+    the base image."""
+    found = BASE_RELEASE.search((HERE / "base.Dockerfile").read_text())
+    python = DEBIAN_PYTHONS.get(found[1]) if found else None
+    if python is None:
+        sys.exit(
+            "the Debian release of the base image has no Python known here,"
+            " add the version of its python3 to DEBIAN_PYTHONS"
         )
-        print(name, version)
+    return python
+
+
+def pin_pypi(pins: Pins) -> None:
+    """The Python packages pinned in a file that is no source of a lock,
+    a Dockerfile of your own: those are refreshed with their locks."""
+    sources = {lock.source for lock in LOCKS}
+    for path, text in pins.texts.items():
+        if path.name not in sources:
+            pins.texts[path] = refreshed_pins(text)
 
 
 def pin_digests(pins: Pins) -> None:
@@ -326,15 +500,11 @@ def arg_marker(arg: str) -> str:
     return rf"(?m)^ARG {arg}="
 
 
-# The npm packages pinned by ARGs, by the ARG that marks them: esbuild
-# builds Excalidraw, it is pinned along with it
+# The npm packages pinned by ARGs, by the ARG that marks them. Each
+# depends on nothing that is not pinned with it.
 NPM_PINS = {
     "CLAUDE_CODE_VERSION": {"CLAUDE_CODE_VERSION": "@anthropic-ai/claude-code"},
     "PYRIGHT_VERSION": {"PYRIGHT_VERSION": "pyright"},
-    "EXCALIDRAW_VERSION": {
-        "EXCALIDRAW_VERSION": "@excalidraw/excalidraw",
-        "EXCALIDRAW_ESBUILD_VERSION": "esbuild",
-    },
     "TYPESCRIPT_LANGUAGE_SERVER_VERSION": {
         "TYPESCRIPT_LANGUAGE_SERVER_VERSION": "typescript-language-server"
     },
@@ -360,16 +530,22 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
 
 
 def default_paths() -> list[Path]:
-    here = Path(__file__).resolve().parent
     config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    features = (HERE / "features", config / "claude-airlock" / "features")
     return [
-        here / "base.Dockerfile",
-        here / "tail.Dockerfile",
-        *sorted((here / "features").glob("*.Dockerfile")),
-        *sorted((config / "claude-airlock" / "features").glob("*.Dockerfile")),
-        here.parent / "claude_airlock" / "sandbox" / "egress_proxy.py",
-        here.parent / "claude_airlock" / "sandbox" / "socket_proxy.py",
-        here.parent / ".github" / "workflows" / "ci.yml",
+        HERE / "base.Dockerfile",
+        HERE / "tail.Dockerfile",
+        *(path for place in features for path in sorted(place.glob("*.Dockerfile"))),
+        # What the locks of the features are made from
+        *(
+            path
+            for place in features
+            for lock in LOCKS
+            for path in sorted(place.glob(f"*/{lock.source}"))
+        ),
+        HERE.parent / "claude_airlock" / "sandbox" / "egress_proxy.py",
+        HERE.parent / "claude_airlock" / "sandbox" / "socket_proxy.py",
+        HERE.parent / ".github" / "workflows" / "ci.yml",
     ]
 
 
@@ -378,6 +554,9 @@ def main() -> None:
     for marker, pin in PINNERS:
         if pins.has(marker):
             pin(pins)
+    # Each lock with what it is made from
+    for lock in LOCKS:
+        lock.lock(pins)
     changed = pins.write()
     print(f"\nDone, {len(changed)} file(s) changed. Review with git diff, then")
     print("start claude-airlock, the image rebuilds itself when its parts change.")

@@ -11,7 +11,8 @@
 # servers it installs, for the plugin the image is given (see
 # tail.Dockerfile).
 #
-# Every image, download and Python package is pinned, refresh them all with
+# Every image and download is pinned, and every Python and npm package with
+# all it needs (the locks of the features), refresh them all with
 # update-pins.py. Debian packages are not: apt drops old versions from its
 # mirrors, so they follow the pinned base image's release instead. Nor are
 # gh and docker-ce-cli, which follow their vendors' repositories, signed by

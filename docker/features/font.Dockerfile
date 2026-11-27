@@ -14,10 +14,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # From PyPI, bookworm's fonttools is years behind. brotli is what gives
-# fonttools its WOFF2 support.
+# fonttools its WOFF2 support. Both named in font/requirements.in, locked
+# by hash in font/requirements.txt.
+COPY font/requirements.txt /tmp/font-requirements.txt
 RUN uv pip install --system --break-system-packages --no-cache \
-    fonttools==4.68.0 \
-    brotli==1.2.1
+    --require-hashes -r /tmp/font-requirements.txt \
+    && rm /tmp/font-requirements.txt
 
 # The common monospace fonts bookworm packages. fonts-dejavu-core,
 # fonts-liberation2 and fonts-go bring their proportional families too.

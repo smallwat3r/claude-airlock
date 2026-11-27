@@ -1,0 +1,4 @@
+# The Python packages of the font feature, locked with what they need into
+# requirements.txt by docker/update-pins.py
+fonttools==4.68.0
+brotli==1.2.1

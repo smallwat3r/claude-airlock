@@ -281,3 +281,31 @@ class InstallTest(LauncherTest):
         own = self.home / ".claude" / "line.sh"
         own.touch()
         assert [f for f in self.launched_with(str(own)).flags if "line.sh" in f]
+
+    def test_a_statusline_that_leads_out_of_what_a_session_can_write_is_not_mounted(
+        self,
+    ):
+        # Kept in the project, a link to it from the home: a session there
+        # pointed it at what holds secrets under a name that says nothing
+        credentials = self.home / ".aws" / "credentials"
+        credentials.parent.mkdir()
+        credentials.write_text("aws_secret_access_key = k\n")
+        (self.home / ".claude.json").write_text('{"mcpServers": {}}\n')
+        line = self.home / "bin" / "status.sh"
+        line.parent.mkdir()
+        line.symlink_to(self.project / "status.sh")
+        for secret in (credentials, self.home / ".claude.json"):
+            (self.project / "status.sh").unlink(missing_ok=True)
+            (self.project / "status.sh").symlink_to(secret)
+            result = self.launched_with(str(line))
+            assert result.status == 0, result.stderr
+            assert not [f for f in result.flags if "status.sh" in f], secret
+            assert (
+                f"the statusline {line} is not mounted: it is, or goes through, a"
+                f" link out of {self.project}, which a session could have made"
+            ) in result.stderr
+        # The project's own file is mounted as before
+        (self.project / "status.sh").unlink()
+        (self.project / "status.sh").write_text("#!/bin/sh\n")
+        flags = self.launched_with(str(line)).flags
+        assert f"--volume={line}:/home/sandbox/bin/status.sh:ro,z" in flags

@@ -1,6 +1,6 @@
 # Docker sandbox
 You run in a sandboxed Docker container. It is read-only (no sudo, no apt),
-writable are /tmp, ~/.cache, ~/.npm and the mounted project. Outside the
+writable are /tmp, ~/.cache and the mounted project. Outside the
 project only ~/.cache outlives the session. Extra Python packages go in a
 venv (uv venv /tmp/venv), npm packages in the project.
 
@@ -47,9 +47,11 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   not listed is refused at once, as above). On, a request
   for a domain that is not listed waits while the user is asked, and goes
   through when they say yes: it can take as long as they do, do not cut
-  it short or retry meanwhile. A 403 then says they refused that host for
-  this session, or were not there to answer. Say which host and why you
-  need it, do not look for another way to it.
+  it short or retry meanwhile. A yes is for that host at that port only,
+  another port of it is asked about again. A 403 then says they refused
+  that host and port for this session, or were not there to answer. Say
+  which host, which port and why you need it, do not look for another way
+  to it.
 - CLAUDE_AIRLOCK_NET_LOG and CLAUDE_AIRLOCK_PROC_LOG (on unless 0) record
   for the user's review every connection, UDP send, ping and name lookup,
   and the processes that run. They block nothing. The root-owned python3

@@ -20,8 +20,9 @@ RUN apt-get update \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Disassembly and executable parsing (ELF, PE, Mach-O) from Python
+# Disassembly and executable parsing (ELF, PE, Mach-O) from Python, named in
+# reverse/requirements.in and locked by hash in reverse/requirements.txt
+COPY reverse/requirements.txt /tmp/reverse-requirements.txt
 RUN uv pip install --system --break-system-packages --no-cache \
-    capstone==5.0.9 \
-    lief==1.0.0 \
-    pyelftools==0.33
+    --require-hashes -r /tmp/reverse-requirements.txt \
+    && rm /tmp/reverse-requirements.txt

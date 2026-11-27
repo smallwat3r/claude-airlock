@@ -1,0 +1,5 @@
+# The Python packages of the reverse feature, locked with what they need into
+# requirements.txt by docker/update-pins.py
+capstone==5.0.9
+lief==1.0.0
+pyelftools==0.33

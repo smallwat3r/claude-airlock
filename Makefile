@@ -36,9 +36,8 @@ types: ## mypy
 	$(MYPY)
 
 .PHONY: test
-test: ## The unit tests and the Dockerfile's assembly, without Docker. One topic: make test K=trace
+test: ## The unit tests, the Dockerfile of every feature among them, without Docker. One topic: make test K=trace
 	$(PYTEST) $(if $(K),-k $(K))
-	$(PYTHON) $(LAUNCHER) --dockerfile | grep -q '^ENTRYPOINT'
 
 .PHONY: smoke
 smoke: ## The end-to-end test, on the host against a real Docker daemon

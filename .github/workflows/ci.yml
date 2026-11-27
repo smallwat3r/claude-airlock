@@ -11,6 +11,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,7 +46,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv run --locked --no-default-groups --group test pytest
-      # Every feature must assemble into the generated Dockerfile
+      # pytest assembled every feature already (test_image.py), this is the
+      # launcher on the standard library alone, as it runs for its users,
+      # without the tools of the checks
       - run: uv run --locked --no-default-groups python bin/claude-airlock --dockerfile | grep -q '^ENTRYPOINT'
 
   # setup-uv's Pythons are built with editline, on Linux as on macOS.
@@ -76,6 +79,8 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    # Base, tail and go build in a few minutes, from no cache
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

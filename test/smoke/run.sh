@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end check of the launcher against a real Docker daemon. Run it on the
 # host (not inside the sandbox) after changing the launcher, the Dockerfile
-# parts or the layout of the checkout:
+# parts or the sidecar configuration:
 #
 #   test/smoke/run.sh
 #
-# It runs the unit tests, replaces the sidecars (they bind-mount their config
-# from the checkout, so a moved checkout leaves them pointing at stale paths),
-# then starts real sessions in a throwaway project and checks the sandbox from
-# the inside: open, filtered and, when the docker feature is built, with the
-# socket proxy. The first session builds the image if it is missing, which
-# takes a while.
+# It runs the unit tests, replaces the sidecars so that the sessions start
+# them anew from this checkout, then starts real sessions in a throwaway
+# project and checks the sandbox from the inside: open, filtered and, when
+# the docker feature is built, with the socket proxy in either mode. The
+# first session builds the image if it is missing, which takes a while.
 #
 # The files next to this one:
 #   inside/   the scripts that run inside a session, one per kind of session.
@@ -108,8 +107,6 @@ unit_tests() {
   else
     fail "launcher tests"
   fi
-  check "every feature assembles into a Dockerfile" \
-    bash -c "'${LAUNCHER}' --dockerfile | grep -q '^ENTRYPOINT'"
 }
 
 # Remove the sidecars so the sessions below start them from this checkout.
@@ -262,6 +259,12 @@ socket_proxy() {
   # The session leaves this file when the docker feature is in the image
   if [ -f "${PROJECT}/.smoke-docker-used" ]; then
     check "the calls through the socket proxy were noted, the denied one too" \
+      python_check door_uses "${STATE}/door-use.jsonl" "${PROJECT}" docker
+  fi
+  section "Session with the socket proxy in full"
+  session socket-proxy-full CLAUDE_AIRLOCK_DOCKER_SOCKET=full
+  if [ -f "${PROJECT}/.smoke-docker-full-used" ]; then
+    check "the calls through the full socket proxy were noted" \
       python_check door_uses "${STATE}/door-use.jsonl" "${PROJECT}" docker
   fi
 }
