@@ -28,9 +28,10 @@ extend-include = ["bin/claude-airlock", "docker/features/excalidraw/excalidraw-e
 "docker/features/excalidraw/excalidraw-export" = "py311"
 
 [tool.ruff.lint]
-# On top of ruff's defaults: likely bugs, security, how large and how
-# branched a function gets, and what a newer Python says better
-extend-select = ["B", "S", "C90", "PLR", "UP", "FURB", "PT", "PYI"]
+# On top of ruff's defaults: likely bugs, an except that catches all,
+# security, how large and how branched a function gets, what a newer
+# Python says better, and a suppression that suppresses nothing
+extend-select = ["B", "BLE", "S", "C90", "PLR", "UP", "FURB", "PT", "PYI", "RUF100"]
 ignore = [
     # The launcher is made of subprocess calls, each an argument list with
     # no shell, and it finds docker and git on PATH as the user does
