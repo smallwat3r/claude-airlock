@@ -11,12 +11,14 @@ import sys
 import pytest
 from harness import (
     LAUNCHER,
+    ROOT,
     LauncherTest,
     Result,
+    mounted_copy,
     mounts_host_sockets,
 )
 
-from claude_airlock.sandbox import session
+from claude_airlock.sandbox import egress_proxy, session
 
 
 class OptionsTest(LauncherTest):
@@ -116,7 +118,13 @@ class OptionsTest(LauncherTest):
         assert [c for c in result.calls if c[:2] == ["exec", "claude-egress-proxy"]]
         proxy = result.sidecar("claude-egress-proxy")
         assert "--network=claude-airlock-net" in proxy
-        assert any("allowed-domains.txt" in arg for arg in proxy)
+        # Copies of its files kept with the launcher's records, a session
+        # that can write the checkout does not change them under it
+        kept = self.state / "proxy-files" / "claude-egress-proxy"
+        for name, target in egress_proxy.SQUID_FILES.items():
+            copy = mounted_copy(proxy, target)
+            assert copy.is_relative_to(kept)
+            assert copy.read_bytes() == (ROOT / "docker" / name).read_bytes()
 
     def test_the_filter_network_is_never_made_with_a_route_out(self):
         result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1")

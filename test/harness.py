@@ -206,6 +206,14 @@ class Result:
         return None
 
 
+def mounted_copy(sidecar: list[str], target: str) -> Path:
+    """The file of the host a proxy was given to read at target: a copy
+    kept with the launcher's records, see shared_proxy.py."""
+    suffix = f":{target}:ro,z"
+    [mount] = [arg for arg in sidecar if arg.endswith(suffix)]
+    return Path(mount.removeprefix("--volume=").removesuffix(suffix))
+
+
 # What only Linux has, and what Docker Desktop on macOS does not do
 reads_proc = pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
 mounts_host_sockets = pytest.mark.skipif(

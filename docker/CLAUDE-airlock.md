@@ -72,7 +72,9 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   and docker logs against the host's daemon, full adds inspect, stats and
   top. Everything else is denied, never run or build, and every call is
   recorded. Off, no daemon can be reached. The docker CLI comes with the
-  docker feature of the image.
+  docker feature of the image. Set by the user but not listed: the host
+  has no socket at /var/run/docker.sock, the one place the setting takes
+  the daemon's from.
 - CLAUDE_AIRLOCK_CONNECTORS (off unless 1, not listed in the environment).
   Off, the connectors of the user's claude.ai account (Gmail, Google Drive
   and the like) are not loaded.

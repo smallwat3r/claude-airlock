@@ -23,7 +23,7 @@ from ..files import private_dir
 from ..notice import warn
 from ..settings import DOCKERFILE_DIR, EGRESS_PORT, Host
 from .networks import EGRESS_PROXY, FILTER_NET, FILTER_NETS, ensure_network
-from .shared_proxy import config_hash, proxy_current, start_shared_proxy
+from .shared_proxy import SharedProxy
 
 # The image of the sidecar. It is the way out of the filtered sessions, so
 # it is pinned by digest (the tag is informative only), refreshed by
@@ -47,14 +47,14 @@ ROTATE_EVERY = 10.0
 # asked_hosts.py and docker/squid-ask-helper.sh)
 ASK_HELPER = "squid-ask-helper.sh"
 ASKED_HOSTS_MOUNT = "/var/lib/claude-airlock/asked"
-
-
-def _egress_config_hash() -> str:
-    files = (
-        Path(DOCKERFILE_DIR, name).read_bytes()
-        for name in ("squid.conf", "allowed-domains.txt", ASK_HELPER)
-    )
-    return config_hash(SQUID_IMAGE.encode(), *files)
+# What the proxy reads of the checkout's docker directory, by where it
+# reads it
+SQUID_DIR = "/etc/squid"
+SQUID_FILES = {
+    ASK_HELPER: f"{SQUID_DIR}/ask-helper",
+    "squid.conf": f"{SQUID_DIR}/squid.conf",
+    "allowed-domains.txt": f"{SQUID_DIR}/allowed-domains.txt",
+}
 
 
 def asked_hosts_root(host: Host) -> str:
@@ -71,27 +71,29 @@ def asked_hosts_root(host: Host) -> str:
     return root
 
 
+def _egress_proxy(host: Host) -> SharedProxy:
+    """The squid sidecar as it is to be started now, its files as they
+    are on disk."""
+    files = {
+        target: Path(DOCKERFILE_DIR, name).read_bytes()
+        for name, target in SQUID_FILES.items()
+    }
+    options = (
+        # Written to by the proxy too: the hosts that wait for an answer
+        mount_arg(asked_hosts_root(host), ASKED_HOSTS_MOUNT, "z"),
+        f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
+    )
+    return SharedProxy(EGRESS_PROXY, FILTER_NET, SQUID_IMAGE, files, options)
+
+
 def start_egress_proxy(host: Host) -> None:
     """(Re)create the squid sidecar on the internal networks, then give it
     its other leg on the default bridge. Labelled with a hash of its config
-    and image, so an edited allowlist is noticed (see egress_proxy_current)."""
+    and image, so an edited allowlist is noticed (see egress_proxy_current).
+    It reads copies of its files, what is edited while it runs is for the
+    proxy that replaces it."""
     ensure_network(FILTER_NET, internal=True)
-    squid = "/etc/squid"
-    options = [
-        mount_arg(f"{DOCKERFILE_DIR}/{ASK_HELPER}", f"{squid}/ask-helper", "ro,z"),
-        # Written to by the proxy too: the hosts that wait for an answer
-        mount_arg(asked_hosts_root(host), ASKED_HOSTS_MOUNT, "z"),
-        mount_arg(f"{DOCKERFILE_DIR}/squid.conf", f"{squid}/squid.conf", "ro,z"),
-        mount_arg(
-            f"{DOCKERFILE_DIR}/allowed-domains.txt",
-            f"{squid}/allowed-domains.txt",
-            "ro,z",
-        ),
-        f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
-    ]
-    start_shared_proxy(
-        EGRESS_PROXY, FILTER_NET, _egress_config_hash(), options, SQUID_IMAGE
-    )
+    _egress_proxy(host).start(host)
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
     # The internal networks of the sessions with a socket proxy, those that
     # are there: sessions may be running on them
@@ -115,11 +117,11 @@ def _wait_for_egress_proxy(timeout: float = 15.0) -> None:
     )
 
 
-def egress_proxy_current() -> bool:
+def egress_proxy_current(host: Host) -> bool:
     """Running, and started from the config as it is on disk now. A stale
     proxy is replaced on the next filtered start, which briefly drops the
     connections of other filtered sessions."""
-    return proxy_current(EGRESS_PROXY, _egress_config_hash())
+    return _egress_proxy(host).current()
 
 
 def rotate_access_log() -> None:

@@ -391,6 +391,10 @@ whatever they do not name is refused: `docker attach`, `cp`, `export` and
 `diff` among them, in `full` too. Command lines and logs can still carry
 secrets.
 
+The proxy is given the daemon's socket at `/var/run/docker.sock`. A
+daemon that keeps its socket elsewhere, rootless or colima, is not
+reached: the session has no Docker, and the launch says so.
+
 **The egress filter**, with `CLAUDE_AIRLOCK_NET_FILTER=1`:
 
 - The session joins an internal network with no route out. Egress goes

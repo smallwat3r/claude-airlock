@@ -14,9 +14,10 @@ from ..docker import (
     env_arg,
     mount_arg,
 )
-from ..settings import DOCKERFILE_DIR, Settings, SocketAccess, variable
+from ..notice import warn
+from ..settings import DOCKERFILE_DIR, Host, Settings, SocketAccess, variable
 from .networks import FILTER_NET, OPEN_NET, SOCKET_PROXIES
-from .shared_proxy import config_hash, proxy_current, start_shared_proxy
+from .shared_proxy import SharedProxy
 
 # The image of the sidecar. It holds the host's Docker socket, so it is
 # pinned by digest (the tag is informative only), refreshed by
@@ -30,6 +31,8 @@ PROXY_RULES = {
 }
 # Where the host has its Docker socket
 DOCKER_SOCK = "/var/run/docker.sock"
+# Where the image reads the rules of the mode from
+RULES_TEMPLATE = "/usr/local/etc/haproxy/haproxy.cfg.template"
 
 
 def network_name(settings: Settings) -> str:
@@ -56,19 +59,44 @@ def _is_socket(path: str) -> bool:
         return False
 
 
+def _asks_for_socket(settings: Settings) -> bool:
+    return settings.docker_socket in SOCKET_PROXIES
+
+
 def has_socket_proxy(settings: Settings) -> bool:
     """Whether the session gets a socket proxy: asked for, and there is
     a Docker socket on the host."""
-    return settings.docker_socket in SOCKET_PROXIES and _is_socket(DOCKER_SOCK)
+    return _asks_for_socket(settings) and _is_socket(DOCKER_SOCK)
 
 
-def _rules_path(settings: Settings) -> str:
-    """The HAProxy rules of the session's mode, for a session that has a
-    socket proxy."""
-    return f"{DOCKERFILE_DIR}/{PROXY_RULES[settings.docker_socket]}"
+def say_without_socket(settings: Settings) -> None:
+    """Say that a session that asks for the Docker socket goes without
+    it, when the host has none where the proxy is given it from. Not
+    said, the session would only find that no daemon answers."""
+    if not _asks_for_socket(settings) or has_socket_proxy(settings):
+        return
+    setting = f"{variable('docker_socket')}={settings.docker_socket.value}"
+    warn(
+        f"{setting} gives this session no Docker: the setting needs the"
+        f" daemon's socket at {DOCKER_SOCK}, and there is none there (a"
+        " rootless daemon or colima keeps its own elsewhere)"
+    )
 
 
-def _socket_proxy_options(settings: Settings) -> list[str]:
+def _socket_proxy(settings: Settings) -> SharedProxy:
+    """The socket proxy of the session's mode as it is to be started now,
+    its rules as they are on disk, for a session that has one."""
+    rules = Path(DOCKERFILE_DIR, PROXY_RULES[settings.docker_socket])
+    return SharedProxy(
+        socket_proxy_name(settings),
+        network_name(settings),
+        PROXY_IMAGE,
+        {RULES_TEMPLATE: rules.read_bytes()},
+        _socket_proxy_options(),
+    )
+
+
+def _socket_proxy_options() -> tuple[str, ...]:
     """What the socket proxy of the session's mode is started with, for a
     session that has one, see has_socket_proxy. A write call to the host
     daemon (which runs as root) would let the session spawn a sibling that
@@ -81,39 +109,33 @@ def _socket_proxy_options(settings: Settings) -> list[str]:
           inspect shows the environment of every container on the host,
           secrets included.
     The image renders the rules, a template to it, into its HAProxy
-    config. None of its allow switches is passed, in either mode: its
-    CONTAINERS allows every GET under /containers, where attach/ws writes
-    to a container and archive and export read its files. And should a
-    future image ignore the template, its stock rules would deny
-    containers rather than open them up."""
-    return [
+    config, from a copy of them (see SharedProxy). None of its
+    allow switches is passed, in either mode: its CONTAINERS allows every
+    GET under /containers, where attach/ws writes to a container and
+    archive and export read its files. And should a future image ignore
+    the template, its stock rules would deny containers rather than open
+    them up."""
+    return (
         mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"),
-        mount_arg(
-            _rules_path(settings), "/usr/local/etc/haproxy/haproxy.cfg.template", "ro,z"
-        ),
         # Among what the stock rules allow unless told: should they be
         # used after all, they do not
         env_arg("EVENTS", 0),
-    ]
+    )
 
 
-def start_socket_proxy(settings: Settings) -> None:
+def start_socket_proxy(settings: Settings, host: Host) -> None:
     """Start the Docker socket proxy of the session's mode as needed, and
     put it on the session's network, which is that of its mode alone.
     Opt-in, nothing without it. One started from other rules or another
     image is replaced, which ends the calls other sessions have open."""
     if not has_socket_proxy(settings):
         return
-    options = _socket_proxy_options(settings)
-    name = socket_proxy_name(settings)
-    network = network_name(settings)
-    rules = Path(_rules_path(settings)).read_bytes()
-    config = config_hash(PROXY_IMAGE.encode(), rules, *map(str.encode, options))
-    if not proxy_current(name, config):
-        start_shared_proxy(name, network, config, options, PROXY_IMAGE)
+    proxy = _socket_proxy(settings)
+    if not proxy.current():
+        proxy.start(host)
     # A proxy started by a session of the other network mode (filtered or
     # open) sits on that one's network, attach it to ours too
-    docker_ok("network", "connect", network, name)
+    docker_ok("network", "connect", proxy.network, proxy.name)
 
 
 def socket_proxy_args(settings: Settings) -> list[str]:

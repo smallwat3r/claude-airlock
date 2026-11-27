@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import ROOT, LauncherTest
+from harness import ROOT, LauncherTest, mounted_copy
 
 from claude_airlock.launcher import Launcher
 from claude_airlock.sandbox import asked_hosts
@@ -343,8 +343,10 @@ class AskingSessionTest(LauncherTest):
     def test_the_proxy_is_given_the_helper_and_where_the_answers_are(self):
         result = self.launch(CLAUDE_AIRLOCK_NET_FILTER="1")
         proxy = result.sidecar("claude-egress-proxy")
-        helper = f"--volume={HELPER}:/etc/squid/ask-helper:ro,z"
-        assert helper in proxy
+        # A copy of the checkout's, see SharedProxyTest
+        copy = mounted_copy(proxy, "/etc/squid/ask-helper")
+        assert copy.is_relative_to(self.state / "proxy-files" / "claude-egress-proxy")
+        assert copy.read_bytes() == HELPER.read_bytes()
         asked = self.state / "asked-hosts"
         assert f"--volume={asked}:/var/lib/claude-airlock/asked:z" in proxy
         assert stat.S_IMODE(asked.stat().st_mode) == 493

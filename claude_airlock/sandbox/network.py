@@ -65,7 +65,7 @@ def _prepare_network(settings: Settings, host: Host) -> None:
         docker_ok("network", "disconnect", "--force", network, stray)
     if not settings.net_filter:
         return
-    if not egress_proxy_current():
+    if not egress_proxy_current(host):
         start_egress_proxy(host)
     # Not yet when the network was made since the proxy started, or made
     # anew (see _isolate_network). Refused when it has joined already.
@@ -80,7 +80,7 @@ def session_network(settings: Settings, host: Host) -> Iterator[None]:
     When it is over, the proxies no session uses any more are removed."""
     with sidecars_locked(host):
         _prepare_network(settings, host)
-        start_socket_proxy(settings)
+        start_socket_proxy(settings, host)
         uses = [
             lock_file(proxy_use_file(host, proxy), shared=True)
             for proxy in session_proxies(settings)

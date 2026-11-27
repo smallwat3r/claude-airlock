@@ -4,19 +4,21 @@ is given of the home, and the socket proxy."""
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import os
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LauncherTest
+from harness import LauncherTest, mounted_copy
 
 from claude_airlock import docker, errors, launcher, settings
-from claude_airlock.sandbox import session, socket_proxy
+from claude_airlock.sandbox import session, shared_proxy, socket_proxy
 
 
 class SessionUserTest(LauncherTest):
@@ -440,6 +442,59 @@ class HomeTest(LauncherTest):
         assert "Traceback" not in result.stderr
 
 
+class SharedProxyTest(LauncherTest):
+    NAME = "claude-airlock-test-proxy"
+
+    def proxy(self, files: dict[str, bytes]) -> shared_proxy.SharedProxy:
+        return shared_proxy.SharedProxy(self.NAME, "a-net", "an-image", files)
+
+    def start(self, files: dict[str, bytes]) -> list[str]:
+        proxy = self.proxy(files)
+        proxy.start(self.host)
+        sidecar = [call for call in self.calls() if call[0] == "run"][-1]
+        assert f"--label=claude-airlock.config={proxy.config}" in sidecar
+        return sidecar
+
+    def test_what_a_proxy_is_started_from_is_told_by_its_config(self):
+        proxy = self.proxy({"/etc/one.conf": b"one"})
+        others = [
+            dataclasses.replace(proxy, image="another-image"),
+            dataclasses.replace(proxy, files={"/etc/one.conf": b"edited"}),
+            # The same rules, read from another place
+            dataclasses.replace(proxy, files={"/etc/two.conf": b"one"}),
+            dataclasses.replace(proxy, options=("--env=A=1",)),
+        ]
+        configs = {proxy.config, *(other.config for other in others)}
+        assert len(configs) == len(others) + 1
+        # Not its network, it joins those of other sessions as it runs
+        assert dataclasses.replace(proxy, network="b-net").config == proxy.config
+
+    def test_a_proxy_reads_copies_of_its_files_as_they_were_when_it_started(self):
+        sidecar = self.start({"/etc/one.conf": b"one\n", "/etc/two": b"two\n"})
+        one = mounted_copy(sidecar, "/etc/one.conf")
+        two = mounted_copy(sidecar, "/etc/two")
+        assert (one.read_bytes(), two.read_bytes()) == (b"one\n", b"two\n")
+        assert one.parent == two.parent
+        assert one.parent.parent == self.state / "proxy-files" / self.NAME
+        # Read as the proxy's user, written to by nobody
+        assert stat.S_IMODE(one.stat().st_mode) == 0o444
+        # Before the image, each where the proxy reads it
+        assert sidecar.index(f"--volume={one}:/etc/one.conf:ro,z") < sidecar.index(
+            "an-image"
+        )
+
+    def test_a_proxy_started_anew_has_copies_of_its_own(self):
+        first = mounted_copy(self.start({"/etc/one.conf": b"before"}), "/etc/one.conf")
+        again = mounted_copy(self.start({"/etc/one.conf": b"after"}), "/etc/one.conf")
+        assert again.parent != first.parent
+        assert again.read_bytes() == b"after"
+        # Those of the container it replaced go with it
+        assert not first.parent.exists()
+        assert list((self.state / "proxy-files" / self.NAME).iterdir()) == [
+            again.parent
+        ]
+
+
 class SocketProxyTest(LauncherTest):
     """Called directly, the socket path is a constant of the socket_proxy module."""
 
@@ -452,7 +507,7 @@ class SocketProxyTest(LauncherTest):
 
     def sidecar_for(self, mode: settings.SocketAccess) -> tuple[list[str], list[str]]:
         asked = settings.Settings(docker_socket=mode)
-        socket_proxy.start_socket_proxy(asked)
+        socket_proxy.start_socket_proxy(asked, self.host)
         args = socket_proxy.socket_proxy_args(asked)
         sidecars = [call for call in self.calls() if call[0] == "run"]
         assert len(sidecars) == 1
@@ -466,17 +521,25 @@ class SocketProxyTest(LauncherTest):
         assert not [arg for arg in sidecar if arg.startswith("--env=")][1:]
         assert "--env=EVENTS=0" in sidecar
 
+    def assert_rules(self, sidecar: list[str], name: str) -> None:
+        """The sidecar reads a copy of the rules of the checkout, kept
+        with the launcher's records: a session that can write the
+        checkout does not change them under it."""
+        rules = mounted_copy(sidecar, socket_proxy.RULES_TEMPLATE)
+        assert rules.is_relative_to(self.state / "proxy-files")
+        assert rules.read_bytes() == Path(settings.DOCKERFILE_DIR, name).read_bytes()
+
     def test_mode_1_uses_the_limited_sidecar(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         assert "--name=claude-airlock-ps-proxy" in sidecar
-        assert any("/docker-socket-proxy.cfg:" in arg for arg in sidecar)
+        self.assert_rules(sidecar, "docker-socket-proxy.cfg")
         self.assert_no_allow_switch(sidecar)
         assert "--env=DOCKER_HOST=tcp://claude-airlock-ps-proxy:2375" in args
 
     def test_mode_full_uses_its_own_sidecar_and_rules(self):
         args, sidecar = self.sidecar_for(settings.SocketAccess.FULL)
         assert "--name=claude-airlock-proxy" in sidecar
-        assert any("/docker-socket-proxy-full.cfg:" in arg for arg in sidecar)
+        self.assert_rules(sidecar, "docker-socket-proxy-full.cfg")
         self.assert_no_allow_switch(sidecar)
         assert "--env=DOCKER_HOST=tcp://claude-airlock-proxy:2375" in args
 
@@ -487,6 +550,29 @@ class SocketProxyTest(LauncherTest):
     def test_off_by_default(self):
         assert socket_proxy.socket_proxy_args(settings.Settings()) == []
         assert self.calls() == []
+
+    def test_a_host_without_the_socket_is_said_to_give_no_docker(self, capsys):
+        # Nothing there, then a file that is not a socket
+        plain = self.work / "plain"
+        plain.write_text("not a socket\n")
+        for path in (self.work / "none", plain):
+            with mock.patch.object(socket_proxy, "DOCKER_SOCK", str(path)):
+                for mode in (settings.SocketAccess.LIMITED, settings.SocketAccess.FULL):
+                    asked = settings.Settings(docker_socket=mode)
+                    socket_proxy.say_without_socket(asked)
+                    said = capsys.readouterr().err
+                    setting = f"CLAUDE_AIRLOCK_DOCKER_SOCKET={mode.value}"
+                    assert f"{setting} gives this session no Docker" in said
+                    # What the setting would need
+                    assert f"the daemon's socket at {path}" in said
+                    assert socket_proxy.socket_proxy_args(asked) == []
+
+    def test_nothing_is_said_of_a_socket_that_is_there_or_not_asked_for(self, capsys):
+        for mode in settings.SocketAccess:
+            socket_proxy.say_without_socket(settings.Settings(docker_socket=mode))
+        with mock.patch.object(socket_proxy, "DOCKER_SOCK", str(self.home / "none")):
+            socket_proxy.say_without_socket(settings.Settings())
+        assert capsys.readouterr().err == ""
 
     def test_a_session_only_shares_a_network_with_the_proxy_of_its_mode(self):
         names = {

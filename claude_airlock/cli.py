@@ -72,7 +72,7 @@ from .sandbox.session import (
     run_session,
     session_args,
 )
-from .sandbox.socket_proxy import socket_proxy_args
+from .sandbox.socket_proxy import say_without_socket, socket_proxy_args
 from .sandbox.tamper import PendingCheck
 from .settings import (
     CHECKOUT_DIR,
@@ -238,6 +238,7 @@ def session(plan: Plan) -> int:
     runtime = session_runtime(settings)
     refuse_unreachable_agent(settings, os.environ, runtime)
     say_runtime_notes(runtime, settings)
+    say_without_socket(settings)
     # The name, then the network and the proxies a session leans on, before
     # the arguments that name them
     with container_name(host, os.environ) as name, ending_passed_on(name) as ending:

@@ -230,6 +230,12 @@ class Host:
         return os.path.join(self.state_dir, "asked-hosts")
 
     @property
+    def proxy_files_dir(self) -> str:
+        # What of the checkout each shared proxy was started from, see
+        # shared_proxy.py. Mounted into that proxy, never into a session.
+        return os.path.join(self.state_dir, "proxy-files")
+
+    @property
     def captures_dir(self) -> str:
         return os.path.join(self.state_dir, "captures")
 
