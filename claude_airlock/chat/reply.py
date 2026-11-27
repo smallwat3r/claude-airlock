@@ -46,6 +46,9 @@ _BOLD = "**"
 # however many of its marks are opened and not closed: see _code_spans
 # and _bold_marked
 MOST_MARKED = 4000
+# No more of a line whose end has not come is held than this, in
+# characters: what came of it is a line of its own past it
+LONGEST_HELD = 64 * 1024
 
 
 def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
@@ -198,26 +201,38 @@ class ReplyWriter:
         # The marks that started the block of code a line is in
         self._fence = ""
         # The start of a line whose end has not come yet, in the pieces
-        # it came in: put together once the line is whole, a line of any
-        # length comes in any number of them
+        # it came in, and how long they are: put together once the line
+        # is whole, a line of any length comes in any number of them, or
+        # past LONGEST_HELD
         self._partial: list[str] = []
+        self._held = 0
         # Whether a line was given back, and the empty ones since the last
         self._started = False
         self._empty = 0
 
     def feed(self, text: str) -> list[Styled]:
-        """The lines that a piece of the reply completes."""
-        if "\n" not in text:
-            self._partial.append(text)
-            return []
-        *whole, rest = "".join([*self._partial, text]).split("\n")
-        self._partial = [rest]
+        """The lines that a piece of the reply completes, and the start of
+        one that is longer than LONGEST_HELD without its end, as a line of
+        its own: a reply that never breaks a line would else all be held
+        here, as long as the session makes it."""
+        self._partial.append(text)
+        self._held += len(text)
+        whole: list[str] = []
+        if "\n" in text:
+            *whole, rest = "".join(self._partial).split("\n")
+            self._partial, self._held = [rest], len(rest)
+        if self._held > LONGEST_HELD:
+            whole.append(self._let_go())
         return [shown for line in whole for shown in self._taken(line)]
 
     def end(self) -> list[Styled]:
         """The line that was left without its end, if any."""
-        last, self._partial = "".join(self._partial), []
-        return self._taken(last.rstrip())
+        return self._taken(self._let_go().rstrip())
+
+    def _let_go(self) -> str:
+        """The start of a line held so far, no longer held."""
+        held, self._partial, self._held = "".join(self._partial), [], 0
+        return held
 
     def _taken(self, line: str) -> list[Styled]:
         """The lines a line of the reply is given back as. Cleaned here,

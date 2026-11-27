@@ -24,6 +24,7 @@ from ..events import flat, labelled
 from ..report.entries import measured, seconds
 from .console import Page
 from .drift import Drift
+from .said import kept_id
 from .turn import tokens
 
 # Of what a task is said to be about, and of what a subagent is at
@@ -33,9 +34,6 @@ KIND_WIDTH = 60
 # The tasks remembered to name them when they end, and the subagents
 # that have ended kept to count them
 MOST_TASKS = 1000
-# An id longer than this is none: they are kept, and a line of claude's
-# can be as long as the session cares to make it
-ID_WIDTH = 200
 # The subagents /status says in a row each, and counts beyond that
 MOST_IN_FULL = 50
 # How Claude Code names the kind of task a subagent is
@@ -123,9 +121,7 @@ def _said(value: object, width: int) -> str:
 def _task_id(message: dict) -> str | None:
     """The id of the task a message is about, none when it gives none
     that can be kept."""
-    task_id = message.get("task_id")
-    known = isinstance(task_id, str) and 0 < len(task_id) <= ID_WIDTH
-    return task_id if known else None
+    return kept_id(message.get("task_id"))
 
 
 def _of_a_subagent(message: dict) -> bool:

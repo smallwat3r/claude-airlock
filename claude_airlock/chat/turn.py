@@ -15,7 +15,7 @@ from ..report import brief
 from ..report.entries import INPUT_TOKENS, content_blocks, measured
 from .console import Page
 from .drift import Drift
-from .said import own
+from .said import NAME_KEPT, keep_open, kept_id, own
 
 # Seconds claude takes no step before a line says that the turn still
 # runs, and the most between two such lines: the wait is doubled after
@@ -40,7 +40,7 @@ class Turn:
     # Whether claude is thinking, as far as it says
     thinking: bool = False
     # The tool of each call claude said it made and has no result of yet,
-    # by the id of the call
+    # by the id of the call, no more of them than MOST_OPEN
     waiting: dict[str, str] = dataclasses.field(default_factory=dict)
     # When claude last took a step: made a call, had its result, or
     # started or ended a block of what it makes
@@ -63,13 +63,14 @@ class Turn:
             if kind == "assistant" and block.get("type") == "tool_use":
                 self.stepped()
                 self.said += 1
-                call = block.get("id")
-                if isinstance(call, str):
-                    self.waiting[call] = flat(block.get("name", "?")).lower()
+                call = kept_id(block.get("id"))
+                if call is not None:
+                    tool = flat(block.get("name", "?")).lower()[:NAME_KEPT]
+                    keep_open(self.waiting, call, tool)
             elif kind == "user" and block.get("type") == "tool_result":
                 self.stepped()
-                call = block.get("tool_use_id")
-                if isinstance(call, str):
+                call = kept_id(block.get("tool_use_id"))
+                if call is not None:
                     self.waiting.pop(call, None)
 
     def piece(self, event: dict) -> None:

@@ -18,8 +18,15 @@ from .drift import Drift
 # Of a list claude gives (its commands, its MCP servers), what is kept
 MOST_LISTED = 1000
 # No more of a name the session gives of itself is kept than this, its
-# model, its mode, its version: they are shown above the prompt
+# model, its mode, its version: they are shown above the prompt. Nor of
+# the name of a tool it called
 NAME_KEPT = 100
+# An id longer than this is none: ids are kept, and a line of claude's can
+# be as long as the session cares to make it
+ID_WIDTH = 200
+# The calls without a result yet that are kept, a session can make any
+# number of them
+MOST_OPEN = 1000
 _COMMAND = re.compile(r"[\w:.-]{1,100}")
 _SESSION_ID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 # What /model says of the model it chose, by the name Claude Code shows
@@ -30,6 +37,20 @@ def is_number(typed: str) -> bool:
     """Whether what was typed is a number as int reads one: isdigit also
     takes digits of other scripts and a superscript, which int refuses."""
     return typed.isascii() and typed.isdigit()
+
+
+def kept_id(value: object) -> str | None:
+    """An id claude gives, of a call or a task, as it is kept: none for
+    what is no text, or is empty or longer than ID_WIDTH."""
+    return value if isinstance(value, str) and 0 < len(value) <= ID_WIDTH else None
+
+
+def keep_open[T](calls: dict[str, T], call: str, kept: T) -> None:
+    """Keep what a call without a result yet is remembered by, under its
+    id, the oldest let go of past MOST_OPEN."""
+    calls[call] = kept
+    while len(calls) > MOST_OPEN:
+        del calls[next(iter(calls))]
 
 
 def is_session_id(value: object) -> bool:

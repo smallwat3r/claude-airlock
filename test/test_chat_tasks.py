@@ -19,6 +19,7 @@ from chat_harness import (
 )
 
 from claude_airlock.chat import console, drift, notices
+from claude_airlock.chat import said as saying
 from claude_airlock.chat import tasks as tasking
 from claude_airlock.report.layout import Layout
 
@@ -276,7 +277,7 @@ class TasksTest:
 
     def test_an_id_that_cannot_be_kept_is_none_and_one_can_change_hands(self):
         started = tasking.Tasks()
-        long = "a" * (tasking.ID_WIDTH + 1)
+        long = "a" * (saying.ID_WIDTH + 1)
         assert started.started(agent_started(long, "Map the code")) is None
         assert started.started(agent_started("", "Map the code")) is None
         assert started.ended(task_over(long)) is None

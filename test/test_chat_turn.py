@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import re
 import time
+import unittest.mock
 
 from chat_harness import page, written
 
 from claude_airlock.chat import console, turn
 from claude_airlock.chat import reply as replying
+from claude_airlock.chat import said as saying
 from claude_airlock.events import Event, Who
 from claude_airlock.report import entries
 from claude_airlock.report.layout import Layout, Styled
@@ -39,6 +41,24 @@ class TurnTest:
         ran.waiting.clear()
         ran.thinking = True
         assert re.search(r"waiting for claude, thinking$", turn.working_line(ran))
+
+    def test_no_more_of_the_calls_waited_for_is_kept_than_so_much(self):
+        ran = turn.Turn(time.monotonic())
+
+        def called(call: str, tool: str = "Bash") -> None:
+            block = {"type": "tool_use", "id": call, "name": tool, "input": {}}
+            ran.heard(message("assistant", block))
+
+        # An id that is too long to keep is no id, a name is cut
+        called("x" * (saying.ID_WIDTH + 1))
+        called("t1", "N" * 1000)
+        assert ran.waiting == {"t1": "n" * saying.NAME_KEPT}
+        # The oldest let go of, past so many
+        with unittest.mock.patch.object(saying, "MOST_OPEN", 2):
+            for call in ("t2", "t3"):
+                called(call)
+        assert list(ran.waiting) == ["t2", "t3"]
+        assert ran.said == 4
 
     def test_one_turn_runs_at_a_time(self):
         turns = turn.Turns()
@@ -297,11 +317,16 @@ class ReplyTest:
         started = time.monotonic()
         for line in crafted:
             assert len(replying.reply_lines("\n".join([line] * 50), 80, True)) >= 50
-        # And a line that comes in any number of pieces
-        writer = replying.ReplyWriter(80, True)
+        # And a line that comes in any number of pieces, never held whole:
+        # given back a part at a time, all of it
+        writer = replying.ReplyWriter(None, False)
+        parts = []
         for _ in range(200_000):
-            assert writer.feed("x" * 20) == []
-        assert len(writer.end()) == 1
+            for part in writer.feed("x" * 20):
+                assert len(part) <= replying.LONGEST_HELD + 20
+                parts.append(part)
+        parts += writer.end()
+        assert "".join(parts) == "x" * 4_000_000
         assert time.monotonic() - started < 30
 
     def test_in_a_file_a_reply_is_written_once_it_is_whole(self):

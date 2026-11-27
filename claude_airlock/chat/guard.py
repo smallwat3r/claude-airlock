@@ -19,10 +19,11 @@ from ..events import clean, labelled
 from ..report.entries import block_text, content_blocks
 from ..report.outcomes import read_source, result_planted, said_source
 from ..report.planted import Planted
+from .said import NAME_KEPT, keep_open, kept_id
 
-# The calls without a result yet whose tool is remembered, what claude
-# says is the session's to write
-MOST_OPEN = 10_000
+# Of where a call reads from that is kept to be said, see said_source: a
+# command can be of any length
+SOURCE_WIDTH = 1000
 # The signs the user went on with that are remembered, each with where
 # it was read
 MOST_ACCEPTED = 10_000
@@ -92,7 +93,7 @@ class Guard:
     place a sign is at, not what came to be written after that."""
 
     def __init__(self) -> None:
-        # Each call that has no result yet, by its id
+        # Each call that has no result yet, by its id, see keep_open
         self._calls: dict[str, Called] = {}
         # Whether the user is asked, or about to be, if claude goes on
         # with what the turns were stopped for
@@ -146,14 +147,16 @@ class Guard:
             self._asking = False
 
     def _called(self, block: dict) -> None:
-        """Remember a call until its result is given, the oldest gone
-        for it when there are more than MOST_OPEN."""
-        tool, given = str(block.get("name")), block.get("input")
-        self._calls[str(block.get("id"))] = Called(
-            tool, _source_of(tool, given), said_source(given)
-        )
-        while len(self._calls) > MOST_OPEN:
-            del self._calls[next(iter(self._calls))]
+        """Remember a call until its result is given, see keep_open. Not
+        one whose id cannot be kept: its result is looked at as that of a
+        call that was not seen. Its tool no longer than a name is kept,
+        a longer one is of no tool whose result is passed over."""
+        call = kept_id(block.get("id"))
+        if call is None:
+            return
+        tool, given = str(block.get("name"))[:NAME_KEPT], block.get("input")
+        said = said_source(given)[:SOURCE_WIDTH]
+        keep_open(self._calls, call, Called(tool, _source_of(tool, given), said))
 
     def _given(self, block: dict) -> tuple[Planted, ...]:
         """The signs in the result of a call that a turn is stopped for,

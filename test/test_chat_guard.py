@@ -9,6 +9,7 @@ from chat_harness import RecordedClaude, a_chat, written
 from harness import LauncherTest
 
 from claude_airlock.chat import guard as guarding
+from claude_airlock.chat import said as saying
 from claude_airlock.chat import talk
 from claude_airlock.report.planted import planted
 from claude_airlock.settings import Settings
@@ -42,6 +43,25 @@ class GuardTest(LauncherTest):
         # Nor does what the session wrote itself
         guard.heard(self.called("c4", "Write"))
         assert guard.heard(self.given("c4", self.FORGED)) == ()
+
+    def test_no_more_of_a_call_is_kept_than_so_much(self):
+        guard = guarding.Guard()
+        # An id too long to keep: its result is looked at as that of a
+        # call that was not seen, of any tool
+        long = "c" * (saying.ID_WIDTH + 1)
+        guard.heard(self.called(long, "Write"))
+        assert guard._calls == {}
+        assert guard.heard(self.given(long, self.FORGED)) != ()
+        # A name and where it reads from no longer than so much
+        asked = self.called("c1", "R" * 1000)
+        asked["message"]["content"][0]["input"] = {"url": "https://a/" + "x" * 5000}
+        guard.heard(asked)
+        kept = guard._calls["c1"]
+        assert kept.tool == "R" * saying.NAME_KEPT
+        assert len(kept.said) == guarding.SOURCE_WIDTH
+        with unittest.mock.patch.object(saying, "MOST_OPEN", 1):
+            guard.heard(self.called("c2"))
+        assert list(guard._calls) == ["c2"]
 
     def read(self, guard: guarding.Guard, output: str, **given: object) -> list[str]:
         """The signs a turn is stopped for when a file or a page is read."""
