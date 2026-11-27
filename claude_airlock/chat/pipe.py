@@ -180,7 +180,11 @@ class Agent:
                 pipe.write(line)
                 pipe.flush()
             except (OSError, ValueError):
-                # One that has ended: nothing more is said to it
+                # One that has ended: nothing more is said to it. Closed
+                # here, what is left in its buffer with it: else written
+                # when the chat ends, and said to have failed then
+                with contextlib.suppress(OSError, ValueError):
+                    pipe.close()
                 return
 
     def _read(self) -> None:

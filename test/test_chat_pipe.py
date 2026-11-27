@@ -67,6 +67,18 @@ class PipeTest:
             with pytest.raises(Fatal, match=said):
                 pipe.Agent(["run", "img"], lambda: None, run)
 
+    def test_a_session_that_reads_no_more_has_what_it_is_told_let_go_of(self):
+        # Written when the chat ends, it would be said to have failed then
+        with played(sys.executable, "-c", "pass") as agent:
+            agent._process.wait(PATIENCE)
+            agent.prompt("x" * 100_000)
+            stdin = agent._process.stdin
+            assert stdin is not None
+            deadline = time.monotonic() + PATIENCE
+            while not stdin.closed and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert stdin.closed
+
     def test_what_waits_to_be_taken_in_is_bounded_by_its_size_too(self):
         backlog = pipe.Backlog(most=3, most_bytes=100)
         backlog.put("a", 60)
