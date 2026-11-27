@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
@@ -74,10 +75,13 @@ class WatcherTest:
                 with socket.create_connection(server.getsockname()) as client:
                     port = client.getsockname()[1]
                     key = (port, "127.0.0.1", server.getsockname()[1])
-                    found, _ = procwatch.sockets()
-                    assert key in found
-                    holders = procwatch.Holders().of({found[key]}, [os.getpid()])
-                    assert holders == {found[key]: [os.getpid()]}
+                    found, waiting, _ = procwatch.sockets()
+                    # Not one on the session's own loopback, which nothing
+                    # asks who made: the one that waits is there
+                    assert key not in found
+                    inode = waiting[(server.getsockname()[1], "127.0.0.1", 0)]
+                    holders = procwatch.Holders().of({inode}, [os.getpid()])
+                    assert holders == {inode: [os.getpid()]}
                 out = io.StringIO()
                 procwatch.Watch(out).look()
                 seen = [json.loads(line) for line in out.getvalue().splitlines()]
@@ -240,12 +244,45 @@ class WatcherTest:
         assert before <= first <= second <= time.monotonic()
 
     @reads_proc
+    def test_no_more_sockets_are_kept_than_so_many_and_that_is_said(
+        self, tmp_path: Path
+    ):
+        heading = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when"
+        rows = [
+            f"   {at}: 0500140A:{at + 1024:04X} 0971CBC6:01BB 01 0:0 0:0 0 0 0 {at + 1}"
+            for at in range(5)
+        ]
+        loopback = "   9: 0100007F:1F40 0100007F:9C40 01 0:0 0:0 0 0 0 99"
+        table = tmp_path / "tcp"
+        table.write_text("\n".join([heading, *rows, loopback]) + "\n")
+        tables = [str(table), str(tmp_path / "none")]
+        found = procwatch.sockets(tables)
+        with mock.patch.object(procwatch, "MOST_SOCKETS", 3):
+            cut = procwatch.sockets(tables)
+        # Not the connection on loopback, kept or not
+        assert (len(found.connected), found.passed_over) == (5, False)
+        assert (len(cut.connected), cut.passed_over) == (3, True)
+        out = io.StringIO()
+        watch = procwatch.Watch(out)
+        with (
+            mock.patch.object(procwatch, "sockets", lambda: cut),
+            mock.patch.object(watch, "_look_at_processes"),
+        ):
+            watch.look()
+            watch.look()
+        notes = [json.loads(line).get("note") for line in out.getvalue().splitlines()]
+        assert notes.count("too many sockets") == 1
+        record = noted({"t": 1.0, "note": "too many sockets"})
+        assert record.too_many_sockets
+        said = net_events.watched_summary(record, False)
+        assert any("NOT LOOKED FOR" in line for line in said)
+
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))
             server.listen(1)
             port = server.getsockname()[1]
-            connected, waiting = procwatch.sockets()
+            connected, waiting, _ = procwatch.sockets()
             assert (port, "127.0.0.1", 0) in waiting
             assert port not in [key[0] for key in connected]
             out = io.StringIO()
@@ -256,10 +293,15 @@ class WatcherTest:
         ours = [line for line in seen if line.get("listen") == port]
         assert [line["on"] for line in ours] == ["127.0.0.1"]
 
-    def holding(self, out: io.StringIO) -> procwatch.Watch:
+    def holding(
+        self,
+        out: io.StringIO,
+        read_process: Callable[[int], procwatch.ProcessRead | None] = lambda _: None,
+    ) -> procwatch.Watch:
         """A watcher that knows of a shell, of curl started by it, and
-        finds curl to hold whatever socket it is asked about."""
-        watch = procwatch.Watch(out)
+        finds curl to hold whatever socket it is asked about. Nothing is
+        read of the processes of this machine, but by read_process."""
+        watch = procwatch.Watch(out, read_process)
         watch._processes = {
             640: (("1", "/bin/bash", ["bash"]), 0.0, 0.0),
             812: (("2", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
@@ -267,6 +309,26 @@ class WatcherTest:
         watch._parents = {640: 1, 812: 640}
         watch._holders.of = lambda inodes, pids: {inode: [812] for inode in inodes}  # type: ignore[method-assign]
         return watch
+
+    def test_a_holder_that_became_another_program_is_looked_at_again(self):
+        # A helper long past its first looks waits, then becomes curl and
+        # connects before the next one: the connection is put on curl
+        out, aloud = io.StringIO(), io.StringIO()
+        became = ("2", 640, "/usr/bin/curl", ["curl", "-T", "secrets.tar"])
+        watch = self.holding(out, lambda pid: became if pid == 812 else None)
+        waiting = ("2", "/bin/sh", ["sh", "-c", "sleep 3; exec curl"])
+        watch._processes[812] = (waiting, 0.0, time.monotonic())
+        with mock.patch.object(sys, "stdout", aloud):
+            watch._look_at_processes([812], time.monotonic())
+            assert out.getvalue() == ""
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+        noted = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line.get("exe") or line.get("port") for line in noted][:2] == [
+            "/usr/bin/curl",
+            40212,
+        ]
+        said = [json.loads(line) for line in aloud.getvalue().splitlines()]
+        assert said[0]["argv"] == ["curl", "-T", "secrets.tar"]
 
     def test_who_holds_a_connection_is_said_aloud_with_those_it_comes_from(self):
         out, aloud = io.StringIO(), io.StringIO()

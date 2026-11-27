@@ -57,6 +57,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Sequence
+from typing import NamedTuple
 
 # Seconds between two looks
 INTERVAL = 0.04
@@ -70,7 +71,9 @@ INTERVAL = 0.04
 SLOW = 3 * INTERVAL
 SLOW_EVERY = 10.0
 # A process is looked at each time while it is this young, it is as a rule
-# right after it was made that it becomes another program, then this often
+# right after it was made that it becomes another program, then this often.
+# And each time it holds a socket that is new, before that is said: a
+# process can wait for longer, then become another program and connect
 YOUNG = 2.0
 SETTLED_EVERY = 0.5
 # What is kept of a command line: so many arguments, of so many characters
@@ -151,6 +154,9 @@ class Note(enum.StrEnum):
     # Said aloud alone, as the last of what is said there of connections
     # and their processes, see MOST_ALOUD: the record has the rest
     HUSHED = "hushed"
+    # There were more sockets at once than are kept, see MOST_SOCKETS: the
+    # processes of the rest were not looked for
+    TOO_MANY_SOCKETS = "too many sockets"
 
 
 def _take_identity(uid: int, gid: int) -> None:
@@ -173,12 +179,17 @@ def _take_identity(uid: int, gid: int) -> None:
         raise OSError(ctypes.get_errno(), "could not drop the capabilities")
 
 
+# What a process is as it is read, see process: when it started, its
+# parent, its program and its command line
+ProcessRead = tuple[str, int, str, list[str]]
+
+
 def read(path: str) -> bytes:
     with open(path, "rb") as file:
         return file.read()
 
 
-def process(pid: int) -> tuple[str, int, str, list[str]] | None:
+def process(pid: int) -> ProcessRead | None:
     """When a process started (in ticks, only good to compare), its
     parent, its program and its command line, none for one that is gone."""
     try:
@@ -229,41 +240,80 @@ def address(encoded: str) -> str:
 
 
 Sockets = dict[tuple[int, str, int], str]
+# No more sockets of each kind are kept from one look than this: some 300
+# bytes each, and a session can open as many as it likes
+MOST_SOCKETS = 20_000
 
 
-def sockets() -> tuple[Sockets, Sockets]:
+class Tables(NamedTuple):
+    """The TCP sockets of one look, see sockets: the connections, those
+    that wait for one, and whether some were passed over for being more
+    than MOST_SOCKETS."""
+
+    connected: Sockets
+    waiting: Sockets
+    passed_over: bool
+
+
+def _socket(line: str) -> tuple[tuple[int, str, int], str, bool] | None:
+    """A socket as a line of /proc/net/tcp or tcp6 has it: by its own
+    port, the address and the port at the other end, or for one that
+    waits for connections its port and the address it waits on, then its
+    inode and whether it waits. None for a line that says none, or one
+    that was let go of."""
+    parts = line.split()
+    try:
+        local, remote, state, inode = parts[1], parts[2], parts[3], parts[9]
+        on, port = local.rsplit(":", 1)
+        to, to_port = remote.rsplit(":", 1)
+        waits = state == TCP_LISTEN
+        if waits:
+            key = (int(port, 16), address(on), 0)
+        else:
+            key = (int(port, 16), address(to), int(to_port, 16))
+    except (IndexError, ValueError):
+        return None
+    if inode == "0":
+        # Let go of
+        return None
+    return key, inode, waits
+
+
+# Where the kernel lists the TCP sockets of the network namespace
+TCP_TABLES = ("/proc/net/tcp", "/proc/net/tcp6")
+
+
+def sockets(tables: Sequence[str] = TCP_TABLES) -> Tables:
     """The TCP sockets of the network namespace, each with its inode, from
-    one read of each table, the kernel takes its time over them: the
-    connections, each by its own port, the address and the port at the
-    other end, and the sockets that wait for connections, each by its port
-    and the address it waits on."""
+    one read of each table, the kernel takes its time over them, a line at
+    a time: the connections, each by its own port, the address and the
+    port at the other end, and the sockets that wait for connections, each
+    by its port and the address it waits on. Not the connections on the
+    session's own loopback, which nothing asks who made (see
+    _look_at_connections), and no more of each kind than MOST_SOCKETS."""
     connected: Sockets = {}
     waiting: Sockets = {}
-    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+    passed_over = False
+    for table in tables:
         try:
-            lines = read(table).decode("ascii", "replace").splitlines()[1:]
+            with open(table, encoding="ascii", errors="replace") as lines:
+                # Its heading
+                next(lines, None)
+                for line in lines:
+                    found = _socket(line)
+                    if found is None:
+                        continue
+                    key, inode, waits = found
+                    kept = waiting if waits else connected
+                    if not waits and not _watched(key):
+                        continue
+                    if len(kept) >= MOST_SOCKETS:
+                        passed_over = True
+                        continue
+                    kept[key] = inode
         except OSError:
             continue
-        for line in lines:
-            parts = line.split()
-            try:
-                local, remote, state, inode = parts[1], parts[2], parts[3], parts[9]
-                on, port = local.rsplit(":", 1)
-                to, to_port = remote.rsplit(":", 1)
-                if state == TCP_LISTEN:
-                    key = (int(port, 16), address(on), 0)
-                else:
-                    key = (int(port, 16), address(to), int(to_port, 16))
-            except (IndexError, ValueError):
-                continue
-            if inode == "0":
-                # Let go of
-                continue
-            if state == TCP_LISTEN:
-                waiting[key] = inode
-            elif key[2]:
-                connected[key] = inode
-    return connected, waiting
+    return Tables(connected, waiting, passed_over)
 
 
 def limit_hits(pid: int, root: str = "/proc") -> int | None:
@@ -320,6 +370,15 @@ def _session_tmpfs(mounts: str) -> list[str]:
         if not kernels and "\\" not in place:
             found.append(place)
     return found[:MOST_TMPFS]
+
+
+def _watched(connection: tuple[int, str, int]) -> bool:
+    """Whether a connection is one the processes of are looked for: one
+    with another end, and not on the session's own loopback, which no
+    capture has, so nothing asks who made it, and of which a session can
+    make as many as it likes without the network."""
+    _, to, to_port = connection
+    return bool(to_port) and not _is_loopback(to)
 
 
 def _is_loopback(address: str) -> bool:
@@ -612,7 +671,9 @@ class Holders:
 
 
 class Watch:
-    def __init__(self, out) -> None:
+    def __init__(
+        self, out, read_process: Callable[[int], ProcessRead | None] = process
+    ) -> None:
         self._out = out
         self._written = 0
         # Whether the processes have used up their part of the record,
@@ -621,6 +682,8 @@ class Watch:
         self._ended = False
         # Not itself, nor what started it
         self._own = {os.getpid(), os.getppid()}
+        # What reads a process, see process
+        self._process_of = read_process
         # Each process seen: what it was, when it was first seen and when
         # it was last looked at
         self._processes: dict[int, tuple[tuple, float, float]] = {}
@@ -637,6 +700,8 @@ class Watch:
         self._tries: dict[tuple[int, str, int], int] = {}
         self._holders = Holders()
         self._said_unreadable = False
+        # Whether it was said that the sockets were more than are kept
+        self._said_too_many = False
         # How often the limit of processes was run into as last noted,
         # and when that was last looked at
         self._limit_hits = 0
@@ -751,7 +816,9 @@ class Watch:
             if name.isdigit() and int(name) not in self._own
         ]
         self._look_at_processes(pids, now)
-        connected, waiting = sockets()
+        connected, waiting, passed_over = sockets()
+        if passed_over:
+            self._passed_over()
         self._look_at_connections(connected, pids)
         self._look_at_listeners(waiting, pids)
         if now - self._beat >= HEARTBEAT_EVERY:
@@ -761,6 +828,13 @@ class Watch:
             self._limits_seen = now
             self._look_at_limits(pids)
             self._health.look(pids, now)
+
+    def _passed_over(self) -> None:
+        """Note once that there were more sockets than are kept, see
+        MOST_SOCKETS."""
+        if not self._said_too_many:
+            self._said_too_many = True
+            self.note(reserved=True, note=Note.TOO_MANY_SOCKETS)
 
     def _keep_pace(self, now: float) -> None:
         """Note that looks came late, see SLOW, by when this one begins:
@@ -794,18 +868,34 @@ class Watch:
                 _, first, last = known
                 if now - first > YOUNG and now - last < SETTLED_EVERY:
                     continue
-            found = process(pid)
-            if found is None:
-                continue
-            started, parent, program, argv = found
-            # A process is another one when it started at another time,
-            # and another program when it runs something else
-            what = (started, program, argv)
-            if not known or known[0] != what:
-                self.note(pid=pid, ppid=parent, exe=program, argv=argv)
-                known = (what, now, now)
-            self._processes[pid] = (what, known[1], now)
-            self._parents[pid] = parent
+            self._look_at_process(pid, now)
+
+    def _look_at_process(self, pid: int, now: float) -> None:
+        """Note a process when it is new, or has become another program
+        since it was last looked at."""
+        known = self._processes.get(pid)
+        found = self._process_of(pid)
+        if found is None:
+            return
+        started, parent, program, argv = found
+        # A process is another one when it started at another time,
+        # and another program when it runs something else
+        what = (started, program, argv)
+        if not known or known[0] != what:
+            self.note(pid=pid, ppid=parent, exe=program, argv=argv)
+            known = (what, now, now)
+        self._processes[pid] = (what, known[1], now)
+        self._parents[pid] = parent
+
+    def _looked_at_again(self, held_by: list[int]) -> None:
+        """Look again at the processes that hold a socket, before it is
+        said who holds it: one that is not young any more is looked at
+        no more than every SETTLED_EVERY seconds, and can have become the
+        program that made the connection since, by an exec of a helper
+        that waited for that."""
+        now = time.monotonic()
+        for pid in held_by:
+            self._look_at_process(pid, now)
 
     def _look_at_connections(self, current: Sockets, pids: list[int]) -> None:
         """Note each new connection with the processes that hold it. One
@@ -813,12 +903,8 @@ class Watch:
         time. After MOST_TRIES it is noted without one: it is there all
         the same, held by a process that cannot be looked into, which a
         process can make itself, and a connection must not go without a
-        word for that. Not one on the session's own loopback: no capture
-        has it, so nothing asks who made it, and a session can make as
-        many as it likes without the network."""
-        current = {
-            key: inode for key, inode in current.items() if not _is_loopback(key[1])
-        }
+        word for that. Only those that are watched, see _watched."""
+        current = {key: inode for key, inode in current.items() if _watched(key)}
         self._connections &= current.keys()
         self._tries = {key: n for key, n in self._tries.items() if key in current}
         new = {
@@ -835,6 +921,7 @@ class Watch:
                     continue
             self._connections.add(key)
             port, to, to_port = key
+            self._looked_at_again(held_by)
             self._say_who(held_by)
             self.note(
                 reserved=True,
@@ -878,6 +965,7 @@ class Watch:
             port, on, _ = key
             held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
             reachable = not _is_loopback(on)
+            self._looked_at_again(held_by)
             if reachable:
                 self._say_who(held_by)
             self.note(

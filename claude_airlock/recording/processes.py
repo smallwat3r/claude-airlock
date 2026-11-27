@@ -308,8 +308,10 @@ class ProcessRecord:
     # of it was ended for want of memory, see health.py
     samples: list[Sample] = field(default_factory=list)
     ended: list[Ended] = field(default_factory=list)
-    # Whether it could not see which process holds a socket
+    # Whether it could not see which process holds a socket, and whether
+    # there were more sockets than it keeps, of which it looked for none
     unreadable: bool = False
+    too_many_sockets: bool = False
     # Each time it said that its looks came late, in the order it did
     slowed: list[Slowed] = field(default_factory=list)
     # When the watcher got to watch, none for one that did not, and when
@@ -366,6 +368,7 @@ class ProcessRecord:
     def _note(self, when: float, said: dict) -> None:
         note = said["note"]
         self.unreadable |= note == Note.UNREADABLE
+        self.too_many_sockets |= note == Note.TOO_MANY_SOCKETS
         # Each as first said, should a line say it again
         if note == Note.FULL and self.full_at is None:
             self.full_at = when

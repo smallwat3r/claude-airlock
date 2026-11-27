@@ -605,6 +605,11 @@ def watched_summary(
         lines.append(f"  {slowed(record)}")
     if record.unreadable:
         lines.append("  which process made a connection could not be seen")
+    if record.too_many_sockets:
+        lines.append(
+            "  more sockets were open at once than the watcher keeps: which"
+            " process made the connections past those was NOT LOOKED FOR"
+        )
     return lines + health_summary(record.samples, record.ended)
 
 

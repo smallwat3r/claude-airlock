@@ -646,7 +646,12 @@ the session that is over has them all.
 
 With `--verbose` every process is a line of its own (`exec`). The sidecar
 looks 25 times a second, so a process that lived shorter than that can be
-missed. The session can neither stop it nor reach its record. A sidecar
+missed. A process older than two seconds is looked at twice a second, and
+again whenever it holds a connection that is new: one that becomes
+another program and connects is the program it became. More than 20,000
+sockets open at once are more than it keeps: which process made a
+connection past those is not looked for, and the header says so. The
+session can neither stop it nor reach its record. A sidecar
 that ended or hung before its session did is said in the header, with
 when it was last heard, as `INCOMPLETE`: what ran later is missing.
 `--follow` and line mode say so too, once it has been silent for more
