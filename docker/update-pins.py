@@ -239,6 +239,26 @@ def pin_terraform_ls(pins: Pins) -> None:
     pin_hashicorp(pins, "terraform-ls", "TERRAFORM_LS")
 
 
+# The keys of the apt repositories of their vendors, by the ARG that pins
+# each: the packages are not pinned, the key they are signed with is
+KEYRINGS = {
+    "GH_KEYRING_SHA256": "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
+    "DOCKER_KEYRING_SHA256": "https://download.docker.com/linux/debian/gpg",
+}
+
+
+def pin_keyring(arg: str) -> Callable[[Pins], None]:
+    """A pinner that sets the ARG to the checksum of its keyring as it is
+    now."""
+
+    def pin(pins: Pins) -> None:
+        sha = fetch_sha256(KEYRINGS[arg])
+        pins.set_arg(arg, sha)
+        print(arg, sha)
+
+    return pin
+
+
 def pin_uv(pins: Pins) -> None:
     uv = plain(github_latest_tag("astral-sh/uv"), "uv")
     pins.substitute(r"astral-sh/uv:[0-9.]+", f"astral-sh/uv:{uv}", "uv")
@@ -332,6 +352,7 @@ PINNERS: list[tuple[str, Callable[[Pins], None]]] = [
     (r"astral-sh/uv:[0-9.]+", pin_uv),
     *((arg_marker(arg), pin_npm(packages)) for arg, packages in NPM_PINS.items()),
     (arg_marker("GOPLS_VERSION"), pin_gopls),
+    *((arg_marker(arg), pin_keyring(arg)) for arg in KEYRINGS),
     (PYPI_PIN, pin_pypi),
     (IMAGE_REF, pin_digests),
     (ACTION_PIN, pin_actions),

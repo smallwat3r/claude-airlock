@@ -89,3 +89,8 @@ without a plugin being enabled on the host. The `python`, `go`, `cpp`,
 ```
 docker/update-pins.py
 ```
+
+- Debian packages are not pinned, they follow the release of the pinned
+  base image. Nor are `gh` and `docker-ce-cli`, which come from the apt
+  repositories of GitHub and Docker: the keys those are signed with are
+  pinned by checksum, the versions are their latest.

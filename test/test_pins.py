@@ -5,6 +5,8 @@ into the Dockerfiles and the launcher's own code."""
 from __future__ import annotations
 
 import importlib.util
+import re
+from pathlib import Path
 
 import pytest
 from harness import ROOT
@@ -49,3 +51,38 @@ def test_a_pin_is_set_where_it_is_and_no_other_is_written(tmp_path):
     with pytest.raises(SystemExit):
         held.set_arg("GO_VERSION", "go1\nRUN id")
     assert held.texts[file] == "ARG GO_VERSION=go1.27.4\nRUN true\n"
+
+
+DOCKERFILES = sorted((ROOT / "docker").glob("**/*.Dockerfile"))
+# A download, into a file
+DOWNLOAD = re.compile(r"\bcurl -fsSL \S+\s+-o (\S+) ")
+
+
+def instructions(path: Path) -> list[str]:
+    """The instructions of a Dockerfile, each on a line of its own."""
+    return path.read_text().replace("\\\n", " ").splitlines()
+
+
+def test_every_download_of_the_image_is_checked_by_its_checksum():
+    downloaded = []
+    for path in DOCKERFILES:
+        for instruction in instructions(path):
+            # Nothing fetched any other way, a pipe into a shell among them
+            assert instruction.count("curl -") == len(DOWNLOAD.findall(instruction))
+            for download in DOWNLOAD.finditer(instruction):
+                file = download[1]
+                after = instruction[download.end() :]
+                checked = rf"{re.escape(file)}[^|&]*\| sha256sum -c -"
+                assert re.search(checked, after), f"{path.name}: {file} is not checked"
+                downloaded.append(file)
+    # The keyrings of the apt repositories among them
+    assert len(downloaded) >= len(pins.KEYRINGS)
+
+
+def test_the_checksum_of_each_keyring_is_refreshed():
+    texts = "".join(path.read_text() for path in DOCKERFILES)
+    markers = [marker for marker, _ in pins.PINNERS]
+    for arg, url in pins.KEYRINGS.items():
+        assert re.search(rf"(?m)^ARG {arg}=[0-9a-f]{{64}}$", texts)
+        assert url in texts
+        assert pins.arg_marker(arg) in markers

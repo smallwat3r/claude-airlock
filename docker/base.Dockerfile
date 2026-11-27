@@ -13,7 +13,9 @@
 #
 # Every image, download and Python package is pinned, refresh them all with
 # update-pins.py. Debian packages are not: apt drops old versions from its
-# mirrors, so they follow the pinned base image's release instead.
+# mirrors, so they follow the pinned base image's release instead. Nor are
+# gh and docker-ce-cli, which follow their vendors' repositories, signed by
+# keys that are pinned.
 #
 # claude-feat-md: Python 3 with uv
 # claude-feat-md: Node.js and npm/npx, gcc/g++/make/pkg-config
@@ -28,10 +30,14 @@ FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb22
 # silently move the image to another release
 FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1
 
+# The key the GitHub CLI repository is signed with
+ARG GH_KEYRING_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && printf '%s  %s\n' "${GH_KEYRING_SHA256}" \
+    /usr/share/keyrings/githubcli-archive-keyring.gpg | sha256sum -c - \
     && echo "deb [arch=$(dpkg --print-architecture) \
     signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
     https://cli.github.com/packages stable main" \
