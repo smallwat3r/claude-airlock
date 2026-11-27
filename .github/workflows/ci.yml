@@ -48,6 +48,32 @@ jobs:
       # Every feature must assemble into the generated Dockerfile
       - run: uv run --locked --no-default-groups python bin/claude-airlock --dockerfile | grep -q '^ENTRYPOINT'
 
+  # setup-uv's Pythons are built with editline, on Linux as on macOS.
+  # actions/setup-python's links GNU readline, which line mode reads lines
+  # with where the host's Python has it, and which it handles otherwise
+  # (see the end of what claude_airlock/chat/console.py says of itself).
+  test-readline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # That Python or none, never one uv would fetch in its place
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - run: echo "UV_PYTHON=$PYTHON" >> "$GITHUB_ENV"
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+      # Fails the leg should it ever run editline after all
+      - run: uv run --locked --no-default-groups python -c 'import readline, sys; sys.exit(readline.backend != "readline")'
+      - run: uv run --locked --no-default-groups --group test pytest
+
   build:
     runs-on: ubuntu-latest
     steps:
