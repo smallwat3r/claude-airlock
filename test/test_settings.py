@@ -6,6 +6,7 @@ what a session is told of them."""
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 from pathlib import Path
 
@@ -119,3 +120,33 @@ class SettingsListTest(LauncherTest):
         }
         assert {"CLAUDE_AIRLOCK_PROTECT", "CLAUDE_AIRLOCK_DIRS"} <= given
         assert given - {"CLAUDE_AIRLOCK_SANDBOX"} <= set(NAMED.findall(told))
+
+
+class WorkingDirectoryTest:
+    """A working directory the launcher cannot name its records by is
+    said in a line."""
+
+    def test_one_that_was_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        with pytest.raises(errors.Fatal, match="the working directory was removed"):
+            settings.detect_host({"HOME": str(tmp_path)})
+
+    def test_one_whose_path_is_no_utf8(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        odd = os.path.join(os.fsencode(tmp_path), b"caf\xe9")
+        try:
+            os.mkdir(odd)
+        except OSError:
+            pytest.skip("the filesystem takes no name that is not UTF-8")
+        monkeypatch.chdir(os.fsdecode(odd))
+        monkeypatch.delenv("PWD", raising=False)
+        with pytest.raises(
+            errors.Fatal, match=r"project is not UTF-8, rename it: .*caf\\xe9$"
+        ):
+            settings.detect_host({"HOME": str(tmp_path)})

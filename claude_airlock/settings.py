@@ -257,8 +257,14 @@ class Host:
 
 def _logical_cwd() -> str:
     """The working directory as the shell shows it, symlinks unresolved, so
-    the project is mounted at the path the user and their editor refer to."""
-    cwd = os.getcwd()
+    the project is mounted at the path the user and their editor refer to.
+    Fatal for one that is gone."""
+    try:
+        cwd = os.getcwd()
+    except FileNotFoundError:
+        raise Fatal(
+            "the working directory was removed, start from one that is there"
+        ) from None
     pwd = os.environ.get("PWD", "")
     try:
         if os.path.isabs(pwd) and os.path.samefile(pwd, cwd):
@@ -268,11 +274,26 @@ def _logical_cwd() -> str:
     return cwd
 
 
+def _project_path(path: str) -> str:
+    """The path of a project, Fatal for one that is no UTF-8: the launcher
+    names its records by the path as text, and docker and Claude Code
+    take it as such."""
+    try:
+        path.encode()
+    except UnicodeEncodeError:
+        # Its bytes, as they are: those that are no UTF-8 by their number
+        shown = os.fsencode(path).decode(errors="backslashreplace")
+        raise Fatal(
+            f"the path of the project is not UTF-8, rename it: {shown}"
+        ) from None
+    return path
+
+
 def detect_host(env: Mapping[str, str]) -> Host:
     home = env.get("HOME") or str(Path.home())
     return Host(
         home=home,
-        project_dir=_logical_cwd(),
+        project_dir=_project_path(_logical_cwd()),
         config_home=env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
         state_home=env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
     )
