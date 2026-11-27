@@ -277,6 +277,7 @@ class WatcherTest:
         said = net_events.watched_summary(record, False)
         assert any("NOT LOOKED FOR" in line for line in said)
 
+    @reads_proc
     def test_a_socket_that_waits_for_connections_is_noted_once(self):
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))
