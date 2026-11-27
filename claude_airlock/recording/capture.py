@@ -155,13 +155,16 @@ def _http_methods(load: str) -> str:
 
 # No packet is in two parts: what goes to and from the resolver's address
 # is the resolver part's alone. Of port 53 anywhere else, what starts and
-# ends a connection is the TCP part's, as of any port, and the rest the
-# part's of what is asked there directly. The reader would take a packet
-# it is given twice for one sent twice.
+# ends a connection and carries nothing is the TCP part's, as of any port,
+# and the rest the part's of what is asked there directly: a message over
+# TCP comes in as many packets as its sender likes, and is read from them
+# in their turn, the last too when it ends the connection. The reader
+# would take a packet it is given twice for one sent twice.
 _NOT_RESOLVER = f"not host {RESOLVER}"
 _NOT_DNS = f"not port 53 and {_NOT_RESOLVER}"
+_DNS_CARRIED = f"port 53 and ((ip and {_CARRIES}) or ({_TCP6} and {_CARRIES6}))"
 TCP_FILTER = (
-    f"{_NOT_RESOLVER} and ("
+    f"{_NOT_RESOLVER} and not ({_DNS_CARRIED}) and ("
     # What starts, answers or ends a connection, but for the session's
     # own within itself
     f"({_ENDS} and not dst net 127.0.0.0/8)"
@@ -187,10 +190,13 @@ TCP_FILTER = (
 DNS_FILTER = f"host {RESOLVER}"
 # What goes to and from port 53 anywhere but at the resolver: a server
 # asked directly, over UDP or over TCP, or whatever else a session sends
-# there. All of it but what starts and ends a connection, which the TCP
-# part has: when this one is at its limit, the connections to port 53 are
-# still recorded.
-DIRECT_FILTER = f"port 53 and {_NOT_RESOLVER} and not ({_ENDS}) and not {_ENDS6}"
+# there. All of it but what starts and ends a connection and carries
+# nothing, which the TCP part has: when this one is at its limit, the
+# connections to port 53 are still recorded.
+DIRECT_FILTER = (
+    f"port 53 and {_NOT_RESOLVER} and"
+    f" ((not ({_ENDS}) and not {_ENDS6}) or ({_DNS_CARRIED}))"
+)
 # Whatever the session sends that is not TCP: UDP, a ping, anything else
 # over IP. There a connection has no start to pick out.
 FLOWS_FILTER = (

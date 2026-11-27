@@ -10,9 +10,10 @@ from __future__ import annotations
 import bisect
 import math
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from ..reader import NotThis
-from .packets import RESOLVER, Packet, Protocol, is_loopback
+from .packets import RESOLVER, Packet, Protocol, TcpFlag, is_loopback
 from .payloads import Lookup, dns_message, unanswered
 
 # What a lookup is flagged for: a name or one label of it longer than
@@ -120,6 +121,33 @@ def is_dns(packet: Packet) -> bool:
     )
 
 
+class Stream(NamedTuple):
+    """One way of a connection of TCP, by where it is from and where it
+    goes."""
+
+    source: str
+    source_port: int
+    destination: str
+    port: int
+
+    @classmethod
+    def of(cls, packet: Packet) -> Stream:
+        return cls(packet.source, packet.source_port, packet.destination, packet.port)
+
+    @property
+    def back(self) -> Stream:
+        """The other way of the same connection."""
+        return Stream(self.destination, self.port, self.source, self.source_port)
+
+
+class Held(NamedTuple):
+    """The start of a DNS message over TCP whose rest has not come, and
+    the sequence number the rest starts at."""
+
+    data: bytes
+    goes_on_at: int
+
+
 @dataclass
 class Lookups:
     """The DNS messages of a capture as they are taken in, a packet at a
@@ -138,9 +166,7 @@ class Lookups:
     cut: int = 0
     # The start of a DNS message over TCP whose rest has not come, by
     # where it is from and where it goes, see DNS_MOST_HELD
-    _held: dict[tuple[str, int, str, int], bytes] = field(
-        default_factory=dict, repr=False
-    )
+    _held: dict[Stream, Held] = field(default_factory=dict, repr=False)
     # The names that were looked up, and how many under each parent
     _looked_up: set[str] = field(default_factory=set, repr=False)
     _under: dict[str, int] = field(default_factory=dict, repr=False)
@@ -166,12 +192,20 @@ class Lookups:
         return not self.unread and not self.cut
 
     def add(self, packet: Packet) -> None:
-        """Take in the DNS messages a packet carries, if any."""
+        """Take in the DNS messages a packet carries, if any. Of TCP, a
+        packet that ends its stream or starts another from the same port
+        lets go of what was held of it, see _over_tcp."""
         if packet.protocol == Protocol.UDP:
             self._take(packet, packet.payload)
-        elif packet.protocol == Protocol.TCP and packet.payload and is_dns(packet):
-            for message in self._over_tcp(packet):
+        elif packet.protocol == Protocol.TCP and is_dns(packet):
+            # A start before what it carries, the first of its stream, an
+            # end after what it carries, the last
+            if TcpFlag.SYN in packet.tcp_flags:
+                self._ended(packet)
+            for message in self._over_tcp(packet) if packet.payload else ():
                 self._take(packet, message)
+            if packet.tcp_flags & (TcpFlag.FIN | TcpFlag.RST):
+                self._ended(packet)
 
     def _left(self) -> int:
         """How many more DNS messages are read: none once MOST_LOOKUPS
@@ -200,8 +234,8 @@ class Lookups:
         a message of many kilobytes is otherwise in no lookup and in no
         count."""
         left = self._left()
-        stream = (packet.source, packet.source_port, packet.destination, packet.port)
-        data = self._held.pop(stream, b"") + packet.payload
+        stream = Stream.of(packet)
+        data = self._held_before(stream, packet) + packet.payload
         messages: list[bytes] = []
         at = 0
         while len(data) - at >= DNS_LENGTH and len(messages) < left:
@@ -224,16 +258,42 @@ class Lookups:
                 oldest = next(iter(self._held))
                 del self._held[oldest]
                 self._lost(oldest)
-            self._held[stream] = data
+            self._held[stream] = Held(data, packet.carried_to)
         return messages
 
-    def _lost(self, stream: tuple[str, int, str, int]) -> None:
+    def _held_before(self, stream: Stream, packet: Packet) -> bytes:
+        """What was held of a stream for a packet to go on from: none
+        when the packet does not start where it goes on, which is then
+        counted as lost (see _lost). A packet the capture did not have,
+        one sent again or out of its turn, or another connection from
+        the same port with the one before it reset: glued together, the
+        two would read as other messages, the one sent in them as none."""
+        held = self._held.pop(stream, None)
+        if held is None:
+            return b""
+        if held.goes_on_at != packet.carried_from:
+            self._lost(stream)
+            return b""
+        return held.data
+
+    def _ended(self, packet: Packet) -> None:
+        """Let go of what was held of the stream a packet ends, and of
+        the stream back with a reset or a start: nothing comes after
+        them on the same connection. What was held then is counted as
+        lost, see _lost. A FIN ends what its sender sends alone, the
+        other end can send on."""
+        stream = Stream.of(packet)
+        both = packet.tcp_flags & (TcpFlag.RST | TcpFlag.SYN)
+        for ended in (stream, stream.back) if both else (stream,):
+            if self._held.pop(ended, None) is not None:
+                self._lost(ended)
+
+    def _lost(self, stream: Stream) -> None:
         """Count a stream of DNS over TCP that could not be read to its
         end, by where it is from and where it goes, see cut: one
         that goes to a resolver. What comes back cut short is the answer
         to a query that was seen, which is then a lookup without one."""
-        _, _, destination, port = stream
-        if destination == RESOLVER or port == DNS_PORT:
+        if stream.destination == RESOLVER or stream.port == DNS_PORT:
             self.cut += 1
 
     def _take(self, packet: Packet, message: bytes) -> None:

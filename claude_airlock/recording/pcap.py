@@ -33,6 +33,7 @@ from .answers import ANSWERS_PART, DOWNLOADS_PART, Answers
 from .lookups import Lookups
 from .packets import (
     ICMP_ECHO,
+    SEQUENCE_SPACE,
     TRANSPORT_NAMES,
     Packet,
     Protocol,
@@ -56,7 +57,6 @@ from .uploads import ELSEWHERE_PART, UPLOADS_PART, Key, Uploads
 # too, for what went over it meanwhile: no more of them than this, a
 # session can leave any number half open
 MOST_CLOSING = 10_000
-SEQUENCE_SPACE = 1 << 32
 # What is spoken on the ports whose use is not in doubt, as spoken of
 # payloads.py tells it: a connection there that begins as something else
 # is noted. And how each is written.
@@ -168,8 +168,10 @@ class Connection:
     # The hello of TLS it sent, none when it sent none
     hello: Hello | None = None
     # What it speaks, by the first bytes the session sent on it, see
-    # spoken of payloads.py: empty while that is not known
+    # spoken of payloads.py: empty while that is not known. And those
+    # bytes until it is, see told_by
     speaks: str = ""
+    opening: bytes = field(default=b"", repr=False)
 
     def __post_init__(self) -> None:
         first = Stream(self.sequence)
@@ -215,6 +217,24 @@ class Connection:
             other.reach(packet.acknowledgement, packet.when)
         if self.ended is not None:
             self.sent, self.received = self.outgoing.count, self.incoming.count
+
+    def told_by(self, packet: Packet) -> bytes | None:
+        """The first bytes it sent, once a packet of it has those that
+        tell what it speaks (see spoken of payloads.py), which is then
+        known: none while it is not, and for a packet that does not go on
+        from where they got, one sent again or out of its turn. As many
+        packets as it takes, the start too when it carries some (TCP Fast
+        Open): a session can send its first bytes a few at a time. Held
+        meanwhile, fewer than TOLD_BY."""
+        if self.speaks or not packet.payload:
+            return None
+        goes_on_at = (self.sequence + 1 + len(self.opening)) % SEQUENCE_SPACE
+        if packet.carried_from != goes_on_at:
+            return None
+        first = self.opening + packet.payload
+        self.speaks = spoken(first)
+        self.opening = b"" if self.speaks else first
+        return first if self.speaks else None
 
     @property
     def done(self) -> bool:
@@ -493,15 +513,20 @@ class Capture:
 
     def _sent_on(self, packet: Packet) -> bool:
         """Take in what a packet the session sent tells of its
-        connection, one it made or one made to it. Whether it has one."""
+        connection, one it made or one made to it. Whether it has one.
+        Counted also once the connection is taken to have ended: a reset
+        the session's kernel did not take (one that is not at the number
+        it waits for), and a connection that is no longer followed for
+        being one of too many half ended (see MOST_CLOSING), go on as far
+        as the session likes. What comes after its own FIN is not, see
+        Connection.count."""
         key = (packet.source_port, packet.destination, packet.port)
         connection = self.connection_at(key, packet.when)
         if connection is None:
             return False
         if not connection.inbound:
             self._take_first(connection, packet)
-        if connection.ended is None:
-            connection.count(packet)
+        connection.count(packet)
         return True
 
     def _place_late(self) -> None:
@@ -515,13 +540,13 @@ class Capture:
 
     def received_too(self, packet: Packet) -> None:
         """Take in a packet of the parts that have some of what comes
-        in (see answers.py): how far its connection got by it, while
-        that is open."""
+        in (see answers.py): how far its connection got by it, also once
+        it is taken to have ended, as of what is sent (see _sent_on)."""
         if packet.sent or not packet.length:
             return
         key = (packet.port, packet.source, packet.source_port)
         connection = self.connection_at(key, packet.when)
-        if connection and connection.ended is None:
+        if connection:
             connection.count(packet)
 
     def name_of(self, address: str, when: float | None = None) -> str | None:
@@ -651,17 +676,16 @@ class Capture:
             self.noticed.append((when, what, connection))
 
     def _take_first(self, connection: Connection, packet: Packet) -> None:
-        """Take in the first bytes a connection sent, when the packet
-        holds them: what they say is spoken there, noted when the port
-        is one that speaks something else, and what they ask a proxy to
-        connect to. Later bytes are not looked at for either: within a
-        tunnel they are the session's to make read as anything."""
-        first = (connection.sequence + 1) % SEQUENCE_SPACE
-        if connection.speaks or packet.sequence != first:
+        """Take in the first bytes a connection sent, once a packet tells
+        what is spoken (see Connection.told_by): that is noted when the
+        port is one that speaks something else, and what they ask a proxy
+        to connect to is kept. Later bytes are not looked at for either:
+        within a tunnel they are the session's to make read as anything."""
+        first = connection.told_by(packet)
+        if first is None:
             return
-        connection.speaks = spoken(packet.payload)
         if connection.speaks == HTTP:
-            asked = http_request(packet.payload)
+            asked = http_request(first)
             if asked and asked[0] == "CONNECT":
                 connection.asked = asked[1][:ASKED_LENGTH]
         usual = SPOKEN_ON.get(connection.port)

@@ -369,13 +369,15 @@ address is what was reached. Trust the address where the two matter.
   over TCP is read as DNS over UDP is, however a message is cut into
   packets.
 - The bytes of a connection are counted from its sequence numbers, to the
-  end of both sides: what is sent after the other side closed counts too.
+  end of both sides: what is sent after the other side closed or reset
+  it counts too, as far as the sender's own end.
   The numbers start over every 4 GB, so the capture takes one packet of
   every gigabyte a connection carries, and a longer one is counted right.
 - The capture has eight parts, each with a limit of 100,000 packets of
   its own: `tcp` (the start, answer and end of connections, the TLS
   hello, plain HTTP), `dns` (what Docker's resolver is asked and says),
-  `direct` (what goes to port 53 anywhere else), `flows` (what is not
+  `direct` (what goes to port 53 anywhere else, with what starts or ends
+  a connection there that carries something), `flows` (what is not
   TCP), `uploads` (what is sent to the model's API), `elsewhere` (what
   is sent over TCP to anywhere else, see below), `answers` (what the
   model's API sends back, 200,000 packets: it comes in many small ones)
@@ -411,9 +413,11 @@ address is what was reached. Trust the address where the two matter.
 - What is sent to a resolver over TCP and cannot be read to its end is
   counted too, and said (`NOT READ to its end`): a packet longer than
   the capture keeps of one (1024 bytes), with whatever follows its first
-  message out of sight, and a message of more than 4 kB sent a little at
-  a time. A lookup may be missing each time, which a session can
-  arrange, and a hello is then held against no name.
+  message out of sight, a message of more than 4 kB sent a little at
+  a time, and one whose rest never came: its connection ended or was
+  reset first, or what came next does not go on from it, by its
+  sequence number. A lookup may be missing each time, which a session
+  can arrange, and a hello is then held against no name.
 - The proxy keeps its log in two files of about 10 MB, the one it writes
   to and the one before, and the launcher of a filtered session has it
   start a new one every 10 seconds once it is over that. The last 32 MB
@@ -438,7 +442,8 @@ bytes a connection sends:
   own line comes when the tunnel closes. It is what the session asked,
   the proxy's line says whether it was allowed. Only the first bytes of
   a connection are taken for it: what goes through a tunnel later is the
-  session's to make read as anything.
+  session's to make read as anything. Those of the packet that starts it
+  too (TCP Fast Open), and across as many packets as it takes to tell.
 - **Whether its hello asks for the name it was reached by.** The hello
   of TLS names the server the connection is for, in the clear. One that
   asks for another name than the address was looked up under, or than
@@ -1042,7 +1047,7 @@ log:
 | What | Holds | How much |
 | --- | --- | --- |
 | `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB, more by what a session has logged within 10 seconds |
-| `captures` | The capture of each session | A few kB, and the headers of what the session sent and of what came back: some hundred kB each as a rule. At most 18 MB for what went to the model and as much for the rest, 22 MB for what the model sent back and 11 MB for the sample of what came in from anywhere else. The latest 100 |
+| `captures` | The capture of each session | A few kB, and the headers of what the session sent and of what came back: some hundred kB each as a rule. At most 104 MB each for the connections, the lookups of the resolver, what was asked of other servers of DNS and what is not TCP, 18 MB for what went to the model and as much for the rest, 22 MB for what the model sent back and 11 MB for the sample of what came in from anywhere else: near 0.5 GB for one capture. The latest 100 |
 | `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
 | `transcripts` | The launcher's copy of each transcript | For 30 days, 2 GB a session at most |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |

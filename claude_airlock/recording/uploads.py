@@ -25,7 +25,7 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass, field
 
-from .packets import Packet
+from .packets import SEQUENCE_SPACE, Packet
 
 # The names of the parts of a capture these packets are in, see
 # capture.py: what is sent to the model's API, and what is sent anywhere
@@ -45,7 +45,6 @@ LEAST = 4096
 # stream going on, with what the capture missed between: past that the
 # port was taken by another connection
 MOST_MISSED = 1 << 24
-SEQUENCE_SPACE = 1 << 32
 # No more uploads than this are kept of a capture. Its part has a packet
 # limit, and an upload is a packet at least
 MOST_UPLOADS = 100_000
@@ -89,7 +88,7 @@ class Reached:
         counted when it first came. And whether it is of another
         connection than the packets before it: neither the stream going
         on nor a part of it again, the port was taken by a new one."""
-        end = (packet.sequence + packet.length) % SEQUENCE_SPACE
+        end = packet.carried_to
         reached = self._reached.get(key)
         ahead, another = packet.length, False
         if reached is not None:

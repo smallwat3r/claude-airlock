@@ -144,12 +144,20 @@ class CaptureFileTest:
                 tcp(there, 443),
                 tcp(there, 443, 0x11),
                 tcp("9.9.9.9", 53),
+                tcp("9.9.9.9", 53, 0x11),
                 tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65535),
                 tcp(there, 443, 0x18, client_hello("sni.test")),
                 tcp(there, 80, 0x18, b"GET / HTTP/1.1\r\n\r\n"),
             ],
             "dns": [dns_query("a.test"), dns_response("a.test", there)],
-            "direct": [direct, tcp("9.9.9.9", 53, 0x18, b"\x00\x01x")],
+            # What ends a connection to port 53 with its last bytes is
+            # read with those before it, see Lookups
+            "direct": [
+                direct,
+                tcp("9.9.9.9", 53, 0x18, b"\x00\x01x"),
+                tcp("9.9.9.9", 53, 0x19, b"\x00\x01x"),
+                tcp("9.9.9.9", 53, 0x04, b"\x00\x01x"),
+            ],
             "flows": [ipv4(17, "172.20.0.5", there, udp(4433))],
             # What is sent to the model's API, outside what is sampled,
             # and the same to anywhere else
@@ -186,7 +194,7 @@ class CaptureFileTest:
         # What is sent anywhere is in its part whatever else has it: the
         # packets of that part are read for when they went and how long
         # they were alone, and not as those of the others are
-        carrying = packets["tcp"][3:] + packets["elsewhere"]
+        carrying = packets["tcp"][4:] + packets["elsewhere"]
         every = [(packet, True) for some in packets.values() for packet in some]
         every += [(packet, False) for some in came_in.values() for packet in some]
         frames = [(1.0 + at, *packet) for at, packet in enumerate(every)]
@@ -665,6 +673,61 @@ class ToldOfConnectionsTest:
         closed = read_parts(ended, elsewhere=sent)
         assert closed.carried() == (6000, 400)
 
+    def test_what_is_sent_once_a_connection_is_taken_to_have_ended_counts(self):
+        # A reset from the other end that the session's kernel did not take,
+        # not at the number it waits for: the session sends on
+        there = self.THERE
+        reset = [*self.connected(), (3.0, answer(there, 443, 0x04, 9999), False)]
+        sent = [
+            (
+                4.0 + at / 100,
+                tcp(there, 443, 0x18, b"x" * 1000, sequence=101 + at * 1000),
+                True,
+            )
+            for at in range(5)
+        ]
+        (went,) = read_parts(reset, elsewhere=sent).connections
+        assert (went.outcome, went.sent) == ("closed", 5000)
+        # And one no longer followed, pushed out by another half ended
+        other = "198.51.100.8"
+        closed = [
+            *self.connected(),
+            (3.0, answer(there, 443, 0x11, 500), False),
+            *self.connected(to=other),
+            (3.1, answer(other, 443, 0x11, 500), False),
+        ]
+        with unittest.mock.patch.object(pcap, "MOST_CLOSING", 1):
+            went, _ = read_parts(closed, elsewhere=sent).connections
+        assert went.sent == 5000
+        # Not what comes after the session's own end
+        ended = [*self.connected(), (3.0, tcp(there, 443, 0x11, b"", 101), True)]
+        (went,) = read_parts(ended, elsewhere=sent).connections
+        assert went.sent == 0
+
+    def test_the_first_bytes_are_those_of_the_start_or_of_several_packets(self):
+        # Carried by the start itself (TCP Fast Open), or a byte at a time:
+        # what is spoken is told by them all the same
+        there, banner = self.THERE, b"SSH-2.0-OpenSSH_9.6\r\n"
+        fast = [
+            (2.0, tcp(there, 443, 0x02, banner, sequence=100), True),
+            (2.0, answer(there, 443, sequence=500, acknowledged=122), False),
+        ]
+        capture = read_parts(fast)
+        assert [what for _, what, _ in capture.noticed] == ["speaks SSH, not TLS"]
+        pieces = [banner[:1], banner[1:5], banner[5:]]
+        capture = read_parts(self.connected(*pieces))
+        assert [what for _, what, _ in capture.noticed] == ["speaks SSH, not TLS"]
+        short = [b"h", b"ere is what I found: " * 3]
+        capture = read_parts(self.connected(*short))
+        assert [what for _, what, _ in capture.noticed] == ["does not speak TLS"]
+        # In their turn alone: one that skips ahead is no first byte
+        skipped = [
+            *self.connected(b"h"),
+            (2.5, tcp(there, 443, 0x18, banner, 120), True),
+        ]
+        capture = read_parts(skipped)
+        assert capture.noticed == []
+
     def test_what_was_sent_early_is_not_read_as_gigabytes_further_on(self):
         # The parts are read one after the other, each from its start: a
         # packet of the first minute comes after those of every gigabyte
@@ -986,8 +1049,10 @@ class DnsTrustTest:
         assert self.read(elsewhere, asked=False).dns.lookups == []
 
     def test_dns_over_tcp_is_read_however_it_is_cut_into_packets(self):
-        def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
-            header = segment(ports, 0x18)
+        def over(
+            payload: bytes, ports: tuple[int, int], at: str, to: str, sequence: int = 0
+        ) -> bytes:
+            header = segment(ports, 0x18, sequence)
             return ipv4(6, at, to, header + payload)
 
         me, server = "172.20.0.5", "9.9.9.9"
@@ -998,17 +1063,16 @@ class DnsTrustTest:
         asked += struct.pack("!H", len(second)) + second
         said = struct.pack("!H", len(response)) + response
         for cuts in ([2], [1, 2, 9], [2, len(query) + 2], [len(asked) - 3]):
-            pieces = [
-                asked[a:b] for a, b in zip([0, *cuts], [*cuts, None], strict=True)
-            ]
+            starts = [0, *cuts]
+            pieces = [asked[a:b] for a, b in zip(starts, [*cuts, None], strict=True)]
             packets = [
-                (1.0 + at, over(piece, (40053, 53), me, server), True)
-                for at, piece in enumerate(pieces)
+                (1.0 + at, over(piece, (40053, 53), me, server, start), True)
+                for at, (start, piece) in enumerate(zip(starts, pieces, strict=True))
             ]
             # The answer too, its length on its own
             packets += [
                 (9.0, over(said[:2], (53, 40053), server, me), False),
-                (9.1, over(said[2:], (53, 40053), server, me), False),
+                (9.1, over(said[2:], (53, 40053), server, me, 2), False),
             ]
             found = self.read(packets, asked=False)
             assert found.name_of("198.51.100.7") == "split.test", cuts
@@ -1025,6 +1089,37 @@ class DnsTrustTest:
         assert len(capture.dns._held) == lookups_module.DNS_MOST_HELD
         # And each one let go of is counted: its query went unread
         assert capture.dns.cut == 50
+
+    def test_dns_over_tcp_is_read_in_its_turn_and_not_glued_to_another(self):
+        me, server, ports = "172.20.0.5", "9.9.9.9", (40053, 53)
+
+        def sent(at: float, payload: bytes, flags: int, sequence: int) -> tuple:
+            frame = ipv4(6, me, server, segment(ports, flags, sequence) + payload)
+            return (at, frame, True)
+
+        query = dns_message_of(dns_query("asked.test"))
+        asked = struct.pack("!H", len(query)) + query
+        # Its last bytes with the end of the connection
+        ending = [sent(1.0, asked[:5], 0x18, 1), sent(1.1, asked[5:], 0x19, 6)]
+        found = self.read(ending, asked=False)
+        assert [lookup.name for lookup in found.dns.lookups] == ["asked.test"]
+        assert found.dns.cut == 0
+        # The start of one, the connection reset, and another from the same
+        # port: the second is read, and the first said to be cut short. By
+        # the reset and the start, or by where the second goes on from
+        # alone, as the part of a server asked directly has it
+        for ends in ([sent(1.1, b"", 0x04, 6), sent(2.0, b"", 0x02, 9000)], []):
+            again = [
+                sent(1.0, asked[:5], 0x18, 1),
+                *ends,
+                sent(2.1, asked, 0x18, 9001),
+            ]
+            found = self.read(again, asked=False)
+            assert [lookup.name for lookup in found.dns.lookups] == ["asked.test"]
+            assert found.dns.cut == 1, ends
+        # And one that ends with its query cut short, said too
+        found = self.read([sent(1.0, asked[:5], 0x19, 1)], asked=False)
+        assert (found.dns.lookups, found.dns.cut) == ([], 1)
 
     def test_dns_over_tcp_that_cannot_be_read_to_its_end_is_counted(self):
         def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
@@ -1119,9 +1214,9 @@ class DnsTrustTest:
         assert filters["flows"].startswith("not port 53 and not host 127.0.0.11 and (")
         # Of port 53 the TCP part has what starts and ends a connection,
         # the rest is the part's of what is asked there directly
-        assert filters["tcp"].startswith("not host 127.0.0.11 and (")
+        assert filters["tcp"].startswith("not host 127.0.0.11 and not (port 53")
         assert " or (not port 53 and (" in filters["tcp"]
-        assert filters["direct"].startswith("port 53 and not host 127.0.0.11 and not")
+        assert filters["direct"].startswith("port 53 and not host 127.0.0.11 and (")
         assert "tcp-syn|tcp-fin|tcp-rst" in filters["direct"]
         for name in ("tcp", "flows"):
             assert filters[name].endswith(")")

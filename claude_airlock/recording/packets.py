@@ -99,6 +99,10 @@ class TcpFlag(enum.IntFlag):
     ACK = 0x10
 
 
+# Where the sequence numbers of TCP start over: they are of 32 bits
+SEQUENCE_SPACE = 1 << 32
+
+
 @dataclass(frozen=True)
 class Packet:
     """A captured packet over IPv4 or IPv6."""
@@ -125,6 +129,21 @@ class Packet:
     # How long it was, captured or not: of TCP its payload, of another
     # protocol what IP carried
     length: int = 0
+
+    @property
+    def carried_from(self) -> int:
+        """Where in its stream what a TCP packet carries starts: at its
+        sequence number, or the one after for a SYN, which takes one of
+        its own (what it carries is the first of the stream, TCP Fast
+        Open)."""
+        syn = 1 if TcpFlag.SYN in self.tcp_flags else 0
+        return (self.sequence + syn) % SEQUENCE_SPACE
+
+    @property
+    def carried_to(self) -> int:
+        """Where what the next packet of the stream carries starts, as
+        far as this one tells: past what it carried."""
+        return (self.carried_from + self.length) % SEQUENCE_SPACE
 
 
 def is_loopback(address: str) -> bool:
