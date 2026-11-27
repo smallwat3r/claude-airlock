@@ -67,6 +67,14 @@ class Did(enum.Enum):
     LEFT = enum.auto()
 
 
+class Taken(enum.Enum):
+    """What stands for a line the user typed that a question of claude's
+    took for its answer (see Asker.take): no line for what it was read
+    for, which reads one again."""
+
+    ANSWER = enum.auto()
+
+
 class Resume:
     """/resume: leaves this session for an earlier one of the project."""
 
@@ -75,13 +83,13 @@ class Resume:
         page: Page,
         host: Host,
         turns: Turns,
-        read: Callable[[Prompt], str | None],
+        read: Callable[[Prompt], str | Taken | None],
         handover: Handover | None,
     ):
         self._page = page
         self._host = host
         self._turns = turns
-        # Reads a line from the user, see Chat
+        # Reads a line from the user, see Chat._read_line
         self._read = read
         self._handover = handover
 
@@ -118,7 +126,9 @@ class Resume:
 
     def _picked(self, files: list) -> str:
         """Ask which of the project's latest sessions, by a number. Its
-        id, empty for none."""
+        id, empty for none. A question claude puts meanwhile, a subagent
+        of its can when no turn runs, takes the place of this one until
+        it is answered: a line for it is no number, nor one for this."""
         rows = session_rows(files[:RESUME_LISTED])
         self._page.say(
             [labelled("chat", "the latest sessions of this project:")]
@@ -126,6 +136,8 @@ class Resume:
         )
         try:
             typed = self._read(WHICH_SESSION)
+            while typed is Taken.ANSWER:
+                typed = self._read(WHICH_SESSION)
         except KeyboardInterrupt:
             return ""
         number = (typed or "").strip()

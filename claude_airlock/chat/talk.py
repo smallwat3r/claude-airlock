@@ -30,6 +30,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
+from types import FrameType
 
 from ..docker import docker_ok, project_slug
 from ..events import Event, Kind, flat, labelled
@@ -51,7 +52,7 @@ from ..report.layout import (
 from ..report.planted import Planted
 from ..settings import Host
 from .asking import ASKED_STYLE, Asked, Asker, said_yes
-from .commands import LOCAL, Commands, Did, Handover, Resume
+from .commands import LOCAL, Commands, Did, Handover, Resume, Taken
 from .console import Console, Page
 from .drift import Drift
 from .followed import POLL, Followed
@@ -75,7 +76,6 @@ type Connect = Callable[[Callable[[], None]], Agent]
 PASSED_OVER = frozenset(
     {
         "auth_status",
-        "control_cancel_request",
         "keep_alive",
         "prompt_suggestion",
         "tool_progress",
@@ -128,6 +128,9 @@ SETTLE_WAIT = 3.0
 # Seconds the next prompt waits there for claude to answer what the chat
 # asked of it (/mode), which it does at once
 ANSWER_WAIT = 1.0
+# Seconds lines that are all there, a file or a pipe, wait for claude to
+# answer what one of them asked of it, see _wait_for_turn
+ANSWER_PATIENCE = 10.0
 
 
 class Life(enum.Enum):
@@ -257,7 +260,7 @@ class Chat:
             lambda: self._tasks.running,
         )
         self._shell = Shell(self._page, sandbox.name, lambda: self._asker.asking)
-        resume = Resume(self._page, host, self._turns, self._read, handover)
+        resume = Resume(self._page, host, self._turns, self._read_line, handover)
         self._commands = Commands(
             self._page,
             self._session,
@@ -271,6 +274,7 @@ class Chat:
         self._takes: dict[str, Callable[[dict], None]] = {
             "system": self._system,
             "control_request": self._answer,
+            "control_cancel_request": self._withdrawn,
             "control_response": self._answered,
             "conversation_reset": self._reset,
             "rate_limit_event": self._limited,
@@ -352,11 +356,12 @@ class Chat:
         """Whether there is nobody left to ask, or to ask for."""
         return self._life.leaving or self._life.over
 
-    def _on_interrupt(self, _number: int, _frame: object) -> None:
+    def _on_interrupt(self, _number: int, frame: FrameType | None) -> None:
         """Ctrl-C: for the turn that runs when one does, and for a session
         that is slow to leave. Else it ends the wait for a line, which
         drops what was typed, and leaves a question that waits without
-        an answer (see _converse)."""
+        an answer (see _converse). Given the frame it came in, see
+        Console.interrupt."""
         # Whether claude has ended while a line is read, as one can be
         # while a command runs: this is then how the end is told, and
         # for the line, see _session_ended
@@ -371,7 +376,7 @@ class Chat:
             self._interrupt = True
         elif self._reading:
             # Where the wait for the line can be ended, see there
-            self._console.interrupt()
+            self._console.interrupt(frame)
 
     def _session_ended(self) -> None:
         """Told by the thread that reads claude. A wait for a line would
@@ -402,6 +407,20 @@ class Chat:
             self._reading = False
             self._page.touched()
 
+    def _read_line(self, prompt: Prompt, headed: bool = False) -> str | Taken | None:
+        """A line from the user as _read has it, given first to the
+        question that waits, if one does (see Asker.take): Taken for one
+        it took, whatever the line was read for. Ctrl-C leaves that
+        question without an answer too, which refuses what it asks."""
+        try:
+            line = self._read(prompt, headed)
+        except KeyboardInterrupt:
+            self._asker.line_dropped()
+            raise
+        if line is not None and self._asker.take(line):
+            return Taken.ANSWER
+        return line
+
     def _converse(self) -> None:
         """Read what the user types and do what it asks, until they leave
         or the session has ended."""
@@ -422,9 +441,9 @@ class Chat:
                     return
             try:
                 if lines:
-                    line = self._read(MORE)
+                    line = self._read_line(MORE)
                 else:
-                    line = self._read(PROMPT, headed=True)
+                    line = self._read_line(PROMPT, headed=True)
             except KeyboardInterrupt:
                 # Ctrl-C drops what was typed, unless the session is over.
                 # A second one right after it leaves, as Ctrl-D does
@@ -435,16 +454,13 @@ class Chat:
                 if now - dropped <= LEAVE_WITHIN:
                     return
                 dropped = now
-                # At a question it leaves that without an answer too,
-                # which refuses what it asks
-                self._asker.line_dropped()
                 self._page.note("chat", "Ctrl-C again leaves")
                 continue
             dropped = -math.inf
             if line is None:
                 self._console.end_line()
                 return
-            if self._asker.take(line):
+            if line is Taken.ANSWER:
                 continue
             if line.endswith("\\"):
                 lines.append(line[:-1])
@@ -463,9 +479,15 @@ class Chat:
         """Wait until claude has nothing left to do, or asks something.
         For lines that are not typed but all there, a file or a pipe: each
         is for the turn after the one before it, and the answer to a
-        question is the line after the prompt that led to it."""
+        question is the line after the prompt that led to it. What a line
+        asked of claude (/mode) is waited for no longer than ANSWER_PATIENCE:
+        a claude that does not answer it holds up no line after it."""
+        patience = self._requested + ANSWER_PATIENCE
         while (
-            (self._turns.running or self._agent.pending)
+            (
+                self._turns.running
+                or (self._agent.pending and time.monotonic() < patience)
+            )
             and not self._asker.asking
             and not self._life.over
         ):
@@ -904,9 +926,18 @@ class Chat:
             )
             self._agent.refuse(asked, "not supported by claude-airlock --line-mode")
             return
-        # The call it asks about first, the question comes under it
-        self._followed.settle(ASK_SETTLE)
-        self._asked.put(asked, request)
+        try:
+            # The call it asks about first, the question comes under it
+            self._followed.settle(ASK_SETTLE)
+        finally:
+            # Put however that went: claude waits for an answer to what
+            # it asked, and the turn with it
+            self._asked.put(asked, request)
+
+    def _withdrawn(self, message: dict) -> None:
+        """Claude no longer asks what it asked under an id, see
+        Asked.cancel."""
+        self._asked.cancel(message.get("request_id"))
 
 
 def _waiting_line(layout: Layout) -> Shown:
@@ -937,6 +968,7 @@ def chat(
     start: Event | None = None,
     guarded: bool = False,
     hosts: Hosts | None = None,
+    on_started: Callable[[], None] = lambda: None,
 ) -> int:
     """Talk to the session a docker command runs, given its arguments, in
     the sandbox it was started with. Returns how docker ended. What the
@@ -944,7 +976,7 @@ def chat(
     the sandbox was started is said first, as a trace shows it. Guarded,
     a turn is stopped for what claude was given to read, see guard.py.
     With hosts, the user is asked about those the egress filter does not
-    allow, see hosts.py."""
+    allow, see hosts.py. on_started is told once docker was started."""
     # What is said is dimmed in a trace, where it was read before. Not here.
     styles = {**STYLES, Kind.REPLY: "", Kind.COMMAND: ""}
     layout = dataclasses.replace(
@@ -960,7 +992,9 @@ def chat(
     console = Console(host.project_dir, history, sent)
 
     def connect(on_end: Callable[[], None]) -> Agent:
-        return Agent(docker_args, on_end)
+        agent = Agent(docker_args, on_end)
+        on_started()
+        return agent
 
     guard = Guard() if guarded else None
     return Chat(

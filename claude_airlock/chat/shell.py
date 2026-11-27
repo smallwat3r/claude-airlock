@@ -101,6 +101,11 @@ class Shell:
             self._page.note("shell", "docker could not be run")
         finally:
             self.running = self._process is not None
+        if self._process is not None and self._interrupted:
+            # Ctrl-C came while it was being started, when there was no
+            # process yet to end: ended now, see interrupt
+            with contextlib.suppress(OSError):
+                self._process.terminate()
         return self._process
 
     def wait(self) -> None:

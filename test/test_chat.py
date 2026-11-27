@@ -245,7 +245,10 @@ class ChatTest(LineModeTest):
     def test_a_host_is_refused_where_nobody_is_there_to_ask(self):
         done = self.chat("reach\n", **self.asking())
         assert done.returncode == 0, done.stderr
-        assert "REFUSED example.com: not allowed, nobody to ask" in done.stdout
+        assert (
+            "REFUSED example.com on port 443 (https): not allowed, nobody to ask"
+            in done.stdout
+        )
         assert "was refused" in done.stdout
         assert "let the session reach" not in done.stdout
 

@@ -29,6 +29,7 @@ from harness import LauncherTest, reads_proc
 from claude_airlock.chat import asking, commands, shell, talk, turn
 from claude_airlock.chat import said as saying
 from claude_airlock.events import labelled
+from claude_airlock.sandbox.asked_hosts import Destination
 
 
 class AnsweredClaude:
@@ -99,6 +100,25 @@ class CommandsTest(LauncherTest):
         # Ctrl-C is for the command while it runs, and only then
         assert seen == [True]
         assert not self.shell.running
+
+    def test_ctrl_c_while_a_command_of_the_users_starts_ends_it(self):
+        # It comes before there is a process to end: not lost, the
+        # command is ended once there is one
+        ours = self.commands()
+        ran = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+        def run(*_args: str, **options):
+            self.shell.interrupt()
+            return subprocess.Popen(ran, **options)
+
+        started = time.monotonic()
+        with (
+            unittest.mock.patch.object(shell, "docker_popen", run),
+            written() as lines,
+        ):
+            assert ours.do("!sleep 60") is commands.Did.DONE
+        assert time.monotonic() - started < 30
+        assert "interrupted" in lines[-1]
 
     # And runs setsid, which macOS does not have
     @reads_proc
@@ -221,7 +241,7 @@ class CommandsTest(LauncherTest):
             deadline = time.monotonic() + PATIENCE
             while not chat._asker.asking and time.monotonic() < deadline:
                 time.sleep(0.01)
-            assert (said, chat._asked.pending) == ([], 2)
+            assert (said, chat._asked._count) == ([], 2)
             # One question at a time, each answered by a line
             before_the_user(chat._asker)
             assert chat._asker.take("y")
@@ -235,7 +255,7 @@ class CommandsTest(LauncherTest):
             assert chat._asked.answered_within(PATIENCE)
             chat._asked.close()
         assert said == [("r1", "allow"), ("r2", "deny")]
-        assert chat._asked.pending == 0
+        assert chat._asked._count == 0
 
     def test_what_waits_to_be_asked_is_refused_with_an_interrupted_turn(self):
         chat = a_chat(self.host)
@@ -264,6 +284,60 @@ class CommandsTest(LauncherTest):
             chat._asked.close()
         assert said == [("r1", "deny"), ("r2", "deny"), ("r3", "allow")]
         assert "".join(lines).count("not asked again in this session") == 2
+
+    def test_what_claude_withdraws_is_neither_put_nor_answered(self):
+        chat = a_chat(self.host)
+        claude = AnsweredClaude()
+        said = claude.said
+        asks = {"type": "control_request", "request_id": "r1", "request": ASKS}
+        withdrawn = {"type": "control_cancel_request", "request_id": "r1"}
+        with written() as lines:
+            chat._asked.start(claude)
+            chat._heard(asks)
+            chat._heard({**asks, "request_id": "r2"})
+            chat._heard({**asks, "request_id": "r3"})
+            self.asked(chat)
+            first = chat._asker._question
+            # The one waiting for its turn is never put, the one on the
+            # screen is put no longer
+            chat._heard({**withdrawn, "request_id": "r2"})
+            chat._heard(withdrawn)
+            deadline = time.monotonic() + PATIENCE
+            while chat._asker._question in (None, first):
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert list(chat._asked._unanswered) == ["r3"]
+            # The one after them is put as before
+            before_the_user(chat._asker)
+            assert chat._asker.take("y")
+            assert chat._asked.answered_within(PATIENCE)
+            # Nothing of what claude did not ask, or asks no longer
+            chat._heard(withdrawn)
+            chat._heard({**withdrawn, "request_id": ["not", "an", "id"]})
+            chat._asked.close()
+        assert said == [("r3", "allow")]
+        assert "".join(lines).count(asking.WITHDRAWN) == 1
+        # A message the chat knows
+        assert not any("CHANGED" in line for line in lines)
+
+    def test_what_claude_asks_is_put_when_what_it_did_cannot_be_shown(self):
+        # Claude waits for an answer, and its turn with it
+        chat = a_chat(self.host)
+        claude = AnsweredClaude()
+        asks = {"type": "control_request", "request_id": "r1", "request": ASKS}
+        unshown = unittest.mock.patch.object(
+            chat._followed, "settle", side_effect=OSError("no records")
+        )
+        with written(), unshown:
+            chat._asked.start(claude)
+            with pytest.raises(OSError, match="no records"):
+                chat._heard(asks)
+            self.asked(chat)
+            before_the_user(chat._asker)
+            assert chat._asker.take("y")
+            assert chat._asked.answered_within(PATIENCE)
+            chat._asked.close()
+        assert claude.said == [("r1", "allow")]
 
     def typing(self, chat: talk.Chat, typed: Iterator[str | None]) -> list[str]:
         """Have a chat read the lines someone types, each when the one
@@ -318,7 +392,8 @@ class CommandsTest(LauncherTest):
         assert said == [early, early, late]
 
     def test_ctrl_c_at_a_question_leaves_it_without_an_answer(self):
-        hosts = WaitingHosts("example.com", "example.org")
+        com, org = Destination("example.com", 443), Destination("example.org", 22)
+        hosts = WaitingHosts(com, org)
         chat = a_chat(self.host, RecordedClaude(), hosts=hosts, typed=True)
 
         def typed() -> Iterator[str | None]:
@@ -348,15 +423,18 @@ class CommandsTest(LauncherTest):
             chat._asker.give_up()
             assert chat._asked.answered_within(PATIENCE)
             chat._asked.close()
-        assert hosts.answers == [("example.com", None), ("example.org", None)]
-        refused = "# net         not answered: the request for example.com is refused"
+        assert hosts.answers == [(com, None), (org, None)]
+        refused = (
+            "# net         not answered: the request for example.com on port 443"
+            " (https) is refused"
+        )
         assert refused in lines
         assert "# chat        Ctrl-C again leaves" in lines
 
     def test_a_host_is_not_let_through_by_a_line_entered_before_it_is_asked_about(
         self,
     ):
-        hosts = WaitingHosts("example.com")
+        hosts = WaitingHosts(Destination("example.com", 443))
         chat = a_chat(self.host, RecordedClaude(), hosts=hosts, typed=True)
         with written() as lines:
             chat._asked.start(AnsweredClaude())
@@ -370,7 +448,7 @@ class CommandsTest(LauncherTest):
                 assert chat._asker.take("y")
             assert chat._asked.answered_within(PATIENCE)
             chat._asked.close()
-        assert hosts.answers == [("example.com", True)]
+        assert hosts.answers == [(Destination("example.com", 443), True)]
         assert f"# {labelled('chat', asking.EARLY)}" in lines
 
     def test_a_line_that_is_not_the_chats_is_for_claude(self):
@@ -464,3 +542,37 @@ class CommandsTest(LauncherTest):
         with written() as lines:
             assert self.commands().do("/resume") is commands.Did.DONE
         assert lines == ["# chat        nothing here to resume a session with"]
+
+    def test_a_question_put_while_a_session_is_picked_is_answered_first(self):
+        # A subagent of claude's asks while no turn runs: its question has
+        # the place of the one for a number until it is answered
+        self.write_transcript(SESSION, [{"type": "user", "message": {"content": "hi"}}])
+        chat = a_chat(self.host)
+        claude = AnsweredClaude()
+        asks = {"type": "control_request", "request_id": "r1", "request": ASKS}
+        handover = commands.Handover()
+        picks = commands.Resume(
+            chat._page, self.host, chat._turns, chat._read_line, handover
+        )
+        typed = iter(["y", "1"])
+
+        def interrupted(_prompt: object, headed: bool = False) -> str:
+            raise KeyboardInterrupt
+
+        with written():
+            chat._asked.start(claude)
+            chat._heard(asks)
+            self.asked(chat)
+            before_the_user(chat._asker)
+            chat._read = lambda prompt, headed=False: next(typed)
+            assert picks.resume([])
+            assert chat._asked.answered_within(PATIENCE)
+            # Ctrl-C at it leaves the question without an answer too
+            chat._heard({**asks, "request_id": "r2"})
+            self.asked(chat)
+            chat._read = interrupted
+            assert not picks.resume([])
+            assert chat._asked.answered_within(PATIENCE)
+            chat._asked.close()
+        assert handover.session == SESSION
+        assert claude.said == [("r1", "allow"), ("r2", "deny")]

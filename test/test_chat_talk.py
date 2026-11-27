@@ -89,6 +89,25 @@ class TalkTest(LauncherTest):
             claude.pending = False
             assert waited() < 0.2
 
+    def test_lines_that_are_all_there_wait_a_while_for_an_answer_and_no_more(self):
+        claude = RecordedClaude()
+        chat = a_chat(self.host, claude, typed=True)
+        chat._console.interactive = False
+        claude.pending = True
+
+        def waited() -> float:
+            began = time.monotonic()
+            chat._wait_for_turn()
+            return time.monotonic() - began
+
+        with written(), unittest.mock.patch.object(talk, "ANSWER_PATIENCE", 0.5):
+            chat._commands.do("/mode plan")
+            # For what a line asked of claude, which may change what the
+            # next one does. A claude that does not answer holds up no
+            # line after it
+            assert 0.4 < waited() < 2.0
+            assert waited() < 0.2
+
     def test_a_chat_counts_the_subagents_and_says_how_far_they_are(self):
         chat = a_chat(self.host)
         heard = (

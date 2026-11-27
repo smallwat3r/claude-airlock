@@ -296,8 +296,10 @@ them, and anything else refuses it.
 The question names the call by its first line. A call of more than that,
 a command of several lines or the arguments of a tool, is shown whole
 above the question first, with every argument it would be made with: a
-yes allows all of them. When one holds characters that do not show
-(control, direction or zero width), a line says so.
+yes allows all of them. A plan claude asks to go ahead with is shown as a
+reply, and under it every other argument of its call, such as the
+permissions it asks for to carry it out. When one holds characters that
+do not show (control, direction or zero width), a line says so.
 
 A question is answered by a line typed with the question to read:
 
@@ -313,15 +315,20 @@ A question is answered by a line typed with the question to read:
 - What you typed while a command of yours ran is gone when the question
   comes. The question is put while the command runs, which goes on
   meanwhile.
+- A question claude withdraws is gone without an answer, and a line
+  says so. A line typed for it is dropped as for any question that is
+  no longer asked. One it withdraws before it was put is never put.
 
 A line that was entered and dropped is said to be, and is not sent to
 claude as a prompt either: a `y` that allowed nothing is no answer to
 what claude said last. Enter it again if it was a prompt.
 
 With `CLAUDE_AIRLOCK_NET_ASK=1`, the egress filter asks whether the
-session may reach a host that is not on its list, and holds the request
-meanwhile. `y` lets it through, anything else refuses it, and either
-holds for that host until the session ends. Ctrl-C refuses the request
+session may reach a host that is not on its list, at the port the request
+is for (`let the session reach example.org on port 443 (https)? [y/N]`),
+and holds the request meanwhile. `y` lets it through, anything else
+refuses it, and either holds for that host at that port until the
+session ends. Another port of the host is asked about apart. Ctrl-C refuses the request
 that waits and is asked again at the next one. A command of yours is
 asked about as claude's are, while it runs: `!curl https://example.org`
 waits for your answer and goes on with it, and Ctrl-C ends the command

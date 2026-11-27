@@ -25,7 +25,7 @@ from collections.abc import Callable
 
 from ..docker import docker_popen, unstartable
 from ..events import clean
-from ..files import MOST_LINE_HELD, bounded_lines, held_size, json_object
+from ..files import MOST_LINE_HELD, bounded_lines, held_object
 from ..notice import warn
 
 # What claude is run with: print mode, JSON Lines both ways, its questions
@@ -196,14 +196,13 @@ class Agent:
             for line in bounded_lines(out, LINE_LIMIT) if out else ():
                 # What it takes once read, which is what waits: a line
                 # of small values takes dozens of times its length
-                held = 0 if line is None else held_size(line)
+                found, held = (None, 0) if line is None else held_object(line)
                 if line is None or held > MOST_LINE_HELD:
                     self.messages.put(Unread.LINE)
                     continue
                 # Not an object: claude run for something else than a
                 # conversation, which is then shown as it is written
                 plain = line[:PLAIN_WIDTH].decode("utf-8", "replace")
-                found = json_object(line)
                 self.messages.put(plain if found is None else found, held)
         finally:
             # What it had to say for itself as it ended comes first

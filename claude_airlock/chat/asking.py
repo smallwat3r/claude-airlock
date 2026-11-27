@@ -24,6 +24,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..events import clean, flat, labelled
@@ -91,6 +92,8 @@ LATE = (
     "that line was typed for a question that is no longer asked, it is"
     " dropped: enter it again if it is a prompt"
 )
+# What is said of a question claude withdrew while it was before the user
+WITHDRAWN = "claude no longer asks that, it is not answered"
 # The least room the text of a question or an option is wrapped to,
 # however far in it starts
 NARROWEST_TEXT = 20
@@ -204,6 +207,18 @@ def _suggested_rule(request: dict) -> tuple[str, dict] | None:
     return None
 
 
+@dataclass(frozen=True)
+class Unanswered:
+    """What claude asked under an id and has no answer to yet, and
+    whether it withdrew it since (control_cancel_request), which it then
+    waits for no answer to. What it withdrew is not put while it waits
+    for its turn, nor any longer while it is put, a line says so when
+    its question was before the user, and it is not answered."""
+
+    asked: object
+    withdrawn: threading.Event = field(default_factory=threading.Event)
+
+
 class Asker:
     """Puts what claude asks to the user and makes of what they say the
     answer claude gets."""
@@ -236,6 +251,9 @@ class Asker:
         # asks itself: what claude asked before the last time is not put
         self._given_up = 0
         self._attended: int | None = None
+        # What claude asked that is attended to, none for what the chat
+        # asks itself, see Unanswered
+        self._unanswered: Unanswered | None = None
         # The tools the user allowed until the session ends, where claude
         # had no rule to suggest
         self._allowed: set[str] = set()
@@ -343,16 +361,26 @@ class Asker:
         asked before the last time, see attend."""
         return self._given_up
 
-    def attend(self, asked_at: int | None) -> bool:
+    def attend(
+        self, asked_at: int | None, unanswered: Unanswered | None = None
+    ) -> bool:
         """Turn to what was asked when given_up was as said, none for
-        what the chat asks itself. Whether it is still to be put: not
-        what claude asked of a turn that was interrupted since, nor
+        what the chat asks itself, and with what claude asked, see
+        Unanswered. Whether it is still to be put: not what claude asked
+        of a turn that was interrupted since, nor what it withdrew, nor
         anything once nobody is left to ask."""
         self._attended = asked_at
+        self._unanswered = unanswered
         return self._wanted()
 
+    def _withdrawn(self) -> bool:
+        """Whether claude withdrew what is attended to."""
+        unanswered = self._unanswered
+        return unanswered is not None and unanswered.withdrawn.is_set()
+
     def _wanted(self) -> bool:
-        return not self._gone() and self._attended in (None, self._given_up)
+        attended = self._attended in (None, self._given_up)
+        return not self._gone() and not self._withdrawn() and attended
 
     def ask(self, prompt: str, style: str = "") -> str | None:
         """Put a question to the user and wait for what they say, none
@@ -378,6 +406,8 @@ class Asker:
         while not question.answered.wait(LOOK_EVERY):
             if self._gone():
                 break
+            if self._withdrawn() and question.answer(None):
+                self._page.note("chat", WITHDRAWN)
         # Unless answered by a line, which has let go of it
         self._let_go(question)
         self._page.touched()
@@ -411,7 +441,9 @@ class Asker:
         is written as its word is (see Page.said): the lines of a call
         under the line that says they are, a plan as a reply. What the
         transcript told of the call is not relied on for it, a line of a
-        subagent's can come after the question."""
+        subagent's can come after the question. A plan comes with every
+        other argument of its call, which a yes allows as well: those that
+        grant what the plan needs (allowedPrompts) among them."""
         acted = self._acted(tool, tool_input)
         named = flat(acted[0]) if acted else ""
         plan = tool_input.get("plan")
@@ -421,6 +453,12 @@ class Asker:
             self._page.put(
                 [*self._page.replied(reply_lines(plan, width, colour)), BLANK]
             )
+            # Every other argument, and what does not show in any, the plan
+            # too: its reply leaves that out
+            besides = call_whole(tool, tool_input, self._project_dir, ("plan",))
+            if besides:
+                self._page.note("plan", "what else a yes allows with it:")
+                self._page.put_said(prefixed("  ", besides))
         elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
             whole = call_whole(tool, tool_input, self._project_dir)
             # On one line: a name is claude's to give, and what followed
@@ -501,15 +539,18 @@ class Asked:
     def __init__(self, asker: Asker, page: Page):
         self._asker = asker
         self._page = page
-        # Each the id claude asked under, the request and how often the
-        # asker had given up by then, or what the chat itself has to ask,
-        # then None when nothing more is asked
+        # Each what claude asked, the request and how often the asker had
+        # given up by then, or what the chat itself has to ask, then None
+        # when nothing more is asked
         self._waiting: queue.Queue[
-            tuple[object, dict, int] | Callable[[], None] | None
+            tuple[Unanswered, dict, int] | Callable[[], None] | None
         ] = queue.Queue()
         # How many of them have no answer yet, the one being put too
         self._count = 0
         self._counting = threading.Lock()
+        # What claude asked and has no answer yet, by the id it asked
+        # under, for it to be withdrawn by, see cancel
+        self._unanswered: dict[str, Unanswered] = {}
 
     def start(self, claude: Answered) -> None:
         """Have what is asked from now on put, and claude given each
@@ -519,9 +560,22 @@ class Asked:
     def put(self, asked: object, request: dict) -> None:
         """Keep what claude asked under an id until its turn comes. Whoever
         listens to claude is not held up by it."""
+        unanswered = Unanswered(asked)
         with self._counting:
             self._count += 1
-        self._waiting.put((asked, request, self._asker.given_up))
+            if isinstance(asked, str):
+                self._unanswered[asked] = unanswered
+        self._waiting.put((unanswered, request, self._asker.given_up))
+
+    def cancel(self, asked: object) -> None:
+        """Claude no longer asks what it asked under an id, and waits for
+        no answer to it (control_cancel_request): see Unanswered."""
+        if not isinstance(asked, str):
+            return
+        with self._counting:
+            unanswered = self._unanswered.get(asked)
+        if unanswered is not None:
+            unanswered.withdrawn.set()
 
     def then(self, ask: Callable[[], None]) -> None:
         """Have the chat ask something of its own when its turn comes,
@@ -534,11 +588,6 @@ class Asked:
     def close(self) -> None:
         """Nothing more is asked: claude has ended."""
         self._waiting.put(None)
-
-    @property
-    def pending(self) -> int:
-        """How many of what claude asked have no answer yet."""
-        return self._count
 
     def answered_within(self, seconds: float) -> bool:
         """Whether all that claude asked has its answer, once that long
@@ -565,18 +614,26 @@ class Asked:
                     self._count -= 1
 
     def _answered(
-        self, claude: Answered, asked: object, request: dict, asked_at: int
+        self, claude: Answered, unanswered: Unanswered, request: dict, asked_at: int
     ) -> None:
         """Put what claude asked and give it the answer. What it asked
         of a turn the user interrupted since is refused unseen, as the
         question that was on the screen then was: claude waits for an
-        answer to each."""
+        answer to each. Unless it withdrew what it asked, see Unanswered."""
+        asked, withdrawn = unanswered.asked, unanswered.withdrawn
         try:
-            wanted = self._asker.attend(asked_at)
-            claude.respond(asked, self._asker.decide(request) if wanted else REFUSED)
+            wanted = self._asker.attend(asked_at, unanswered)
+            decision = self._asker.decide(request) if wanted else REFUSED
+            if not withdrawn.is_set():
+                claude.respond(asked, decision)
         except Exception as error:  # noqa: BLE001
             self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
-            claude.refuse(asked, "the question could not be put")
+            if not withdrawn.is_set():
+                claude.refuse(asked, "the question could not be put")
+        finally:
+            with self._counting:
+                if isinstance(asked, str) and self._unanswered.get(asked) is unanswered:
+                    del self._unanswered[asked]
 
     def _own(self, ask: Callable[[], None]) -> None:
         """Put what the chat itself asks. One that fails is said, the

@@ -266,6 +266,74 @@ class ConsoleTest(LauncherTest):
         with pytest.raises(KeyboardInterrupt):
             screen.interrupt()
 
+    def test_editline_takes_any_number_of_new_line_keys_in_a_line(self):
+        # Each ends the line read, which goes on as the next: more of them
+        # than Python calls a function within another
+        keys = sys.getrecursionlimit() + 10
+        screen = console.Console(str(self.project), out=io.StringIO())
+        screen._redrawn, screen._editline = True, True
+        buffers = iter([*[console.EDITLINE_NEW_LINE] * keys, ""])
+        with (
+            unittest.mock.patch.object(screen, "_typed", lambda _prompt: "x"),
+            unittest.mock.patch.object(console, "readline") as readline,
+        ):
+            readline.get_line_buffer.side_effect = lambda: next(buffers)
+            line = screen._line("> ", False)
+        assert line == "\n".join(["x"] * (keys + 1))
+
+    def test_ctrl_c_as_readline_calls_the_console_ends_the_line_for_it(self):
+        # Come in the step before what readline called says that it does
+        # not wait: raised there, readline would drop it, and the line
+        # could no longer be interrupted. It is ended instead
+        screen = console.Console(str(self.project), out=io.StringIO())
+        screen._entering = "> "
+        done = ctypes.c_int(0)
+        raised: list[bool] = []
+
+        def above() -> str:
+            # The frame of the hook around _prompted, as the handler of the
+            # signal is given it there. Not that of what it calls next
+            hook = sys._getframe(2)
+            if hook.f_code is console.Console._prompted.__code__:
+                screen._waiting = True
+                try:
+                    screen.interrupt(hook)
+                except KeyboardInterrupt:
+                    raised.append(True)
+            return ""
+
+        with (
+            written(),
+            unittest.mock.patch.object(console, "_done", done),
+            unittest.mock.patch.object(screen, "_above", above),
+        ):
+            screen._prompted()
+        assert (raised, done.value, screen._ended_for_interrupt) == ([], 1, True)
+        assert screen._waiting
+        # Anywhere else in the wait it is raised as before
+        with pytest.raises(KeyboardInterrupt):
+            screen.interrupt(sys._getframe())
+
+    def test_ctrl_c_in_what_a_readline_hook_calls_ends_the_line_too(self):
+        # Deeper than the hook, as in what it calls once it says again
+        # that it waits: readline would drop it there as well
+        screen = console.Console(str(self.project), out=io.StringIO())
+        screen._entering = "> "
+        done = ctypes.c_int(0)
+
+        def above() -> str:
+            screen._waiting = True
+            screen.interrupt(sys._getframe())
+            return ""
+
+        with (
+            written(),
+            unittest.mock.patch.object(console, "_done", done),
+            unittest.mock.patch.object(screen, "_above", above),
+        ):
+            screen._prompted()
+        assert (done.value, screen._ended_for_interrupt) == (1, True)
+
     def test_a_line_without_a_head_has_none_above_its_prompt(self):
         screen = console.Console(str(self.project))
         screen.set_head(["model x"])

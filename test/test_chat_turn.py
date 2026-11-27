@@ -340,6 +340,30 @@ class ReplyTest:
         for line, text in zip(lines, ("one", "two"), strict=True):
             assert re.search(r"^\d{4}-.* claude   reply       " + text + "$", line)
 
+    def test_in_a_file_in_colour_a_reply_keeps_its_marks(self):
+        # Each of its lines is a detail of an event there, cleaned of every
+        # escape: a style would be the text of its escape, and the marks it
+        # took the place of gone
+        told = "use `ls` and **bold**\n"
+        replies, _ = self.stream(Layout(colour=True))
+        said = Event(1.0, Who.CLAUDE, "command", [], {"text": told})
+        with written() as lines:
+            replies.piece(piece("content_block_start", content_block={"type": "text"}))
+            replies.piece(piece("content_block_delta", delta={"text": told}))
+            replies.piece(piece("content_block_stop"))
+            replies._page.put(replying.said_whole(replies._page, said))
+        assert len(lines) == 2
+        for line in lines:
+            # No escape but those of the layout, nothing of one as text
+            assert "[" not in line.replace("\x1b[", "")
+            text = told.strip()
+            assert re.sub(r"\x1b\[[0-9;]*m", "", line).endswith(text)
+        # At a terminal it is in colour, its marks taken out
+        replies, _ = self.stream(Layout(colour=True, compact=True))
+        with written() as lines:
+            replies.whole(message("assistant", {"type": "text", "text": told}))
+        assert f"\x1b[{replying.CODE}mls\x1b[0m" in lines[2]
+
     def test_what_was_said_is_shown_whole(self):
         said = "Set model to `Sonnet`\nfor this session only"
         event = Event(1_800_000_000.0, Who.CLAUDE, "command", ["Set"], {"text": said})

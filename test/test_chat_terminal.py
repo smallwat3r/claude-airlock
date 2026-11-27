@@ -343,13 +343,21 @@ class TerminalTest(LineModeTest):
     def test_a_host_the_filter_does_not_allow_goes_through_with_a_yes(self):
         said = self.at_a_terminal(
             ("> ", "reach\r"),
-            ("let the session reach example.com? [y/N] ", Paused("y\r")),
+            (
+                "let the session reach example.com on port 443 (https)? [y/N] ",
+                Paused("y\r"),
+            ),
             ("was let through", "\x04"),
             **self.asking(),
         )
         assert "network: filtered to the allowed domains, the user is" in said
-        assert "# net         a request for example.com waits" in said
-        assert "# net         allowed example.com until the session ends" in said
+        assert (
+            "# net         a request for example.com on port 443 (https) waits" in said
+        )
+        assert (
+            "# net         allowed example.com on port 443 (https) until the session ends"
+            in said
+        )
         assert "net:ask" in said
         # What was allowed goes with the session
         assert list((self.state / "asked-hosts").iterdir()) == []
@@ -357,11 +365,17 @@ class TerminalTest(LineModeTest):
     def test_a_host_the_filter_does_not_allow_is_refused_without_a_yes(self):
         said = self.at_a_terminal(
             ("> ", "reach\r"),
-            ("let the session reach example.com? [y/N] ", Paused("\r")),
+            (
+                "let the session reach example.com on port 443 (https)? [y/N] ",
+                Paused("\r"),
+            ),
             ("was refused", "\x04"),
             **self.asking(),
         )
-        assert "# net         REFUSED example.com until the session ends" in said
+        assert (
+            "# net         REFUSED example.com on port 443 (https) until the session ends"
+            in said
+        )
 
     def reaching(self) -> None:
         """Have the docker of the checks run what a chat runs for its
@@ -381,14 +395,14 @@ class TerminalTest(LineModeTest):
         )
         fake.chmod(0o755)
         (self.project / "reach.sh").write_text(
-            'host="$FAKE_ASKED/waiting/example.com"\n'
+            'host="$FAKE_ASKED/waiting/example.com:443"\n'
             "looks=0\n"
             'until [ -d "${host%/*}" ] || [ $((looks += 1)) -gt 400 ]; do\n'
             "  sleep 0.05\n"
             "done\n"
             ': > "$host"\n'
             'while [ -e "$host" ] && [ $((looks += 1)) -le 400 ]; do sleep 0.05; done\n'
-            'if [ -e "$FAKE_ASKED/allowed/example.com" ]; then\n'
+            'if [ -e "$FAKE_ASKED/allowed/example.com:443" ]; then\n'
             "  echo was let through\n"
             "else\n"
             "  echo was refused\n"
@@ -401,23 +415,32 @@ class TerminalTest(LineModeTest):
         self.reaching()
         said = self.at_a_terminal(
             ("> ", "!sh reach.sh\r"),
-            ("let the session reach example.com? [y/N] ", Paused("y\r")),
+            (
+                "let the session reach example.com on port 443 (https)? [y/N] ",
+                Paused("y\r"),
+            ),
             ("was let through", "\x04"),
             **self.asking(),
         )
         assert "# shell       $ sh reach.sh  (claude is not told)" in said
-        assert "# net         allowed example.com until the session ends" in said
+        assert (
+            "# net         allowed example.com on port 443 (https) until the session ends"
+            in said
+        )
         assert "\nwas let through\n" in said
 
     def test_ctrl_c_at_a_host_that_is_asked_about_refuses_the_request(self):
         self.reaching()
-        question = "let the session reach example.com? [y/N] "
+        question = "let the session reach example.com on port 443 (https)? [y/N] "
         said = self.at_a_terminal(
             # Asked for by what the command left running: no turn runs,
             # and no command of the user's
             ("> ", "!sh reach.sh > reached 2>&1 &\r"),
             (question, "\x03"),
-            ("not answered: the request for example.com is refused", "\x04"),
+            (
+                "not answered: the request for example.com on port 443 (https) is refused",
+                "\x04",
+            ),
             **self.asking(),
         )
         assert "# chat        Ctrl-C again leaves" in said

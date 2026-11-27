@@ -121,6 +121,10 @@ class PipeTest:
         dense = b"[" + b"{}," * 1000 + b"{}]\n"
         # No fewer bytes than it takes, dozens of times its length
         assert files.held_size(dense) > 24 * len(dense)
+        # What is within a string sets no value apart, an escaped quote
+        # does not end it
+        text = b'{"text": "\\"' + b",{[:" * 1000 + b'"}\n'
+        assert files.held_size(text) < 3 * len(text)
         with (
             played("cat") as agent,
             unittest.mock.patch.object(pipe, "MOST_LINE_HELD", 1000),

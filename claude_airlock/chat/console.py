@@ -53,6 +53,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import enum
+import functools
 import io
 import os
 import select
@@ -63,7 +64,8 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TextIO
+from types import CodeType, FrameType
+from typing import Concatenate, TextIO
 
 from ..events import Event, clean, labelled
 from ..report.layout import Layout, Shown, Styled, painted, prefixed
@@ -191,6 +193,45 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
         ending = "/" if os.path.isdir(os.path.join(place, name)) else ""
         found.append("@" + (f"{directory}/" if directory else "") + name + ending)
     return found[:NAMES_OFFERED]
+
+
+# The code readline runs of a console within the wait for a line, where
+# what is raised is dropped: that of each _readline_hook
+_HOOKS: set[CodeType] = set()
+
+
+def _readline_hook[**P, R](
+    hook: Callable[Concatenate[Console, P], R],
+) -> Callable[Concatenate[Console, P], R]:
+    """What readline calls of a console within the wait for a line (Tab
+    completion, the prompt written), which is not interrupted while it
+    runs: readline drops what is raised there, and the line could then no
+    longer be interrupted, see Console.interrupt. Once it is done, the
+    line is ended for a Ctrl-C that came meanwhile, see
+    _end_for_interrupt. What runs it is known by its code, see
+    _in_readline_hook."""
+
+    def hooked(console: Console, *args: P.args, **kwargs: P.kwargs) -> R:
+        console._waiting = False
+        try:
+            return hook(console, *args, **kwargs)
+        finally:
+            console._waiting = True
+            console._end_for_interrupt()
+
+    _HOOKS.add(hooked.__code__)
+    return functools.wraps(hook)(hooked)
+
+
+def _in_readline_hook(frame: FrameType | None) -> bool:
+    """Whether a signal came within a readline hook, see _readline_hook:
+    in it or in what it calls, _end_for_interrupt among them once the
+    line is waited for again. What is raised there is dropped."""
+    while frame is not None:
+        if frame.f_code in _HOOKS:
+            return True
+        frame = frame.f_back
+    return False
 
 
 class Wait(enum.Enum):
@@ -398,19 +439,13 @@ class Console:
             with contextlib.suppress(OSError):
                 readline.read_history_file(self._history)
 
+    @_readline_hook
     def _complete(self, word: str, state: int) -> str | None:
-        """Asked by readline for each of what a word may become in turn.
-        Not interrupted meanwhile: readline drops what is raised here, and
-        the line could then no longer be interrupted, see interrupt."""
-        self._waiting = False
-        try:
-            if state == 0:
-                first = readline.get_begidx() == 0
-                self._offered = completions(word, first, self.commands, self._root)
-            return self._offered[state] if state < len(self._offered) else None
-        finally:
-            self._waiting = True
-            self._end_for_interrupt()
+        """Asked by readline for each of what a word may become in turn."""
+        if state == 0:
+            first = readline.get_begidx() == 0
+            self._offered = completions(word, first, self.commands, self._root)
+        return self._offered[state] if state < len(self._offered) else None
 
     def _end_for_interrupt(self) -> None:
         """Have GNU readline end the line once the key it is at is done,
@@ -424,7 +459,7 @@ class Console:
             _done.value = 1
             self._ended_for_interrupt = True
 
-    def interrupt(self) -> None:
+    def interrupt(self, frame: FrameType | None = None) -> None:
         """End the wait for the line being read as KeyboardInterrupt. For
         the handler of a signal, which runs in the thread that reads,
         between any two steps of it. Raised while that thread holds a
@@ -433,11 +468,21 @@ class Console:
         first, would then wait forever. So it is raised only where the
         thread waits for the line and holds nothing, once: one that comes
         a moment before is raised when it gets there, one that comes
-        after is dropped with the line."""
-        if self._waiting:
+        after is dropped with the line.
+
+        Nor is it raised in what readline calls within the wait (see
+        _readline_hook), given the frame the signal came in: readline
+        drops what is raised there, and in the step before one of them
+        says that it does not wait, or after it says again that it does,
+        Ctrl-C would be gone, and the line could no longer be
+        interrupted. The line is ended for it instead, as within them."""
+        hooked = _in_readline_hook(frame)
+        if self._waiting and not hooked:
             self._waiting = False
             raise KeyboardInterrupt
         self._interrupted = True
+        if hooked:
+            self._end_for_interrupt()
 
     def close(self) -> None:
         """Keep the lines typed for the next chat, for the user alone."""
@@ -496,7 +541,24 @@ class Console:
     def _line(self, prompt: str, headed: bool) -> str:
         """Read a line, from when its prompt is on the screen being the
         line that what is written goes above. Not before: what is written
-        in the moment between would put the prompt there twice."""
+        in the moment between would put the prompt there twice. For
+        editline, read again while a key of a new line ended it, see
+        _set_up: as many times as it is pressed."""
+        while True:
+            above, shown, begun = self._prompt_set(prompt, headed)
+            given = self._given(above, shown) + shown_typed(begun)
+            typed = self._typed(given if self._redrawn else "")
+            if not (self._editline and self._redrawn):
+                return typed
+            line = self._editline_line(begun, typed)
+            if line is not None:
+                return line
+
+    def _prompt_set(self, prompt: str, headed: bool) -> tuple[str, str, str]:
+        """Make ready for a line to be read with a prompt, and write that
+        where it is not readline's to write: what is above it, the prompt
+        it is read with, a question asked instead, and what the line
+        starts with that readline does not have."""
         with self._lock:
             self._headed = headed
             self._usual = prompt
@@ -525,28 +587,27 @@ class Console:
                     self._shown = above
                     self._say(above + shown)
                     self._on_screen = True
-            begun = self._begun
-        given = self._given(above, shown) + shown_typed(begun)
-        typed = self._typed(given if self._redrawn else "")
-        if not (self._editline and self._redrawn):
-            return typed
-        # A key of a new line pressed within the line, see _set_up
+            return above, shown, self._begun
+
+    def _editline_line(self, begun: str, typed: str) -> str | None:
+        """The line editline read after what it began with, none when a
+        key of a new line ended it (see _set_up): it then goes on, as
+        the start of the next line read."""
         line = begun + typed.replace(EDITLINE_NEW_LINE, "\n")
         if line != typed:
             self._forget(typed)
             readline.add_history(line)
         if not readline.get_line_buffer().endswith(EDITLINE_NEW_LINE):
             return line
-        # The line was ended by a key of a new line: it goes on, as the
-        # start of the next line read. Editline did not move to the next
-        # row, as it does for Enter: the cursor is still after the key
-        # as it shows it, where the erase starts from
+        # Editline did not move to the next row, as it does for Enter:
+        # the cursor is still after the key as it shows it, where the
+        # erase starts from
         with self._lock:
             shows = shown_typed(line) + CONTROL_SHOWN
             self._say(self._erased(self._shown, shows))
             self._forget(line)
             self._filled = line + "\n"
-        return self._line(prompt, headed)
+        return None
 
     def _given(self, above: str, shown: str) -> str:
         """The prompt readline is given to write: it counts the columns
@@ -673,31 +734,26 @@ class Console:
         """Text the user typed in the style of a line that was entered."""
         return painted(self._sent, text) if self._sent else text
 
+    @_readline_hook
     def _prompted(self) -> None:
         """Told by readline once it has written the prompt of a line. A
         question that was put in the moment before, or a head that changed,
-        has the prompt written again as it now is. Called within the wait
-        for a line, and not interrupted while it holds the lock, see
-        interrupt."""
-        self._waiting = False
-        try:
-            with self._lock:
-                if self._entering is None:
-                    return
-                self._reading = self._entering
-                prompt = self._reading if self._asked is None else self._asked
-                if self._asked is not None and self._asked_at is None:
-                    # Put in the moment before, and written just below
-                    self._asked_at = time.monotonic()
-                if self._filled:
-                    readline.insert_text(self._filled)
-                    self._filled = ""
-                    readline.redisplay()
-                if self._above() + prompt != self._shown:
-                    self._put("", prompt)
-        finally:
-            self._waiting = True
-            self._end_for_interrupt()
+        has the prompt written again as it now is. Not interrupted while
+        it holds the lock, see _readline_hook."""
+        with self._lock:
+            if self._entering is None:
+                return
+            self._reading = self._entering
+            prompt = self._reading if self._asked is None else self._asked
+            if self._asked is not None and self._asked_at is None:
+                # Put in the moment before, and written just below
+                self._asked_at = time.monotonic()
+            if self._filled:
+                readline.insert_text(self._filled)
+                self._filled = ""
+                readline.redisplay()
+            if self._above() + prompt != self._shown:
+                self._put("", prompt)
 
     @property
     def redrawn(self) -> bool:

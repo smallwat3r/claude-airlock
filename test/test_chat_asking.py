@@ -476,6 +476,31 @@ class AskingTest:
                 self.asker(["y"]).decide(request)
             assert len(lines) == 1
 
+    def test_a_plan_is_asked_about_with_all_its_call_would_be_made_with(self):
+        # A yes allows the permissions it asks for to carry it out too,
+        # and what does not show in the plan is left out of its reply
+        allowed = [{"tool": "Bash", "prompt": "run the tests"}]
+        plan = {"plan": "# Plan\n1. Do it\u200b", "allowedPrompts": allowed}
+        asker = self.asker(["y"])
+        with written() as lines:
+            decided = asker.decide({"tool_name": "ExitPlanMode", "input": plan})
+        besides = lines.index("# plan        what else a yes allows with it:")
+        assert lines[besides + 1 :] == [
+            '  allowedPrompts: [{"tool": "Bash", "prompt": "run the tests"}]',
+            "  CHARACTERS THAT DO NOT SHOW (control, direction or zero width) in plan",
+            "# "
+            + labelled("chat", "a: not asked again in this session for every call")
+            + " of exitplanmode",
+        ]
+        # Given back as it was shown
+        assert decided == {"behavior": "allow", "updatedInput": plan}
+        # A plan alone has nothing more under it
+        with written() as lines:
+            self.asker(["y"]).decide(
+                {"tool_name": "ExitPlanMode", "input": {"plan": "# Plan"}}
+            )
+        assert not any("what else" in line for line in lines)
+
     def test_a_call_of_more_than_the_line_asked_about_is_shown_by_the_question(self):
         # Whatever the transcript has told of it by then: the lines of a
         # subagent's call can come after the question

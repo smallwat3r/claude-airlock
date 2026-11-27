@@ -281,6 +281,17 @@ def reply_lines(text: str, width: int | None, colour: bool) -> list[Styled]:
     return writer.feed(text) + writer.end()
 
 
+def styled_replies(page: Page) -> bool:
+    """Whether the replies on a page are styled as the module says: in
+    colour, where their lines are written as they are made, at a
+    terminal (see Page.replied). In a file each line of one is a detail
+    of an event, which is cleaned of every escape (see Layout.event):
+    a style would show as the text of its escape, and the marks it took
+    out would be gone. There they are left as written, as without
+    colour."""
+    return page.layout.colour and page.layout.compact
+
+
 def said_whole(page: Page, said: Event) -> list[Shown]:
     """What was said with all of its lines, where a trace has a few: a
     chat is where it is read. At a terminal a line says when and who, and
@@ -288,7 +299,7 @@ def said_whole(page: Page, said: Event) -> list[Shown]:
     and with an empty line after it. In a file every line says when and
     who, as of any event."""
     text = said.fields.get("text", "")
-    lines = reply_lines(text, page.width, page.layout.colour)
+    lines = reply_lines(text, page.width, styled_replies(page))
     if not page.layout.compact:
         whole = dataclasses.replace(said, details=[*lines] or said.details)
         return page.layout.event(whole)
@@ -342,7 +353,7 @@ class ReplyStream:
                 # The whole of a reply comes before its last piece: one
                 # that has not come by now will not
                 self._owed = 0
-                self._writer = ReplyWriter(self._page.width, self._page.layout.colour)
+                self._writer = ReplyWriter(self._page.width, styled_replies(self._page))
                 self._started = time.time()
         elif kind == "content_block_delta" and self._writer:
             given = event.get("delta")
