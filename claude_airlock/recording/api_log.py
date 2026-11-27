@@ -60,13 +60,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..background import in_background
-from ..docker import env_arg, mount_arg
+from ..docker import container_gone, env_arg, mount_arg
 from ..errors import Fatal
 from ..files import (
     MOST_LINE_HELD,
     held_size,
     json_object,
     open_plain,
+    open_up,
     private_dir,
     try_lock_file,
     write_whole,
@@ -338,25 +339,11 @@ class IndexTail:
 
 def _open_up(top: str) -> None:
     """Have a drop and the directories in it be the launcher's to read
-    and to empty again. A session can take that away, it owns them as the
-    launcher does: with a mode of none on its drop nothing would be taken
-    from it, and nothing of it removed. Never the mode of what a link
-    leads to, and of no more directories than MOST_LISTED."""
-    left = [top]
-    for _ in range(MOST_LISTED):
-        if not left:
-            return
-        directory = left.pop()
-        # Not where the mode of a link itself cannot be asked for: that
-        # one is left as it is
-        with contextlib.suppress(OSError, NotImplementedError):
-            os.chmod(directory, 0o700, follow_symlinks=False)
-        with contextlib.suppress(OSError), os.scandir(directory) as entries:
-            left += [
-                entry.path
-                for entry in itertools.islice(entries, MOST_LISTED)
-                if entry.is_dir(follow_symlinks=False)
-            ]
+    and to empty again, see open_up. A session can take that away, it
+    owns them as the launcher does: with a mode of none on its drop
+    nothing would be taken from it, and nothing of it removed. No more
+    directories than MOST_LISTED."""
+    open_up(top, MOST_LISTED)
 
 
 def _removed(drop: str) -> bool:
@@ -617,9 +604,12 @@ class Keeper:
 
 
 def _session_over(host: Host, name: str) -> bool:
-    """Whether no launcher has the session of a name any more, by the
-    claim each holds on its name while it runs (see container_name of
-    sandbox/session.py). Not when that cannot be told."""
+    """Whether the session of a name is over: no launcher has it any
+    more, by the claim each holds on its name while it runs (see
+    container_name of sandbox/session.py), and its container is gone, as
+    session_alive has it. A container can outlive a launcher that was
+    killed, and goes on writing to its drop. Not when that cannot be
+    told."""
     try:
         claim = try_lock_file(os.path.join(host.names_dir, name))
     except OSError:
@@ -627,7 +617,7 @@ def _session_over(host: Host, name: str) -> bool:
     if claim is None:
         return False
     os.close(claim)
-    return True
+    return container_gone(name)
 
 
 def let_go_of_left_drops(host: Host) -> None:

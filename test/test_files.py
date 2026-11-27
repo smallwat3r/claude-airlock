@@ -94,6 +94,37 @@ class FilesTest(LauncherTest):
         assert list(record.parent.iterdir()) == [record]
         assert record.stat().st_mode & 511 == 384
 
+    def test_a_tree_is_opened_up_without_following_a_link(self):
+        top = self.work / "drop"
+        (top / "a" / "b").mkdir(parents=True)
+        for closed in (top / "a" / "b", top / "a", top):
+            closed.chmod(0)
+            self.cleanup.callback(closed.chmod, 0o700)
+        files.open_up(str(top), 100)
+        for opened in (top, top / "a", top / "a" / "b"):
+            assert opened.stat().st_mode & 0o777 == 0o700
+        # Listed as a directory, then a link in its place: what it leads
+        # to is not opened up, nor anything in it
+        elsewhere = self.work / "elsewhere"
+        (elsewhere / "b").mkdir(parents=True)
+        for kept in (elsewhere / "b", elsewhere):
+            kept.chmod(0o500)
+            self.cleanup.callback(kept.chmod, 0o700)
+        (top / "c").mkdir()
+        listed = files._subdirectories
+
+        def swapped(directory: int, most: int) -> list[str]:
+            names = listed(directory, most)
+            if "c" in names:
+                (top / "c").rename(top / "moved")
+                (top / "c").symlink_to(elsewhere)
+            return names
+
+        with unittest.mock.patch.object(files, "_subdirectories", swapped):
+            files.open_up(str(top), 100)
+        assert elsewhere.stat().st_mode & 0o777 == 0o500
+        assert (elsewhere / "b").stat().st_mode & 0o777 == 0o500
+
     def test_a_link_into_a_directory_is_in_it(self):
         inner = self.project / "inner"
         inner.mkdir()

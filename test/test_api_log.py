@@ -642,6 +642,18 @@ class ApiLogTest(LauncherTest):
         assert api_log._removed(str(self.drop))
         assert elsewhere.exists()
 
+    def test_the_drop_of_a_container_that_outlived_its_launcher_stays(self):
+        # Its launcher was killed, the container still writes to its drop
+        drops = self.state / "api-drop"
+        (drops / "claude-left").mkdir(parents=True)
+        (self.state / "names").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(api_log, "container_gone", return_value=False):
+            api_log.let_go_of_left_drops(self.host)
+        assert (drops / "claude-left").exists()
+        with mock.patch.object(api_log, "container_gone", return_value=True):
+            api_log.let_go_of_left_drops(self.host)
+        assert not (drops / "claude-left").exists()
+
     def test_a_drop_that_cannot_be_removed_is_put_aside_and_said(self):
         drops = self.state / "api-drop"
         (drops / CONTAINER).mkdir(parents=True)

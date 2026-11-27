@@ -9,6 +9,7 @@ not what it should be is no line."""
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import errno
 import fcntl
@@ -206,6 +207,97 @@ def try_lock_file(path: str) -> int | None:
         os.close(descriptor)
         raise
     return descriptor
+
+
+# How deep in a tree the directories are opened up, see open_up: each one
+# further down holds a descriptor until it is done with
+MOST_DEEP_OPENED = 64
+# A directory as it is opened to be gone into: never through a link
+_GONE_INTO = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def open_up(top: str, most: int) -> None:
+    """Give a directory a session can write, and those in it, the mode of
+    the user's alone (0700), for the launcher to read and empty them: a
+    session owns them as the launcher does, and can take that away. Each
+    by its name in the directory above it, opened as it is gone into: a
+    session can put a link in the place of a directory between the two,
+    and the mode of what a link leads to is never changed. No more
+    directories than most, none deeper than MOST_DEEP_OPENED."""
+    opened = _opened_up(top, None)
+    if opened is None:
+        return
+    # The directories gone into, each with those in it still to go into
+    seen = 1
+    path = [(opened, _subdirectories(opened, most))]
+    try:
+        while path:
+            directory, left = path[-1]
+            if not left or seen >= most or len(path) > MOST_DEEP_OPENED:
+                os.close(directory)
+                path.pop()
+                continue
+            child = _opened_up(left.pop(), directory)
+            if child is not None:
+                seen += 1
+                path.append((child, _subdirectories(child, most)))
+    finally:
+        for directory, _ in path:
+            os.close(directory)
+
+
+def _subdirectories(directory: int, most: int) -> list[str]:
+    """The names of the directories in an open one, no more than most,
+    none when it cannot be listed."""
+    found: list[str] = []
+    with contextlib.suppress(OSError), os.scandir(directory) as entries:
+        for entry in entries:
+            if len(found) >= most:
+                break
+            if entry.is_dir(follow_symlinks=False):
+                found.append(entry.name)
+    return found
+
+
+def _opened_up(name: str, parent: int | None) -> int | None:
+    """Give a directory the mode of the user's alone (see _made_own) and
+    open it, by its name in an open parent (none for a path of the
+    launcher's own), none when it cannot be opened. Its mode first: one
+    of none cannot be opened."""
+    _made_own(name, parent)
+    try:
+        return os.open(name, _GONE_INTO, dir_fd=parent)
+    except OSError:
+        return None
+
+
+def _made_own(name: str, parent: int | None) -> None:
+    """Give a directory the mode of the user's alone, by its name in an
+    open parent (none for a path of the launcher's own). Never what a
+    link leads to. Where the system cannot be told not to follow one
+    (Linux), the name is opened as it is, a link too, and the mode of
+    what was opened changed when it is a directory: through the place
+    the system gives each open file (/proc/self/fd), which is that file
+    and no other, as the C library itself does it. Nothing where neither
+    can be had."""
+    if os.chmod in os.supports_follow_symlinks:
+        with contextlib.suppress(OSError):
+            os.chmod(name, 0o700, dir_fd=parent, follow_symlinks=False)
+        return
+    as_it_is = getattr(os, "O_PATH", 0)
+    if not as_it_is:
+        return
+    try:
+        opened = os.open(name, as_it_is | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    except OSError:
+        return
+    try:
+        if stat.S_ISDIR(os.fstat(opened).st_mode):
+            os.chmod(f"/proc/self/fd/{opened}", 0o700)
+    except OSError:
+        pass
+    finally:
+        os.close(opened)
 
 
 def open_plain(path: str | Path, *, links: bool = False) -> BinaryIO | None:
