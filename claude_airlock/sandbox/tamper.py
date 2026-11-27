@@ -210,9 +210,32 @@ class PendingCheck:
         self._file.unlink(missing_ok=True)
 
     def run(self) -> None:
-        """Run the check of the session, now over."""
-        self._check.report()
-        self._file.unlink(missing_ok=True)
+        """Run the check of the session, now over, see _run_kept."""
+        _run_kept(self._check, self._file)
+
+
+def _run_kept(check: HostCheck, file: Path, unchecked: str = "") -> None:
+    """Run the check kept in a file, of the session over now or of one
+    that ended without it (unchecked), and remove the file once it has
+    run. Whatever a session left that the check does not get through is
+    said, and the file kept for the next launch to try again. Passed on,
+    it would end this launch and every one after it, of any project, and
+    a session could have meant it to."""
+    try:
+        check.report(unchecked)
+    except Exception as problem:  # noqa: BLE001
+        said = repr(problem)[:PROBLEM_WIDTH]
+        warn(
+            f"the session {unchecked} ended without its check, and the check"
+            f" cannot be run now: {said}"
+            if unchecked
+            else f"the check of what the session left behind cannot be run: {said}",
+            f"What it left behind is not known. The check is kept in {file}"
+            " and tried again by the next launch, remove the file to be"
+            " rid of it.",
+        )
+        return
+    file.unlink(missing_ok=True)
 
 
 def report_unchecked_sessions(directory: Path) -> None:
@@ -232,19 +255,4 @@ def report_unchecked_sessions(directory: Path) -> None:
             continue
         if session_alive(launcher, file.stem):
             continue
-        try:
-            check.report(file.stem)
-        except Exception as problem:  # noqa: BLE001
-            # Whatever a session left that the check does not get through:
-            # said, and kept for the next launch to try again. Passed on,
-            # it would end this launch and every one after it, of any
-            # project, and a session could have meant it to.
-            warn(
-                f"the session {file.stem} ended without its check, and the"
-                f" check cannot be run now: {repr(problem)[:PROBLEM_WIDTH]}",
-                f"What it left behind is not known. The check is kept in {file}"
-                " and tried again by the next launch, remove the file to be"
-                " rid of it.",
-            )
-            continue
-        file.unlink(missing_ok=True)
+        _run_kept(check, file, file.stem)

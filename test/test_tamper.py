@@ -92,7 +92,7 @@ class TamperingTest(LauncherTest):
         started = time.monotonic()
         with unittest.mock.patch.object(watched, "GIT_SECONDS", 0.2):
             assert config_hash(str(config)) == bounded.file_hash(str(config))
-            assert watched.moved_hooks_dir(str(self.project)) is None
+            assert watched.moved_hooks_dirs(str(self.project)) == []
         assert time.monotonic() - started < 30
 
     def test_no_more_of_what_git_lists_is_held_than_a_config_takes(self):
@@ -240,6 +240,29 @@ class TamperingTest(LauncherTest):
         (self.project / ".githooks").mkdir()
         result = self.launch(session="echo x > .githooks/pre-commit")
         assert f"  {self.project}/.githooks/pre-commit\n" in result.stderr
+
+    def test_a_pipe_a_config_includes_does_not_hold_the_hooks_found(self):
+        # Git asked with --includes would open it itself, and wait on it
+        config = self.project / ".git" / "config"
+        config.write_text(
+            "[include]\n\tpath = ../pipe.gitconfig\n"
+            '[includeIf "gitdir:/nowhere/"]\n\tpath = ../shared.gitconfig\n'
+        )
+        os.mkfifo(self.project / "pipe.gitconfig")
+        (self.project / "shared.gitconfig").write_text(
+            "[core]\n\thooksPath = .githooks\n"
+        )
+        started = time.monotonic()
+        with unittest.mock.patch.object(watched, "GIT_SECONDS", 20.0):
+            found = watched.moved_hooks_dirs(str(self.project))
+        assert time.monotonic() - started < 10
+        # On a condition that does not hold here too: more is watched
+        assert found == [str(self.project / ".githooks")]
+        # Not one that leads out of what a session was given
+        (self.project / "shared.gitconfig").write_text(
+            "[core]\n\thooksPath = ../../elsewhere\n"
+        )
+        assert watched.moved_hooks_dirs(str(self.project)) == []
 
     def test_what_is_no_plain_file_is_hashed_as_unreadable(self):
         pipe = self.work / "pipe"
@@ -949,6 +972,32 @@ class LauncherItselfTest:
         assert watched.is_launcher_file(str(self.checkout / "linked" / "__init__.py"))
         assert not watched.is_launcher_file(str(self.checkout / "docs" / "trace.py"))
 
+    def test_a_link_at_the_top_that_cannot_be_followed_is_watched_as_it_is(
+        self, tmp_path: Path
+    ):
+        # Followed, it would end the check, and every launch that takes one
+        mounted = [str(self.checkout)]
+        loop = self.checkout / "loop"
+        loop.symlink_to("loop")
+        links = [loop]
+        if os.getuid() != 0:
+            closed = tmp_path / "closed"
+            closed.mkdir(mode=0o000)
+            (self.checkout / "closed.py").symlink_to(closed / "inner")
+            links.append(self.checkout / "closed.py")
+        try:
+            before = watched.build_fingerprint(mounted)
+            for link in links:
+                assert str(link) in before
+            # And what it is changed to lead to is a change
+            loop.unlink()
+            loop.symlink_to("readline")
+            after = watched.build_fingerprint(mounted)
+            assert str(loop) in tampered.differing(before, after)
+        finally:
+            if os.getuid() != 0:
+                closed.chmod(0o700)
+
     def test_a_session_that_cannot_write_the_launcher_has_nothing_of_it_watched(
         self, tmp_path: Path
     ):
@@ -1284,6 +1333,27 @@ class UncheckedSessionTest(LauncherTest):
         assert self.pending() == [file]
         self.launch()
         assert self.pending() == []
+
+
+class CheckAtTheEndTest:
+    def test_a_check_that_cannot_be_run_at_the_end_is_kept_for_the_next(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        # Passed on, it would replace what is said of the session with a
+        # traceback
+        file = tmp_path / "claude-proj.json"
+        file.write_text("{}")
+        check = unittest.mock.Mock()
+        check.report.side_effect = RuntimeError("left by a session")
+        tamper.PendingCheck(file, check).run()
+        said = capsys.readouterr().err
+        assert "the check of what the session left behind cannot be run" in said
+        assert "RuntimeError('left by a session')" in said
+        assert str(file) in said
+        assert file.exists()
+        check.report.side_effect = None
+        tamper.PendingCheck(file, check).run()
+        assert not file.exists()
 
 
 class FailedLaunchTest:
