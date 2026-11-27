@@ -34,6 +34,9 @@ _UNSAFE = re.compile(
 )
 # Of the label a header line starts with: session, network, day, chat...
 LABEL_WIDTH = 12
+# What the link of a connection is, its number after this, see Event.link
+_CONNECTION_START = "n"
+_CONNECTION = re.compile(rf"{_CONNECTION_START}(\d+)")
 
 
 class Wrong(enum.IntEnum):
@@ -183,6 +186,18 @@ class Event:
         """Say that it tells of something gone wrong, in so much of it:
         never less than was said before."""
         self.wrong = max(self.wrong, how)
+
+
+def connection_link(number: int) -> str:
+    """What a connection is tied to its other lines by, see Event.link."""
+    return f"{_CONNECTION_START}{number}"
+
+
+def connection_number(link: str) -> int | None:
+    """The number of the connection a link ties to, none for a link that
+    is of anything else, a thing sent over a connection too."""
+    found = _CONNECTION.fullmatch(link)
+    return int(found[1]) if found else None
 
 
 def _text(value: object) -> str:

@@ -16,7 +16,7 @@ from unittest import mock
 import pytest
 from harness import LauncherTest, prompts_at
 
-from claude_airlock import errors, settings
+from claude_airlock import errors, files, settings
 from claude_airlock.events import Kind, Who
 from claude_airlock.files import try_lock_file
 from claude_airlock.recording import api_calls, api_log, started
@@ -358,7 +358,7 @@ class ApiLogTest(LauncherTest):
 
     def test_a_body_of_too_many_values_is_kept_and_not_taken_apart(self):
         self.call(1, request=[[]] * 200)
-        with mock.patch.object(api_log, "MOST_LINE_HELD", 1000):
+        with mock.patch.object(files, "MOST_LINE_HELD", 1000):
             self.keeper.look(last=True)
         [note] = self.notes()
         assert "messages" not in note
@@ -572,6 +572,47 @@ class ApiLogTest(LauncherTest):
         assert "messages" not in second
         assert "usage" not in second
         assert "kept" not in second
+
+    def test_an_answer_read_again_while_it_is_waited_for_is_counted_once(self):
+        one = len(written(request_body())) + len(written(answer_body("msg_1")))
+        with mock.patch.object(api_log, "MOST_READ_A_SESSION", 2 * one + 10):
+            keeper = api_log.Keeper.of(
+                self.host, CONTAINER, str(self.drop), time.time()
+            )
+        self.call(1)
+        answer = self.drop / "req_1.response.json"
+        whole = answer.read_bytes()
+        # Read again and again while it does not read whole, written to
+        # in between
+        for cut in range(1, 6):
+            answer.write_bytes(whole[:-cut])
+            keeper.look()
+        answer.write_bytes(whole)
+        keeper.look()
+        self.call(2)
+        keeper.look(last=True)
+        first, second = self.notes()
+        assert first["usage"]["output_tokens"] == 25
+        # The room left is that of one call read once
+        assert second["messages"]
+        assert second["usage"]["output_tokens"] == 25
+
+    def test_an_answer_that_did_not_change_is_not_read_again(self):
+        self.call(1)
+        answer = self.drop / "req_1.response.json"
+        whole = answer.read_bytes()
+        answer.write_bytes(whole[:-1])
+        with mock.patch.object(
+            api_log, "held_object", wraps=api_log.held_object
+        ) as taken_apart:
+            for _ in range(5):
+                self.keeper.look()
+            assert taken_apart.call_count == 1
+            assert self.notes() == []
+            answer.write_bytes(whole)
+            self.keeper.look()
+        [note] = self.notes()
+        assert note["usage"]["output_tokens"] == 25
 
     def test_two_sessions_of_one_name_and_moment_keep_their_bodies_apart(self):
         moment = time.time()

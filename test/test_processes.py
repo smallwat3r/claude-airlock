@@ -120,6 +120,83 @@ class WatcherTest:
         assert len(out.getvalue().splitlines()) == len(said)
         assert len(out.getvalue()) <= procwatch.MOST_BYTES
 
+    def test_a_record_that_could_not_be_written_for_a_while_says_so(self):
+        class Full(io.StringIO):
+            full = False
+
+            def write(self, line: str) -> int:
+                if self.full:
+                    raise OSError(28, "No space left on device")
+                return super().write(line)
+
+        out = Full()
+        watch = procwatch.Watch(out)
+        watch.note(pid=2, ppid=1, exe="/bin/sh", argv=["sh"])
+        out.full = True
+        # The disk is full for a moment, which the session can see to
+        watch.note(pid=3, ppid=2, exe="/usr/bin/curl", argv=["curl"])
+        watch.note(reserved=True, note=procwatch.Note.ALIVE)
+        out.full = False
+        watch.note(pid=4, ppid=2, exe="/bin/ls", argv=["ls"])
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line.get("pid") or line.get("note") for line in said] == [
+            2,
+            "unwritten",
+            4,
+        ]
+        assert said[1]["lines"] == 2
+        assert said[1]["since"] <= said[1]["until"] <= said[2]["t"]
+        # Read back, what was noted then is not taken for nothing having run
+        started = {"t": 0.0, "note": "started", "beat": 30}
+        record = noted(started, ran(1.0, 9, 1, "make"), *said)
+        (gap,) = record.unwritten
+        assert gap.lines == 2
+        assert record.noted_processes(gap.since, gap.until) is None
+        assert record.noted_processes(0.5, 1.5) is True
+        summary = "\n".join(net_events.watched_summary(record, verbose=False))
+        assert "2 lines of the record could NOT BE WRITTEN, 1 times" in summary
+        # Of several, the one in between is found, and none where there is
+        # none
+        gaps = [
+            {"t": at + 1, "note": "unwritten", "lines": 1, "since": at, "until": at}
+            for at in (10.0, 20.0, 30.0)
+        ]
+        ran_then = [ran(at, 9, 1, "make") for at in (15.0, 25.0)]
+        several = noted(started, *ran_then, *gaps)
+        assert several.noted_processes(19.0, 21.0) is None
+        assert several.noted_processes(30.0, 40.0) is None
+        assert several.noted_processes(14.0, 16.0) is True
+        assert several.noted_processes(26.0, 29.0) is False
+
+    def test_a_line_cut_short_in_the_file_is_ended_by_the_next(self, tmp_path: Path):
+        path = tmp_path / "record.jsonl"
+        out = procwatch.LineFile(str(path))
+        first = procwatch.stamped(**ran(1.0, 2, 1, "sh"))
+        out.write(first)
+        written = os.write
+
+        def cut(file: int, data: bytes) -> int:
+            if len(data) > 10:
+                return written(file, data[:10])
+            raise OSError(28, "No space left on device")
+
+        with (
+            mock.patch.object(os, "write", cut),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            out.write(procwatch.stamped(**ran(2.0, 3, 1, "curl")))
+        last = procwatch.stamped(**ran(3.0, 4, 1, "ls"))
+        out.write(last)
+        out.close()
+        lines = path.read_text().splitlines()
+        assert len(lines) == 3
+        assert lines[0] + "\n" == first
+        assert lines[-1] + "\n" == last
+        record = noted({"t": 0.0, "note": "started"})
+        for line in lines:
+            record.take(line)
+        assert [process.pid for process in record.processes] == [2, 4]
+
     def test_sockets_on_its_own_loopback_leave_room_for_what_others_reach(self):
         out = io.StringIO()
         watch = procwatch.Watch(out)
@@ -165,6 +242,26 @@ class WatcherTest:
         # One that fits is left as it is, an empty argument too
         assert procwatch.command_line(b"sh\x00-c\x00\x00") == ["sh", "-c", ""]
         assert procwatch.command_line(b"") == []
+        # As many as are kept, and one more
+        most = procwatch.MOST_ARGUMENTS
+        whole = [str(at) for at in range(most)]
+        assert procwatch.command_line("\0".join(whole).encode() + b"\0") == whole
+        more = "\0".join([*whole, "more"]).encode() + b"\0"
+        assert procwatch.command_line(more) == [*whole, procwatch.CUT]
+
+    def test_a_program_cannot_fill_the_record_with_where_it_is(self):
+        stat = b"812 (x) S 640" + b" 0" * 30
+        deep = "/" + "d" * 4000 + "/x"
+        files = {"/proc/812/stat": stat, "/proc/812/cmdline": b"x\0"}
+        with (
+            mock.patch.object(procwatch, "read", files.__getitem__),
+            mock.patch.object(os, "readlink", return_value=deep),
+        ):
+            found = procwatch.process(812)
+        assert found
+        _, parent, program, _ = found
+        assert parent == 640
+        assert program == deep[: procwatch.MOST_ARGUMENT] + procwatch.CUT
 
     def test_room_is_kept_for_the_connections_once_the_processes_filled_theirs(self):
         out = io.StringIO()
@@ -365,6 +462,41 @@ class WatcherTest:
         assert [line for line in kept if "pid" in line] == []
         assert len([line for line in kept if "port" in line]) == 2
 
+    def test_the_holder_started_last_is_named_whatever_its_id(self):
+        # Ids start over in a long session: curl, which the shell started
+        # and handed the socket to, has the lower one
+        out, aloud = io.StringIO(), io.StringIO()
+        watch = self.holding(out)
+        watch._processes = {
+            30000: (("500", "/bin/bash", ["bash"]), 0.0, 0.0),
+            150: (("900", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
+        }
+        watch._parents = {30000: 1, 150: 30000}
+        watch._holders.of = lambda inodes, pids: {i: [150, 30000] for i in inodes}
+        with mock.patch.object(sys, "stdout", aloud):
+            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [])
+            watch._look_at_listeners({(8080, "0.0.0.0", 0): "8"}, [])
+        kept = [json.loads(line) for line in out.getvalue().splitlines()]
+        kept = [line for line in kept if "pids" in line]
+        assert [line["pids"] for line in kept] == [[30000, 150], [30000, 150]]
+        said = [json.loads(line) for line in aloud.getvalue().splitlines()]
+        assert said[0]["pid"] == 150
+        record = noted(*said)
+        (made, shell) = record.holder(40212, "203.0.113.9", 443, kept[0]["t"])
+        assert (made.pid, shell.pid) == (150, 30000)
+        (listened,) = net_events.listener_events(record)
+        assert "by: [150] curl -sS < bash" in listened.details[0]
+
+    def test_what_a_process_was_at_a_time_is_found_among_many(self):
+        lines = [ran(10.0 + at, 7, 1, "x", str(at)) for at in range(5000)]
+        # One noted out of order, as of a clock set back
+        lines.append(ran(9.0, 7, 1, "x", "early"))
+        record = noted(*lines)
+        for at, said in ((12.5, "2"), (1.0, "early"), (1e9, "4999")):
+            found = record.process(7, at)
+            assert found
+            assert found.argv == ("x", said)
+
     def test_a_process_that_became_another_program_is_said_again(self):
         out, aloud = io.StringIO(), io.StringIO()
         watch = self.holding(out)
@@ -425,7 +557,8 @@ class RecordTest:
                 "port": 50000,
                 "to": "10.0.0.1",
                 "to_port": 80,
-                "pids": [640, 7],
+                # In the order they started, as the watcher lists them
+                "pids": [7, 640],
             },
         )
 

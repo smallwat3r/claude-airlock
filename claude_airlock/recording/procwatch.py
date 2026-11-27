@@ -157,6 +157,10 @@ class Note(enum.StrEnum):
     # There were more sockets at once than are kept, see MOST_SOCKETS: the
     # processes of the rest were not looked for
     TOO_MANY_SOCKETS = "too many sockets"
+    # Lines that could not be written to the record (a full disk, which a
+    # session can bring about), said once one can again: how many, from
+    # when and until when, see Watch._write
+    UNWRITTEN = "unwritten"
 
 
 def _take_identity(uid: int, gid: int) -> None:
@@ -204,13 +208,18 @@ def process(pid: int) -> ProcessRead | None:
     except OSError:
         # A kernel thread, or one that is not the user's to look into
         program = ""
+    # Where it is is the session's to choose as well, as long as a path
+    if len(program) > MOST_ARGUMENT:
+        program = program[:MOST_ARGUMENT] + CUT
     return started, parent, program, command_line(raw)
 
 
 def command_line(raw: bytes) -> list[str]:
     """A command line as it is kept, see MOST_COMMAND: its arguments from
-    the first on, and CUT in the place of what there was no room for."""
-    given = raw.split(b"\0")
+    the first on, and CUT in the place of what there was no room for.
+    Those past MOST_ARGUMENTS are not taken apart, a command line can
+    hold hundreds of thousands."""
+    given = raw.split(b"\0", MOST_ARGUMENTS)
     if given and not given[-1]:
         given.pop()
     argv: list[str] = []
@@ -670,12 +679,23 @@ class Holders:
         return found
 
 
+def started_last(pids: Sequence[int]) -> int:
+    """Of the processes that hold a socket, as the watcher lists them in
+    the order they started (see Watch._by_start), the one started last.
+    Not the highest id, ids start over once they reach the most there can
+    be."""
+    return pids[-1]
+
+
 class Watch:
     def __init__(
         self, out, read_process: Callable[[int], ProcessRead | None] = process
     ) -> None:
         self._out = out
         self._written = 0
+        # Of the lines that could not be written since the last that was,
+        # how many, and the times of the first and of the last of them
+        self._unwritten: tuple[int, float, float] | None = None
         # Whether the processes have used up their part of the record,
         # and whether all of it is: nothing more is written then
         self._full = False
@@ -755,11 +775,36 @@ class Watch:
             self._full = True
             aloud = False
             line = stamped(note=Note.FULL)
-        self._written += len(line)
-        self._out.write(line)
-        self._out.flush()
+        self._write(line)
         if aloud:
             self._speak(line, counted)
+
+    def _write(self, line: str) -> None:
+        """Write a line to the record. One that cannot be written (a full
+        disk, which a session can bring about) is counted, with when, and
+        the watcher goes on: once one can be again, a line says how many
+        were not and between which times (see Note.UNWRITTEN), ahead of
+        it. A record that would stop at the first is one a session could
+        have the watcher write no more of, for as long as it runs, by
+        filling the disk for a moment."""
+        try:
+            if self._unwritten:
+                lines, since, until = self._unwritten
+                gap = stamped(
+                    note=Note.UNWRITTEN, lines=lines, since=since, until=until
+                )
+                self._out.write(gap)
+                self._out.flush()
+                self._written += len(gap)
+                self._unwritten = None
+            self._out.write(line)
+            self._out.flush()
+        except OSError:
+            now = round(time.time(), 3)
+            lines, since, _ = self._unwritten or (0, now, now)
+            self._unwritten = (lines + 1, since, now)
+            return
+        self._written += len(line)
 
     def _speak(self, line: str, counted: bool = False) -> None:
         """Write a line to the watcher's output, for what follows the
@@ -787,8 +832,9 @@ class Watch:
         the socket: the one started last of those that hold it and those
         it comes from, each as the record has it, unless it was said as
         that before. The record has every process, the output only those
-        a connection is tied to."""
-        pid = max(held_by, default=0)
+        a connection is tied to. Given the holders in the order they
+        started, see _by_start."""
+        pid = started_last(held_by) if held_by else 0
         for _ in range(SAID_PARENTS + 1):
             known = self._processes.get(pid)
             if not known or self._hushed:
@@ -801,6 +847,22 @@ class Watch:
                 said = stamped(pid=pid, ppid=parent, exe=program, argv=argv)
                 self._speak(said, counted=True)
             pid = parent
+
+    def _by_start(self, pids: list[int]) -> list[int]:
+        """Processes in the order they started, by when the kernel says
+        each did, the last MOST_HOLDERS of them: the one started last is
+        the last. Not by their ids, which start over once they reach the
+        most there can be, and a long session gets there. One that was
+        not read comes first."""
+
+        def started(pid: int) -> tuple[int, int]:
+            known = self._processes.get(pid)
+            try:
+                return (int(known[0][0]) if known else -1), pid
+            except ValueError:
+                return -1, pid
+
+        return sorted(pids, key=started)[-MOST_HOLDERS:]
 
     def say(self, **said: object) -> None:
         """Write a line to the record and to the watcher's output, see
@@ -922,6 +984,7 @@ class Watch:
             self._connections.add(key)
             port, to, to_port = key
             self._looked_at_again(held_by)
+            held_by = self._by_start(held_by)
             self._say_who(held_by)
             self.note(
                 reserved=True,
@@ -930,7 +993,7 @@ class Watch:
                 port=port,
                 to=to,
                 to_port=to_port,
-                pids=sorted(held_by)[-MOST_HOLDERS:],
+                pids=held_by,
             )
         if not self._holders.readable and not self._said_unreadable:
             self._said_unreadable = True
@@ -963,9 +1026,10 @@ class Watch:
         for key, inode in new.items():
             self._listening.add(key)
             port, on, _ = key
-            held_by = sorted(holders.get(inode, []))[-MOST_HOLDERS:]
+            held_by = holders.get(inode, [])
             reachable = not _is_loopback(on)
             self._looked_at_again(held_by)
+            held_by = self._by_start(held_by)
             if reachable:
                 self._say_who(held_by)
             self.note(
@@ -978,9 +1042,42 @@ class Watch:
             )
 
 
+class LineFile:
+    """The record as it is written: each line straight to its file, none
+    held back to be written later, which would come out in the middle of
+    another once it could. A line that cannot be written whole raises
+    OSError, and what of it did go in is ended by the next line that is
+    written, which starts with an end of line of its own: the part reads
+    as a line that does not hold up, which the reader passes over, and
+    the one after it is whole."""
+
+    def __init__(self, path: str) -> None:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC
+        self._file = os.open(path, flags, 0o644)
+        # Whether a line was cut short in the file, see write
+        self._cut = False
+
+    def write(self, line: str) -> None:
+        data = ("\n" if self._cut else "").encode() + line.encode()
+        while data:
+            written = os.write(self._file, data)
+            if not written:
+                raise OSError("nothing could be written to the record")
+            data = data[written:]
+            self._cut = True
+        self._cut = False
+
+    def flush(self) -> None:
+        """Nothing to do, every line is written as it comes."""
+
+    def close(self) -> None:
+        os.close(self._file)
+
+
 def _main(args: list[str]) -> int:
     path = args[0]
-    with open(path, "a", encoding="utf-8") as out:
+    out = LineFile(path)
+    try:
         if len(args) > 1:
             _take_identity(int(args[1]), int(args[2]))
         watch = Watch(out)
@@ -988,6 +1085,8 @@ def _main(args: list[str]) -> int:
         while True:
             watch.look()
             time.sleep(INTERVAL)
+    finally:
+        out.close()
 
 
 if __name__ == "__main__":

@@ -162,6 +162,29 @@ class AgentDoorTest(LauncherTest):
             client.sendall(string(b"\x0b"))
             assert ssh_agent.read_message(client)[:1] == b"\x0c"
 
+    def test_a_message_sent_a_byte_at_a_time_is_read_whole(self):
+        class Trickle:
+            """A connection that gives what was sent a byte at a time."""
+
+            def __init__(self, sent: bytes) -> None:
+                self.left, self.reads = sent, 0
+
+            def recv_into(self, buffer: memoryview) -> int:
+                self.reads += 1
+                if not self.left:
+                    return 0
+                buffer[0], self.left = self.left[0], self.left[1:]
+                return 1
+
+        message = sign_request(login("git"))
+        sent = len(message).to_bytes(4, "big") + message
+        trickle = Trickle(sent)
+        assert ssh_agent.read_message(trickle) == message
+        assert trickle.reads == len(sent)
+        # One that ends first is none
+        cut = Trickle(sent[:7])
+        assert ssh_agent.read_message(cut) is None
+
     def test_a_connection_that_asks_nothing_is_let_go(self):
         self.through_the_door(b"\x0b")
         path = self.door.path

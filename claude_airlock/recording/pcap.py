@@ -706,15 +706,16 @@ class Capture:
         proxy for, else the one its address was looked up under last by
         a time, when the address was given no such name by then. Empty
         when the hello asks for a name it was reached by, and when that
-        cannot be told: the address was not looked up, the lookups are
-        not all there, or it goes to the egress proxy and what it asked
-        of it was not seen."""
+        cannot be told: the address was not looked up, the lookups up to
+        that time are not all there (see whole_by of lookups.py), or it
+        goes to the egress proxy and what it asked of it was not seen."""
         if connection.asked:
             host = connection.asked.rpartition(":")[0] or connection.asked
             host = host.strip("[]").lower()
             return "" if name == host else host
         said = self.dns.answered.get(connection.address)
-        whole = self.lookups_whole and self.dns.whole
+        # A lookup that went unread after the hello says nothing of it
+        whole = self.lookups_whole and self.dns.whole_by(when)
         if not said or not whole or connection.port == EGRESS_PORT:
             return ""
         return "" if said.had(name, when) else (said.as_of(when) or "").lower()

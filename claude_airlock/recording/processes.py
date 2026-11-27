@@ -38,6 +38,7 @@ from __future__ import annotations
 import bisect
 import json
 import math
+import operator
 import os
 import subprocess
 import threading
@@ -54,11 +55,11 @@ from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
 from .packets import is_loopback
-from .procwatch import Note
+from .procwatch import Note, started_last
 from .records import TracedSession
 from .sidecar import Sidecar
 
-PROCESSES_SUFFIX = ".procs"
+PROCESSES_SUFFIX = "procs"
 PROCESSES_LABEL = "claude-airlock.processes"
 RECORD_FILE = "/processes.jsonl"
 WATCHER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "procwatch.py")
@@ -250,6 +251,11 @@ class Process:
         return " ".join([self.name, *self.argv[1:]])
 
 
+# What a process and a gap of the record are put in order by
+_noted_when = operator.attrgetter("when")
+_until = operator.attrgetter("until")
+
+
 @dataclass(frozen=True)
 class Listener:
     """A socket that was noted to wait for connections: when, on which
@@ -273,6 +279,12 @@ class Listener:
         address = f"[{self.address}]" if ":" in self.address else self.address
         return f"tcp {address}:{self.port}"
 
+    @property
+    def holder(self) -> int:
+        """Of the processes that held it, the one started last, see
+        started_last of procwatch.py. 0 when none was found."""
+        return started_last(self.pids) if self.pids else 0
+
 
 @dataclass(frozen=True)
 class Slowed:
@@ -286,6 +298,17 @@ class Slowed:
     looks: int
     seconds: float
     longest: float
+
+
+@dataclass(frozen=True)
+class Unwritten:
+    """What a watcher noted of lines it could not write to its record (a
+    full disk, which a session can bring about): from when and until
+    when, and how many. What it saw then is not in the record."""
+
+    since: float
+    until: float
+    lines: int
 
 
 @dataclass
@@ -319,6 +342,8 @@ class ProcessRecord:
     # never did
     watched_from: float | None = None
     full_at: float | None = None
+    # Each time lines could not be written to it, in the order it said so
+    unwritten: list[Unwritten] = field(default_factory=list)
     # When it said it would say no more aloud of connections and their
     # processes, none for one that did not: of what is read while a
     # session runs, see procwatch.py
@@ -374,6 +399,13 @@ class ProcessRecord:
             self.full_at = when
         if note == Note.HUSHED and self.hushed_at is None:
             self.hushed_at = when
+        if note == Note.UNWRITTEN:
+            gap = Unwritten(
+                float(said["since"]), float(said["until"]), int(said["lines"])
+            )
+            # Not one that says nothing, or what is no length of time
+            if gap.lines > 0 and gap.since <= gap.until < math.inf:
+                self.unwritten.append(gap)
         if note == Note.STARTED:
             beat = said.get("beat")
             if isinstance(beat, (int, float)) and not isinstance(beat, bool):
@@ -419,7 +451,10 @@ class ProcessRecord:
             when, int(said["pid"]), int(said["ppid"]), str(said["exe"]), argv
         )
         self.processes.append(found)
-        self._by_pid.setdefault(found.pid, []).append(found)
+        # By when each was noted, so that what a pid was at a time is
+        # found without going through all it was: a process that writes
+        # its own command line anew is noted as often as it likes
+        bisect.insort(self._by_pid.setdefault(found.pid, []), found, key=_noted_when)
         bisect.insort(self._noted_at, when)
 
     # What a line of the record tells of, by the key only such a line
@@ -443,8 +478,8 @@ class ProcessRecord:
         known = self._by_pid.get(pid)
         if not known:
             return None
-        earlier = [found for found in known if found.when <= when]
-        return earlier[-1] if earlier else known[0]
+        at = bisect.bisect_right(known, when, key=_noted_when)
+        return known[at - 1] if at else known[0]
 
     def lineage(self, pid: int, when: float) -> list[Process]:
         """A process and those it comes from, itself first."""
@@ -464,8 +499,9 @@ class ProcessRecord:
     ) -> list[Process]:
         """The process that held a connection made at a time and those it
         comes from, none when no process was noted to hold it. Of several
-        that hold it the one started last: a socket is handed down, the
-        one that made it is as a rule the last of the line."""
+        that hold it the one started last, the last of them as the watcher
+        lists them (see started_last of procwatch.py): a socket is handed
+        down, the one that made it is as a rule the last of the line."""
         noted = [
             (at, pids)
             for at, pids in self.holders.get((source_port, address, port), [])
@@ -474,7 +510,7 @@ class ProcessRecord:
         if not noted:
             return []
         at, pids = min(noted, key=lambda found: abs(found[0] - when))
-        return self.lineage(max(pids), at) if pids else []
+        return self.lineage(started_last(pids), at) if pids else []
 
     def hidden_holder(
         self, source_port: int, address: str, port: int, when: float
@@ -508,11 +544,16 @@ class ProcessRecord:
         """Whether a process was noted between two times, or within so
         many seconds of them. None when the record cannot tell: the
         launcher wrote it from outside the session, or its watcher was
-        not up yet at the first of them, or had stopped noting processes
-        by the second."""
+        not up yet at the first of them, had stopped noting processes by
+        the second, or could not write some of them in between."""
         if self.outside or self.watched_from is None or start < self.watched_from:
             return None
         if self.full_at is not None and end > self.full_at:
+            return None
+        # The gaps come in the order of their times: the first that ends
+        # from the start on is the one that may be in between
+        at = bisect.bisect_left(self.unwritten, start - within, key=_until)
+        if at < len(self.unwritten) and self.unwritten[at].since <= end + within:
             return None
         if self.silent_from(end) is not None:
             return None

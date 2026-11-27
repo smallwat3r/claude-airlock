@@ -17,6 +17,7 @@ from typing import ClassVar, Self
 from ..docker import (
     DROP_CAPABILITIES,
     NO_NEW_PRIVILEGES,
+    SIDECAR_SEPARATOR,
     docker,
     docker_answer,
     docker_ok,
@@ -37,10 +38,9 @@ class Sidecar:
     the start of its session, and the launcher that started it. The label
     is the launcher's, a session cannot set its own."""
 
-    # What the sidecar's name adds to its session's, and its label. Session
-    # names are stepped past the names in use (see container_name), a clash
-    # with a session of a project named like a sidecar is left to docker to
-    # refuse.
+    # What the sidecar's name adds to its session's, after the separator
+    # no session's name has (SIDECAR_SEPARATOR, see container_name), and
+    # its label
     SUFFIX: ClassVar[str]
     LABEL: ClassVar[str]
     # What it records, as it is called when that was not kept, and the
@@ -66,12 +66,12 @@ class Sidecar:
 
     @classmethod
     def name_for(cls, session: str) -> str:
-        return session + cls.SUFFIX
+        return session + SIDECAR_SEPARATOR + cls.SUFFIX
 
     @classmethod
     def session_of(cls, name: str) -> str:
         """The session a sidecar of this name belongs to."""
-        return name[: -len(cls.SUFFIX)]
+        return name[: -len(SIDECAR_SEPARATOR + cls.SUFFIX)]
 
     @classmethod
     def for_session(cls, session: str, project: str) -> Self:
@@ -125,7 +125,8 @@ class Sidecar:
             launcher = Launcher.from_fields(about)
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
             return None
-        if not name.endswith(cls.SUFFIX) or not math.isfinite(start):
+        ending = SIDECAR_SEPARATOR + cls.SUFFIX
+        if not name.endswith(ending) or not math.isfinite(start):
             return None
         return cls(name, project, start, launcher)
 

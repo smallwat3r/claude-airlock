@@ -52,7 +52,11 @@ DNS_LENGTH = 2
 # them are counted and not read. Each part of a capture has a packet
 # limit, which bounds what a packet a lookup would: over TCP one packet
 # can hold dozens of messages, and a session can send any number of them
-# to a port of its own.
+# to a port of its own. This and the two below are each of what goes to
+# and comes from Docker's resolver on its own, and of what goes to port 53
+# anywhere else on its own: a session can make all it likes of the second,
+# which must not use up what the lookups it has the resolver make are read
+# with, in whatever order the two are read.
 MOST_LOOKUPS = 100_000
 # Nor are more DNS messages read than this, whatever comes of them: one
 # that is none, an answer nobody asked for and a query asked again leave
@@ -141,11 +145,47 @@ class Stream(NamedTuple):
 
 
 class Held(NamedTuple):
-    """The start of a DNS message over TCP whose rest has not come, and
-    the sequence number the rest starts at."""
+    """The start of a DNS message over TCP whose rest has not come, the
+    sequence number the rest starts at, and when what it holds began to
+    come."""
 
     data: bytes
     goes_on_at: int
+    since: float
+
+
+def at_resolver(packet: Packet) -> bool:
+    """Whether a packet goes to or comes from Docker's resolver, which
+    has its own share of what is read, see MOST_LOOKUPS."""
+    return RESOLVER in (packet.source, packet.destination)
+
+
+@dataclass
+class _Share:
+    """What was read and kept of one share of the DNS messages, see
+    MOST_LOOKUPS: Docker's resolver's, or the rest. How many messages
+    were read, how many lookups are kept, and how many addresses those
+    give."""
+
+    read: int = 0
+    kept: int = 0
+    addresses: int = 0
+
+    def left(self) -> int:
+        """How many more messages are read: none once MOST_LOOKUPS are
+        kept, else what is left of MOST_DNS_READ."""
+        if self.kept >= MOST_LOOKUPS:
+            return 0
+        return max(MOST_DNS_READ - self.read, 0)
+
+    def room_for(self, lookup: Lookup) -> bool:
+        """Whether a lookup can be kept, see MOST_ADDRESSES."""
+        addresses = self.addresses + len(lookup.addresses)
+        return self.kept < MOST_LOOKUPS and addresses <= MOST_ADDRESSES
+
+    def keep(self, lookup: Lookup) -> None:
+        self.kept += 1
+        self.addresses += len(lookup.addresses)
 
 
 @dataclass
@@ -174,22 +214,35 @@ class Lookups:
     # the session's doing, the address is what it reached
     answered: dict[str, LookedUp] = field(default_factory=dict)
     # The queries the session sent to a resolver that have not been
-    # answered, by the key of their answer, with when each was sent, and
-    # those of them said to have had none
-    _pending: dict[tuple[int, str, int], float] = field(
+    # answered, by the key of their answer, each as the lookup it asks
+    # for and the share it is of, and those of them said to have had none
+    _pending: dict[tuple[int, str, int], tuple[Lookup, _Share]] = field(
         default_factory=dict, repr=False
     )
     _silent: set[tuple[int, str, int]] = field(default_factory=set, repr=False)
     _expired_at: float = field(default=0.0, repr=False)
-    # How many DNS messages were read, see MOST_DNS_READ, and how many
-    # addresses the lookups that are kept give, see MOST_ADDRESSES
-    _read: int = field(default=0, repr=False)
-    _addresses: int = field(default=0, repr=False)
+    # What was read and kept of what is Docker's resolver's, and of the
+    # rest, apart, see MOST_LOOKUPS
+    _shares: dict[bool, _Share] = field(
+        default_factory=lambda: {True: _Share(), False: _Share()}, repr=False
+    )
+    # From when a message may have gone unread, see whole_by
+    _missed_from: float = field(default=math.inf, repr=False)
 
-    @property
-    def whole(self) -> bool:
-        """Whether every DNS message was read, see unread and cut."""
-        return not self.unread and not self.cut
+    def whole_by(self, when: float) -> bool:
+        """Whether every DNS message up to a time was read: none was
+        found unread that was sent by then. A name an address was given
+        by then is all there is to know of it at that time, whatever was
+        not read later."""
+        return when < self._missed_from
+
+    def _missed(self, since: float) -> None:
+        """Note that a message sent at a time, or later, went unread."""
+        self._missed_from = min(self._missed_from, since)
+
+    def _share(self, packet: Packet) -> _Share:
+        """The share of what is read a packet is of, see MOST_LOOKUPS."""
+        return self._shares[at_resolver(packet)]
 
     def add(self, packet: Packet) -> None:
         """Take in the DNS messages a packet carries, if any. Of TCP, a
@@ -207,13 +260,6 @@ class Lookups:
             if packet.tcp_flags & (TcpFlag.FIN | TcpFlag.RST):
                 self._ended(packet)
 
-    def _left(self) -> int:
-        """How many more DNS messages are read: none once MOST_LOOKUPS
-        are kept, else what is left of MOST_DNS_READ."""
-        if len(self.lookups) >= MOST_LOOKUPS:
-            return 0
-        return max(MOST_DNS_READ - self._read, 0)
-
     def _over_tcp(self, packet: Packet) -> list[bytes]:
         """The DNS messages a packet of TCP completes. Over TCP a message
         comes after its length, and the two need not come together: the
@@ -222,8 +268,8 @@ class Lookups:
         stream. A packet that was not captured whole gives what there is
         of its last message, and nothing is kept: where the next one
         starts is not known. No more messages than are still read, see
-        _left: what is left of the packet then counts as one that was
-        not, and is not looked into.
+        _Share.left: what is left of the packet then counts as one that
+        was not, and is not looked into.
 
         Where a stream cannot be read to its end, that is counted (see
         cut), never passed over: a packet of the session's that is
@@ -233,9 +279,10 @@ class Lookups:
         A session chooses all three, a query sent behind padding or in
         a message of many kilobytes is otherwise in no lookup and in no
         count."""
-        left = self._left()
+        left = self._share(packet).left()
         stream = Stream.of(packet)
-        data = self._held_before(stream, packet) + packet.payload
+        held, since = self._held_before(stream, packet)
+        data = held + packet.payload
         messages: list[bytes] = []
         at = 0
         while len(data) - at >= DNS_LENGTH and len(messages) < left:
@@ -247,22 +294,23 @@ class Lookups:
         data = data[at:]
         if data and len(messages) >= left:
             self.unread += 1
+            self._missed(since)
             return messages
         if len(packet.payload) < packet.length:
-            self._lost(stream)
+            self._lost(stream, since)
             return [*messages, data[DNS_LENGTH:]] if data[DNS_LENGTH:] else messages
         if len(data) > DNS_HELD_BYTES:
-            self._lost(stream)
+            self._lost(stream, since)
         elif data:
             while len(self._held) >= DNS_MOST_HELD:
                 oldest = next(iter(self._held))
-                del self._held[oldest]
-                self._lost(oldest)
-            self._held[stream] = Held(data, packet.carried_to)
+                self._lost(oldest, self._held.pop(oldest).since)
+            self._held[stream] = Held(data, packet.carried_to, since)
         return messages
 
-    def _held_before(self, stream: Stream, packet: Packet) -> bytes:
-        """What was held of a stream for a packet to go on from: none
+    def _held_before(self, stream: Stream, packet: Packet) -> tuple[bytes, float]:
+        """What was held of a stream for a packet to go on from, with
+        when it began to come, the packet's own time without any: none
         when the packet does not start where it goes on, which is then
         counted as lost (see _lost). A packet the capture did not have,
         one sent again or out of its turn, or another connection from
@@ -270,11 +318,11 @@ class Lookups:
         two would read as other messages, the one sent in them as none."""
         held = self._held.pop(stream, None)
         if held is None:
-            return b""
+            return b"", packet.when
         if held.goes_on_at != packet.carried_from:
-            self._lost(stream)
-            return b""
-        return held.data
+            self._lost(stream, held.since)
+            return b"", packet.when
+        return held.data, held.since
 
     def _ended(self, packet: Packet) -> None:
         """Let go of what was held of the stream a packet ends, and of
@@ -285,16 +333,19 @@ class Lookups:
         stream = Stream.of(packet)
         both = packet.tcp_flags & (TcpFlag.RST | TcpFlag.SYN)
         for ended in (stream, stream.back) if both else (stream,):
-            if self._held.pop(ended, None) is not None:
-                self._lost(ended)
+            held = self._held.pop(ended, None)
+            if held is not None:
+                self._lost(ended, held.since)
 
-    def _lost(self, stream: Stream) -> None:
+    def _lost(self, stream: Stream, since: float) -> None:
         """Count a stream of DNS over TCP that could not be read to its
         end, by where it is from and where it goes, see cut: one
-        that goes to a resolver. What comes back cut short is the answer
-        to a query that was seen, which is then a lookup without one."""
+        that goes to a resolver, with when what was not read began to
+        come. What comes back cut short is the answer to a query that was
+        seen, which is then a lookup without one."""
         if stream.destination == RESOLVER or stream.port == DNS_PORT:
             self.cut += 1
+            self._missed(since)
 
     def _take(self, packet: Packet, message: bytes) -> None:
         """Take in a DNS message. A query the session sent is kept until
@@ -304,10 +355,12 @@ class Lookups:
         on loopback, is nothing the resolver said."""
         if not is_dns(packet):
             return
-        if not self._left():
+        share = self._share(packet)
+        if not share.left():
             self.unread += 1
+            self._missed(packet.when)
             return
-        self._read += 1
+        share.read += 1
         try:
             # Its question alone at first, see dns_message
             found = dns_message(packet.when, message, answered=False)
@@ -319,38 +372,43 @@ class Lookups:
             # On loopback a capture has each packet once, as one that came
             # in: what goes to the resolver there is the session's query
             if packet.sent or packet.destination == RESOLVER:
-                self._ask(key, packet.when)
+                self._ask(key, found.lookup, share)
             return
         from_resolver = packet.source == RESOLVER or (
             not packet.sent and not is_loopback(packet.source)
         )
         if not from_resolver or key not in self._pending:
             return
-        del self._pending[key]
+        _, asked_of = self._pending.pop(key)
         self._silent.discard(key)
-        self._keep(dns_message(packet.when, message).lookup)
+        self._keep(dns_message(packet.when, message).lookup, asked_of)
 
-    def _ask(self, key: tuple[int, str, int], when: float) -> None:
-        """Keep a query to match its answer with. Past DNS_MOST_PENDING the
-        oldest goes: queries that are never answered must not keep the
-        later ones, and their answers, from being taken."""
+    def _ask(self, key: tuple[int, str, int], query: Lookup, share: _Share) -> None:
+        """Keep a query to match its answer with, as the lookup it asks
+        for, with the share it is of. Past DNS_MOST_PENDING the oldest
+        goes: queries that are never answered must not keep the later
+        ones, and their answers, from being taken."""
         if key in self._pending:
             return
         while len(self._pending) >= DNS_MOST_PENDING:
             oldest = next(iter(self._pending))
+            asked, of = self._pending.pop(oldest)
             if oldest not in self._silent:
-                self._keep(unanswered(self._pending[oldest], oldest))
+                self._keep(unanswered(asked), of)
             self._silent.discard(oldest)
-            del self._pending[oldest]
-        self._pending[key] = when
+        self._pending[key] = (query, share)
 
-    def _keep(self, lookup: Lookup) -> None:
-        addresses = self._addresses + len(lookup.addresses)
-        if len(self.lookups) >= MOST_LOOKUPS or addresses > MOST_ADDRESSES:
+    def _keep(self, lookup: Lookup, share: _Share) -> None:
+        """Keep a lookup of a share, as long as there is room for it, see
+        MOST_LOOKUPS."""
+        if not share.room_for(lookup):
             # Of the queries still waiting when the last one was kept
             self.unread += 1
+            if lookup.addresses:
+                # One that gives none names no address either
+                self._missed(lookup.when)
             return
-        self._addresses = addresses
+        share.keep(lookup)
         self.lookups.append(lookup)
         self._flag(lookup)
         if lookup.kind in ("A", "AAAA"):
@@ -366,32 +424,39 @@ class Lookups:
         if now - self._expired_at < 1.0:
             return
         self._expired_at = now
-        for key, asked in self._pending.items():
-            if now - asked > DNS_WAIT and key not in self._silent:
+        for key, (asked, share) in self._pending.items():
+            if now - asked.when > DNS_WAIT and key not in self._silent:
                 self._silent.add(key)
-                self._keep(unanswered(asked, key))
+                self._keep(unanswered(asked), share)
 
     def finish(self) -> None:
         """Say of what was asked and never answered, of a capture that
         ended, that it was not. Not for one that is still growing."""
-        for key, asked in self._pending.items():
+        for key, (asked, share) in self._pending.items():
             if key not in self._silent:
                 self._silent.add(key)
-                self._keep(unanswered(asked, key))
+                self._keep(unanswered(asked), share)
 
     def _flag(self, lookup: Lookup) -> None:
         """Note a lookup that stands out, a name once however often it is
-        asked for: one longer than names are, the one that makes it
-        DNS_MANY_NAMES under the same parent, and the one that makes it
-        DNS_MANY_UNDER_DOMAIN under the same domain, whatever labels are
-        between the two."""
-        name = lookup.name.lower().rstrip(".")
-        if name in self._looked_up:
+        asked for: one longer than names are, one with bytes no host name
+        has, the one that makes it DNS_MANY_NAMES under the same parent,
+        and the one that makes it DNS_MANY_UNDER_DOMAIN under the same
+        domain, whatever labels are between the two. A name is another
+        by its case too, as it went: data can be carried in that as well,
+        a resolver passes it on. Where it is counted goes by small letters,
+        a domain is the same in any case. What the name is made of is as
+        it was read, see Name of payloads.py: nothing of one that was not."""
+        named = lookup.named
+        if named is None or lookup.name in self._looked_up:
             return
-        self._looked_up.add(name)
-        labels = name.split(".")
-        if len(name) > DNS_LONG_NAME or max(map(len, labels)) > DNS_LONG_LABEL:
+        self._looked_up.add(lookup.name)
+        labels = [label.lower() for label in named.labels]
+        name = ".".join(labels)
+        if named.length > DNS_LONG_NAME or named.longest > DNS_LONG_LABEL:
             self.flagged.append(("an unusually long name", lookup))
+        if not named.plain:
+            self.flagged.append(("a name with bytes no host name has", lookup))
         # Under a parent of two labels or more, not under com
         if len(labels) < 3:
             return

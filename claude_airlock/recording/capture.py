@@ -56,7 +56,7 @@ from .records import TracedSession
 from .sidecar import Sidecar
 from .uploads import ELSEWHERE_PART, UPLOADS_PART
 
-CAPTURE_SUFFIX = ".capture"
+CAPTURE_SUFFIX = "capture"
 CAPTURE_LABEL = "claude-airlock.capture"
 CAPTURE_FILE = "/capture.pcap"
 # tcpdump stops after this many packets, of at most SNAP_LENGTH bytes each,
@@ -510,8 +510,14 @@ def _start_capture(
     # is slower to start than that.
     time.sleep(0.3)
     if started.returncode != 0 or not container_running(sidecar.name):
-        said = sidecar.last_said()
-        sidecar.remove()
+        # A docker run that failed said why itself. What has the name then
+        # can be another's, the name was in use, and is left alone: one
+        # of this sidecar's that was made and never started is collected
+        # by its label, as one left behind (see collect_left_behind)
+        ran = started.returncode == 0
+        said = sidecar.last_said() if ran else ""
+        if ran:
+            sidecar.remove()
         raise Fatal(
             "the network capture did not start, CLAUDE_AIRLOCK_NET_LOG=0 runs"
             f" a session without it:\n{said}"

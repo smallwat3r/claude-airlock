@@ -531,6 +531,71 @@ class RecorderTest(LauncherTest):
         assert copier.failed == 1
         assert "Too many open files" in copier.problem
 
+    def test_a_copy_does_not_grow_past_its_limit(self):
+        size = self.transcript.stat().st_size
+        with unittest.mock.patch.object(recorder, "MOST_COPIED", size - 10):
+            recorder.catch_up(self.transcript, self.copy)
+            recorder.catch_up(self.transcript, self.copy)
+        assert self.copy.stat().st_size == size - 10
+
+    def test_no_more_transcripts_are_followed_than_so_many(self):
+        with (
+            unittest.mock.patch.object(recorder, "MOST_FOLLOWED", 3),
+            unittest.mock.patch.object(recorder, "MOST_CHECKED", 2),
+        ):
+            copier = recorder.Copier(self.host, time.time() - 60)
+            copier.look()
+            decoys = [self.decoy(f"d{number}", 10) for number in range(6)]
+            looked_at = unittest.mock.patch.object(
+                copier, "written_to", wraps=copier.written_to
+            )
+            # No more of those not followed are looked at than so many
+            with looked_at as written_to:
+                copier.look()
+            assert written_to.call_count == 2
+            copier.look()
+            followed = [self.host_copy(decoy).exists() for decoy in decoys]
+            assert sum(followed) == 2
+            assert copier.unfollowed
+            # Once that is said, none of them is looked at any more
+            with unittest.mock.patch.object(copier, "written_to") as written_to:
+                copier.look()
+            written_to.assert_not_called()
+            # The session's own still has its turn
+            added = json.dumps(prompts_at(self.now + 5)[0]) + "\n"
+            with open(self.transcript, "a") as transcript:
+                transcript.write(added)
+            copier.look()
+        assert self.copy.read_bytes() == self.transcript.read_bytes()
+
+    def test_one_of_many_older_transcripts_is_found_in_its_turn(self):
+        older = [self.decoy(f"d{number}", 10) for number in range(5)]
+        with unittest.mock.patch.object(recorder, "MOST_CHECKED", 2):
+            copier = recorder.Copier(self.host, time.time() + 60)
+            # A resumed session adds to one of them
+            with open(older[3], "ab") as resumed:
+                resumed.write(b"x")
+            looks = 0
+            while not self.host_copy(older[3]).exists() and looks < 5:
+                copier.look()
+                looks += 1
+        assert self.host_copy(older[3]).read_bytes() == older[3].read_bytes()
+        assert 1 < looks <= 3
+
+    def test_a_launcher_that_followed_all_it_can_says_so(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        with (
+            unittest.mock.patch.object(recorder, "MOST_FOLLOWED", 1),
+            recorder.transcripts_copied(self.host),
+        ):
+            with open(self.transcript, "a") as transcript:
+                transcript.write(json.dumps(prompts_at(self.now + 5)[0]) + "\n")
+            time.sleep(recorder.LOOK_EVERY * 2)
+            self.decoy("d0", 10)
+        said = capsys.readouterr().err
+        assert "more than the 1 a launcher follows in one session" in said
+
     def test_old_copies_go(self):
         recorder.catch_up(self.transcript, self.copy)
         long_ago = time.time() - (recorder.KEPT_DAYS + 1) * 86400

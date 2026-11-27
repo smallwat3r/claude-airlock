@@ -56,15 +56,14 @@ import time
 from collections import deque
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..background import in_background
 from ..docker import container_gone, env_arg, mount_arg
 from ..errors import Fatal
 from ..files import (
-    MOST_LINE_HELD,
-    held_size,
+    held_object,
     json_object,
     open_plain,
     open_up,
@@ -205,14 +204,20 @@ class Body:
     written: float | None = None
     data: bytes | None = None
     held: dict | None = None
+    # How long the file was and when it was last written, to the
+    # nanosecond, when it was read: what tells it is still the same
+    version: tuple[int, int] | None = field(default=None, compare=False)
 
     @classmethod
-    def read(cls, path: Path, most: int) -> Body:
+    def read(cls, path: Path, most: int, earlier: Body | None = None) -> Body:
         """The body at a path, nothing for one that is not there or is
         no plain file (see open_plain). A session wrote it: one longer
         than most is not read, and one is not taken apart when that
         would hold more than a line of a transcript may (see
-        held_size)."""
+        held_object of files.py). The one it was read as earlier when
+        the file is as it was then, without reading it again: an answer
+        that does not read whole yet is looked at again at every look,
+        and can be of many megabytes."""
         file = open_plain(path)
         if file is None:
             return cls()
@@ -220,6 +225,9 @@ class Body:
             with file:
                 about = os.fstat(file.fileno())
                 size, written = about.st_size, round(about.st_mtime, 3)
+                version = (size, about.st_mtime_ns)
+                if earlier is not None and earlier.version == version:
+                    return earlier
                 if size > most:
                     return cls(size, written)
                 # As long as it was when measured: what it gains meanwhile
@@ -227,8 +235,7 @@ class Body:
                 data = file.read(size)
         except OSError:
             return cls()
-        held = json_object(data) if held_size(data) <= MOST_LINE_HELD else None
-        return cls(len(data), written, data, held)
+        return cls(len(data), written, data, held_object(data)[0], version)
 
 
 def _written_size(value: object) -> int:
@@ -364,8 +371,12 @@ class Drop:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
         self._index = IndexTail(self._path / INDEX)
-        # How much of bodies may still be read
+        # How much of bodies may still be read, of each that was read and
+        # not let go of yet how much was counted, and the last that did
+        # not read whole, by its name, see body
         self._readable = MOST_READ_A_SESSION
+        self._counted: dict[str, int] = {}
+        self._not_whole: tuple[str, Body] | None = None
         # Whether it could not be listed when that was last tried
         self.closed = False
 
@@ -387,11 +398,25 @@ class Drop:
 
     def body(self, name: str) -> Body:
         """The body of a name, nothing for no name, as far as there is
-        room left to read it."""
+        room left to read it. Counted once, at the longest it was read:
+        an answer that does not read whole yet is looked at again at the
+        next look, and a session must not have its room used up for each
+        time. Nor read again while its file has not changed, see
+        Body.read: the last that did not read whole is held for that,
+        one at a time, it is the one at the head of those that wait."""
         if not name:
             return Body()
-        body = Body.read(self._path / name, min(MOST_BODY, self._readable))
-        self._readable -= len(body.data or b"")
+        counted = self._counted.get(name, 0)
+        earlier = None
+        if self._not_whole and self._not_whole[0] == name:
+            earlier = self._not_whole[1]
+        most = min(MOST_BODY, self._readable + counted)
+        body = Body.read(self._path / name, most, earlier)
+        read = len(body.data or b"")
+        if read > counted:
+            self._readable -= read - counted
+            self._counted[name] = read
+        self._not_whole = (name, body) if body.held is None else None
         return body
 
     def let_go(self, *names: str) -> None:
@@ -399,6 +424,9 @@ class Drop:
         and left there a request would be kept twice, or pass for one
         that had no answer."""
         for name in filter(None, names):
+            self._counted.pop(name, None)
+            if self._not_whole and self._not_whole[0] == name:
+                self._not_whole = None
             with contextlib.suppress(OSError):
                 # Never through a link: the name is removed, whatever it is
                 os.unlink(self._path / name)

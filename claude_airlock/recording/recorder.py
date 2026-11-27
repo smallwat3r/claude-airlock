@@ -27,11 +27,14 @@ So a launcher adds no more to its copies in one session than
 MOST_A_SESSION, to all of them together, and what it adds it adds a turn
 at a time, to the transcripts in the order they were first written to
 (see Copier). A copy that stopped short for it is noted to have, and
---trace says so of its transcript.
+--trace says so of its transcript. Nor does it follow more transcripts
+than MOST_FOLLOWED, nor look at more of the others than MOST_CHECKED at a
+time: a session that makes many does not have the looks come far apart.
 
 What this does not give: a line a session takes back within the moment
-before it is copied, what is written once a launcher has no room left,
-and anything of a session run without the launcher."""
+before it is copied, what is written once a launcher has no room left or
+follows as many transcripts as it can, and anything of a session run
+without the launcher."""
 
 from __future__ import annotations
 
@@ -52,9 +55,8 @@ from ..background import in_background
 from ..files import (
     LINE_LIMIT,
     digested_lines,
-    held_size,
     json_object,
-    line_entry,
+    line_read,
     open_locked,
     open_plain,
     private_dir,
@@ -87,6 +89,14 @@ MOST_A_SESSION = 2 * 1024 * 1024 * 1024
 # transcript that gained a lot at once, or was made to, does not keep the
 # next one waiting for all of it
 MOST_A_TURN = 16 * 1024 * 1024
+# No more transcripts than this are followed in one session, and no more
+# of those that are not followed are looked at in one look, the new ones
+# first, then the others in their turn: each takes a look at its length,
+# and a session can make any number of them, which would have the looks
+# come as far apart as it likes and its own transcript copied as late.
+# Far more than a session and its subagents write to.
+MOST_FOLLOWED = 2000
+MOST_CHECKED = 2000
 # A transcript of more different lines than this is not compared with its
 # copies, and of the lines found gone no more is held than this, as the
 # entries they are once read (see held_size): both are a session's to
@@ -238,7 +248,7 @@ def catch_up(transcript: Path, copy: Path, most: int = MOST_COPIED) -> int:
             return 0
         source.seek(have)
         while have + added < MOST_COPIED and added < most:
-            data = source.read(min(CHUNK, most - added))
+            data = source.read(min(CHUNK, most - added, MOST_COPIED - have - added))
             if not data:
                 break
             kept.write(data)
@@ -267,14 +277,20 @@ class Copier:
     is used up stops short, which is noted next to it for --trace to say
     (see Beyond), and counted, to be said when the session is over. Not a
     copy that goes on growing: the launcher of another session of the
-    project is adding to it then, and has room."""
+    project is adding to it then, and has room.
+
+    No more transcripts are followed than MOST_FOLLOWED, and of those that
+    are not, no more than MOST_CHECKED are looked at in one look, see
+    _take_in: a look takes as long as the transcripts it looks at, and a
+    session can make any number. One written to once there are as many as
+    are followed is not copied, which is said when the session is over."""
 
     def __init__(self, host: Host, since: float) -> None:
         self._host = host
         # A transcript written just before is the one a resumed session
         # adds to
         self._since = since
-        # Where the copy of each transcript there is goes, worked out once
+        # Where the copy of each transcript followed goes, worked out once
         self._copies: dict[Path, Path] = {}
         there = session_transcripts(host)
         # How long each transcript was when the session started
@@ -283,11 +299,19 @@ class Copier:
         # they are until they change length: taken up again for being
         # behind, what one session left would use up the room of every
         # session after it
-        self._left = {path for path in there if Beyond.of(self._copy_of(path)).no_room}
+        self._left = {
+            path for path in there if Beyond.of(copy_path(host, path)).no_room
+        }
         # The transcripts seen to be written to, the first seen first.
         # Each with how long its copy was when it was last found to have
         # more to take than there is room for, none while it never was
         self._written: dict[Path, int | None] = {}
+        # Of the transcripts that were there when the session started and
+        # are not followed, where the next look goes on looking at them,
+        # see _take_in
+        self._next_checked = 0
+        # Whether one was written to once MOST_FOLLOWED were followed
+        self.unfollowed = False
         # How much may still be added to the copies, see MOST_A_SESSION
         self._room = MOST_A_SESSION
         # The transcripts whose copy this launcher noted to stop short
@@ -322,7 +346,7 @@ class Copier:
             return False
         if about.st_mtime >= self._since:
             return True
-        copied = length(self._copy_of(transcript))
+        copied = length(copy_path(self._host, transcript))
         return copied is not None and copied != about.st_size
 
     def _copy_of(self, transcript: Path) -> Path:
@@ -341,8 +365,8 @@ class Copier:
         # Not of those that are gone, a session can make any number
         self._copies = {
             transcript: copy
-            for transcript in transcripts
-            if (copy := self._copies.get(transcript)) is not None
+            for transcript, copy in self._copies.items()
+            if transcript in there
         }
         self._written = {
             transcript: stuck
@@ -350,9 +374,7 @@ class Copier:
             if transcript in there
         }
         self._short &= there
-        for transcript in transcripts:
-            if transcript not in self._written and self.written_to(transcript):
-                self._written[transcript] = None
+        self._take_in(transcripts)
         more = False
         for transcript in self._written:
             try:
@@ -363,6 +385,41 @@ class Copier:
                 self.failed += 1
                 self.problem = str(problem)
         return more and self._room > 0
+
+    def _take_in(self, transcripts: list[Path]) -> None:
+        """Follow those of the transcripts there that were written to, see
+        written_to, as long as fewer than MOST_FOLLOWED are. Of those that
+        are not followed yet, no more are looked at than MOST_CHECKED:
+        those that were not there when the session started first, they
+        are what was written since, then the others in their turn, a
+        resumed session adds to one of those. Once as many are followed
+        as can be, the new ones alone, until one of them is found to be
+        written to, which is then said (see unfollowed): nothing more is
+        taken in."""
+        full = len(self._written) >= MOST_FOLLOWED
+        if full and self.unfollowed:
+            return
+        unknown = [path for path in transcripts if path not in self._written]
+        new = [path for path in unknown if path not in self._lengths][:MOST_CHECKED]
+        old = [] if full else [path for path in unknown if path in self._lengths]
+        for transcript in filter(self.written_to, [*new, *self._in_turn(old, new)]):
+            if len(self._written) >= MOST_FOLLOWED:
+                self.unfollowed = True
+                return
+            self._written[transcript] = None
+
+    def _in_turn(self, old: list[Path], new: list[Path]) -> list[Path]:
+        """Of the transcripts that were there when the session started
+        and are not followed, those to be looked at with the new ones,
+        from where the look before left off: as many as there is room for
+        next to those, see MOST_CHECKED."""
+        room = MOST_CHECKED - len(new)
+        if not old or room <= 0:
+            return []
+        start = self._next_checked % len(old)
+        turn = (old[start:] + old[:start])[:room]
+        self._next_checked = start + len(turn)
+        return turn
 
     def _turn(self, transcript: Path, whole: bool) -> bool:
         """Add to the copy of a transcript what it has gained: as much as
@@ -463,6 +520,14 @@ def transcripts_copied(host: Host) -> Iterator[Copier]:
                 f" launcher copies no more than {MOST_A_SESSION >> 20} MB in"
                 " one session: what the session took out of them after"
                 " that is not known, --trace says NOT ALL COPIED of each",
+            )
+        if copier.unfollowed:
+            # A session can be what made them that many
+            warn(
+                "the transcripts written to were more than the"
+                f" {MOST_FOLLOWED} a launcher follows in one session, those"
+                " found after that were not copied: what the session took out"
+                " of them is not known",
             )
 
 
@@ -676,14 +741,12 @@ def compare(host: Host, transcript: Path) -> Compared:
         if len(seen) < MOST_COMPARED:
             seen.add(digest)
         # What it takes once read, as an entry: a line of small values
-        # takes dozens of times its length. Nothing of one too long to be.
-        size = 0 if line is None else held_size(line)
+        # takes dozens of times its length. One that holds no entry is
+        # said to be gone too, as that, and so is one too long to be read
+        entry, size = line_read(line)
         if held + size > MOST_GONE_HELD:
             found.more_gone += 1
             continue
-        # One that holds no entry is said to be gone too, as that, and so
-        # is one too long to be read
-        entry = line_entry(line)
         if entry:
             held += size
             found.gone.append(entry)

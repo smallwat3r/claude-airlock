@@ -46,8 +46,10 @@ def segment(
 
 
 def dns_name(name: str) -> bytes:
-    """A name as DNS writes it in a question, its labels without the end."""
-    return b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
+    """A name as DNS writes it in a question, its labels without the end,
+    each in UTF-8."""
+    labels = [part.encode() for part in name.split(".")]
+    return b"".join(bytes([len(label)]) + label for label in labels)
 
 
 def tcp(

@@ -7,8 +7,9 @@ read as raises NotThis or reads as nothing."""
 
 from __future__ import annotations
 
+import dataclasses
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..reader import Cursor, NotThis
 
@@ -42,6 +43,12 @@ DNS_ERRORS = {
 NO_ANSWER = "no answer"
 # A name cannot have more labels than this, a longer walk is a loop
 DNS_MOST_LABELS = 127
+# The bytes of a label that are written after a backslash, as dig does:
+# they mean something in a name written out
+DNS_ESCAPED = frozenset(b'.\\"();@$')
+# The bytes a host name is made of: letters, digits, the hyphen, and the
+# underscore of a service (_dmarc, _sip._tcp)
+HOST_BYTES = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 TLS_HANDSHAKE = 0x16
 TLS_CLIENT_HELLO = 0x01
 # The major version every record of TLS starts with, after its type
@@ -65,22 +72,52 @@ TOLD_BY = len(HTTP2_PREFACE)
 
 
 @dataclass(frozen=True)
+class Name:
+    """A name a DNS message asks about, as it is read from its bytes:
+    written as dig writes it (see dns_label), its labels so written, how
+    many bytes it and its longest label are on the wire, and whether all
+    of it is what a host name is made of (see HOST_BYTES)."""
+
+    text: str
+    labels: tuple[str, ...]
+    length: int
+    longest: int
+    plain: bool
+
+    @classmethod
+    def of(cls, raw: list[bytes]) -> Name:
+        """The name of labels as they came."""
+        labels = tuple(map(dns_label, raw))
+        return cls(
+            ".".join(labels),
+            labels,
+            sum(map(len, raw)) + max(len(raw) - 1, 0),
+            max(map(len, raw), default=0),
+            not any(label.translate(None, HOST_BYTES) for label in raw),
+        )
+
+
+@dataclass(frozen=True)
 class Lookup:
     """An answer of the resolver: for which name and kind of record it
-    was asked, the addresses it gave, and what it said went wrong."""
+    was asked, the addresses it gave, and what it said went wrong. With
+    the name as it was read, when it was (see Name): one is not compared
+    by that, it is the name over again."""
 
     when: float
     name: str
     kind: str
     addresses: tuple[str, ...]
     error: str
+    named: Name | None = field(default=None, compare=False, repr=False)
 
 
-def _dns_name(message: bytes, at: Cursor) -> str:
-    """The name at a cursor in a DNS message, the cursor left after it.
-    A name can end in a pointer to the rest of it, elsewhere in the
-    message, which is followed without moving the cursor further."""
-    labels: list[str] = []
+def _dns_labels(message: bytes, at: Cursor) -> list[bytes]:
+    """The labels of the name at a cursor in a DNS message, the cursor
+    left after it. A name can end in a pointer to the rest of it,
+    elsewhere in the message, which is followed without moving the cursor
+    further."""
+    labels: list[bytes] = []
     reader = at
     for _ in range(DNS_MOST_LABELS):
         length = reader.number(1)
@@ -88,10 +125,39 @@ def _dns_name(message: bytes, at: Cursor) -> str:
             target = (length & ~DNS_POINTER) << 8 | reader.number(1)
             reader = Cursor(message, target)
         elif length == 0:
-            return ".".join(labels)
+            return labels
         else:
-            labels.append(reader.take(length).decode("ascii", "replace"))
+            labels.append(reader.take(length))
     raise NotThis
+
+
+def _shown_byte(byte: int) -> str:
+    if byte in DNS_ESCAPED:
+        return "\\" + chr(byte)
+    if 0x21 <= byte <= 0x7E:
+        return chr(byte)
+    return f"\\{byte:03d}"
+
+
+# How each byte of a label is written, see dns_label, and those that are
+# written as they are
+_LABEL_BYTES = tuple(_shown_byte(byte) for byte in range(256))
+_PLAIN = bytes(byte for byte in range(256) if _LABEL_BYTES[byte] == chr(byte))
+
+
+def dns_label(raw: bytes) -> str:
+    """A label of a name as dig writes it, so that no two are written
+    the same: a byte that is no printable letter of ASCII as a backslash
+    and its number in three digits (\\032 for a space), a dot, a
+    backslash and the others that mean something in a name after a
+    backslash. Letters keep their case. A session can carry anything out
+    in the names it looks up, a resolver passes them on: read as text
+    they would all look alike. For showing alone, what a name is made of
+    is told by Name."""
+    if not raw.translate(None, _PLAIN):
+        # As a rule: one that has nothing to be written otherwise
+        return raw.decode("ascii")
+    return "".join(_LABEL_BYTES[byte] for byte in raw)
 
 
 @dataclass(frozen=True)
@@ -121,16 +187,16 @@ def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessag
     reader.skip(4)  # the counts of the two other sections
     if questions != 1:
         raise NotThis
-    name = _dns_name(message, reader)
+    labels = _dns_labels(message, reader)
     asked = reader.number(2)
     reader.skip(2)  # the class asked for
-    if not name:
+    if not labels:
         raise NotThis
     response = bool(flags & DNS_IS_RESPONSE)
     addresses = []
     try:
         for _ in range(answers if response and answered else 0):
-            _dns_name(message, reader)
+            _dns_labels(message, reader)
             kind = reader.number(2)
             reader.skip(6)  # class, time to live
             data = reader.take(reader.number(2))
@@ -145,15 +211,15 @@ def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessag
     code = flags & DNS_ERROR_CODE if response else 0
     error = DNS_ERRORS.get(code, f"error {code}") if code else ""
     kind_asked = DNS_RECORDS.get(asked, f"type {asked}")
-    lookup = Lookup(when, name, kind_asked, tuple(addresses), error)
+    named = Name.of(labels)
+    lookup = Lookup(when, named.text, kind_asked, tuple(addresses), error, named)
     return DnsMessage(ident, response, asked, lookup)
 
 
-def unanswered(asked: float, key: tuple[int, str, int]) -> Lookup:
-    """The lookup of a query that never had an answer: when it was sent,
-    for which name and kind of record."""
-    _, name, kind = key
-    return Lookup(asked, name, DNS_RECORDS.get(kind, f"type {kind}"), (), NO_ANSWER)
+def unanswered(query: Lookup) -> Lookup:
+    """The lookup of a query that never had an answer, by that of the
+    query: when it was sent, for which name and kind of record."""
+    return dataclasses.replace(query, addresses=(), error=NO_ANSWER)
 
 
 def http_request(payload: bytes) -> tuple[str, str, str] | None:

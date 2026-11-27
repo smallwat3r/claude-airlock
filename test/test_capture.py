@@ -220,12 +220,13 @@ class CaptureFileTest:
 
     def test_the_name_of_an_address_is_found_among_any_number_of_answers(self):
         capture = pcap.Capture()
+        share = lookups_module._Share()
         count = 50_000
         for at in range(count):
             lookup = payloads.Lookup(
                 float(at), f"n{at}.test", "A", ("198.51.100.7",), ""
             )
-            capture.dns._keep(lookup)
+            capture.dns._keep(lookup, share)
         started = time.monotonic()
         for at in range(count):
             assert capture.name_of("198.51.100.7", at + 0.5) == f"n{at}.test"
@@ -233,7 +234,8 @@ class CaptureFileTest:
         assert capture.name_of("198.51.100.7") == f"n{count - 1}.test"
         assert capture.name_of("198.51.100.7", -1.0) is None
         # One that comes out of its turn is put where its time is
-        capture.dns._keep(payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), ""))
+        late = payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), "")
+        capture.dns._keep(late, share)
         assert capture.name_of("198.51.100.7", 9.8) == "late.test"
         assert capture.name_of("198.51.100.7", 9.6) == "n9.test"
 
@@ -766,6 +768,59 @@ class ToldOfConnectionsTest:
             cut = read_parts(packets[1:], dns=looked_up)
         assert (cut.lookups_whole, cut.noticed) == (False, [])
         assert cut.names == {self.THERE: "files.test"}
+
+    def test_a_hello_is_held_against_the_lookups_that_were_all_read_by_then(self):
+        packets = [
+            (1.0, dns_response("files.test", self.THERE), False),
+            *self.connected(client_hello("pypi.test")),
+        ]
+
+        def cut_at(when: float) -> tuple[float, bytes, bool]:
+            # Sent to a server of the session's own over TCP, longer than
+            # the capture keeps of a packet
+            sent = bytearray(dns_over("172.20.0.5", "9.9.9.9", b"q" * 20, (40053, 53)))
+            sent[2:4] = struct.pack("!H", 2000)
+            return when, bytes(sent), True
+
+        # What could not be read after the hello says nothing of it
+        later = read_parts(packets, direct=[cut_at(5.0)])
+        assert later.dns.cut == 1
+        assert len(later.noticed) == 1
+        # What could not be read before it may have named the address
+        earlier = read_parts(packets, direct=[cut_at(0.5)])
+        assert earlier.dns.cut == 1
+        assert earlier.noticed == []
+
+    def test_lookups_elsewhere_do_not_use_up_those_of_the_resolver(self):
+        def message(when: float, payload: bytes, sent: bool) -> pcap.Packet:
+            ends = ("172.20.0.5", "127.0.0.11")
+            ports = (40000, 53)
+            if not sent:
+                ends, ports = ends[::-1], ports[::-1]
+            return pcap.Packet(
+                when, sent, 17, *ends, *ports, pcap.TcpFlag(0), payload, length=1
+            )
+
+        dns = lookups_module.Lookups()
+        query = dns_message_of(dns_query("good.test"))
+        response = dns_message_of(dns_response("good.test", self.THERE))
+        with unittest.mock.patch.object(lookups_module, "MOST_DNS_READ", 100):
+            # Messages of no length to a server of the session's own, over
+            # TCP, as many as are read: as the parts are read in turn,
+            # while a session is followed, ahead of what the resolver said
+            flood = b"\0\0" * 200
+            dns.add(
+                pcap.Packet(
+                    1.0, True, 6, "172.20.0.5", "9.9.9.9", 40053, 53,
+                    pcap.TcpFlag.ACK, flood, 1, 0, len(flood),
+                )
+            )  # fmt: skip
+            dns.add(message(2.0, query, True))
+            dns.add(message(2.1, response, False))
+        assert dns.unread == 1
+        assert [lookup.name for lookup in dns.lookups] == ["good.test"]
+        assert dns.whole_by(0.5)
+        assert not dns.whole_by(1.0)
 
     def test_whether_an_address_had_a_name_is_told_without_going_through_them(self):
         looked_up = lookups_module.LookedUp()
@@ -1345,6 +1400,54 @@ class OtherTrafficTest:
         flat = [f"n{n}.evil.test" for n in range(count + 5)]
         ((why, _),) = self.read(lookups(flat)).dns.flagged
         assert why == f"{lookups_module.DNS_MANY_NAMES} names looked up under evil.test"
+
+    def test_a_name_is_written_as_dig_writes_it(self):
+        assert payloads.dns_label(b"Ab-_9") == "Ab-_9"
+        written = payloads.dns_label(b'a.b\\c d"\x00\xff')
+        assert written == 'a\\.b\\\\c\\032d\\"\\000\\255'
+        # Two that differ in a byte that is no letter are two names
+        names = {payloads.dns_label(bytes([byte])) for byte in range(256)}
+        assert len(names) == 256
+        # Written the same whether or not it has anything to escape
+        for raw in (bytes(range(256)), b"plain-label", b"x" * 63 + b"\x00"):
+            whole = "".join(payloads.dns_label(bytes([byte])) for byte in raw)
+            assert payloads.dns_label(raw) == whole
+        # What a name is made of is told by its bytes, not by how it is shown
+        named = payloads.Name.of([b"a.b", b"\xff", b"_sip"])
+        assert named.text == "a\\.b.\\255._sip"
+        assert named.labels == ("a\\.b", "\\255", "_sip")
+        assert (named.length, named.longest, named.plain) == (10, 4, False)
+        assert payloads.Name.of([b"Good-1", b"_tcp", b"test"]).plain
+
+    def test_names_carried_in_what_no_host_name_has_are_flagged(self):
+        count = lookups_module.DNS_MANY_NAMES
+
+        def lookups(names: list[str]) -> list[tuple[float, bytes, bool]]:
+            return [(1.0, dns_response(name, "198.51.100.7"), False) for name in names]
+
+        # Data in bytes past ASCII, each of them a name of its own
+        carried = [
+            "".join(chr(0x80 + (n >> shift & 0x3F)) for shift in (0, 6)) + ".evil.test"
+            for n in range(count + 5)
+        ]
+        found = self.read(lookups(carried)).dns
+        assert len({lookup.name for lookup in found.lookups}) == count + 5
+        assert found.lookups[0].name == "\\194\\128\\194\\128.evil.test"
+        whys = [why for why, _ in found.flagged]
+        assert whys.count("a name with bytes no host name has") == count + 5
+        assert f"{count} names looked up under evil.test" in whys
+        # Data in the case of its letters, which a resolver passes on
+        word = "abcdefgh"
+        cased = [
+            "".join(c.upper() if n >> at & 1 else c for at, c in enumerate(word))
+            + ".evil.test"
+            for n in range(count + 5)
+        ]
+        ((why, _),) = self.read(lookups(cased)).dns.flagged
+        assert why == f"{count} names looked up under evil.test"
+        # The same name asked for again is not another
+        again = self.read(lookups(["Word.evil.test"] * (count + 5))).dns
+        assert again.flagged == []
 
     def test_many_names_under_one_parent_are_flagged(self):
         count = lookups_module.DNS_MANY_NAMES

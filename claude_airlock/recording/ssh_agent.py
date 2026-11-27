@@ -322,13 +322,18 @@ def read_message(connection: socket.socket) -> bytes | None:
 
 
 def _read_exactly(connection: socket.socket, count: int) -> bytes | None:
-    data = b""
-    while len(data) < count:
-        more = connection.recv(count - len(data))
+    """So many bytes of a connection, none when it ends first. Into one
+    buffer as they come: a session that sends a byte at a time would
+    otherwise have each copied again with every one after it."""
+    data = bytearray(count)
+    view = memoryview(data)
+    got = 0
+    while got < count:
+        more = connection.recv_into(view[got:])
         if not more:
             return None
-        data += more
-    return data
+        got += more
+    return bytes(data)
 
 
 def agent_socket(
