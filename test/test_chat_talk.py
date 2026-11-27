@@ -143,6 +143,24 @@ class TalkTest(LauncherTest):
         )
         assert re.fullmatch(whole, lines[10])
 
+    def test_a_result_ends_only_a_turn_that_runs_and_is_claudes(self):
+        chat = a_chat(self.host)
+        over = {"type": "result", "subtype": "success", "is_error": False}
+        chat._turns.begin()
+        with written() as lines:
+            # Of a subagent: the turn goes on
+            chat._heard({**over, "parent_tool_use_id": "t1"})
+        assert chat._turns.running
+        assert lines == []
+        with written() as lines:
+            chat._heard(over)
+        assert not chat._turns.running
+        assert lines
+        # Once more: no turn runs to end, nothing is said again
+        with written() as lines:
+            chat._heard(over)
+        assert lines == []
+
     def test_a_chat_is_over_or_left_by_who_ended_first(self):
         life = talk.Life
         # The user leaves, then claude ends for it
@@ -321,10 +339,12 @@ class TalkTest(LauncherTest):
 
     def said_by(self, *messages: dict) -> list[str]:
         """What a chat writes of what claude says, the lines about what
-        changed in it."""
+        changed in it. Each within a turn, as claude says all of it: a
+        result ends only a turn that runs."""
         chat = a_chat(self.host)
         with written() as lines:
             for message in messages:
+                chat._turns.begin()
                 chat._heard(message)
         return [line for line in lines if "CHANGED" in line]
 

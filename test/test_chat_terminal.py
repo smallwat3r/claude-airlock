@@ -11,6 +11,7 @@ import re
 import sys
 import time
 
+import pyte
 import pytest
 from chat_harness import (
     EDITLINE,
@@ -117,6 +118,23 @@ class TerminalTest(LineModeTest):
         )
         assert said.count("user     prompt      one\n") == 1
         assert turns(said) == 1
+
+    @editline
+    def test_at_a_terminal_of_editline_a_new_line_key_erases_nothing_above(self):
+        # Editline stays on the row of the key, where Enter moves to the
+        # next: erased from the row below, each key took a row above
+        said = self.at_a_terminal(
+            ("> ", "one\x1b\r"),
+            ("one^M", "two\x1b[13;2u"),
+            ("two^M", "three"),
+            ("three", "\x15\x04"),
+        )
+        head = "[claude-proj]"
+        before = _screen(said[: said.index("> ")])
+        after = _screen(said[: said.rindex("three") + len("three")])
+        above = before[: before.index(next(r for r in before if r.startswith(head)))]
+        assert after[: len(above)] == above
+        assert after[len(above) :][:4] == [f"{head} net:open", "> one", "two", "three"]
 
     def test_at_a_terminal_lines_pasted_unmarked_are_one_prompt(self):
         # Without the escapes of a bracketed paste, as a terminal that
@@ -496,3 +514,14 @@ class ReadlineTest:
             # In bytes from the start of the line, where it can be read.
             # Editline leaves it where it was, the console does not ask
             assert point == 2, f"with {library}"
+
+
+def _screen(written: str) -> list[str]:
+    """The rows a terminal of the width a chat is run at shows of what was
+    written, those that hold something, each without the blanks at its
+    end: what was erased is not among them."""
+    screen = pyte.Screen(100, 60)
+    # A line feed starts the next row, as the terminal of the pty had it
+    screen.set_mode(pyte.modes.LNM)
+    pyte.Stream(screen).feed(written)
+    return [row.rstrip() for row in screen.display if row.strip()]

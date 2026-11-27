@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import io
 import sys
 import unittest.mock
@@ -149,7 +150,7 @@ class ConsoleTest(LauncherTest):
                 ) as buffer,
             ):
                 buffer.return_value = ""
-                assert screen.read("> ", headed=True) == "hello"
+                assert screen.read(screens.as_prompt("> "), headed=True) == "hello"
             return out.getvalue()
 
         # Editline writes an escape with the character after it, and
@@ -311,13 +312,62 @@ class ConsoleTest(LauncherTest):
         asked = "allow bash $ echo hi" + "\t" * 190 + "? [y/a/N] "
         with unittest.mock.patch.object(console.readline, "get_line_buffer") as typed:
             typed.return_value = ""
-            screen.ask(asked)
+            screen.ask(screens.as_prompt(asked))
             screen.write(["one"])
         assert "\t" not in out.getvalue()
         shown = asked.replace("\t", " ")
         # Each written as many columns as are counted for it, 220
         assert out.getvalue() == f"\r\x1b[J{shown}\x1b[3A\r\x1b[Jone\n{shown}"
-        assert screens.spaced("a\tb") == "a b"
+        # Made so the one way there is: cleaned, and on one line
+        assert screens.as_prompt("a\tb\nc\x1b[2J") == "a b\\nc[2J"
+        assert screens.as_prompt("a", "1") == "\x1b[1ma\x1b[0m"
+
+    def test_ctrl_c_while_readline_completes_ends_the_line(self):
+        # GNU readline does not see it, the chat's own code ran: the line
+        # is ended for it, and dropped as Ctrl-C drops one
+        screen = console.Console(str(self.project), out=io.StringIO())
+        done = ctypes.c_int(0)
+
+        def completing(_prompt: str) -> str:
+            # Ctrl-C within the completion, where nothing is raised
+            screen._waiting = False
+            screen.interrupt()
+            screen._complete("/he", 0)
+            # What readline gives back once it ended the line
+            return "half" if done.value else "entered"
+
+        with (
+            unittest.mock.patch.object(console, "_done", done),
+            unittest.mock.patch.object(console, "readline") as readline,
+            unittest.mock.patch("builtins.input", completing),
+        ):
+            readline.get_begidx.return_value = 0
+            readline.get_current_history_length.return_value = 1
+            readline.get_history_item.return_value = "half"
+            with pytest.raises(KeyboardInterrupt):
+                screen._typed("> ")
+            assert done.value == 1
+            # Kept by readline among the lines typed, and taken out
+            readline.remove_history_item.assert_called_once_with(0)
+        assert not screen._ended_for_interrupt
+        # Where readline cannot be had to, nothing is ended
+        screen._interrupted = True
+        with unittest.mock.patch.object(console, "_done", None):
+            screen._end_for_interrupt()
+        assert not screen._ended_for_interrupt
+
+    def test_a_typed_tab_is_counted_to_the_next_stop(self):
+        # Pasted, as Tab completes: to column 16 of the row, and what
+        # follows ends at the edge of twenty, the cursor on the next row.
+        # Counted one column, it would be on the first
+        typed = "x" * 10 + "\tabcd"
+        assert screens.erased("> ", typed, 20) == "\x1b[1A\r\x1b[J"
+        assert screens.erased("> ", "x\ta", 20) == "\r\x1b[J"
+        # No further than the last column of the row it is on, where a
+        # terminal stops it: the fewer columns, see columns_of
+        assert screens.erased("> ", "xxxxxxx\t", 10) == "\r\x1b[J"
+        # The cursor put back after it, at its stop
+        assert screens.cursor_back("> ", "\tab", "\t", 20) == "\r\x1b[8C"
 
     def test_a_line_is_written_again_with_the_cursor_where_it_was(self):
         out = io.StringIO()

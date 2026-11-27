@@ -37,13 +37,13 @@ from ..report.layout import (
     RED,
     WHAT_WIDTH,
     YELLOW,
-    painted,
     prefixed,
     together,
 )
 from .console import Console, Page
 from .reply import reply_lines, wrapped
 from .said import is_number
+from .screen import as_prompt
 
 # How a question that must not be missed is put in colour, bold yellow:
 # something waits until the user has answered it
@@ -361,8 +361,7 @@ class Asker:
         wanted, see attend."""
         if not self._wanted():
             return None
-        if self._page.layout.colour:
-            prompt = painted(style, prompt)
+        shown = as_prompt(prompt, style if self._page.layout.colour else "")
         question = Question(stale=self._console.typed())
         if question.stale.strip():
             # It is written again after the question, where it looks like
@@ -373,7 +372,7 @@ class Asker:
             )
         with self._putting:
             self._question = question
-            self._console.ask(prompt)
+            self._console.ask(shown)
         self._console.bell()
         self._on_ask()
         while not question.answered.wait(LOOK_EVERY):
@@ -465,8 +464,9 @@ class Asker:
         for question in asked if isinstance(asked, list) else []:
             if not isinstance(question, dict):
                 continue
-            options = question.get("options")
-            options = [o for o in options or [] if isinstance(o, dict)]
+            given = question.get("options")
+            listed = given if isinstance(given, list) else []
+            options = [option for option in listed if isinstance(option, dict)]
             text = str(question.get("question", ""))
             width = self._page.width
             lines = _laid_out(labelled("question", ""), flat(text), width)

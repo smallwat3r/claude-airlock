@@ -24,6 +24,7 @@ from ..report.trace import session_rows
 from ..settings import Host, variable
 from .console import Page
 from .said import Session, is_number, is_session_id
+from .screen import Prompt, as_prompt
 from .turn import Turns
 
 LEAVE = ("/exit", "/quit")
@@ -42,8 +43,9 @@ NATIVE_UI = f"{variable('line_mode')}=0 claude-airlock"
 SHELL = "!"
 # How wide /help has what is typed, before what it does
 TYPED_WIDTH = 15
-# How many of the project's sessions /resume lists
+# How many of the project's sessions /resume lists, and what it asks
 RESUME_LISTED = 15
+WHICH_SESSION = as_prompt("resume which, by its number (none: Enter): ")
 
 
 @dataclass
@@ -73,7 +75,7 @@ class Resume:
         page: Page,
         host: Host,
         turns: Turns,
-        read: Callable[[str], str | None],
+        read: Callable[[Prompt], str | None],
         handover: Handover | None,
     ):
         self._page = page
@@ -123,7 +125,7 @@ class Resume:
             + [f"  {number}. {line}" for number, (_, line) in enumerate(rows, 1)]
         )
         try:
-            typed = self._read("resume which, by its number (none: Enter): ")
+            typed = self._read(WHICH_SESSION)
         except KeyboardInterrupt:
             return ""
         number = (typed or "").strip()

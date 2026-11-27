@@ -69,11 +69,11 @@ from ..events import Event, clean, labelled
 from ..report.layout import Layout, Shown, Styled, painted, prefixed
 from .screen import (
     SGR,
+    Prompt,
     cursor_back,
     erased,
     first_row,
     shown_typed,
-    spaced,
     uncounted,
 )
 
@@ -83,24 +83,33 @@ except ImportError:  # pragma: no cover, a Python built without it
     readline = None  # type: ignore[assignment]
 
 
-def _readline_point() -> Callable[[], int] | None:
-    """What reads where the cursor is in the line being typed, in bytes
-    from its start. The module of Python does not say, the library it is
-    made with does (rl_point). None where that cannot be had. Editline
-    has it too, left where it was when the line was started: not asked
-    there, see _before_cursor."""
+def _readline_int(name: str) -> ctypes.c_int | None:
+    """A variable of the library readline is made with, which the module
+    of Python does not give. None where it cannot be had."""
     try:
         library = ctypes.CDLL(getattr(readline, "__file__", None))
-        point = ctypes.c_int.in_dll(library, "rl_point")
+        return ctypes.c_int.in_dll(library, name)
     except (OSError, ValueError, TypeError, AttributeError):
         return None
-    return lambda: point.value
+
+
+def _readline_point() -> Callable[[], int] | None:
+    """What reads where the cursor is in the line being typed, in bytes
+    from its start (rl_point). None where that cannot be had. Editline
+    has it too, left where it was when the line was started: not asked
+    there, see _before_cursor."""
+    point = _readline_int("rl_point")
+    return (lambda: point.value) if point is not None else None
 
 
 _point = _readline_point() if readline else None
 # Whether readline is the editline of macOS, which does less: see the end
 # of what this module says of itself
 EDITLINE = bool(readline) and "libedit" in (readline.__doc__ or "")
+# What has GNU readline end the line being read once the key it is at is
+# done, as Enter does (rl_done), see Console._end_for_interrupt. None for
+# editline, which reads a line otherwise, and where it cannot be had
+_done = _readline_int("rl_done") if readline and not EDITLINE else None
 
 # Lines of history kept from one chat to the next
 HISTORY_LINES = 1000
@@ -268,10 +277,12 @@ class Console:
         self._held = False
         self._on_screen = False
         # Whether the thread that reads waits for a line with nothing of
-        # the console held, and whether Ctrl-C came for the line while it
-        # did not, see interrupt
+        # the console held, whether Ctrl-C came for the line while it did
+        # not, see interrupt, and whether readline was had to end the
+        # line for it, see _end_for_interrupt
         self._waiting = False
         self._interrupted = False
+        self._ended_for_interrupt = False
         self.interactive = sys.stdin.isatty()
         # Whatever is typed or sent in, reading it is not what fails
         _read_whatever_comes(sys.stdin)
@@ -399,6 +410,19 @@ class Console:
             return self._offered[state] if state < len(self._offered) else None
         finally:
             self._waiting = True
+            self._end_for_interrupt()
+
+    def _end_for_interrupt(self) -> None:
+        """Have GNU readline end the line once the key it is at is done,
+        or the next one where it is at none (the prompt just written),
+        when Ctrl-C came while the chat's own code ran within the wait
+        for it (Tab completion, see interrupt): the key would else be
+        lost, readline does not see it. Raised once readline gives the
+        line, see _typed. Nothing for editline, where it comes with the
+        next line."""
+        if self._interrupted and _done is not None:
+            _done.value = 1
+            self._ended_for_interrupt = True
 
     def interrupt(self) -> None:
         """End the wait for the line being read as KeyboardInterrupt. For
@@ -427,7 +451,7 @@ class Console:
 
     def read(
         self,
-        prompt: str,
+        prompt: Prompt,
         keep: Callable[[], bool] = lambda: True,
         headed: bool = False,
     ) -> str | None:
@@ -437,7 +461,6 @@ class Console:
         not. Ctrl-C ends it as KeyboardInterrupt when the handler of the
         signal asks for it, see interrupt."""
         line: str | None = None
-        prompt = spaced(prompt)
         try:
             typed = self._line(prompt, headed)
             if self.interactive:
@@ -515,10 +538,12 @@ class Console:
         if not readline.get_line_buffer().endswith(EDITLINE_NEW_LINE):
             return line
         # The line was ended by a key of a new line: it goes on, as the
-        # start of the next line read
+        # start of the next line read. Editline did not move to the next
+        # row, as it does for Enter: the cursor is still after the key
+        # as it shows it, where the erase starts from
         with self._lock:
             shows = shown_typed(line) + CONTROL_SHOWN
-            self._say("\x1b[1A" + self._erased(self._shown, shows))
+            self._say(self._erased(self._shown, shows))
             self._forget(line)
             self._filled = line + "\n"
         return self._line(prompt, headed)
@@ -538,14 +563,21 @@ class Console:
 
     def _typed(self, prompt: str) -> str:
         """Wait for a line, the one place Ctrl-C ends as
-        KeyboardInterrupt, see interrupt."""
+        KeyboardInterrupt, see interrupt. A line readline ended for one
+        (see _end_for_interrupt) is no line: dropped, as one that Ctrl-C
+        ends while it waits."""
         try:
             self._waiting = True
             if self._interrupted:
                 raise KeyboardInterrupt
-            return input(prompt)
+            line = input(prompt)
+            if self._ended_for_interrupt:
+                self._forget(line)
+                raise KeyboardInterrupt
+            return line
         finally:
             self._waiting = False
+            self._ended_for_interrupt = False
 
     def _with_paste(self, line: str, prompt: str, headed: bool) -> str:
         """A line with what came with it: what was pasted without the
@@ -665,6 +697,7 @@ class Console:
                     self._put("", prompt)
         finally:
             self._waiting = True
+            self._end_for_interrupt()
 
     @property
     def redrawn(self) -> bool:
@@ -711,12 +744,11 @@ class Console:
         if self._reading is not None and self._headed and self._asked is None:
             self._put("", self._reading)
 
-    def ask(self, prompt: str | None) -> None:
+    def ask(self, prompt: Prompt | None) -> None:
         """Have the next line read with a prompt of its own, the one being
         read too, or with none for the usual one again. For a question
         that comes while the user is at the prompt, and for one that is
         over without a line: the line being read is not its answer."""
-        prompt = spaced(prompt) if prompt is not None else None
         with self._lock:
             # One that differs starts as not yet before the user
             was, self._asked = self._asked, prompt

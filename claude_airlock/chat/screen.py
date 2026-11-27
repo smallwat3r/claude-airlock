@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import NewType
 
-from ..events import clean
+from ..events import clean, flat
+from ..report.layout import painted
 
 # The escapes of colour, the only ones a head keeps
 SGR = re.compile(r"\x1b\[[0-9;]{0,32}m")
@@ -111,16 +113,40 @@ def first_row(line: str, columns: int) -> str:
     return line
 
 
-def spaced(prompt: str) -> str:
-    """A prompt with each tab written as a space. A terminal moves a tab
-    to the next stop, and at its edge by none, where it is counted a
-    column (see columns_of): a question that names a command with tabs
-    in it would have rows above it erased each time it is written again,
-    those that showed the call whole. A space takes the column it is
-    counted for, and readline counts it too. One, not the spaces to the
-    stop: the tabs of a question are the session's, and as many stops
-    would make its rows push the call whole out of sight."""
-    return prompt.replace("\t", " ")
+# A prompt as the console takes it, made by as_prompt alone
+Prompt = NewType("Prompt", str)
+
+
+def as_prompt(text: str, style: str = "") -> Prompt:
+    """A text as the prompt of a line: cleaned, on one line, each tab
+    written as a space, in a style when given one. The rows it takes are
+    counted from it (see erased), and what the count does not know of,
+    a line break or a tab, would have rows above it erased each time it
+    is written again: a question names what the session gave, a command
+    whose tabs a terminal moves to the next stop, and at its edge by
+    none. A space takes the column it is counted for, and readline
+    counts it too. One, not the spaces to the stop: the tabs of a
+    question are the session's, and as many stops would make its rows
+    push the call it shows whole out of sight."""
+    flattened = flat(text).replace("\t", " ")
+    return Prompt(painted(style, flattened) if style else flattened)
+
+
+def _row_columns(row: str, columns: int) -> int:
+    """How many columns a row of a prompt and what is typed after it
+    takes, as columns_of counts them, a tab to the next stop: no further
+    than the last column of the row of the terminal it is on, where a
+    terminal stops it and readline may go on with spaces on the next.
+    The fewer, as columns_of has it."""
+    taken = 0
+    for at, part in enumerate(row.split("\t")):
+        if at:
+            on_row = taken % columns
+            taken += max(
+                0, min(TAB_COLUMNS - on_row % TAB_COLUMNS, columns - 1 - on_row)
+            )
+        taken += columns_of(part)
+    return taken
 
 
 def _rows_above(text: str, columns: int) -> int:
@@ -128,7 +154,7 @@ def _rows_above(text: str, columns: int) -> int:
     the row their end is on. What ends at the edge has its end on the
     row after, as readline writes it."""
     rows = text.split("\n")
-    return len(rows) - 1 + sum(columns_of(row) // columns for row in rows)
+    return len(rows) - 1 + sum(_row_columns(row, columns) // columns for row in rows)
 
 
 def erased(prompt: str, typed: str, columns: int) -> str:
@@ -157,12 +183,12 @@ def cursor_back(prompt: str, typed: str, before: str, columns: int) -> str:
     columns = max(1, columns)
     prompt = SGR.sub("", prompt).rpartition("\n")[2]
     whole, part = prompt + typed, prompt + before
-    last = columns_of(whole.rpartition("\n")[2])
+    last = _row_columns(whole.rpartition("\n")[2], columns)
     out = " \r" if last and last % columns == 0 else ""
     if before == typed:
         return out
     up = _rows_above(whole, columns) - _rows_above(part, columns)
-    across = columns_of(part.rpartition("\n")[2]) % columns
+    across = _row_columns(part.rpartition("\n")[2], columns) % columns
     out += f"\x1b[{up}A" if up else ""
     return out + "\r" + (f"\x1b[{across}C" if across else "")
 

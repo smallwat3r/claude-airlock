@@ -197,7 +197,7 @@ class AskingTest:
             screen._comes_before_the_user()
         assert waits()
         assert screen.asked_for() is None
-        screen.ask("allow? ")
+        screen.ask(screens.as_prompt("allow? "))
         assert screen.asked_for() is None
         with screen._lock:
             screen._comes_before_the_user()
@@ -210,14 +210,14 @@ class AskingTest:
         assert waits()
         # And the next question starts over
         screen.ask(None)
-        screen.ask("and this? ")
+        screen.ask(screens.as_prompt("and this? "))
         assert screen.asked_for() is None
 
     def test_a_question_put_under_a_line_being_read_is_before_the_user_at_once(self):
         screen = console.Console("/nowhere")
         with written():
             screen._reading = "> "
-            screen.ask("allow? ")
+            screen.ask(screens.as_prompt("allow? "))
             assert screen.asked_for() is not None
             screen.ask(None)
             assert screen.asked_for() is None
@@ -515,6 +515,16 @@ class AskingTest:
                 {"tool_name": "AskUserQuestion", "input": {"questions": questions}}
             )
         assert refused == asking.REFUSED
+
+    def test_a_question_whose_options_are_no_list_is_put_without_them(self):
+        for options in (True, 3, "Red"):
+            questions = [{"question": "Which?", "options": options}]
+            with written() as lines:
+                decision = self.asker(["red"]).decide(
+                    {"tool_name": "AskUserQuestion", "input": {"questions": questions}}
+                )
+            assert lines == ["# question    Which?"], options
+            assert decision["updatedInput"]["answers"] == {"Which?": "red"}
 
     def test_a_question_and_its_options_are_wrapped_to_the_terminal(self):
         about = "A rule for every session, and a scanner on the host"

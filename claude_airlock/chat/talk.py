@@ -62,6 +62,7 @@ from .pipe import Agent, Answer, Unread
 from .plain import PlainLines
 from .reply import ReplyStream
 from .said import Session, own
+from .screen import Prompt, as_prompt
 from .shell import Shell
 from .status import Sandbox, StatusLine
 from .tasks import Progress, Running, Tasks, still_running
@@ -82,9 +83,9 @@ PASSED_OVER = frozenset(
         "update_environment_variables",
     }
 )
-PROMPT = "> "
+PROMPT = as_prompt("> ")
 # After a line that ended with a backslash, which takes the next one too
-MORE = ". "
+MORE = as_prompt(". ")
 # A turn that ran this many seconds rings when it ends, for a user who
 # looked elsewhere meanwhile
 LONG_TURN = 30.0
@@ -382,7 +383,7 @@ class Chat:
         if self._reading:
             os.kill(os.getpid(), signal.SIGINT)
 
-    def _read(self, prompt: str, headed: bool = False) -> str | None:
+    def _read(self, prompt: Prompt, headed: bool = False) -> str | None:
         """A line from the user, none when there are no more, with the
         status above its prompt when headed. As Ctrl-C when claude has
         ended, there is nobody left to read it. The answer to a question is
@@ -720,7 +721,11 @@ class Chat:
         self._replies.piece(event)
 
     def _turn_over(self, result: dict) -> None:
-        """A turn ended: write the rest of it and what it took."""
+        """A turn ended: write the rest of it and what it took. Not for a
+        result when no turn runs, nor one of a subagent's: a turn that
+        is over is not over again, and the next one has not started."""
+        if not self._turns.running or not own(result):
+            return
         self._replies.turn_over()
         self._followed.settle()
         more = self._usage.parts(result, self._session.model)
