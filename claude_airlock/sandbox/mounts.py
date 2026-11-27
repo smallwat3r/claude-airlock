@@ -4,13 +4,22 @@ files of secrets hidden from it."""
 
 from __future__ import annotations
 
+import enum
 import fnmatch
 import os
 import stat
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
-from ..docker import covered_arg, env_arg, held_arg, hidden_arg, mount_arg
+from ..docker import (
+    NO_COLON,
+    covered_arg,
+    env_arg,
+    held_arg,
+    hidden_arg,
+    mount_arg,
+    volume_takes,
+)
 from ..errors import Fatal
 from ..files import (
     expand_home,
@@ -117,23 +126,178 @@ def kept_out(path: str, host: Host, but: Sequence[str] = ()) -> str:
     return ""
 
 
-def refuse_unsafe_dir(path: str, host: Host) -> None:
-    """Refuse the filesystem root, the home directory or any of its parents:
-    mounting one read-write would expose the whole home and defeat the
-    sandbox. And what is kept out of every session, see _kept_out, with
-    the directories around it. By the path as it is written and by where
-    it leads, a link to the home directory is the home directory."""
+def _unsafe_dir(path: str, host: Host) -> str:
+    """Why a directory is never to be mounted, empty when it may be: the
+    filesystem root, the home directory or any of its parents, mounting
+    one would expose the whole home and defeat the sandbox. And what is
+    kept out of every session, see _kept_out, with the directories around
+    it. By the path as it is written and by where it leads, a link to the
+    home directory is the home directory."""
     real = os.path.realpath(path)
     for home, directory in ((host.home, path), (os.path.realpath(host.home), real)):
         if is_within(os.path.normpath(home), os.path.normpath(directory)):
-            raise Fatal(f"refusing to mount {path}: it would defeat the sandbox")
+            return "it would defeat the sandbox"
     for kept in _kept_out(host):
         # Mounting the one brings in the other, or a part of it
         if overlap(path, kept) or overlap(real, os.path.realpath(kept)):
-            raise Fatal(
-                f"refusing to mount {path}: {kept} is not a session's to have,"
-                " it would defeat the sandbox"
-            )
+            return f"{kept} is not a session's to have, it would defeat the sandbox"
+    return ""
+
+
+def refuse_unsafe_dir(path: str, host: Host) -> None:
+    """Refuse a directory that is never to be mounted, see _unsafe_dir."""
+    unsafe = _unsafe_dir(path, host)
+    if unsafe:
+        raise Fatal(f"refusing to mount {path}: {unsafe}")
+
+
+# No more links are followed on the way to a path than this, as the
+# system has it: past it the path leads nowhere, a loop
+MOST_LINKS = 40
+
+
+def _links_on_the_way(path: str) -> tuple[list[str], str]:
+    """The links an absolute path is resolved through, each where it is,
+    with what is above it resolved, and where the path leads: as realpath
+    has it, with the links it passed on the way. Past MOST_LINKS links,
+    those found so far and where realpath says it leads."""
+    links: list[str] = []
+    resolved = os.sep
+    parts = path.split(os.sep)
+    while parts:
+        name = parts.pop(0)
+        if name in ("", os.curdir):
+            continue
+        if name == os.pardir:
+            resolved = os.path.dirname(resolved)
+            continue
+        here = os.path.join(resolved, name)
+        try:
+            target = os.readlink(here)
+        except OSError:
+            # No link, or nothing there: what is below it is as written
+            resolved = here
+            continue
+        if len(links) >= MOST_LINKS:
+            return links, os.path.realpath(path)
+        links.append(here)
+        if os.path.isabs(target):
+            resolved = os.sep
+        parts[:0] = target.split(os.sep)
+    return links, resolved
+
+
+def _through_link_in(links: Sequence[str], root: str) -> bool:
+    """Whether a path goes through a link in a directory, by the links
+    it was resolved through (see _links_on_the_way) and where the
+    directory leads (root): a session that can write the directory could
+    have made the link, or put another in its place."""
+    return any(is_under(link, root) for link in links)
+
+
+@dataclass(frozen=True)
+class Written:
+    """The directories a session can write, or could at an earlier launch,
+    each with where it leads: resolved once for all that a launch asks of
+    them, the git config, each file it includes, the statusline and each
+    directory mounted next to the project."""
+
+    places: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def of(cls, directories: Iterable[str]) -> Written:
+        """The directories, each once, with where each leads."""
+        unique = dict.fromkeys(directories)
+        return cls(tuple((each, os.path.realpath(each)) for each in unique))
+
+    def holds(self, path: str) -> bool:
+        """Whether a path is in one of them as it is written, or by where
+        it leads: what is there is a session's to write."""
+        real = os.path.realpath(path)
+        return any(
+            is_under(path, directory) or is_under(real, root)
+            for directory, root in self.places
+        )
+
+
+# What no session writes, for what is asked with nothing written
+NOTHING_WRITTEN = Written()
+
+
+def link_out(path: str, written: Written) -> str:
+    """The directory a session can write, or could at an earlier launch
+    (written), that a link on the way to a path is in, when the path
+    leads out of all of them, empty when it does not: the session could
+    have left that link, to be given what it points to the next time.
+    Wherever the path is named from, ~/.gitconfig as a link into a
+    repository of dotfiles that has a link of its own to a key. Not by
+    the path itself, which is a directory a session writes once it is
+    mounted next to the project, and leads where it leads."""
+    others = [(each, root) for each, root in written.places if each != path]
+    links, real = _links_on_the_way(os.path.abspath(path))
+    if any(is_within(real, root) for _, root in others):
+        return ""
+    for directory, root in others:
+        if _through_link_in(links, root):
+            return directory
+    return ""
+
+
+class Rule(enum.Enum):
+    """What withheld keeps a path of the host back by."""
+
+    LINK_OUT = enum.auto()
+    COLON = enum.auto()
+    UNSAFE = enum.auto()
+    SECRETS = enum.auto()
+    KEPT_OUT = enum.auto()
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why withheld keeps a path back: the rule, and what is said of it."""
+
+    rule: Rule
+    said: str
+
+
+def withheld(
+    path: str,
+    host: Host,
+    written: Written,
+    shadow: Sequence[str] = (),
+    but: Sequence[str] = (),
+) -> Refusal | None:
+    """Why a file or a directory of the host is not to be mounted into a
+    session, none when it may be: the one rule for what the launcher
+    mounts of the host besides the project, the git config and the files
+    it includes, the statusline and the directories mounted next to the
+    project. Not one that is, or goes through, a link out of a directory
+    a session can write or could (written, see link_out), nor one docker
+    cannot take. Nor a directory that is never to be mounted, see
+    _unsafe_dir. Nor a file whose name says it holds secrets, by its own
+    name and the name of what it leads to, see names_secrets, with the
+    globs of shadow, nor one in a directory that is never a session's to
+    have, see kept_out, but for the directories given, which whoever asks
+    handles itself. Each rule asked once, the first that refuses says
+    why."""
+    out = link_out(path, written)
+    if out:
+        said = f"it is, or goes through, a link out of {out}, which a session"
+        return Refusal(Rule.LINK_OUT, said + " could have made")
+    if not volume_takes(path):
+        return Refusal(Rule.COLON, NO_COLON)
+    if os.path.isdir(path):
+        unsafe = _unsafe_dir(path, host)
+        return Refusal(Rule.UNSAFE, unsafe) if unsafe else None
+    patterns = (*SHADOWED_NAMES, *shadow)
+    names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
+    if any(names_secrets(name, patterns) for name in names):
+        return Refusal(Rule.SECRETS, "its name is one of secrets")
+    kept = kept_out(path, host, but)
+    return (
+        Refusal(Rule.KEPT_OUT, f"{kept} is not a session's to have") if kept else None
+    )
 
 
 def mounted_dirs(dirs: list[ExtraDir], host: Host) -> list[str]:
@@ -148,25 +312,25 @@ def writable_dirs(dirs: list[ExtraDir], host: Host) -> list[str]:
     return [host.project_dir, *(each.path for each in dirs if not each.read_only)]
 
 
-def refuse_links_out(
+def refuse_withheld_dirs(
     dirs: list[ExtraDir], host: Host, written_before: Sequence[str] = ()
 ) -> None:
-    """Refuse a directory to mount that is named by a path in the project,
-    or in another directory a session can write, or could at an earlier
-    launch (written_before), and is not in there: it is reached through a
-    link, which a session could have left for this, to be given the next
-    time what it points to. One the user keeps such a link to is named by
-    where it is."""
-    writable = [*writable_dirs(dirs, host), *written_before]
+    """Refuse a directory to mount that withheld keeps back: one that is
+    never to be mounted, see _unsafe_dir, and one that is, or goes
+    through, a link in the project, or in another directory a session can
+    write, or could at an earlier launch (written_before), and leads out
+    of there. A session could have left the link for this, to be given
+    the next time what it points to, named from there or from anywhere
+    else. One the user keeps such a link to is named by where it is."""
+    written = Written.of([*writable_dirs(dirs, host), *written_before])
     for extra in dirs:
-        for root in writable:
-            inside = is_under(extra.path, root)
-            if inside and _within(extra.path, root) is None:
-                raise Fatal(
-                    f"refusing to mount {extra.path}: it is a link out of {root},"
-                    " which a session could have made. Name the directory it"
-                    " leads to"
-                )
+        refused = withheld(extra.path, host, written)
+        if refused is None:
+            continue
+        said = refused.said
+        if refused.rule is Rule.LINK_OUT:
+            said += ". Name the directory it leads to"
+        raise Fatal(f"refusing to mount {extra.path}: {said}")
 
 
 def _absolute_path(raw: str, host: Host) -> str:
@@ -192,9 +356,9 @@ def add_extra_dir(
     wins whichever way it was asked for first: what one setting keeps a
     session from, another does not give back without a word. The project
     is already mounted, and writable: asked for read-only it is refused,
-    there is no session that does not write to it."""
+    there is no session that does not write to it. What is never to be
+    mounted is refused with the rest, see refuse_withheld_dirs."""
     path = _resolve_dir(raw, host)
-    refuse_unsafe_dir(path, host)
     if path == host.project_dir:
         if read_only:
             raise Fatal(
@@ -249,12 +413,13 @@ def _refuse_protected_link(
     nothing holds the link, which no mount can. A session would replace
     it with what it likes, which the host reads at the path protected.
     By the mounted directory the path is in as it is written, the one
-    nearest to it."""
+    nearest to it, whether the link leads out of it or not."""
     roots = mounted_dirs(dirs, host)
     root = max((r for r in roots if is_under(path, r)), key=len, default=None)
     if root is None or root not in writable_dirs(dirs, host):
         return
-    if _within(path, root) != path:
+    links, _ = _links_on_the_way(path)
+    if _through_link_in(links, os.path.realpath(root)):
         raise Fatal(
             f"cannot protect {raw}: it is, or goes through, a link in {root},"
             " which a session could replace. Name the path it leads to"

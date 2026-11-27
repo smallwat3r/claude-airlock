@@ -10,13 +10,15 @@ import shlex
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import Protocol
 
 from ..action import Action
 from ..docker import (
     DROP_CAPABILITIES,
     NO_NEW_PRIVILEGES,
+    SIDECAR_SEPARATOR,
     Tmpfs,
     docker,
     docker_ok,
@@ -28,7 +30,6 @@ from ..docker import (
 from ..files import (
     expand_home,
     is_under,
-    leads_under,
     private_dir,
     settings_object,
     try_lock_file,
@@ -49,7 +50,7 @@ from .ending import Ending
 from .fingerprint import home_git_configs, included_configs
 from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
-from .mounts import SHADOWED_NAMES, kept_out, names_secrets
+from .mounts import NOTHING_WRITTEN, Written, withheld
 from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
@@ -77,8 +78,11 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
     if buffer_name:
         instance = buffer_name.rsplit(":", 1)[-1]
         name += "-" + instance.removesuffix("*")
-    # No longer than files named after it can take, see SESSION_NAME_WIDTH
-    name = docker_safe_name(name)[:SESSION_NAME_WIDTH]
+    # No longer than files named after it can take, see SESSION_NAME_WIDTH,
+    # and without what a sidecar's name has after its session's, see
+    # SIDECAR_SEPARATOR
+    safe = docker_safe_name(name).replace(SIDECAR_SEPARATOR, "-")
+    name = safe[:SESSION_NAME_WIDTH]
     # Buffer names are only unique within one Emacs, so a second Emacs (or a
     # plain shell) on the same project asks for a name that is already
     # taken. Step past it rather than fail, the other session is still live.
@@ -296,7 +300,10 @@ def _configured_statusline(host: Host) -> list[str]:
 
 
 def own_statusline_args(
-    settings: Settings, host: Host, mounted: Sequence[str]
+    settings: Settings,
+    host: Host,
+    mounted: Sequence[str],
+    written: Written = NOTHING_WRITTEN,
 ) -> list[str]:
     """A statusline of the user's own, for Claude Code's native UI: the
     file ~/.claude/settings.json runs as one is mounted alone, read-only,
@@ -307,35 +314,28 @@ def own_statusline_args(
     but what the launcher mounts: a path anywhere else could be a
     program of the image, which the host's must not stand in for. Not
     what is in the project or a directory mounted next to it (mounted),
-    which is there already, not a file whose name says it holds
-    secrets (see hidden_files of mounts.py), and not one in a directory
-    that is never a session's to have (see kept_out of mounts.py): the
-    user's keys, the launcher's settings and records. Where a session
-    can write the settings (CLAUDE_AIRLOCK_RW_CONFIG, or settings kept
-    as a link into a directory it is given), it names the file, and
-    would be given any of the home it named. What the script needs
-    besides itself has to be in the image, or in a directory mounted
-    next to the project (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
+    which is there already, nor what withheld of mounts.py keeps back:
+    one that is, or goes through, a link out of a directory a session
+    can write or could (written), which the session could have pointed
+    anywhere, a file whose name says it holds secrets, and one in a
+    directory that is never a session's to have, the user's keys, the
+    launcher's settings and records. Where a session can write the
+    settings (CLAUDE_AIRLOCK_RW_CONFIG, or settings kept as a link into
+    a directory it is given), it names the file, and would be given any
+    of the home it named. What the script needs besides itself has to be
+    in the image, or in a directory mounted next to the project
+    (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
     for path in _configured_statusline(host):
-        if not is_under(path, host.home) or ":" in path:
-            continue
-        if not os.path.isfile(path):
+        if not is_under(path, host.home) or not os.path.isfile(path):
             continue
         if any(is_under(path, root) for root in mounted):
             continue
-        patterns = SHADOWED_NAMES + settings.shadow
-        names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
-        if any(names_secrets(name, patterns) for name in names):
-            warn(f"the statusline {path} is not mounted: its name is one of secrets")
-            continue
         # Claude's own directory is the one where a statusline is kept as
         # a rule, and what of it a session has is the launcher's to say
-        kept = kept_out(path, host, but=(host.claude_dir,))
-        if kept:
-            warn(
-                f"the statusline {path} is not mounted: {kept} is not a"
-                " session's to have"
-            )
+        but = (host.claude_dir,)
+        refused = withheld(path, host, written, settings.shadow, but)
+        if refused:
+            warn(f"the statusline {path} is not mounted: {refused.said}")
             continue
         inner = os.path.relpath(path, host.home)
         in_claude = os.path.relpath(path, host.claude_dir)
@@ -353,7 +353,6 @@ def own_statusline_args(
 SCRATCH = (
     Tmpfs("/tmp", 4096, runs=True),  # noqa: S108
     Tmpfs(f"{CONTAINER_HOME}/.config", 64),
-    Tmpfs(f"{CONTAINER_HOME}/.npm", 1024, runs=True),
 )
 CACHE = Tmpfs(f"{CONTAINER_HOME}/.cache", 2048, runs=True)
 # What is written there counts towards the session's memory limit, and is
@@ -424,67 +423,82 @@ def session_args(action: Action, env: Mapping[str, str]) -> list[str]:
 XDG_GIT_FORWARDED = ("config", "ignore", "attributes", "templates")
 
 
-@dataclass(frozen=True)
-class _Includes:
-    """What decides whether a file the git config includes is mounted:
-    the settings, the directories a session is given, and those it can
-    write or could at an earlier launch (written, see remembered.py)."""
+def _git_files(host: Host) -> list[tuple[str, str]]:
+    """The user's git config and what of git's own directory of
+    XDG_CONFIG_HOME is forwarded (XDG_GIT_FORWARDED), those that are
+    there, each with where a session has it: ~/.gitconfig as a file, the
+    others as whatever they are, templates a directory."""
+    found = []
+    gitconfig = os.path.join(host.home, ".gitconfig")
+    if os.path.isfile(gitconfig):
+        found.append((gitconfig, f"{CONTAINER_HOME}/.gitconfig"))
+    xdg_git = os.path.join(host.config_home, "git")
+    for name in XDG_GIT_FORWARDED:
+        path = os.path.join(xdg_git, name)
+        if os.path.exists(path):
+            found.append((path, f"{CONTAINER_HOME}/.config/git/{name}"))
+    return found
 
-    settings: Settings
-    host: Host
-    mounted: Sequence[str]
-    written: Sequence[str]
 
-    def withheld(self, path: str, by: str) -> str | None:
-        """Why a file the git config includes is not mounted, none when
-        it is. Not when the config that names it (by) is, or leads into, a
-        directory a session can write or could: dotfiles kept in a
-        repository, for one. What it includes is then the session's to
-        name, for the next launch of any project to mount,
-        ~/.aws/credentials as well as a config. Nor, as for the statusline
-        (see own_statusline_args), what is in a directory that is never a
-        session's to have, the user's keys and the launcher's settings and
-        records, nor a file whose name says it holds secrets, nor one
-        docker cannot take. Empty, for nothing to say, for what is in the
-        project or a directory mounted next to it, which is there
-        already."""
-        if any(is_under(path, root) for root in self.mounted):
-            return ""
-        if any(leads_under(by, root) for root in self.written):
-            real = os.path.realpath(by)
-            leads = f" (it leads to {real})" if real != by else ""
-            return f"{by}, which includes it, is a session's to write{leads}"
-        if ":" in path:
-            return "docker takes no path with a colon"
-        patterns = SHADOWED_NAMES + self.settings.shadow
-        names = {os.path.basename(path), os.path.basename(os.path.realpath(path))}
-        if any(names_secrets(name, patterns) for name in names):
-            return "its name is one of secrets"
-        kept = kept_out(path, self.host)
-        if kept:
-            return f"{kept} is not a session's to have"
-        return None
+def _git_file_mountable(
+    path: str, what: str, settings: Settings, host: Host, written: Written
+) -> bool:
+    """Whether a file of the git config, one git reads or one a config
+    includes (what says which), is mounted, see withheld of mounts.py.
+    Said when it is not."""
+    refused = withheld(path, host, written, settings.shadow)
+    if refused:
+        warn(f"{path}, which {what}, is not mounted: {refused.said}")
+    return refused is None
+
+
+def _include_mounted(
+    path: str,
+    by: str,
+    *,
+    settings: Settings,
+    host: Host,
+    mounted: Sequence[str],
+    written: Written,
+) -> bool:
+    """Whether a file a git config (by) includes is mounted. Not when it
+    is in the project or a directory mounted next to it, which is there
+    already, and says nothing. Nor when the config that names it is, or
+    leads into, a directory a session can write or could: dotfiles kept
+    in a repository, for one. What it includes is then the session's to
+    name, for the next launch of any project to mount, ~/.aws/credentials
+    as well as a config. Nor what withheld keeps back, see
+    _git_file_mountable."""
+    if any(is_under(path, root) for root in mounted):
+        return False
+    if written.holds(by):
+        real = os.path.realpath(by)
+        leads = f" (it leads to {real})" if real != by else ""
+        said = f"{by}, which includes it, is a session's to write{leads}"
+        warn(f"{path}, which the git config includes, is not mounted: {said}")
+        return False
+    return _git_file_mountable(path, "the git config includes", settings, host, written)
 
 
 def git_config_args(
     settings: Settings,
     host: Host,
     mounted: Sequence[str],
-    written: Sequence[str] = (),
+    written: Written = NOTHING_WRITTEN,
 ) -> list[str]:
     """Forward the git config, read-only, and no credentials with it (see
-    XDG_GIT_FORWARDED). Of what it includes, not what a config a session
-    can write, or could (written), names, see _Includes."""
+    XDG_GIT_FORWARDED). Not what withheld of mounts.py keeps back: a
+    file that is, or goes through, a link out of a directory a session
+    can write or could (written), as ~/.gitconfig kept as a link into a
+    repository of dotfiles can, which the session could have pointed at
+    a key, nor one in a directory that is never a session's to have, nor
+    one whose name says it holds secrets. Of what it includes, the same,
+    and not what a config a session can write names, see
+    _include_mounted."""
     args = []
-    gitconfig = os.path.join(host.home, ".gitconfig")
-    if os.path.isfile(gitconfig):
-        args.append(mount_arg(gitconfig, f"{CONTAINER_HOME}/.gitconfig", "ro,z"))
-    xdg_git = os.path.join(host.config_home, "git")
-    forwarded = {gitconfig}
-    for name in XDG_GIT_FORWARDED:
-        path = os.path.join(xdg_git, name)
-        if os.path.exists(path):
-            target = f"{CONTAINER_HOME}/.config/git/{name}"
+    forwarded: set[str] = set()
+    for path, target in _git_files(host):
+        if _git_file_mountable(path, "git reads", settings, host, written):
             args.append(mount_arg(path, target, "ro,z"))
             forwarded.add(path)
 
@@ -493,21 +507,27 @@ def git_config_args(
     # silently never apply. Mounted at their host path, the one the config
     # refers to, and those they pull in too. A relative path is taken
     # from the config that names it, as git takes it. Not what
-    # _Includes keeps back, nor what that includes, which git in the
-    # session cannot read then.
-    includes = _Includes(settings, host, mounted, written)
-
-    def taken(path: str, by: str) -> bool:
-        withheld = includes.withheld(path, by)
-        if withheld:
-            warn(f"{path}, which the git config includes, is not mounted: {withheld}")
-        return withheld is None
-
-    for path in included_configs(home_git_configs(host), host.home, taken):
+    # _include_mounted keeps back, nor what that includes, which git in
+    # the session cannot read then.
+    included = partial(
+        _include_mounted, settings=settings, host=host, mounted=mounted, written=written
+    )
+    configs = [path for path in home_git_configs(host) if path in forwarded]
+    for path in included_configs(configs, host.home, included):
         if path not in forwarded:
             args.append(mount_arg(path, path, "ro,z"))
             forwarded.add(path)
     return args
+
+
+class Through(Protocol):
+    """What runs a session's docker command in the launcher's place, as a
+    chat does: given its arguments, and what it tells once docker was
+    started. Returns how docker ended."""
+
+    def __call__(
+        self, docker_args: list[str], *, on_started: Callable[[], None]
+    ) -> int: ...
 
 
 def run_session(
@@ -515,22 +535,26 @@ def run_session(
     image: Image,
     command_args: list[str],
     ending: Ending,
-    through: Callable[[list[str]], int] | None = None,
+    through: Through | None = None,
 ) -> int:
     """Run the container and wait for it. Not an exec: the launcher has to
     outlive the session to check what it left behind, see interrupts_held
     and ending_passed_on. Not at all when the launcher was told to end
     before it got here. With through, that is given the arguments of docker
-    to run and returns how it ended, as a chat does (see chat/)."""
+    to run and returns how it ended, as a chat does (see chat/). The
+    session is said to have been run (see Ending.started) by what starts
+    docker for it, once it has: not when docker could not be started."""
     try:
         if ending.signal is not None:
             return 0
         command = ["run", *run_args, image.tag, *command_args]
         if through:
-            status = through(command)
+            status = through(command, on_started=ending.started)
         else:
-            # For as long as the session runs
+            # For as long as the session runs, and it did run once docker
+            # ends, see unstartable of docker.py for when it cannot start
             status = docker(*command, timeout=None).returncode
+            ending.started()
     finally:
         ending.session_over()
     # Killed by a signal: report it the way a shell would

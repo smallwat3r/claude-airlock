@@ -43,6 +43,8 @@ class Ending:
         # The signal that told it, none while none did
         self.signal: int | None = None
         self._over = threading.Event()
+        # Whether docker was started to run the session
+        self._ran = False
 
     def told(self, number: int, _frame: object) -> None:
         """The handler of the signals: the first one counts."""
@@ -60,14 +62,19 @@ class Ending:
                 return
             self._over.wait(STOP_EVERY)
 
+    def started(self) -> None:
+        """Docker was started to run the session, by whatever started it."""
+        self._ran = True
+
     def session_over(self) -> None:
         self._over.set()
 
     @property
     def session_was_run(self) -> bool:
-        """Whether the session got as far as being run: until then
-        nothing of it can have changed a file."""
-        return self._over.is_set()
+        """Whether docker was started to run the session: until then
+        nothing of it can have changed a file. Not when the launcher was
+        told to end first, nor when docker could not be started."""
+        return self._ran
 
     def status(self, status: int) -> int:
         """What the launcher ends with: the session's status, or the way

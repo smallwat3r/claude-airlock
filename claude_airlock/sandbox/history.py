@@ -36,6 +36,7 @@ from collections import deque
 from pathlib import Path
 
 from ..docker import env_arg, mount_arg, project_slug
+from ..errors import Fatal
 from ..files import json_object, last_lines, open_plain, private_dir, write_whole
 from ..projects import project_roots, transcript_dirs
 from ..settings import CONTAINER_CLAUDE, Host, Settings, variable
@@ -76,10 +77,13 @@ def is_own(name: str, own: set[str]) -> bool:
 
 
 def _other_projects(host: Host) -> list[str]:
-    """The directories of projects that are another project's, by name.
-    Fatal for more of them than MOST_COVERED (see refuse_past_most):
-    none could be covered, and a session started with them all in reach
-    would see them all."""
+    """The directories of projects that are another project's, by name,
+    none when there is no directory of projects yet. Fatal for more of
+    them than MOST_COVERED (see refuse_past_most): none could be covered,
+    and a session started with them all in reach would see them all. And
+    for a directory of projects that cannot be listed: it is a session's
+    to write, and to take the right to list away, for the next session to
+    start with nothing covered and give it back."""
     projects = Path(host.claude_dir, "projects")
     own = own_names(host)
     others = []
@@ -90,16 +94,28 @@ def _other_projects(host: Host) -> list[str]:
                     others.append(entry.name)
                     what = f"directories of other projects in {projects}"
                     refuse_past_most(len(others), MOST_COVERED, what)
-    except OSError:
+    except FileNotFoundError:
         return []
+    except OSError as problem:
+        raise Fatal(
+            f"{projects} cannot be listed ({problem.strerror}), a session may"
+            " have made it so: what Claude Code keeps there of other projects"
+            " could not be kept from this one. Make it yours to list again"
+            f" (chmod u+rwx {projects}) for a session to start"
+        ) from None
     return sorted(others)
 
 
 def _is_other(entry: os.DirEntry[str], own: set[str]) -> bool:
     """Whether an entry of projects is the directory of another project,
-    one whose name can be spelled in a mount."""
+    one whose name can be spelled in a mount. Not one that is gone since
+    it was listed."""
+    try:
+        directory = entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
     return (
-        entry.is_dir(follow_symlinks=False)
+        directory
         and _MOUNTABLE.fullmatch(entry.name) is not None
         and not is_own(entry.name, own)
     )

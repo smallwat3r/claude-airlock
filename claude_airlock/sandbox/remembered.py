@@ -7,7 +7,7 @@ turned to its use since, for later launches to go by:
   they are there.
 - The directories that were a session's to write. A link a session left
   in one is still its doing once the directory is mounted read-only, or
-  not at all (see refuse_links_out of mounts.py).
+  not at all (see refuse_withheld_dirs of mounts.py).
 
 Of every project at once: a file or a directory is the same whichever
 project's session had it. The latest MOST_REMEMBERED of each are kept, and

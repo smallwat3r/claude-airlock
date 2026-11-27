@@ -39,6 +39,10 @@ PIECE = 1 << 20
 # it a line is not read, as one that is too long is not.
 HELD_BY_LINE = 200
 HELD_BY_VALUE = 80
+# Of a line of JSON, what held_size looks at: the quotes of its strings and
+# what sets its values apart, all else is dropped before it is counted
+_SET_APART = (b"{", b"[", b",", b":")
+_NOT_COUNTED = bytes(set(range(256)) - set(b'"{[,:'))
 MOST_LINE_HELD = 256 << 20
 # A settings file of Claude Code past this is not read, the project's
 # ones are a session's to write
@@ -47,6 +51,8 @@ SETTINGS_BYTES = 1024 * 1024
 # no entry, and how much of such a line is kept to be shown
 UNREADABLE = "unreadable-line"
 UNREADABLE_SHOWN = 2000
+# What such an entry says of a line that was too long to read
+TOO_LONG = "(a line too long to read)"
 # How each mode of open_locked opens its file, which is made as needed
 LOCKED_MODES = {
     "r+": os.O_RDWR,
@@ -432,26 +438,56 @@ def held_size(line: bytes) -> int:
     fewer: its own, and so many for each value it holds, counted by what
     sets them apart. A line of nothing but small values takes dozens of
     times its length, which is the session's to write: what is bounded
-    by the bytes read alone is not bounded in what it holds."""
-    values = sum(map(line.count, (b"{", b"[", b",", b":")))
+    by the bytes read alone is not bounded in what it holds. Not what is
+    within its strings: a comma or a brace there is a character of a
+    text, and sets no value apart. A string a half written line leaves
+    open is not one, what is in it counts as if it were outside. An
+    escaped quote or backslash is taken out before the quotes are
+    paired, then all but the quotes and what sets values apart, which
+    leaves the strings in every other piece between quotes."""
+    bare = line.replace(b"\\\\", b"").replace(b'\\"', b"")
+    pieces = bare.translate(None, _NOT_COUNTED).split(b'"')
+    outside = pieces[0::2]
+    if len(pieces) % 2 == 0:
+        outside.append(pieces[-1])
+    values = sum(piece.count(mark) for piece in outside for mark in _SET_APART)
     return 2 * len(line) + HELD_BY_LINE + HELD_BY_VALUE * values
 
 
-def line_entry(line: bytes | None) -> dict | None:
+def held_object(line: bytes) -> tuple[dict | None, int]:
+    """The JSON object a line holds, with about how much it takes once
+    read (see held_size). None for a line that holds none, and for one
+    that would take more than MOST_LINE_HELD, which is not taken apart:
+    the size says which. The one rule for what a session wrote, in a
+    transcript, a body or what claude says to a chat."""
+    held = held_size(line)
+    return (json_object(line) if held <= MOST_LINE_HELD else None), held
+
+
+def line_read(line: bytes | None) -> tuple[dict | None, int]:
     """A whole line of a transcript as the entry it holds, none for an
-    empty one. A line that holds none, or was too long to read (see
-    bounded_lines), is an entry that says so: Claude Code writes no such
-    line, a session that writes half a line ahead of an entry does, and
-    what it did there must not go without a word."""
-    if line is None or held_size(line) > MOST_LINE_HELD:
-        return {"type": UNREADABLE, "text": "(a line too long to read)"}
-    if not line.strip():
-        return None
-    entry = json_object(line)
+    empty one, with about how much that takes once read (see held_size).
+    A line that holds none, or was too long to read (see bounded_lines),
+    is an entry that says so, which takes no more than an empty line:
+    Claude Code writes no such line, a session that writes half a line
+    ahead of an entry does, and what it did there must not go without a
+    word."""
+    if line is None:
+        return {"type": UNREADABLE, "text": TOO_LONG}, HELD_BY_LINE
+    entry, held = held_object(line)
     if entry is not None:
-        return entry
+        return entry, held
+    if held > MOST_LINE_HELD:
+        return {"type": UNREADABLE, "text": TOO_LONG}, HELD_BY_LINE
+    if not line.strip():
+        return None, 0
     shown = line[:UNREADABLE_SHOWN].decode("utf-8", "replace").rstrip("\n")
-    return {"type": UNREADABLE, "text": shown}
+    return {"type": UNREADABLE, "text": shown}, HELD_BY_LINE
+
+
+def line_entry(line: bytes | None) -> dict | None:
+    """A whole line of a transcript as the entry it holds, see line_read."""
+    return line_read(line)[0]
 
 
 def json_object(text: str | bytes) -> dict | None:

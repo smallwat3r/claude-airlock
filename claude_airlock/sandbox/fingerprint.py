@@ -1124,12 +1124,15 @@ def _below_the_top(
 
 def project_names(claude_dir: str) -> list[str] | None:
     """The names of what is where Claude Code keeps the transcripts and
-    the memory of each project, whatever each is. None when they cannot
-    be told apart, more of them than MOST_PROJECTS: a session can make
-    any number."""
+    the memory of each project, whatever each is, none where there is no
+    such place. None when they cannot be told apart, more of them than
+    MOST_PROJECTS, a session can make any number, or where they cannot be
+    listed, which a session can make so too."""
     try:
         with os.scandir(os.path.join(claude_dir, PROJECTS)) as entries:
             names = [entry.name for entry in islice(entries, MOST_PROJECTS + 1)]
-    except OSError:
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
     return sorted(names) if len(names) <= MOST_PROJECTS else None

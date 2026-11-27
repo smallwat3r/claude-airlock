@@ -107,6 +107,21 @@ class HistoryTest(LauncherTest):
         ):
             history._other_projects(self.host)
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="no directory is closed to root")
+    def test_projects_that_cannot_be_listed_end_the_launch(self):
+        # A session can take the right to list them away, for the next one
+        # to start with none of them covered, and give it back then
+        self.cleanup.callback(self.projects.chmod, 0o700)
+        for mode in (0o000, 0o300):
+            self.projects.chmod(mode)
+            result = self.launch()
+            assert result.status != 0
+            assert f"{self.projects} cannot be listed" in result.stderr
+            assert f"chmod u+rwx {self.projects}" in result.stderr
+            assert not [call for call in result.calls if call[0] == "run"]
+        self.projects.chmod(0o700)
+        assert self.covered(self.launch().flags)
+
     def test_no_more_of_the_prompt_history_is_read_than_its_end(self):
         shared = self.home / ".claude" / "history.jsonl"
         lines = [

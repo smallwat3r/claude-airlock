@@ -195,20 +195,31 @@ def env_arg(name: str, value: object = None) -> str:
     return f"--env={name}" if value is None else f"--env={name}={value}"
 
 
+# What is said of a path that has a colon, see volume_takes
+NO_COLON = "docker takes no path with a colon"
+
+
+def volume_takes(path: str) -> bool:
+    """Whether a path can be spelt in a --volume, which tells its parts
+    apart by colons: not one that has a colon, docker would take a part
+    of it for something else."""
+    return ":" not in path
+
+
 def mount_arg(
     source: str, target: str, options: str = "", *, daemons: bool = False
 ) -> str:
     """A bind mount or named volume. The z option relabels a bind mount so
     containers can read it on SELinux hosts. The three are told apart by
-    colons, so a path that has one cannot be mounted: refused here, docker
-    would take a part of it for something else. A source that is a path
-    and is not there is refused too: docker would make a directory of it,
-    owned by root, in the place of the file that was meant. Not a path
-    said to be the daemon's: one of the machine docker runs in, which is
-    not this one under Docker Desktop, and cannot be looked for here."""
+    colons, so a path that has one cannot be mounted, see volume_takes. A
+    source that is a path and is not there is refused too: docker would
+    make a directory of it, owned by root, in the place of the file that
+    was meant. Not a path said to be the daemon's: one of the machine
+    docker runs in, which is not this one under Docker Desktop, and
+    cannot be looked for here."""
     for path in (source, target):
-        if ":" in path:
-            raise Fatal(f"cannot mount {path}: docker takes no path with a colon")
+        if not volume_takes(path):
+            raise Fatal(f"cannot mount {path}: {NO_COLON}")
     if source.startswith("/") and not daemons and not os.path.lexists(source):
         raise Fatal(
             f"cannot mount {source}: it does not exist, docker would make a"
@@ -223,7 +234,7 @@ def hidden_arg(path: str) -> str:
     _long_mount_arg: a session can make a file of such a name, and one
     that could not be hidden would have every later launch refuse to
     start."""
-    if ":" not in path:
+    if volume_takes(path):
         return mount_arg("/dev/null", path, "ro")
     return _long_mount_arg("/dev/null", path)
 
@@ -232,7 +243,7 @@ def covered_arg(empty: str, path: str) -> str:
     """An empty directory mounted over one, read-only: it holds nothing
     in the container. A path with a colon the long way, as hidden_arg
     and for the same reason."""
-    if ":" not in path:
+    if volume_takes(path):
         return mount_arg(empty, path, "ro,z")
     return _long_mount_arg(empty, path)
 
@@ -243,7 +254,7 @@ def held_arg(path: str) -> str:
     sandbox/mounts.py). One with a colon in its name the long way, as
     hidden_arg and for the same reason: a session can make one above a
     file that is hidden."""
-    if ":" not in path:
+    if volume_takes(path):
         return mount_arg(path, path, "z")
     return _long_mount_arg(path, path, read_only=False)
 
@@ -299,6 +310,11 @@ class Tmpfs:
 # Of the name of a project, as much as names its records: a file takes no
 # more than 255 bytes for a name, and the launcher puts more after it
 SLUG_WIDTH = 200
+# What the name of a sidecar has between its session's and its kind
+# (claude-app.capture, see Sidecar.name_for), and no session's has: a
+# session of a project named like a sidecar of another would be taken
+# for it, see container_name
+SIDECAR_SEPARATOR = "."
 
 
 def docker_safe_name(name: str) -> str:

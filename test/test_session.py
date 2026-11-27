@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import time
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -18,7 +19,9 @@ import pytest
 from harness import LauncherTest, mounted_copy
 
 from claude_airlock import docker, errors, launcher, settings
+from claude_airlock.recording import capture, sidecar
 from claude_airlock.sandbox import session, shared_proxy, socket_proxy
+from claude_airlock.sandbox.ending import Ending
 
 
 class SessionUserTest(LauncherTest):
@@ -186,6 +189,61 @@ class DefaultSessionTest(LauncherTest):
         launched = self.launch()
         assert mounted not in [c for c in launched.calls if c[0] == "run"][-1]
 
+    def test_a_git_config_that_leads_out_of_what_a_session_can_write_is_not_mounted(
+        self,
+    ):
+        # Dotfiles kept in a repository a session was given, linked to from
+        # the home: the session pointed what is there at a key, at a
+        # directory of credentials, at a file of them that reads as a config
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("[a]\n\tb = c\n")
+        credentials = self.home / ".aws" / "credentials"
+        credentials.parent.mkdir()
+        credentials.write_text("[default]\n\taws_secret_access_key = k\n")
+        git = self.home / ".config" / "git"
+        git.mkdir(parents=True)
+        work = self.home / "work.gitconfig"
+        (git / "config").write_text(f"[include]\n\tpath = {work}\n")
+        for name, leads_to in (
+            ("gitconfig", key),
+            ("templates", credentials.parent),
+            ("work", credentials),
+        ):
+            (dotfiles / name).symlink_to(leads_to)
+        os.symlink(dotfiles / "gitconfig", self.home / ".gitconfig")
+        os.symlink(dotfiles / "templates", git / "templates")
+        os.symlink(dotfiles / "work", work)
+        withheld = (self.home / ".gitconfig", git / "templates", work)
+        for args in (("--add-dir", str(dotfiles)), ()):
+            # Given, then once it no longer is: a session could have
+            # written it
+            launched = self.launch(*args)
+            assert launched.status == 0, launched.stderr
+            flags = [call for call in launched.calls if call[0] == "run"][-1]
+            for path in withheld:
+                assert not [flag for flag in flags if f"={path}:" in flag], path
+            assert (
+                f"--volume={git / 'config'}:/home/sandbox/.config/git/config:ro,z"
+                in flags
+            )
+            said = launched.stderr
+            out = f"it is, or goes through, a link out of {dotfiles}"
+            for path in withheld[:2]:
+                assert f"{path}, which git reads, is not mounted: {out}" in said
+            assert (
+                f"{work}, which the git config includes, is not mounted: {out}" in said
+            )
+        # What leads into the repository and stays there is mounted, as a
+        # config kept in dotfiles is
+        (dotfiles / "gitconfig").unlink()
+        (dotfiles / "gitconfig").write_text("[user]\n\tname = d\n")
+        flags = [call for call in self.launch().calls if call[0] == "run"][-1]
+        home_config = self.home / ".gitconfig"
+        assert f"--volume={home_config}:/home/sandbox/.gitconfig:ro,z" in flags
+
     def test_a_docker_that_does_not_answer_holds_the_launcher_no_longer(self, capsys):
         hung = self.work / "bin" / "docker"
         hung.write_text("#!/bin/sh\nexec sleep 30\n")
@@ -231,9 +289,76 @@ class DefaultSessionTest(LauncherTest):
         ) as name:
             assert name == f"claude-{'p' * 250}"[: session.SESSION_NAME_WIDTH]
             assert (Path(host.names_dir) / name).exists()
+        # Never with a dot, which the name of a sidecar has after that of
+        # its session: a session of app.capture would have the name of the
+        # capture of a session of app
+        dotted = settings.Host(
+            str(self.home), str(self.home / "app.capture"), "", str(self.home / "s")
+        )
+        with session.container_name(
+            dotted, {"CLAUDE_BUFFER_NAME": "*c:x:a.procs*"}
+        ) as name:
+            assert name == "claude-app-capture-a-procs"
         slug = docker.project_slug(str(long))
         assert slug.startswith("p" * docker.SLUG_WIDTH + "-")
         assert len(slug) == docker.SLUG_WIDTH + 9
+
+    def test_a_capture_that_docker_did_not_run_removes_nothing(self):
+        # Its name was in use: what has it is another's, not the capture
+        def started(code: int, running: bool) -> list[mock._Call]:
+            ran = subprocess.CompletedProcess(["docker"], code, "", "")
+            with (
+                mock.patch.object(capture, "docker", return_value=ran),
+                mock.patch.object(capture, "container_running", return_value=running),
+                mock.patch.object(capture.time, "sleep"),
+                mock.patch.object(sidecar, "docker", return_value=ran),
+                mock.patch.object(sidecar, "docker_ok") as asked,
+                pytest.raises(errors.Fatal, match="the network capture did not start"),
+            ):
+                capture._start_capture(settings.Settings(), self.host, "claude-a", "i")
+            return asked.call_args_list
+
+        removed = mock.call("rm", "--force", "claude-a.capture")
+        assert removed not in started(125, running=True)
+        # One that docker ran and that ended at once is its own, and goes
+        assert removed in started(0, running=False)
+
+    def test_a_session_docker_could_not_start_was_not_run(self):
+        # Its check is dropped, nothing of it can have changed a file
+        image = mock.Mock(tag="img")
+        for raised in (
+            docker.unstartable(FileNotFoundError(), ["run", "x", "img"]),
+            docker.unstartable(OSError(errno.E2BIG, "too long"), ["run", "x", "img"]),
+        ):
+            ending = Ending("claude-a")
+            with (
+                mock.patch.object(session, "docker", side_effect=raised),
+                pytest.raises(errors.Fatal),
+            ):
+                session.run_session(["x"], image, [], ending)
+            assert not ending.session_was_run
+
+        # Through a chat, by what it says once docker was started for it
+        def chat(started: bool, docker_args: list[str], *, on_started) -> int:
+            if started:
+                on_started()
+            raise errors.Fatal("what came after")
+
+        for started in (False, True):
+            ending = Ending("claude-a")
+            with pytest.raises(errors.Fatal):
+                session.run_session(["x"], image, [], ending, partial(chat, started))
+            assert ending.session_was_run is started
+        # Told to end before it got there
+        ending = Ending("claude-a")
+        ending.signal = 15
+        assert session.run_session(["x"], image, [], ending) == 0
+        assert not ending.session_was_run
+        ending = Ending("claude-a")
+        done = subprocess.CompletedProcess(["docker"], 0, "", "")
+        with mock.patch.object(session, "docker", return_value=done):
+            assert session.run_session(["x"], image, [], ending) == 0
+        assert ending.session_was_run
 
     def test_a_container_is_gone_only_when_docker_says_so(self):
         def answering(code: int, listed: str = "") -> mock._patch:

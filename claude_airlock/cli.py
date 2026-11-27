@@ -46,6 +46,7 @@ from .sandbox.login import login_shared
 from .sandbox.mounts import (
     ExtraDir,
     Hidden,
+    Written,
     add_extra_dir,
     configured_extra_dirs,
     extra_dir_args,
@@ -54,8 +55,8 @@ from .sandbox.mounts import (
     protect_args,
     protect_env_args,
     protected_dirs,
-    refuse_links_out,
     refuse_unsafe_dir,
+    refuse_withheld_dirs,
     writable_dirs,
 )
 from .sandbox.network import network_args, session_network
@@ -64,6 +65,7 @@ from .sandbox.proxy_use import sidecars_locked
 from .sandbox.remembered import Remembered, remember
 from .sandbox.runtime import Runtime, say_runtime_notes, session_runtime
 from .sandbox.session import (
+    Through,
     base_args,
     container_name,
     git_config_args,
@@ -171,10 +173,14 @@ def _main(argv: list[str], usage: str = "") -> int:
     if action is Action.PRUNE:
         return prune_images(image.tag)
 
+    # Before anything is remembered of it: a project that is refused is
+    # no directory a session could write, and remembered as one it would
+    # have every later launch hold back what leads into it
+    refuse_unsafe_dir(host.project_dir, host)
     dirs = configured_extra_dirs(settings, host)
     for raw, read_only in added:
         add_extra_dir(dirs, raw, host, read_only)
-    refuse_links_out(dirs, host, Remembered.load(host).written)
+    refuse_withheld_dirs(dirs, host, Remembered.load(host).written)
     dirs, protected = protected_dirs(dirs, settings, host)
     # A link this session leaves in them is its doing at later launches
     remember(host, written=writable_dirs(dirs, host))
@@ -227,7 +233,6 @@ def _chats(plan: Plan) -> int:
 def session(plan: Plan) -> int:
     """One session from start to finish. Returns its exit status."""
     settings, host, image = plan.settings, plan.host, plan.image
-    refuse_unsafe_dir(host.project_dir, host)
     if not docker_ok("image", "inspect", image.tag):
         status = build_image(image, host)
         if status != 0:
@@ -287,6 +292,8 @@ def session_run_args(
     remembered = Remembered.load(host)
     hidden = _hidden(plan, remembered)
     mounted = mounted_dirs(dirs, host)
+    # Resolved once, for every file of the host asked about
+    written = Written.of(remembered.written)
     return [
         *base_args(settings, host, name, runtime),
         *session_args(plan.action, os.environ),
@@ -297,8 +304,8 @@ def session_run_args(
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
-        *git_config_args(settings, host, mounted, remembered.written),
-        *own_statusline_args(settings, host, mounted),
+        *git_config_args(settings, host, mounted, written),
+        *own_statusline_args(settings, host, mounted, written),
         *hidden.args(host),
     ]
 
@@ -395,7 +402,7 @@ def recorded_session(
         # the uses of a door that were only counted, is within its stay.
         # Its name is not another session's to take before that.
         at_last.callback(note_end, host, name)
-        through = None
+        through: Through | None = None
         if plan.is_chat:
             sandbox = Sandbox.started(name, start, host.home)
             through = partial(

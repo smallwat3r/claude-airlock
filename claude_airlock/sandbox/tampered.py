@@ -214,9 +214,10 @@ def report_projects(planted: list[str] | None, unchecked: str = "") -> None:
     whose = f"the session {unchecked}" if unchecked else "this session"
     if planted is None:
         warn(
-            f"more than {MOST_PROJECTS} directories are where Claude Code"
-            f" keeps what it remembers of each project: whether {whose} made"
-            " one for another project cannot be told"
+            f"where Claude Code keeps what it remembers of each project, more"
+            f" than {MOST_PROJECTS} directories are, or what is there cannot be"
+            f" listed: whether {whose} made one for another project cannot be"
+            " told"
         )
     elif planted:
         warn(

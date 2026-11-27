@@ -593,6 +593,19 @@ class TamperingTest(LauncherTest):
             assert watched.project_names(claude) is None
             assert tampered.planted_projects([], (), claude) is None
 
+    @pytest.mark.skipif(os.getuid() == 0, reason="no directory is closed to root")
+    def test_projects_that_cannot_be_listed_are_said(self):
+        # A session can make them so: that is not that there are none
+        claude = str(self.home / ".claude")
+        projects = self.transcripts.parent
+        projects.mkdir(parents=True, exist_ok=True)
+        self.cleanup.callback(projects.chmod, 0o700)
+        projects.chmod(0o300)
+        assert watched.project_names(claude) is None
+        assert tampered.planted_projects([], (), claude) is None
+        projects.chmod(0o700)
+        assert watched.project_names(str(self.home / "none")) == []
+
     def test_a_memory_as_it_was_is_not_reported(self):
         memory = self.transcripts / "memory"
         memory.mkdir(parents=True)
@@ -1427,6 +1440,7 @@ class FailedLaunchTest:
 
         def fail(*_: object) -> None:
             if ran:
+                ending.started()
                 ending.session_over()
             raise Fatal("docker is not there")
 

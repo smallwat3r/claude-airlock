@@ -15,7 +15,7 @@ from harness import LauncherTest, Result
 from claude_airlock import settings
 from claude_airlock.docker import covered_arg, mount_arg
 from claude_airlock.errors import Fatal
-from claude_airlock.sandbox import mounts
+from claude_airlock.sandbox import mounts, remembered
 
 # Root lists and enters a directory whatever its mode says
 closed_to_its_owner = pytest.mark.skipif(
@@ -216,6 +216,10 @@ class ExtraDirsTest(LauncherTest):
     def test_home_directory_is_refused(self):
         result = self.launch(cwd=self.home)
         self.assert_refused(result, "it would defeat the sandbox")
+        # And not remembered as a directory a session could write: every
+        # later launch would hold back what leads into it, all of the home
+        written = remembered.Remembered.load(self.host).written
+        assert str(self.home) not in written
 
     def test_a_link_to_the_home_directory_is_refused(self):
         link = self.work / "elsewhere"
@@ -254,11 +258,15 @@ class ExtraDirsTest(LauncherTest):
         outside.mkdir()
         (self.project / "vendor").symlink_to(outside)
         result = self.launch("--add-dir", "vendor")
-        self.assert_refused(result, f"it is a link out of {self.project}")
+        self.assert_refused(
+            result, f"it is, or goes through, a link out of {self.project}"
+        )
         self.shared.mkdir()
         (self.shared / "notes").symlink_to(outside)
         result = self.launch("--add-dir-ro", "~/claude-shared/notes")
-        self.assert_refused(result, f"it is a link out of {self.shared}")
+        self.assert_refused(
+            result, f"it is, or goes through, a link out of {self.shared}"
+        )
         # Named by where it is, and a link the session cannot have made
         assert self.launch("--add-dir", str(outside)).status == 0
         mine = self.home / "mine"
@@ -267,6 +275,24 @@ class ExtraDirsTest(LauncherTest):
         # In a directory it can only read
         (self.ref / "more").symlink_to(outside)
         result = self.launch("--add-dir-ro", "~/ref", "--add-dir", "~/ref/more")
+        assert result.status == 0, result.stderr
+
+    def test_a_link_into_what_a_session_can_write_that_leads_out_is_refused(self):
+        # The user keeps a link into the project, where a session pointed
+        # what it leads to elsewhere, for the next launch to mount that
+        outside = self.home / "documents"
+        outside.mkdir()
+        (self.project / "kit").symlink_to(outside)
+        kit = self.home / "kit"
+        kit.symlink_to(self.project / "kit")
+        result = self.launch("--add-dir", str(kit))
+        refused = f"it is, or goes through, a link out of {self.project}"
+        self.assert_refused(result, refused)
+        assert "Name the directory it leads to" in result.stderr
+        # Into the project and no further, it is the project's
+        (self.project / "kit").unlink()
+        (self.project / "kit").mkdir()
+        result = self.launch("--add-dir", str(kit))
         assert result.status == 0, result.stderr
 
     def test_a_dir_inside_the_project_has_its_secrets_hidden_once(self):
@@ -557,6 +583,6 @@ class AcrossLaunchesTest(LauncherTest):
         assert self.launch("--add-dir", "~/ref").status == 0
         (self.ref / "more").symlink_to(self.outside)
         result = self.launch("--add-dir-ro", "~/ref", "--add-dir", "~/ref/more")
-        self.assert_refused(result, f"it is a link out of {self.ref}")
+        self.assert_refused(result, f"it is, or goes through, a link out of {self.ref}")
         result = self.launch("--add-dir-ro", "~/ref/more")
-        self.assert_refused(result, f"it is a link out of {self.ref}")
+        self.assert_refused(result, f"it is, or goes through, a link out of {self.ref}")

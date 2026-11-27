@@ -11,12 +11,13 @@ What a session is given and what it is kept from.
   launcher's own settings and records (`~/.config/claude-airlock`,
   `~/.local/state/claude-airlock`). A session that could write those
   would decide how the next one is sandboxed.
-- An extra directory is named by where it is. A path inside the project,
-  or inside another directory a session can write, that leads out of it
-  through a link is refused: a session could have left the link there, to
-  be given what it points to the next time. The same in a directory a
-  session could write at an earlier launch, and cannot now: the launcher
-  keeps the latest 1000 such directories, of every project.
+- An extra directory is named by where it is. A path that is, or goes
+  through, a link in the project, or in another directory a session can
+  write, and leads out of it is refused, wherever the path is named from
+  (`~/kit` as a link into the project too): a session could have left the
+  link there, to be given what it points to the next time. The same in a
+  directory a session could write at an earlier launch, and cannot now:
+  the launcher keeps the latest 1000 such directories, of every project.
 - Read-only wins. A directory asked for both ways, by `--add-dir` and
   `--add-dir-ro` or their settings, the shared directory too, is mounted
   read-only, whichever was said first. The project itself is always
@@ -56,7 +57,11 @@ What a session is given and what it is kept from.
   names that is, or leads into, a directory a session can write, or
   could at an earlier launch: a config kept in a repository a session was
   given can name any file, `~/.aws/credentials` as well, for the next
-  launch to mount. The launcher says which it left out.
+  launch to mount. Nor the config itself, or a file it includes, that
+  goes through a link in such a directory and leads out of it, as with an
+  extra directory: `~/.gitconfig` as a link into a repository of dotfiles
+  is mounted while it leads to the file there, not once a session has
+  made that file a link to a key. The launcher says which it left out.
 - The file `~/.claude/settings.json` runs as its statusline, read-only,
   when it is a file of your home directory, see
   [Statusline](#statusline).
@@ -102,7 +107,11 @@ What a session is given and what it is kept from.
   history are kept per project. So `claude` on the host cannot rewind the
   files of a session run in the sandbox. `CLAUDE_AIRLOCK_SHARED_HISTORY=1`
   shares it all again. More than 2000 directories of other projects end
-  the launch, as too many to cover. A project's prompt history starts
+  the launch, as too many to cover, and so does a `~/.claude/projects`
+  the launcher cannot list, which a session can make so for the next one
+  to start with none of them covered. Make it yours to list again
+  (`chmod u+rwx`) to have it back.
+  A project's prompt history starts
   from its latest lines of the host's, those in its last 64 MB.
 - **The shell snapshots of other sessions.** `~/.claude/shell-snapshots`
   and `session-env` are each session's own.
@@ -124,7 +133,7 @@ What a session is given and what it is kept from.
   comes last in `PATH`: the cache outlives the session, and a command left
   there cannot stand in for one of the image.
 - Writable space is the mounts, the cache volume and a few size-capped
-  tmpfs (`/tmp`, `~/.npm`, `~/.config`, `~/.local/state/claude`).
+  tmpfs (`/tmp`, `~/.config`, `~/.local/state/claude`).
 - Containers still share the host kernel, unless the session runs under
   [gVisor](#gvisor).
 
@@ -235,7 +244,11 @@ where the settings name it, whether it is the program
 - A file with the name of a secrets file (`.env`, `.netrc`) is not
   mounted, nor one in a directory no session is given: `~/.ssh`,
   `~/.gnupg`, the launcher's settings and its records, by where the path
-  leads. The launch says so.
+  leads. Nor one that goes through a link in a directory a session can
+  write, or could at an earlier launch, and leads out of it: a script
+  kept in a project and linked to from `~/bin` is mounted while it is
+  there, not once a session has made it a link to `~/.aws/credentials`.
+  The launch says so.
 - Only the statusline of `~/.claude/settings.json` on the host, not one a
   project's settings name.
 - It can show the sandbox from the variables a session has of how it was
@@ -408,9 +421,11 @@ reached: the session has no Docker, and the launch says so.
 - With `CLAUDE_AIRLOCK_NET_ASK=1` as well, a host that is not on the list
   is yours to allow, in [line mode](line-mode.md). The proxy holds the
   request, you are asked, and a yes lets it through. Nothing is looked up
-  or sent for the host before that. The answer is for that host alone,
-  not the names under it, and holds until the session ends: the list is
-  not changed. Only a name of the public DNS is asked about, never an
+  or sent for the host before that. The question names the port too
+  (`example.com on port 443 (https)`), and the answer is for that host at
+  that port alone, not another port of it nor the names under it: a yes
+  to its HTTPS lets no SSH through to it. It holds until the session
+  ends: the list is not changed. Only a name of the public DNS is asked about, never an
   address or the bare name of a container, and a yes does not reach a
   private address the name leads to: a host of your own network goes on
   the list. Nothing gets through the proxy to its own loopback (0.0.0.0/8
