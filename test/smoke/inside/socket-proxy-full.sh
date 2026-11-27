@@ -15,8 +15,12 @@ check "docker stats works" docker stats --no-stream "${proxy}"
 check "the info of the daemon is read" docker info
 check_fails "other docker calls are denied" docker volume ls
 check_socket_denials
+# The whole handshake, as a client sends it: without its key HAProxy takes
+# the request for a malformed one and answers 400 before any rule
 check "a read that asks to become a WebSocket is denied" \
   denied -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
   "${SOCKET_API}/${NO_CONTAINER}/json"
 # Tells run.sh that docker was used, see socket-proxy.sh
 touch .smoke-docker-full-used
