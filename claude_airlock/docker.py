@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import IO, Any
 
@@ -13,6 +15,7 @@ from .errors import Fatal
 from .notice import warn
 
 NOT_FOUND = "docker was not found on PATH"
+NOT_RUNNABLE = "docker on PATH cannot be run, it is not executable"
 # The seconds a docker command is given to end: a daemon that hangs must
 # not hold the launcher, least of all once a session is over and what it
 # left behind is yet to be checked. Longer for what may have an image
@@ -33,6 +36,28 @@ DROP_CAPABILITIES = "--cap-drop=ALL"
 NO_NEW_PRIVILEGES = "--security-opt=no-new-privileges"
 
 
+def unstartable(problem: OSError, args: Sequence[str]) -> Fatal:
+    """What is said of a docker command that could not be started, as
+    the one line it is: docker missing, there and not to be run, or
+    given more than the system takes, which a session can have brought
+    about with the files and directories that are each mounted (see
+    hidden_files of sandbox/mounts.py and history_args of
+    sandbox/history.py)."""
+    if isinstance(problem, FileNotFoundError):
+        return Fatal(NOT_FOUND)
+    if isinstance(problem, PermissionError):
+        return Fatal(NOT_RUNNABLE)
+    if problem.errno == errno.E2BIG:
+        size = sum(len(os.fsencode(arg)) + 1 for arg in args)
+        mounts = sum(arg.startswith(("--volume=", "--mount=")) for arg in args)
+        return Fatal(
+            f"docker {' '.join(args[:1])} cannot be started, it is given more"
+            f" than the system takes: {len(args)} arguments of"
+            f" {size // 1024} kB, {mounts} of them mounts"
+        )
+    return Fatal(f"docker {' '.join(args[:1])} cannot be started: {problem.strerror}")
+
+
 def patience(args: tuple[str, ...]) -> float:
     """The seconds a docker command is given, by what it does."""
     return SLOW_SECONDS if args[:1] and args[0] in SLOW_COMMANDS else DOCKER_SECONDS
@@ -50,7 +75,8 @@ def docker(
     is given the time of its kind to end (see patience), another when
     told, or with None as long as it takes. One that does not end in its
     time is ended and said to have failed, with TIMED_OUT: whoever asked
-    goes on as after any docker command that failed."""
+    goes on as after any docker command that failed. One that cannot be
+    started is Fatal, see unstartable."""
     seconds = patience(args) if timeout == ITS_KIND else timeout
     try:
         return subprocess.run(
@@ -62,8 +88,8 @@ def docker(
             check=False,
             timeout=seconds,
         )
-    except FileNotFoundError:
-        raise Fatal(NOT_FOUND) from None
+    except OSError as problem:
+        raise unstartable(problem, args) from None
     except subprocess.TimeoutExpired:
         warn(
             f"docker {' '.join(args[:2])} did not end within {seconds:.0f} seconds,"
@@ -77,7 +103,8 @@ def docker(
 def docker_popen(*args: str, **options: Any) -> subprocess.Popen:
     """Start a docker command and leave it running, with the options of
     subprocess.Popen. Raises OSError when it cannot be started,
-    FileNotFoundError when docker is not on PATH."""
+    FileNotFoundError when docker is not on PATH, see unstartable for
+    what to say of it."""
     return subprocess.Popen(["docker", *args], **options)
 
 
@@ -269,13 +296,19 @@ class Tmpfs:
         return f"--tmpfs={self.target}:{','.join(options)}"
 
 
+# Of the name of a project, as much as names its records: a file takes no
+# more than 255 bytes for a name, and the launcher puts more after it
+SLUG_WIDTH = 200
+
+
 def docker_safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "-", name)
 
 
 def project_slug(project_dir: str) -> str:
     """A name for a project that docker and the filesystem take, and that
-    two projects of the same name do not share: its last part and a hash
-    of its whole path."""
+    two projects of the same name do not share: its last part, no more
+    of it than SLUG_WIDTH, and a hash of its whole path."""
     suffix = hashlib.sha256(project_dir.encode()).hexdigest()[:8]
-    return f"{docker_safe_name(os.path.basename(project_dir))}-{suffix}"
+    name = docker_safe_name(os.path.basename(project_dir))[:SLUG_WIDTH]
+    return f"{name}-{suffix}"

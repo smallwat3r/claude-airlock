@@ -33,6 +33,7 @@ import stat
 from pathlib import Path
 
 from ..docker import Tmpfs, env_arg, mount_arg
+from ..errors import Fatal
 from ..files import json_object, private_dir, write_whole
 from ..settings import (
     CONFIG_FILES,
@@ -126,9 +127,18 @@ def _make_missing(
     directory: str, trees: tuple[str, ...], files: tuple[str, ...]
 ) -> None:
     """Make the directories and the files of a directory that are not
-    there, empty. A file that holds JSON says nothing as {}."""
+    there, empty. A file that holds JSON says nothing as {}. Fatal for
+    something else where a directory is to be: a session or the user put
+    it there, and nothing could be mounted over it."""
     for name in trees:
-        os.makedirs(os.path.join(directory, name), exist_ok=True)
+        path = os.path.join(directory, name)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except (FileExistsError, NotADirectoryError):
+            raise Fatal(
+                f"{path} is not a directory, where Claude Code keeps its {name}:"
+                " move it aside for a session to start"
+            ) from None
     for name in files:
         path = os.path.join(directory, name)
         if os.path.lexists(path):

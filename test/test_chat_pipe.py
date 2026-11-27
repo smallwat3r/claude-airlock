@@ -5,6 +5,7 @@ that runs it, and the lines of the session that are no message."""
 from __future__ import annotations
 
 import contextlib
+import errno
 import queue
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from chat_harness import PATIENCE, page, written
 
 from claude_airlock import files
 from claude_airlock.chat import pipe, plain
+from claude_airlock.errors import Fatal
 from claude_airlock.events import labelled
 
 
@@ -54,6 +56,16 @@ class PipeTest:
         the test."""
         with played("cat") as agent:
             yield agent
+
+    def test_a_docker_that_cannot_be_started_is_said_in_a_line(self):
+        for problem, said in (
+            (FileNotFoundError(), "docker was not found"),
+            (PermissionError(), "docker on PATH cannot be run"),
+            (OSError(errno.E2BIG, "Argument list too long"), "more than the system"),
+        ):
+            run = unittest.mock.Mock(side_effect=problem)
+            with pytest.raises(Fatal, match=said):
+                pipe.Agent(["run", "img"], lambda: None, run)
 
     def test_what_waits_to_be_taken_in_is_bounded_by_its_size_too(self):
         backlog = pipe.Backlog(most=3, most_bytes=100)

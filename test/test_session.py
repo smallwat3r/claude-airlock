@@ -4,6 +4,7 @@ is given of the home, and the socket proxy."""
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import subprocess
@@ -14,7 +15,7 @@ from unittest import mock
 import pytest
 from harness import LauncherTest
 
-from claude_airlock import docker, launcher, settings
+from claude_airlock import docker, errors, launcher, settings
 from claude_airlock.sandbox import session, socket_proxy
 
 
@@ -175,6 +176,39 @@ class DefaultSessionTest(LauncherTest):
         # runs for as long as it has to is given all the time it takes
         assert docker.patience(("run", "--detach", "x")) == docker.SLOW_SECONDS
         assert docker.patience(("ps",)) == docker.DOCKER_SECONDS
+
+    def test_a_docker_that_cannot_be_started_is_said_in_a_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The fake alone on PATH, no other docker is to be found past it
+        fake = self.work / "bin" / "docker"
+        fake.chmod(0o644)
+        monkeypatch.setenv("PATH", str(fake.parent))
+        with pytest.raises(errors.Fatal, match="docker on PATH cannot be run"):
+            docker.docker("ps")
+        # Given more than the system takes, which a session can bring about
+        # with the files it makes, each mounted
+        too_long = OSError(errno.E2BIG, os.strerror(errno.E2BIG))
+        args = ("run", "--volume=/dev/null:/x:ro", "--mount=type=bind", "img")
+        with (
+            mock.patch.object(subprocess, "run", side_effect=too_long),
+            pytest.raises(errors.Fatal, match="4 arguments of 0 kB, 2 of them mounts"),
+        ):
+            docker.docker(*args)
+
+    def test_a_long_project_name_gives_a_name_files_take(self):
+        # A file takes no more than 255 bytes for a name, and files are
+        # named after the session and the project with more put after
+        long = self.home / ("p" * 250)
+        host = settings.Host(str(self.home), str(long), "", str(self.home / "state"))
+        with session.container_name(
+            host, {"CLAUDE_BUFFER_NAME": "*claude:x:2*"}
+        ) as name:
+            assert name == f"claude-{'p' * 250}"[: session.SESSION_NAME_WIDTH]
+            assert (Path(host.names_dir) / name).exists()
+        slug = docker.project_slug(str(long))
+        assert slug.startswith("p" * docker.SLUG_WIDTH + "-")
+        assert len(slug) == docker.SLUG_WIDTH + 9
 
     def test_a_container_is_gone_only_when_docker_says_so(self):
         def answering(code: int, listed: str = "") -> mock._patch:
@@ -370,6 +404,17 @@ class HomeTest(LauncherTest):
                 assert source.exists(), source
                 # A file where a file goes, docker would make a directory
                 assert over.is_dir() == source.is_dir(), over
+
+    def test_a_file_where_a_directory_of_claude_goes_is_said_in_a_line(self):
+        hooks = self.home / ".claude" / "hooks"
+        hooks.rmdir()
+        hooks.touch()
+        result = self.launch()
+        assert result.status == 1
+        assert f"{hooks} is not a directory, where Claude Code keeps its hooks" in (
+            result.stderr
+        )
+        assert "Traceback" not in result.stderr
 
 
 class SocketProxyTest(LauncherTest):

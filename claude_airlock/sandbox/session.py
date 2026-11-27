@@ -51,6 +51,11 @@ from .mounts import SHADOWED_NAMES, kept_out, names_secrets
 from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
 
+# Of the name of a session, as much as is kept: a file takes no more than
+# 255 bytes for a name, and the launcher names files after a session with
+# more put after (its sidecars, its records)
+SESSION_NAME_WIDTH = 128
+
 
 def _claim_name(directory: str, name: str) -> int | None:
     """Claim a name among the launchers, none when another has it: the
@@ -70,7 +75,8 @@ def container_name(host: Host, env: Mapping[str, str]) -> Iterator[str]:
     if buffer_name:
         instance = buffer_name.rsplit(":", 1)[-1]
         name += "-" + instance.removesuffix("*")
-    name = docker_safe_name(name)
+    # No longer than files named after it can take, see SESSION_NAME_WIDTH
+    name = docker_safe_name(name)[:SESSION_NAME_WIDTH]
     # Buffer names are only unique within one Emacs, so a second Emacs (or a
     # plain shell) on the same project asks for a name that is already
     # taken. Step past it rather than fail, the other session is still live.

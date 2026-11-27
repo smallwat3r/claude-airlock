@@ -23,8 +23,7 @@ import sys
 import threading
 from collections.abc import Callable
 
-from ..docker import NOT_FOUND, docker_popen
-from ..errors import Fatal
+from ..docker import docker_popen, unstartable
 from ..events import clean
 from ..files import MOST_LINE_HELD, bounded_lines, held_size, json_object
 from ..notice import warn
@@ -142,8 +141,8 @@ class Agent:
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-        except FileNotFoundError:
-            raise Fatal(NOT_FOUND) from None
+        except OSError as problem:
+            raise unstartable(problem, docker_args) from None
         self._on_end = on_end
         # What is to be said to claude, a line each, then None when no
         # more is: written by a thread of its own, see _write
