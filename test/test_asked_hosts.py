@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -21,6 +22,8 @@ from harness import ROOT, LauncherTest, mounted_copy
 from claude_airlock.launcher import Launcher
 from claude_airlock.sandbox import asked_hosts
 from claude_airlock.settings import Host, Settings
+
+At = asked_hosts.Destination
 
 HELPER = ROOT / "docker" / "squid-ask-helper.sh"
 ADDRESS = "172.20.0.7"
@@ -89,42 +92,57 @@ class AskedHostsTest(LauncherTest):
         # Nobody else on the host gets as far
         assert stat.S_IMODE(self.root.parent.stat().st_mode) == 448
 
-    def test_only_what_could_be_a_host_is_taken_of_what_waits(self):
+    def test_only_what_could_be_a_host_at_a_port_is_taken_of_what_waits(self):
         asked = self.asked()
-        for name in ("example.com", "b.example.com", "UPPER.com", ".hidden", "a b"):
+        for name in (
+            "example.com:443",
+            "b.example.com:22",
+            "UPPER.com:443",
+            ".hidden:443",
+            "a b:443",
+            # A host alone, as a helper of before wrote it
+            "example.org",
+            "example.net:",
+            "example.net:0443",
+            "example.net:65536",
+            "example.net:443:443",
+        ):
             (self.tree / "waiting" / name).touch()
-        (self.tree / "waiting" / "-dash.com").mkdir()
-        assert asked.waiting() == ["b.example.com", "example.com"]
+        (self.tree / "waiting" / "-dash.com:443").mkdir()
+        assert asked.waiting() == [At("b.example.com", 22), At("example.com", 443)]
         # No more than the helper lets wait
         for number in range(20):
-            (self.tree / "waiting" / f"h{number}.test").touch()
+            (self.tree / "waiting" / f"h{number}.test:443").touch()
         assert len(asked.waiting()) == asked_hosts.MOST_WAITING
 
     def test_an_answer_is_kept_and_the_host_waits_no_more(self):
         asked = self.asked()
-        for name in ("yes.test", "no.test", "later.test"):
+        for name in ("yes.test:443", "no.test:22", "later.test:80"):
             (self.tree / "waiting" / name).touch()
-        asked.answer("yes.test", True)
-        asked.answer("no.test", False)
-        asked.answer("later.test", None)
-        # Not a host, nothing is written for it anywhere
-        asked.answer("../../owner", True)
-        asked.answer("../owner", None)
+        asked.answer(At("yes.test", 443), True)
+        asked.answer(At("no.test", 22), False)
+        asked.answer(At("later.test", 80), None)
+        # Not a host at a port, nothing is written for it anywhere
+        asked.answer(At("../../owner", 443), True)
+        asked.answer(At("../owner", 443), None)
+        asked.answer(At("yes.test", 0), True)
+        asked.answer(At("yes.test", 65536), True)
         assert asked.waiting() == []
-        kept = sorted(str(p.relative_to(self.tree)) for p in self.tree.rglob("*.test"))
-        assert kept == ["allowed/yes.test", "refused/no.test"]
+        kept = sorted(str(p.relative_to(self.tree)) for p in self.tree.rglob("*.test*"))
+        assert kept == ["allowed/yes.test:443", "refused/no.test:22"]
         assert (self.tree / "owner").exists()
+        assert (self.tree / asked_hosts.BY_PORT).is_file()
 
     def test_nothing_is_asked_before_the_address_is_known_or_after_the_end(self):
         asked = asked_hosts.AskedHosts(self.host, "claude-proj")
         assert asked.waiting() == []
-        asked.answer("example.com", True)
+        asked.answer(At("example.com", 443), True)
         assert not self.root.exists()
         # Not an address the helper takes
         assert not asked.open("fd00::7")
         assert not asked.open("../x")
         assert asked.open(ADDRESS)
-        asked.answer("example.com", True)
+        asked.answer(At("example.com", 443), True)
         asked.close()
         assert list(self.root.iterdir()) == []
         assert asked.waiting() == []
@@ -134,15 +152,15 @@ class AskedHostsTest(LauncherTest):
 
     def test_what_another_session_was_allowed_at_the_address_is_dropped(self):
         first = self.asked()
-        first.answer("example.com", True)
+        first.answer(At("example.com", 443), True)
         self.asked()
         assert list((self.tree / "allowed").iterdir()) == []
 
     def test_what_a_session_that_is_over_left_is_dropped(self):
-        self.asked().answer("example.com", True)
+        self.asked().answer(At("example.com", 443), True)
         # Of this launcher, which is still there
         asked_hosts.drop_left_behind(self.host)
-        assert (self.tree / "allowed" / "example.com").exists()
+        assert (self.tree / "allowed" / "example.com:443").exists()
         # Of a launcher that is gone, with its session
         gone = {"session": "claude-proj", **Launcher(2**22 + 1, "1").as_fields()}
         (self.tree / "owner").write_text(json.dumps(gone))
@@ -185,26 +203,26 @@ class AskedHostsTest(LauncherTest):
 
     def test_the_helper_refuses_for_a_session_that_does_not_ask(self):
         assert self.helper(
-            f"0 {ADDRESS} example.com -", "1 172.20.0.8 example.com -"
+            f"0 {ADDRESS} example.com 443", "1 172.20.0.8 example.com 443"
         ) == ["0 ERR", "1 ERR"]
         assert not self.root.exists()
 
     def test_the_helper_answers_what_the_user_said(self):
         asked = self.asked()
-        (self.tree / "waiting" / "seen.test").touch()
-        asked.answer("yes.test", True)
-        asked.answer("no.test", False)
-        assert asked.waiting() == ["seen.test"]
+        (self.tree / "waiting" / "seen.test:443").touch()
+        asked.answer(At("yes.test", 443), True)
+        asked.answer(At("no.test", 443), False)
+        assert asked.waiting() == [At("seen.test", 443)]
         # The first two are not hosts the launcher was asked about, the
         # answers are still found: an answer may come ahead of a request
-        (self.tree / "allowed" / "yes.test").touch()
-        (self.tree / "refused" / "no.test").touch()
+        (self.tree / "allowed" / "yes.test:443").touch()
+        (self.tree / "refused" / "no.test:443").touch()
         answered = self.helper(
-            f"0 {ADDRESS} yes.test -",
-            f"1 {ADDRESS} no.test -",
-            f"2 {ADDRESS} YES.test -",
+            f"0 {ADDRESS} yes.test 443",
+            f"1 {ADDRESS} no.test 443",
+            f"2 {ADDRESS} YES.test 443",
             # Another session's answers are not this one's
-            "3 172.20.0.8 yes.test -",
+            "3 172.20.0.8 yes.test 443",
         )
         assert answered == ["0 OK", "1 ERR", "2 OK", "3 ERR"]
 
@@ -215,20 +233,20 @@ class AskedHostsTest(LauncherTest):
             patience = time.monotonic() + 10
             while time.monotonic() < patience:
                 for host in asked.waiting():
-                    asked.answer(host, host == "yes.test")
+                    asked.answer(host, host == At("yes.test", 443))
                 time.sleep(0.02)
 
         answering = threading.Thread(target=answer, daemon=True)
         answering.start()
         said = self.helper(
-            f"0 {ADDRESS} yes.test -", f"1 {ADDRESS} no.test -", looks=200
+            f"0 {ADDRESS} yes.test 443", f"1 {ADDRESS} no.test 443", looks=200
         )
         assert said == ["0 OK", "1 ERR"]
         assert asked.waiting() == []
 
     def test_the_helper_refuses_what_is_not_answered_and_asks_again(self):
         asked = self.asked()
-        assert self.helper(f"0 {ADDRESS} slow.test -") == ["0 ERR"]
+        assert self.helper(f"0 {ADDRESS} slow.test 443") == ["0 ERR"]
         # Not kept: the next request for it waits again
         assert asked.waiting() == []
         assert list((self.tree / "refused").iterdir()) == []
@@ -237,19 +255,28 @@ class AskedHostsTest(LauncherTest):
         self.asked()
         outside = self.work / "outside"
         requests = [
-            f"0 {ADDRESS} ../../outside -",
-            f"1 {ADDRESS} ..%2F..%2Foutside -",
-            f"2 {ADDRESS} /etc/passwd -",
-            f"3 {ADDRESS} . -",
-            f"4 {ADDRESS} -x.test -",
-            f"5 {ADDRESS} [::1] -",
+            f"0 {ADDRESS} ../../outside 443",
+            f"1 {ADDRESS} ..%2F..%2Foutside 443",
+            f"2 {ADDRESS} /etc/passwd 443",
+            f"3 {ADDRESS} . 443",
+            f"4 {ADDRESS} -x.test 443",
+            f"5 {ADDRESS} [::1] 443",
             f"6 {ADDRESS}",
-            "7 ../.. example.com -",
-            "8 172.20.0.7/allowed example.com -",
-            "not-a-channel 172.20.0.7 example.com -",
+            "7 ../.. example.com 443",
+            "8 172.20.0.7/allowed example.com 443",
+            # Nor a port for one, nor what is no port squid writes
+            f"9 {ADDRESS} example.com ../../../outside",
+            f"10 {ADDRESS} example.com 443/../../../../outside",
+            f"11 {ADDRESS} example.com",
+            f"12 {ADDRESS} example.com -",
+            f"13 {ADDRESS} example.com 0",
+            f"14 {ADDRESS} example.com 0443",
+            f"15 {ADDRESS} example.com 65536",
+            f"16 {ADDRESS} example.com 99999999999999999999",
+            "not-a-channel 172.20.0.7 example.com 443",
         ]
-        said = self.helper(*requests, answers=9)
-        assert said == [f"{n} ERR" for n in range(9)]
+        said = self.helper(*requests, answers=17)
+        assert said == sorted(f"{n} ERR" for n in range(17))
         assert not outside.exists()
         assert list((self.tree / "waiting").iterdir()) == []
 
@@ -279,20 +306,79 @@ class AskedHostsTest(LauncherTest):
             with subtests.test(name=name):
                 assert not asked_hosts.is_host(name)
         lines = [name for name in unasked if "\n" not in name]
-        requests = [f"{n} {ADDRESS} {name} -" for n, name in enumerate(lines)]
+        requests = [f"{n} {ADDRESS} {name} 443" for n, name in enumerate(lines)]
         said = self.helper(*requests)
         assert said == sorted(f"{n} ERR" for n in range(len(lines)))
         assert list((self.tree / "waiting").iterdir()) == []
         for name in ("example.com", "a-b.example.co.uk", "1.example.xn--p1ai"):
             with subtests.test(name=name):
                 assert asked_hosts.is_host(name)
-                asked.answer(name, True)
-                assert self.helper(f"0 {ADDRESS} {name} -") == ["0 OK"]
+                asked.answer(At(name, 443), True)
+                assert self.helper(f"0 {ADDRESS} {name} 443") == ["0 OK"]
 
     def test_the_helper_and_the_launcher_take_the_same_for_a_host(self):
         script = HELPER.read_text()
         assert f"HOST='{asked_hosts.HOST_PATTERN}'\n" in script
         assert f"LONGEST_HOST={asked_hosts.LONGEST_HOST}\n" in script
+        assert f"PORT='{asked_hosts.PORT_PATTERN}'\n" in script
+        assert f"HIGHEST_PORT={asked_hosts.HIGHEST_PORT}\n" in script
+        assert f"BY_PORT={asked_hosts.BY_PORT}\n" in script
+
+    def test_a_yes_is_for_the_port_it_was_given_alone(self):
+        asked = self.asked()
+        asked.answer(At("example.com", 443), True)
+        asked.answer(At("example.com", 80), False)
+        said = self.helper(
+            f"0 {ADDRESS} example.com 443",
+            f"1 {ADDRESS} example.com 80",
+            # Not answered for, it waits, and is refused for want of one
+            f"2 {ADDRESS} example.com 22",
+        )
+        assert said == ["0 OK", "1 ERR", "2 ERR"]
+        assert asked.waiting() == []
+
+    def test_what_is_written_of_a_host_and_port_is_taken_by_the_launcher(self):
+        for name, asked in (
+            ("example.com:443", At("example.com", 443)),
+            ("a-b.example.co.uk:22", At("a-b.example.co.uk", 22)),
+            ("x.test:65535", At("x.test", 65535)),
+        ):
+            assert At.named(name) == asked
+            assert asked.file_name == name
+        for name in (
+            "example.com",
+            "example.com:",
+            ":443",
+            "example.com:0",
+            "example.com:0443",
+            "example.com:65536",
+            "example.com:443:443",
+            "172.17.0.1:443",
+            "claude-other:443",
+            "example.com:44 3",
+            "example.com:443\n",
+        ):
+            assert At.named(name) is None, name
+
+    def test_a_directory_of_a_launcher_of_before_is_not_asked_for(self):
+        # Made by a launcher that kept a host alone, for a session that
+        # still runs: what it allowed is not taken for any port, and the
+        # helper does not wait for an answer it would never write
+        old = self.tree
+        for kept in asked_hosts.Hosts:
+            (old / kept).mkdir(parents=True)
+        (old / "allowed" / "example.com").touch()
+        started = time.monotonic()
+        said = self.helper(f"0 {ADDRESS} example.com 443", looks=200)
+        assert said == ["0 ERR"]
+        assert time.monotonic() - started < 5
+        assert list((old / "waiting").iterdir()) == []
+        # Nor is such an answer taken in a directory of now
+        shutil.rmtree(old)
+        asked = self.asked()
+        (self.tree / "allowed" / "example.com").touch()
+        assert self.helper(f"0 {ADDRESS} example.com 443") == ["0 ERR"]
+        assert asked.waiting() == []
 
     def test_the_proxy_looks_no_host_up_before_it_is_allowed(
         self, subtests: pytest.Subtests
@@ -317,10 +403,13 @@ class AskedHostsTest(LauncherTest):
             assert network in own
         asked = ["http_access", "allow", "confirmed", "!to_own", "!to_private"]
         assert asked in rules
+        # Told the port as well as the host, which an answer is for
+        (helper,) = (line for line in conf if line.startswith("external_acl_type"))
+        assert " %>a %>rd %>rP /bin/bash /etc/squid/ask-helper" in helper
 
     def test_the_helper_lets_only_so_many_hosts_of_a_session_wait(self):
         self.asked()
-        requests = [f"{n} {ADDRESS} h{n}.test -" for n in range(12)]
+        requests = [f"{n} {ADDRESS} h{n}.test 443" for n in range(12)]
         seen: list[int] = []
         done = threading.Event()
 

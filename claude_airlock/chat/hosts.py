@@ -1,13 +1,14 @@
 """Whether the session may reach a host its egress filter does not allow
 (CLAUDE_AIRLOCK_NET_ASK): the question a chat puts for it.
 
-The proxy holds the request and the launcher is told the host (see
-sandbox/asked_hosts.py). The user is asked like for a tool claude wants
-to use, one question at a time on the same thread (see Asked), and the
-request goes through or is refused by what they say.
+The proxy holds the request and the launcher is told the host and port
+(see sandbox/asked_hosts.py). The user is asked like for a tool claude
+wants to use, one question at a time on the same thread (see Asked), and
+the request goes through or is refused by what they say.
 
-A yes or a no holds for that host until the session ends, so what is
-tried again is not asked about again. No answer, the user interrupted
+A yes or a no holds for that host at that port until the session ends, so
+what is tried again is not asked about again, and another port of the
+host is asked about apart: a yes to its HTTPS is none to its SSH. No answer, the user interrupted
 the turn, pressed Ctrl-C at the question or is leaving, refuses the
 request that waits and nothing more. A request of a command of the
 user's is asked about while the command runs, see shell.py.
@@ -18,22 +19,33 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
+from ..report.shown import PORT_USES
 from .asking import ASKED_STYLE, Asked, Asker, said_yes
 from .console import Page
+
+if TYPE_CHECKING:
+    from ..sandbox.asked_hosts import Destination
 
 # The label of what a chat says about a host that is asked about
 LABEL = "net"
 
 
+def reached(asked: Destination) -> str:
+    """A host at a port as the user is told of it, with what is at the
+    port, so that they know what a yes opens."""
+    use = PORT_USES.get(asked.port)
+    return f"{asked.host} on port {asked.port}" + (f" ({use})" if use else "")
+
+
 class Hosts(Protocol):
-    """The hosts a request of the session waits for an answer about, and
-    where the answer goes: see AskedHosts."""
+    """The hosts at a port a request of the session waits for an answer
+    about, and where the answer goes: see AskedHosts."""
 
-    def waiting(self) -> list[str]: ...
+    def waiting(self) -> list[Destination]: ...
 
-    def answer(self, host: str, allowed: bool | None) -> None: ...
+    def answer(self, asked: Destination, allowed: bool | None) -> None: ...
 
 
 class HostQuestions:
@@ -59,7 +71,7 @@ class HostQuestions:
         self._interactive = interactive
         self._before = before
         # The hosts that are being asked about, or will be
-        self._put: set[str] = set()
+        self._put: set[Destination] = set()
 
     def look(self) -> None:
         """Have the user asked about each host that waits since the
@@ -71,28 +83,30 @@ class HostQuestions:
         for host in new:
             if not self._interactive:
                 self._hosts.answer(host, False)
-                self._page.note(LABEL, f"REFUSED {host}: not allowed, nobody to ask")
+                refused = f"REFUSED {reached(host)}: not allowed, nobody to ask"
+                self._page.note(LABEL, refused)
                 continue
             self._put.add(host)
             self._asked.then(functools.partial(self._ask, host))
 
-    def _ask(self, host: str) -> None:
-        """Ask whether the session may reach a host. Anything but a yes
-        refuses it."""
+    def _ask(self, host: Destination) -> None:
+        """Ask whether the session may reach a host at a port. Anything
+        but a yes refuses it."""
+        shown = reached(host)
         try:
-            waits = f"a request for {host} waits, the filter does not allow it."
+            waits = f"a request for {shown} waits, the filter does not allow it."
             self._page.note(LABEL, f"{waits} Your answer holds for this session")
             typed = self._asker.ask(
-                f"let the session reach {host}? [y/N] ", ASKED_STYLE
+                f"let the session reach {shown}? [y/N] ", ASKED_STYLE
             )
             allowed = said_yes(typed)
             self._hosts.answer(host, allowed)
             if allowed is None:
-                said = f"not answered: the request for {host} is refused"
+                said = f"not answered: the request for {shown} is refused"
             elif allowed:
-                said = f"allowed {host} until the session ends"
+                said = f"allowed {shown} until the session ends"
             else:
-                said = f"REFUSED {host} until the session ends"
+                said = f"REFUSED {shown} until the session ends"
             self._page.note(LABEL, said)
         finally:
             # Asked about again when a request waits for it again

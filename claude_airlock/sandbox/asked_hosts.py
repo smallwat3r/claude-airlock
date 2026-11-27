@@ -12,15 +12,18 @@ named after that address, where the proxy's helper finds it (see
 docker/squid-ask-helper.sh, which says what is in it). A session without
 one is not asked for: its requests are refused as before.
 
-An answer holds for the host as it was asked about, not for the names
-under it, and for as long as the session lasts: the directory goes with
-the session. One that a killed launcher left would be found by the next
-session given its address, with what was allowed there, so every filtered
-session drops those before it starts (see drop_left_behind).
+An answer holds for the host and port as they were asked about, not for
+another port of the host nor for the names under it, and for as long as
+the session lasts: the directory goes with the session. One that a killed
+launcher left would be found by the next session given its address, with
+what was allowed there, so every filtered session drops those before it
+starts (see drop_left_behind).
 
-The helper is the proxy's and writes one thing here, the names of the
-hosts that wait. They are read as names and nothing else, and only those
-that could be a host's are taken."""
+What is asked about is a Destination, a host and a port, written as the
+file name HOST:PORT in the directory. The helper is the proxy's and
+writes one thing here, those of the requests that wait. They are read as
+names and nothing else, and only those that could be a host's at a port
+are taken: a host alone, as a helper of before wrote it, is not."""
 
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import NamedTuple
 
 from ..background import in_background, wait_for
 from ..files import json_object, locked, private_dir, write_whole
@@ -47,8 +51,9 @@ from .networks import session_address
 
 class Hosts(enum.StrEnum):
     """What the directory of a session keeps hosts in, each a directory
-    of this name with an empty file for every host of it. The helper
-    knows them by the same names, see docker/squid-ask-helper.sh."""
+    of this name with an empty file for every host at a port of it,
+    HOST:PORT. The helper knows them by the same names, see
+    docker/squid-ask-helper.sh."""
 
     # Those a request waits for an answer about, written by the proxy's
     # helper
@@ -66,6 +71,10 @@ class Hosts(enum.StrEnum):
 
 # Whose the directory is: the session's container and its launcher
 OWNER = "owner"
+# What says that a directory keeps each host with its port. The helper
+# asks for none without it: one made by a launcher of before, which kept
+# a host alone, for a session that still runs.
+BY_PORT = "by-port"
 # A host as the helper takes one for a file name, see there, written the
 # same in both: a name of the public DNS, labels with dots between them,
 # the last one starting with a letter. So never a path, and never what
@@ -78,6 +87,10 @@ HOST_PATTERN = (
 HOST = re.compile(HOST_PATTERN)
 # How long such a name is at most
 LONGEST_HOST = 253
+# A port as squid writes one, and the highest there is
+PORT_PATTERN = r"^[1-9][0-9]{0,4}$"
+PORT = re.compile(PORT_PATTERN)
+HIGHEST_PORT = 65535
 # The hosts taken of those that wait, the helper lets no more wait
 MOST_WAITING = 8
 # What a directory that is being made or dropped is named with first: no
@@ -142,6 +155,35 @@ def is_host(name: str) -> bool:
     return len(name) <= LONGEST_HOST and HOST.fullmatch(name) is not None
 
 
+class Destination(NamedTuple):
+    """What the user is asked about: a host, at a port."""
+
+    host: str
+    port: int
+
+    @property
+    def taken(self) -> bool:
+        """Whether it is one the helper asks about, see HOST_PATTERN and
+        PORT_PATTERN."""
+        return is_host(self.host) and 0 < self.port <= HIGHEST_PORT
+
+    @property
+    def file_name(self) -> str:
+        """Its name in the directory of a session, as the helper writes
+        it."""
+        return f"{self.host}:{self.port}"
+
+    @classmethod
+    def named(cls, name: str) -> Destination | None:
+        """The one a file of the directory is named for, none for a name
+        that is not one's (see file_name)."""
+        host, colon, port = name.rpartition(":")
+        if not colon or PORT.fullmatch(port) is None:
+            return None
+        found = cls(host, int(port))
+        return found if found.taken else None
+
+
 class AskedHosts:
     """What the egress filter asks the user about for one session, and
     what they said. There is nothing to ask about until the session's
@@ -173,6 +215,7 @@ class AskedHosts:
             _drop(root, address)
             made = tempfile.mkdtemp(prefix=ASIDE, dir=root)
             write_whole(os.path.join(made, OWNER), json.dumps(owner))
+            write_whole(os.path.join(made, BY_PORT), "")
             # Whatever the umask is
             for kept in Hosts:
                 os.mkdir(os.path.join(made, kept))
@@ -190,34 +233,37 @@ class AskedHosts:
                 _drop(self._host.asked_hosts_dir, self._address)
                 self._address = ""
 
-    def _path(self, kept: Hosts, host: str = "") -> str:
-        return os.path.join(self._host.asked_hosts_dir, self._address, kept, host)
+    def _path(self, kept: Hosts, asked: Destination | None = None) -> str:
+        name = asked.file_name if asked else ""
+        return os.path.join(self._host.asked_hosts_dir, self._address, kept, name)
 
-    def waiting(self) -> list[str]:
-        """The hosts a request of the session waits for an answer about."""
+    def waiting(self) -> list[Destination]:
+        """The hosts at a port a request of the session waits for an
+        answer about."""
         if not self._address:
             return []
         try:
             names = os.listdir(self._path(Hosts.WAITING))
         except OSError:
             return []
-        return sorted(name for name in names if is_host(name))[:MOST_WAITING]
+        found = (Destination.named(name) for name in sorted(names))
+        return [asked for asked in found if asked][:MOST_WAITING]
 
-    def answer(self, host: str, allowed: bool | None) -> None:
-        """Say whether the session may reach a host, for as long as it
-        lasts. None says neither: the requests that wait are refused, and
-        the next one for the host is asked about again."""
-        if not self._address or not is_host(host):
+    def answer(self, asked: Destination, allowed: bool | None) -> None:
+        """Say whether the session may reach a host at a port, for as
+        long as it lasts. None says neither: the requests that wait are
+        refused, and the next one for it is asked about again."""
+        if not self._address or not asked.taken:
             return
         with contextlib.suppress(OSError):
             if allowed is not None:
                 answer = Hosts.ALLOWED if allowed else Hosts.REFUSED
-                kept = self._path(answer, host)
+                kept = self._path(answer, asked)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
                 os.close(os.open(kept, flags, 0o644))
             # After the answer: the helper takes a host that no longer
             # waits and has none for refused
-            os.unlink(self._path(Hosts.WAITING, host))
+            os.unlink(self._path(Hosts.WAITING, asked))
 
 
 def _open_once_addressed(asked: AskedHosts, owner: str, stop: threading.Event) -> None:

@@ -2,8 +2,8 @@
 (CLAUDE_AIRLOCK_NET_ASK): its helper, run in the proxy's container as the
 user squid runs it as, finds what a launcher keeps for a session, holds a
 request for a host nobody answered for yet, and lets it through once the
-launcher has a yes. The session is made up, at an address no container
-has.
+launcher has a yes, for the port it was given alone. The session is made
+up, at an address no container has.
 
 Usage: asked_hosts.py PROXY_CONTAINER"""
 
@@ -16,7 +16,7 @@ import time
 
 from records import require
 
-from claude_airlock.sandbox.asked_hosts import AskedHosts
+from claude_airlock.sandbox.asked_hosts import AskedHosts, Destination
 from claude_airlock.settings import detect_host
 
 ADDRESS = "10.255.255.7"
@@ -35,22 +35,25 @@ helper = subprocess.Popen(
 try:
     assert helper.stdin
     assert helper.stdout
-    asked.answer("allowed.test", True)
+    asked.answer(Destination("allowed.test", 443), True)
+    asked.answer(Destination("allowed.test", 22), False)
     helper.stdin.write(
-        f"0 {ADDRESS} allowed.test -\n"
-        "1 10.255.255.8 allowed.test -\n"
-        f"2 {ADDRESS} waits.test -\n"
+        f"0 {ADDRESS} allowed.test 443\n"
+        "1 10.255.255.8 allowed.test 443\n"
+        f"2 {ADDRESS} allowed.test 22\n"
+        f"3 {ADDRESS} waits.test 443\n"
     )
     helper.stdin.flush()
-    first = sorted(helper.stdout.readline().strip() for _ in range(2))
-    require(first == ["0 OK", "1 ERR"], f"the helper said {first}")
+    first = sorted(helper.stdout.readline().strip() for _ in range(3))
+    require(first == ["0 OK", "1 ERR", "2 ERR"], f"the helper said {first}")
+    waits = Destination("waits.test", 443)
     deadline = time.monotonic() + PATIENCE
-    while asked.waiting() != ["waits.test"] and time.monotonic() < deadline:
+    while asked.waiting() != [waits] and time.monotonic() < deadline:
         time.sleep(0.1)
-    require(asked.waiting() == ["waits.test"], f"waiting: {asked.waiting()}")
-    asked.answer("waits.test", True)
+    require(asked.waiting() == [waits], f"waiting: {asked.waiting()}")
+    asked.answer(waits, True)
     held = helper.stdout.readline().strip()
-    require(held == "2 OK", f"the helper said {held!r} of the host that waited")
+    require(held == "3 OK", f"the helper said {held!r} of the host that waited")
 finally:
     helper.kill()
     helper.wait()

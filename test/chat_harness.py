@@ -18,6 +18,7 @@ from harness import LAUNCHER, LauncherTest, Terminal
 from claude_airlock.chat import asking, console, pipe, status, talk
 from claude_airlock.chat import guard as guarding
 from claude_airlock.report.layout import Layout
+from claude_airlock.sandbox.asked_hosts import Destination
 from claude_airlock.settings import Host
 
 # Whether the readline of this Python is the editline of macOS, which
@@ -171,14 +172,14 @@ def subagents():
 
 def reached():
     tree = os.environ["FAKE_ASKED"]
-    waiting = os.path.join(tree, "waiting", "example.com")
+    waiting = os.path.join(tree, "waiting", "example.com:443")
     patience = time.time() + 20
     while not os.path.isdir(os.path.dirname(waiting)) and time.time() < patience:
         time.sleep(0.05)
     open(waiting, "w").close()
     while os.path.exists(waiting) and time.time() < patience:
         time.sleep(0.05)
-    allowed = os.path.exists(os.path.join(tree, "allowed", "example.com"))
+    allowed = os.path.exists(os.path.join(tree, "allowed", "example.com:443"))
     return "let through" if allowed else "refused"
 
 while True:
@@ -331,16 +332,16 @@ class WaitingHosts:
     request waits for, how often they were looked at, and each answer
     that was given, which takes the host from those that wait."""
 
-    def __init__(self, *hosts: str) -> None:
+    def __init__(self, *hosts: Destination) -> None:
         self.hosts = list(hosts)
         self.looks = 0
-        self.answers: list[tuple[str, bool | None]] = []
+        self.answers: list[tuple[Destination, bool | None]] = []
 
-    def waiting(self) -> list[str]:
+    def waiting(self) -> list[Destination]:
         self.looks += 1
         return list(self.hosts)
 
-    def answer(self, host: str, allowed: bool | None) -> None:
+    def answer(self, host: Destination, allowed: bool | None) -> None:
         self.answers.append((host, allowed))
         self.hosts.remove(host)
 
