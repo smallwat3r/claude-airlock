@@ -290,7 +290,9 @@ A line can be typed at any time, claude takes it up when it can.
 | `/login`, `/logout` | Say where that is done: line mode can do neither, see [Login](../README.md#login) |
 
 When claude asks whether it may use a tool, `y` allows that one call, `a`
-allows calls like it until the session ends, and anything else refuses it.
+allows calls like it until the session ends, as the line above the
+question says, or every call of the tool where claude gives no rule for
+them, and anything else refuses it.
 The question names the call by its first line. A call of more than that,
 a command of several lines or the arguments of a tool, is shown whole
 above the question first, with every argument it would be made with: a
