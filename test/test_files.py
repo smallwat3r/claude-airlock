@@ -94,6 +94,26 @@ class FilesTest(LauncherTest):
         assert list(record.parent.iterdir()) == [record]
         assert record.stat().st_mode & 511 == 384
 
+    def test_the_end_of_a_file_is_read_in_whole_lines(self):
+        file = self.work / "lines"
+        file.write_bytes(b"first\nsecond\nthird\n")
+        with open(file, "rb") as read:
+            # Starting in the middle of the second: it is not read
+            assert list(files.last_lines(read, 9)) == [b"third\n"]
+        with open(file, "rb") as read:
+            assert list(files.last_lines(read, 100)) == [
+                b"first\n",
+                b"second\n",
+                b"third\n",
+            ]
+        with open(file, "rb") as read:
+            # A line too long is passed over as bounded_lines has it
+            assert list(files.last_lines(read, 100, longest=5)) == [
+                b"first\n",
+                None,
+                b"third\n",
+            ]
+
     def test_a_record_that_cannot_be_cut_short_is_left_whole(self):
         record = self.work / "state" / "record.jsonl"
         for number in range(3):

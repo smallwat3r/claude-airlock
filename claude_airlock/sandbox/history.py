@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import os
 import re
+from collections import deque
 from pathlib import Path
 
 from ..docker import env_arg, mount_arg, project_slug
-from ..files import bounded_lines, json_object, private_dir, write_whole
+from ..files import json_object, last_lines, open_plain, private_dir, write_whole
 from ..projects import project_roots, transcript_dirs
 from ..settings import CONTAINER_CLAUDE, Host, Settings, variable
-from .mounts import empty_dir
+from .mounts import empty_dir, refuse_past_most
 
 # What Claude Code names the transcripts of a worktree after: the project's
 # own name, then its path below the project (.claude/worktrees/NAME) dashed
@@ -48,9 +49,19 @@ PER_PROJECT_DIRS = ("file-history", "paste-cache")
 # The prompts typed in every project, a line each that names its project.
 # Claude Code adds to it in place, so one file can be mounted over it.
 PROMPT_HISTORY = "history.jsonl"
+# Of it, as much of its end as is read for the lines of a project, no
+# longer a line than this, and no more of them than this are kept: what
+# Claude Code goes back through is the latest
+PROMPTS_READ = 64 << 20
+PROMPT_LINE = 4 << 20
+MOST_PROMPTS = 10_000
 # A name that can be spelled in a mount. Claude Code's own are, another is
 # something a session put there, which holds nothing of another project.
 _MOUNTABLE = re.compile(r"[A-Za-z0-9_.-]+")
+# No more directories of other projects are covered than this, see
+# refuse_past_most: a session that can write ~/.claude/projects can make
+# any number of them
+MOST_COVERED = 2000
 
 
 def own_names(host: Host) -> set[str]:
@@ -65,20 +76,33 @@ def is_own(name: str, own: set[str]) -> bool:
 
 
 def _other_projects(host: Host) -> list[str]:
-    """The directories of projects that are another project's, by name."""
+    """The directories of projects that are another project's, by name.
+    Fatal for more of them than MOST_COVERED (see refuse_past_most):
+    none could be covered, and a session started with them all in reach
+    would see them all."""
     projects = Path(host.claude_dir, "projects")
     own = own_names(host)
+    others = []
     try:
-        entries = sorted(os.scandir(projects), key=lambda entry: entry.name)
+        with os.scandir(projects) as entries:
+            for entry in entries:
+                if _is_other(entry, own):
+                    others.append(entry.name)
+                    what = f"directories of other projects in {projects}"
+                    refuse_past_most(len(others), MOST_COVERED, what)
     except OSError:
         return []
-    return [
-        entry.name
-        for entry in entries
-        if entry.is_dir(follow_symlinks=False)
-        and _MOUNTABLE.fullmatch(entry.name)
+    return sorted(others)
+
+
+def _is_other(entry: os.DirEntry[str], own: set[str]) -> bool:
+    """Whether an entry of projects is the directory of another project,
+    one whose name can be spelled in a mount."""
+    return (
+        entry.is_dir(follow_symlinks=False)
+        and _MOUNTABLE.fullmatch(entry.name) is not None
         and not is_own(entry.name, own)
-    ]
+    )
 
 
 def _project_store(host: Host) -> Path:
@@ -89,23 +113,33 @@ def _project_store(host: Host) -> Path:
 
 
 def _own_prompts(host: Host) -> list[str]:
-    """The lines of the shared prompt history that are this project's."""
+    """The lines of the shared prompt history that are this project's,
+    the latest of them. Shared, the host's history is a session's to
+    write, as long as the disk takes: no more of its end is read than
+    PROMPTS_READ, no line longer than PROMPT_LINE, and no more of them
+    kept than MOST_PROMPTS. Nor read at all when it is no plain file,
+    a pipe that would hold the launch."""
     roots = set(project_roots(host))
-    kept = []
-    try:
-        # Shared, the host's history is a session's to write: no line of
-        # it is trusted to be short
-        with open(Path(host.claude_dir, PROMPT_HISTORY), "rb") as history:
-            for line in bounded_lines(history):
-                said = json_object(line) if line is not None else None
-                project = said.get("project") if said else None
-                if line is None or not isinstance(project, str):
-                    continue
-                if project in roots:
+    kept: deque[str] = deque(maxlen=MOST_PROMPTS)
+    file = open_plain(Path(host.claude_dir, PROMPT_HISTORY), links=True)
+    if file is None:
+        return []
+    with file:
+        try:
+            for line in last_lines(file, PROMPTS_READ, PROMPT_LINE):
+                if line is not None and _prompt_project(line) in roots:
                     kept.append(line.decode("utf-8", "replace").rstrip("\r\n") + "\n")
-    except OSError:
-        pass
-    return kept
+        except OSError:
+            pass
+    return list(kept)
+
+
+def _prompt_project(line: bytes) -> str | None:
+    """The project a line of the prompt history names, none for a line
+    that names none."""
+    said = json_object(line)
+    project = said.get("project") if said else None
+    return project if isinstance(project, str) else None
 
 
 def _prepare_store(host: Host) -> Path:

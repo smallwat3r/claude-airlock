@@ -5,9 +5,14 @@ project's history, not that of the others."""
 from __future__ import annotations
 
 import json
+import os
+from unittest import mock
 
 import pytest
 from harness import LauncherTest
+
+from claude_airlock.errors import Fatal
+from claude_airlock.sandbox import history
 
 CLAUDE = "/home/sandbox/.claude"
 
@@ -87,3 +92,44 @@ class HistoryTest(LauncherTest):
             assert f"--volume={shared / name}:{CLAUDE}/{name}:z" in flags
         assert (shared / "paste-cache").is_dir()
         assert not list((self.state / "history").glob("proj-*"))
+
+    def test_more_other_projects_than_can_be_covered_end_the_launch(self):
+        # A session that can write ~/.claude/projects can make any number,
+        # each a mount: docker would be given more than the system takes
+        with mock.patch.object(history, "MOST_COVERED", 2):
+            assert len(history._other_projects(self.host)) == 2
+        with (
+            mock.patch.object(history, "MOST_COVERED", 1),
+            pytest.raises(
+                Fatal,
+                match=f"more than 1 directories of other projects in {self.projects}",
+            ),
+        ):
+            history._other_projects(self.host)
+
+    def test_no_more_of_the_prompt_history_is_read_than_its_end(self):
+        shared = self.home / ".claude" / "history.jsonl"
+        lines = [
+            {"display": f"mine {n}", "project": str(self.project)} for n in range(50)
+        ]
+        shared.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        kept = [json.loads(line)["display"] for line in history._own_prompts(self.host)]
+        assert kept == [line["display"] for line in lines]
+        # The latest, those of its end, and no line cut at its start
+        width = len(json.dumps(lines[-1])) + 1
+        with mock.patch.object(history, "PROMPTS_READ", 3 * width + 5):
+            kept = history._own_prompts(self.host)
+        assert [json.loads(line)["display"] for line in kept] == [
+            "mine 47",
+            "mine 48",
+            "mine 49",
+        ]
+        with mock.patch.object(history, "MOST_PROMPTS", 2):
+            kept = history._own_prompts(self.host)
+        assert [json.loads(line)["display"] for line in kept] == ["mine 48", "mine 49"]
+
+    def test_a_prompt_history_that_is_no_file_holds_no_launch(self):
+        shared = self.home / ".claude" / "history.jsonl"
+        shared.unlink()
+        os.mkfifo(shared)
+        assert history._own_prompts(self.host) == []

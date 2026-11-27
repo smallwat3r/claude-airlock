@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from harness import LauncherTest
 
+from claude_airlock import settings
 from claude_airlock.docker import covered_arg, mount_arg
 from claude_airlock.errors import Fatal
 from claude_airlock.sandbox import mounts
@@ -407,3 +408,37 @@ class MountArgTest:
         )
         # A named volume has no path to be missing
         assert mount_arg("a-volume", "/data") == "--volume=a-volume:/data"
+
+
+class TooManyMountsTest(LauncherTest):
+    """What a session can make more of than docker can be given mounts
+    for ends the launch in a line that names it."""
+
+    def test_more_files_to_hide_than_can_be_mounted_end_the_launch(self):
+        # The project has a .env and a .netrc
+        found = mounts.hidden_files(self.launch_settings(), self.host, [])
+        assert len(found.files) == 2
+        with (
+            unittest.mock.patch.object(mounts, "MOST_HIDDEN", 1),
+            pytest.raises(
+                Fatal, match=f"more than 1 files of secrets .* in {self.project}"
+            ),
+        ):
+            mounts.hidden_files(self.launch_settings(), self.host, [])
+
+    def test_more_directories_to_hold_than_can_be_mounted_end_the_launch(self):
+        deep = self.project / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        (deep / ".env").touch()
+        hidden = [str(deep / ".env")]
+        assert len(mounts._held_in_place([], self.host, [], hidden)) == 3
+        with (
+            unittest.mock.patch.object(mounts, "MOST_HELD", 2),
+            pytest.raises(
+                Fatal, match=f"more than 2 directories to hold .* {deep}/.env among"
+            ),
+        ):
+            mounts._held_in_place([], self.host, [], hidden)
+
+    def launch_settings(self) -> settings.Settings:
+        return settings.load_settings({}, os.devnull)

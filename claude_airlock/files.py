@@ -276,6 +276,22 @@ def bounded_lines(file: IO[bytes], longest: int = LINE_LIMIT) -> Iterator[bytes 
         yield None
 
 
+def last_lines(
+    file: IO[bytes], most: int, longest: int = LINE_LIMIT
+) -> Iterator[bytes | None]:
+    """The lines of the end of a file a session can write, as bounded_lines
+    has them: those that start in its last so many bytes, for what wants
+    the latest of a file that can be made as long as the disk. Raises
+    OSError for one that cannot be read or moved in."""
+    size = os.fstat(file.fileno()).st_size
+    file.seek(max(0, size - most))
+    lines = bounded_lines(file, longest)
+    if file.tell() > 0:
+        # The end of a line whose start is not read
+        next(lines, None)
+    return lines
+
+
 def _past_a_hole(file: IO[bytes]) -> None:
     """Move a file that is read through a line too long to take past the
     hole of a sparse file it is in, if any: a hole holds no line break,

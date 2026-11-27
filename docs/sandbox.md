@@ -85,11 +85,16 @@ What a session is given and what it is kept from.
     session, and the launch names it. A session can take the right to
     list a directory away and give it back the next time. Make it yours
     to read again (`chmod u+rx`) to have it back.
+  - More than 1000 such files and directories, or more than 2000
+    directories held above them, end the launch with one of them named:
+    each is a mount of its own, and docker takes only so many.
 - **The history of other projects.** Their transcripts are covered by
   empty directories, and the prompt history, the paste cache and the file
   history are kept per project. So `claude` on the host cannot rewind the
   files of a session run in the sandbox. `CLAUDE_AIRLOCK_SHARED_HISTORY=1`
-  shares it all again.
+  shares it all again. More than 2000 directories of other projects end
+  the launch, as too many to cover. A project's prompt history starts
+  from its latest lines of the host's, those in its last 64 MB.
 - **The shell snapshots of other sessions.** `~/.claude/shell-snapshots`
   and `session-env` are each session's own.
 - **What Claude Code keeps in `~/.local/state/claude`.** A session has

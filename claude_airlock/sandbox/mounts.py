@@ -7,7 +7,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from ..docker import covered_arg, env_arg, held_arg, hidden_arg, mount_arg
@@ -19,6 +19,23 @@ from ..settings import SESSION_DIRS, Host, Settings, variable
 SHADOWED_NAMES = (".env", ".env.*", ".envrc", ".netrc", ".pypirc")
 SHADOW_EXEMPT = (".env.example", ".env.sample", ".env.template")
 SHADOW_PRUNED_DIRS = ("node_modules", ".git")
+# No more files are hidden than this, nor directories held in place, see
+# refuse_past_most: a session can make any number of files of secrets, or
+# one as deep as a path goes
+MOST_HIDDEN = 1000
+MOST_HELD = 2000
+
+
+def refuse_past_most(count: int, most: int, what: str) -> None:
+    """Fatal for more of a kind of mount than most: each is an argument
+    of docker run, which the system takes only so many of, and what each
+    is for is a session's to make any number of. Said with what they are
+    for, and where."""
+    if count > most:
+        raise Fatal(
+            f"more than {most} {what}: more than can each be mounted, a"
+            " session may have made them"
+        )
 
 
 @dataclass(frozen=True)
@@ -247,6 +264,12 @@ def _held_in_place(
         while directory != root:
             held[directory] = None
             directory = os.path.dirname(directory)
+        refuse_past_most(
+            len(held),
+            MOST_HELD,
+            "directories to hold in place above the files hidden and the paths"
+            f" protected, {path} among them",
+        )
     return sorted(held)
 
 
@@ -338,6 +361,56 @@ def _led_to(link: str, roots: Sequence[str]) -> list[str]:
     return [found for root in roots if (found := _within(real, root))]
 
 
+def _secrets_in(
+    root: str, roots: Sequence[str], patterns: Sequence[str], closed: dict[str, None]
+) -> Iterator[str]:
+    """The files of secrets in a mounted directory, as hidden_files has
+    them, one at a time, and those links named as one lead to in any of
+    the roots. What cannot be looked into is added to closed."""
+
+    def not_listed(problem: OSError) -> None:
+        if isinstance(problem.filename, str):
+            closed[problem.filename] = None
+
+    for directory, subdirs, files in os.walk(root, onerror=not_listed):
+        if not os.access(directory, os.X_OK):
+            # Listed, and not to be entered: neither what its files are
+            # nor what is below it can be told
+            closed[directory] = None
+            subdirs[:] = []
+            continue
+        subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
+        for name in sorted(files):
+            if not names_secrets(name, patterns):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:
+                # Gone since it was listed, a build or another session
+                continue
+            if stat.S_ISREG(mode):
+                yield path
+            elif stat.S_ISLNK(mode):
+                yield from _led_to(path, roots)
+
+
+def _refuse_past_most_hidden(
+    root: str, hidden: dict[str, None], closed: dict[str, None]
+) -> None:
+    """Fatal for more files to hide, with the directories that cannot be
+    looked into, than MOST_HIDDEN, the last found named."""
+    if not hidden and not closed:
+        return
+    last = next(reversed(closed or hidden))
+    refuse_past_most(
+        len(hidden) + len(closed),
+        MOST_HIDDEN,
+        "files of secrets to hide and directories that cannot be looked into,"
+        f" in {root}, {last} among them",
+    )
+
+
 def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden:
     """What to shadow: .env files (and direnv's .envrc, which commonly
     exports secrets, plus .netrc and .pypirc, which hold nothing but
@@ -353,40 +426,22 @@ def hidden_files(settings: Settings, host: Host, dirs: list[ExtraDir]) -> Hidden
     A directory that cannot be looked into is not passed over: a session
     can take the right to list one away, for the file in it to go
     unhidden at the next launch, and give it back then. One a session
-    could open is hidden whole instead, and said."""
+    could open is hidden whole instead, and said.
+
+    Fatal past MOST_HIDDEN of them, files and directories together: they
+    could not all be hidden, and a session started with them in reach
+    would read them."""
     patterns = SHADOWED_NAMES + settings.shadow
     # By path, in the order found: a directory mounted next to the project
     # can be inside it, and docker refuses to mount twice at one place
     hidden: dict[str, None] = {}
     closed: dict[str, None] = {}
-
-    def not_listed(problem: OSError) -> None:
-        if isinstance(problem.filename, str):
-            closed[problem.filename] = None
-
     roots = [host.project_dir] + [extra.path for extra in dirs]
     for root in roots:
-        for directory, subdirs, files in os.walk(root, onerror=not_listed):
-            if not os.access(directory, os.X_OK):
-                # Listed, and not to be entered: neither what its files
-                # are nor what is below it can be told
-                closed[directory] = None
-                subdirs[:] = []
-                continue
-            subdirs[:] = sorted(d for d in subdirs if d not in SHADOW_PRUNED_DIRS)
-            for name in sorted(files):
-                if not names_secrets(name, patterns):
-                    continue
-                path = os.path.join(directory, name)
-                try:
-                    mode = os.lstat(path).st_mode
-                except OSError:
-                    # Gone since it was listed, a build or another session
-                    continue
-                if stat.S_ISREG(mode):
-                    hidden[path] = None
-                elif stat.S_ISLNK(mode):
-                    hidden.update(dict.fromkeys(_led_to(path, roots)))
+        for path in _secrets_in(root, roots, patterns, closed):
+            hidden[path] = None
+            _refuse_past_most_hidden(root, hidden, closed)
+        _refuse_past_most_hidden(root, hidden, closed)
     covered = [directory for directory in closed if openable(directory)]
     if covered:
         warn(
