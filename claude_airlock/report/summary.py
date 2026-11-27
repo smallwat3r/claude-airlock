@@ -29,6 +29,7 @@ from .entries import (
     step_usage,
     tool_calls,
 )
+from .given import GIVEN, texts_given
 from .outcomes import outside_flag, refused, result_planted
 from .planted import INJECTION, read_said
 from .told import INSTRUCTIONS, attachment, instruction_files, instructions_read
@@ -39,10 +40,11 @@ MOST_LISTED = 5
 
 
 def planted_reads(entries: list[dict]) -> int:
-    """How many of the results of its calls and of the files it read as
-    instructions show signs of being written to instruct the session,
-    see planted.py. A file of instructions is read again as the session
-    goes, and counts once. Every result counts, and by every tool its
+    """How many of the results of its calls, of the files it read as
+    instructions and of the texts of given.py show signs of being written
+    to instruct the session, see planted.py. A file of instructions is
+    read again as the session goes, and counts once, as does a text by
+    where it is from. Every result counts, and by every tool its
     call is named as: the transcript is the session's to add to, and a
     second result under the id of a call, or a second call under it
     named as a tool whose results are not read, takes no sign away."""
@@ -62,7 +64,13 @@ def planted_reads(entries: list[dict]) -> int:
         for file in instruction_files(attachment(entry))
         if file.planted
     }
-    return results + len(files)
+    texts = {
+        (text.kind, text.source)
+        for entry in entries
+        for text in texts_given(attachment(entry))
+        if text.planted
+    }
+    return results + len(files) + len(texts)
 
 
 def planted_shown(events: Iterable[Event]) -> int:
@@ -72,17 +80,27 @@ def planted_shown(events: Iterable[Event]) -> int:
     taken for what it is, not for what a value of it says, and its values
     for no more than they hold: most of them are the session's to give."""
     results = 0
-    files: set[str] = set()
+    read: set[tuple[object, str]] = set()
     for event in events:
         fields = event.fields
         if event.call:
             results += bool(fields.get(INJECTION))
         elif event.kind is Kind.CONTEXT and fields.get("kind") == INSTRUCTIONS:
-            for file in every(fields.get("files")):
-                path = file.get("path") if isinstance(file, dict) else None
-                if isinstance(path, str) and file.get(INJECTION):
-                    files.add(path)
-    return results + len(files)
+            read.update(_planted_in(fields.get("files"), "path", INSTRUCTIONS))
+        elif event.kind is Kind.CONTEXT and fields.get("kind") == GIVEN:
+            read.update(_planted_in(fields.get("texts"), "source", fields.get("of")))
+    return results + len(read)
+
+
+def _planted_in(read: object, named: str, kind: object) -> set[tuple[object, str]]:
+    """What of the things an event tells of shows a sign, each by its
+    kind and by the field it is named in, as planted_reads counts them."""
+    return {
+        (kind, one[named])
+        for one in every(read)
+        if isinstance(one, dict) and isinstance(one.get(named), str)
+        if one.get(INJECTION)
+    }
 
 
 def _listed(values: Iterable[object]) -> str:

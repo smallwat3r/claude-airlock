@@ -158,8 +158,10 @@ A page, a file of the project or the output of a command can hold text
 written for the model that reads it: to have it run something, send
 something out or keep quiet about it. That is prompt injection, and a
 session is not asked before it uses a tool. The launcher looks at what
-each call gave the session to read, and at each file it read as
-instructions that is not your own, and says what stands out:
+each call gave the session to read, at each file it read as
+instructions that is not your own, and at what else Claude Code put
+before the model as text (see [Besides the calls](#besides-the-calls)),
+and says what stands out:
 
 ```
 claude   webfetch  url: https://example.org/install
@@ -230,6 +232,8 @@ claude   context  instructions: /home/me/.claude/CLAUDE.md (User, 1.2k chars)
 claude   context  instructions: /home/me/code/api/CLAUDE.md (Project, 4.0k chars)
 claude   context  MCP server instructions: github
 claude   context  skills: 12 listed
+claude   context  hook added: SessionStart (312 chars)
+claude   context  memory recalled: /home/me/.claude/projects/-home-me-code-api/memory/build.md (840 chars)
 claude   context  changed since claude read it: /home/me/code/api/main.go
 claude   mode     permissions: bypassPermissions  was: default
 claude   model    claude-opus-5-5, effort high  was: claude-fable-5-2, effort medium
@@ -240,7 +244,7 @@ claude   task     completed: Agent "review" finished
 
 | `what` | Says |
 | --- | --- |
-| `context` | What Claude Code put before the model next to the prompt: each file of instructions it read (a `CLAUDE.md`, its memory) with where it is from, the MCP servers that brought instructions, the skills it listed, a file that changed since claude read it. With `--verbose` what the language server reported after an edit |
+| `context` | What Claude Code put before the model next to the prompt: each file of instructions it read (a `CLAUDE.md`, its memory) with where it is from, the MCP servers that brought instructions, the skills it listed, the texts below, a file that changed since claude read it. With `--verbose` what the language server reported after an edit |
 | `mode` | The permission mode changed. The one the session started in is in the header |
 | `model` | Another model, or another effort, than the request before |
 | `api` | A request the API did not answer or refused, which Claude Code tried again |
@@ -255,9 +259,24 @@ claude   task     completed: Agent "review" finished
   the project, once claude reads a file next to it. Of a set, the first
   50 are named and how many more there are, and every one is looked at
   for [what it read](#what-it-read).
+- Claude Code puts other texts before the model too, each told with
+  where it is from and how long it is, once, and again when it says
+  other than it did. Every one is looked at for
+  [what it read](#what-it-read): a hook or a skill can come with the
+  project, a memory is written by a session, a resource by its server.
+
+| Line | The text |
+| --- | --- |
+| `skill given again` | A skill used before the conversation was compacted, by its name and path |
+| `MCP resource` | What a resource of an MCP server holds, by the server and its address |
+| `hook added` | What a hook added to the context, by the event it ran on |
+| `plugin noted` | What a plugin gave the model, as a prompt of its own |
+| `memory recalled` | A memory Claude Code found of use, by its path |
+
 - `--json` says which of these a `context` event is as `kind`:
   `instructions`, `mcp_instructions` (with the servers `added` and
-  `gone`), `skills`, `edited_file`, `diagnostics`, or `told` for what
+  `gone`), `skills`, `given` for the texts above (with the attachment
+  they are of as `of`), `edited_file`, `diagnostics`, or `told` for what
   Claude Code told the model in the place of a prompt (`told (bash):
   ls`), with the mode Claude Code names for it as `mode`. The kind is
   the launcher's word, never one of the transcript.

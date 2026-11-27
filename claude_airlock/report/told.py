@@ -2,10 +2,10 @@
 
 What Claude Code put before the model next to the prompt: the instruction
 files it read (each CLAUDE.md), the instructions of MCP servers, the
-skills it listed, a file that changed behind the model's back, what a
-language server reported. And what became of the session itself: its
-permission mode, its model, a request the API did not answer, a
-conversation that was compacted, a task of its that ended.
+skills it listed, the texts of given.py, a file that changed behind the
+model's back, what a language server reported. And what became of the
+session itself: its permission mode, its model, a request the API did
+not answer, a conversation that was compacted, a task of its that ended.
 
 None of it is something the model did, all of it says why it did what it
 did. Like the rest of a transcript it is written from inside the sandbox,
@@ -14,12 +14,14 @@ a transcript is followed is bounded."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from ..events import Event, Kind, Who, Wrong, clean, flat
 from .brief import PREVIEW_WIDTH, amount, between, shortened
 from .entries import MOST_LISTED, claude_of, counted, every, kept, listed, seconds
+from .given import GIVEN, GIVING, Given, texts_given
 from .planted import Planted, flagged, planted
 
 # What a line of a language server's report is about, in the order of the
@@ -38,12 +40,26 @@ OWN_INSTRUCTIONS = frozenset({"Managed", "User"})
 INSTRUCTIONS = "instructions"
 # What Claude Code attaches for a file of instructions it read later on
 NESTED = "nested_memory"
-# Of those, how many are remembered as they were last told: what one
-# says again is told once
-MOST_NESTED = 1000
+# Of those, and of the texts of given.py, how many are remembered as they
+# were last told: what one says again is told once
+MOST_REMEMBERED = 1000
 TOLD = "told"
 
 type Reader = Callable[[dict, float, Who], list[Event]]
+
+
+class Read(Protocol):
+    """Something read into the conversation: a file of instructions, or
+    a text of given.py."""
+
+    @property
+    def line(self) -> str: ...
+
+    @property
+    def fields(self) -> dict: ...
+
+    @property
+    def planted(self) -> tuple[Planted, ...]: ...
 
 
 def names(value: object) -> list[str]:
@@ -68,8 +84,10 @@ class Instructions:
     planted: tuple[Planted, ...] = ()
 
     @property
-    def shown(self) -> str:
-        return f"{flat(self.path)} ({flat(self.kind)}, {amount(self.size)} chars)"
+    def line(self) -> str:
+        """How it is told."""
+        about = f"{flat(self.path)} ({flat(self.kind)}, {amount(self.size)} chars)"
+        return f"instructions: {about}"
 
     @property
     def fields(self) -> dict:
@@ -150,30 +168,55 @@ def instructions_read(entries: list[dict]) -> list[str]:
     return lines
 
 
+def _read_event(
+    read: Sequence[Read],
+    fields: dict,
+    more: Callable[[int], str],
+    when: float,
+    who: Who,
+) -> Event:
+    """The event of what was read into the conversation, with the fields
+    of what it is: each named, no more than MOST_LISTED of them and how
+    many more there are (the line more says for that count), and the
+    signs of every one, past those named too."""
+    signs = flagged(sign for one in read for sign in one.planted)
+    event = Event(when, who, Kind.CONTEXT, [], {**fields, **signs})
+    if signs:
+        event.went_wrong()
+    named, rest = read[:MOST_LISTED], read[MOST_LISTED:]
+    for one in named:
+        event.say(one.line)
+        for sign in one.planted:
+            event.say(sign.shown, alert=True)
+    if rest:
+        event.say(more(len(rest)))
+    for sign in (sign for one in rest for sign in one.planted):
+        event.say(sign.shown, alert=True)
+    return event
+
+
 def _instructions_event(
     files: tuple[Instructions, ...], when: float, who: Who
 ) -> Event:
-    """The event of files read as instructions: each named, no more than
-    MOST_LISTED of them and how many more there are, and the signs of
-    every one, past those named too."""
+    """The event of files read as instructions."""
+    fields = {"kind": INSTRUCTIONS, "files": [file.fields for file in files]}
+    return _read_event(
+        files, fields, lambda rest: f"instructions: ... {rest} more files", when, who
+    )
+
+
+def _given_event(texts: tuple[Given, ...], when: float, who: Who) -> Event:
+    """The event of texts an attachment put before the model, all of one
+    kind."""
+    first = texts[0]
     fields = {
-        "kind": INSTRUCTIONS,
-        "files": [file.fields for file in files],
-        **flagged(sign for file in files for sign in file.planted),
+        "kind": GIVEN,
+        "of": first.kind,
+        "texts": [text.fields for text in texts],
     }
-    event = Event(when, who, Kind.CONTEXT, [], fields)
-    if any(file.planted for file in files):
-        event.went_wrong()
-    named, rest = files[:MOST_LISTED], files[MOST_LISTED:]
-    for file in named:
-        event.say(f"instructions: {file.shown}")
-        for sign in file.planted:
-            event.say(sign.shown, alert=True)
-    if rest:
-        event.say(f"instructions: ... {len(rest)} more files")
-    for sign in (sign for file in rest for sign in file.planted):
-        event.say(sign.shown, alert=True)
-    return event
+    return _read_event(
+        texts, fields, lambda rest: f"{first.what}: ... {rest} more", when, who
+    )
 
 
 def _diagnostic_lines(file: dict) -> list[str]:
@@ -211,6 +254,7 @@ class Asides:
         self._verbose = verbose
         self._instructions: tuple[Instructions, ...] = ()
         self._nested: dict[str, Instructions] = {}
+        self._given: dict[tuple[str, str], Given] = {}
         self._skills: tuple[int, tuple[str, ...]] = (0, ())
         self._mode = ""
         # The model and the effort last asked for, by what asked
@@ -226,6 +270,7 @@ class Asides:
             "edited_text_file": self._file_changed,
             "diagnostics": self._diagnostics,
             "thinking_drop": self._thinking_dropped,
+            **dict.fromkeys(GIVING, self._texts_given),
         }
         self._of_the_system: dict[str, Reader] = {
             "api_error": self._api_error,
@@ -275,10 +320,20 @@ class Asides:
         files = instruction_files(given)
         if not files or self._nested.get(files[0].path) == files[0]:
             return []
-        self._nested[files[0].path] = files[0]
-        while len(self._nested) > MOST_NESTED:
-            del self._nested[next(iter(self._nested))]
+        _remember(self._nested, files[0].path, files[0])
         return [_instructions_event(files, when, who)]
+
+    def _texts_given(self, given: dict, when: float, who: Who) -> list[Event]:
+        """Texts an attachment put before the model: told when one is new
+        or says other than it did, those it gives again are not."""
+        texts = tuple(
+            text
+            for text in texts_given(given)
+            if self._given.get((text.kind, text.source)) != text
+        )
+        for text in texts:
+            _remember(self._given, (text.kind, text.source), text)
+        return [_given_event(texts, when, who)] if texts else []
 
     def _server_instructions(self, given: dict, when: float, who: Who) -> list[Event]:
         added, removed = (
@@ -434,6 +489,15 @@ class Asides:
             "source": source,
         }
         return [Event(when, who, Kind.MODEL, [line], fields)]
+
+
+def _remember[K, V](remembered: dict[K, V], key: K, value: V) -> None:
+    """Keep what was last told of something, forgetting the oldest past
+    MOST_REMEMBERED: what is forgotten is told again."""
+    remembered.pop(key, None)
+    remembered[key] = value
+    while len(remembered) > MOST_REMEMBERED:
+        del remembered[next(iter(remembered))]
 
 
 def _model_shown(model: str, effort: str) -> str:

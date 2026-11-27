@@ -9,12 +9,26 @@ import json
 
 import pytest
 from harness import LauncherTest
-from transcribed import PROJECT, at, attached, call, events, prompt, result, step
+from transcribed import (
+    PROJECT,
+    SKILL_PATH,
+    at,
+    attached,
+    call,
+    events,
+    given_texts,
+    prompt,
+    result,
+    step,
+)
 
 from claude_airlock.events import Event, Who
-from claude_airlock.report import summary, transcript
+from claude_airlock.report import given, summary, transcript
 from claude_airlock.report.layout import Layout, alerting, event_json, went_wrong
 from claude_airlock.report.transcript import WalkOptions
+
+# The fields of a skill Claude Code gives again after a compaction
+SKILL = ("name", "path", "content")
 
 
 def shown(entries: list[dict], verbose: bool = False) -> list[tuple[str, list[str]]]:
@@ -228,6 +242,43 @@ class ToldTest:
         ]
         assert shown([skills], verbose=True) == [
             ("context", ["skills: 2 listed: pdf, xlsx"])
+        ]
+
+    def test_the_texts_attachments_give_are_said_once_and_again_when_changed(self):
+        texts = given_texts()
+        told = shown([*texts, *texts])
+        assert told == [
+            (
+                "context",
+                [f"skill given again: pdf {SKILL_PATH} (14 chars)"],
+            ),
+            ("context", ["MCP resource: docs:file:///a.md (3 chars)"]),
+            ("context", ["hook added: SessionStart (18 chars)"]),
+            ("context", ["plugin noted: notes (8 chars)"]),
+            ("context", ["memory recalled: /p/.claude/memory/a.md (7 chars)"]),
+        ]
+        again = given_texts(hook="Branch: dev")[2]
+        assert shown([*texts, again])[-1] == (
+            "context",
+            ["hook added: SessionStart (17 chars)"],
+        )
+        (hook,) = events([texts[2]])
+        assert hook.fields == {
+            "kind": "given",
+            "of": "hook_additional_context",
+            "texts": [{"source": "SessionStart", "chars": 18}],
+        }
+        assert not went_wrong(hook)
+
+    def test_a_hook_is_named_by_its_event_and_its_own_name(self):
+        hook = attached(
+            "hook_additional_context",
+            content=["Look at the tests"],
+            hookName="tool.call",
+            hookEvent="PostToolUse",
+        )
+        assert shown([hook]) == [
+            ("context", ["hook added: PostToolUse (tool.call) (17 chars)"])
         ]
 
     def test_a_line_typed_while_claude_worked_is_a_prompt(self):
@@ -493,6 +544,7 @@ class HostileTest:
             "edited_text_file",
             "diagnostics",
             "thinking_drop",
+            *given.GIVING,
         )
         keys = (
             "files",
@@ -504,6 +556,14 @@ class HostileTest:
             "commandMode",
             "filename",
             "newlyDropped",
+            "skills",
+            "memories",
+            "content",
+            "server",
+            "uri",
+            "hookEvent",
+            "hookName",
+            "plugin",
         )
         entries: list[dict] = [
             {"type": "attachment", "attachment": odd} for odd in self.ODD
@@ -520,6 +580,15 @@ class HostileTest:
             ]
             entries += [
                 attached("diagnostics", files=[{"uri": odd, "diagnostics": [odd]}])
+            ]
+            entries += [
+                attached("invoked_skills", skills=[odd, dict.fromkeys(SKILL, odd)]),
+                attached("relevant_memories", memories=[odd, {"path": odd}]),
+                attached("mcp_resource", content={"contents": [odd, {"text": odd}]}),
+                attached(
+                    "hook_additional_context", content=[odd, "said"], hookName=odd
+                ),
+                attached("plugin_note", content=[odd], plugin=odd),
             ]
             entries += [
                 {"type": "attachment", "attachment": {"type": odd}},

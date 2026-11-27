@@ -52,6 +52,57 @@ def attached(kind: str, second: int = 0, **given) -> dict:
     }
 
 
+# Where a skill given again is from, see given_texts
+SKILL_PATH = "/home/me/.claude/skills/pdf/SKILL.md"
+
+
+def given_texts(text: str = "", hook: str = "Branch: main") -> list[dict]:
+    """An attachment of each kind given.py reads, as Claude Code writes
+    it, each with the text, after what it holds of its own."""
+    return [
+        attached(
+            "invoked_skills",
+            skills=[
+                {
+                    "name": "pdf",
+                    "path": SKILL_PATH,
+                    "content": "Use pdftotext." + text,
+                }
+            ],
+        ),
+        attached(
+            "mcp_resource",
+            server="docs",
+            uri="file:///a.md",
+            name="a.md",
+            content={
+                "contents": [
+                    {"uri": "file:///a.md", "text": "# A" + text},
+                    # No text to read
+                    {"uri": "file:///b.png", "blob": "AAAA"},
+                ]
+            },
+        ),
+        attached(
+            "hook_additional_context",
+            content=[hook, "Clean" + text],
+            hookName="SessionStart",
+            hookEvent="SessionStart",
+            toolUseID="SessionStart",
+        ),
+        attached(
+            "plugin_note", plugin="notes", rowUuid="r1", content=["Remember" + text]
+        ),
+        attached(
+            "relevant_memories",
+            memories=[
+                {"path": "/p/.claude/memory/a.md", "content": "Use uv." + text},
+                {"path": "/p/.claude/memory/b.md", "content": ""},
+            ],
+        ),
+    ]
+
+
 def step(step_id: str, second: int, **usage: int) -> dict:
     return {
         "type": "assistant",
