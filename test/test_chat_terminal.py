@@ -122,11 +122,14 @@ class TerminalTest(LineModeTest):
     @editline
     def test_at_a_terminal_of_editline_a_new_line_key_erases_nothing_above(self):
         # Editline stays on the row of the key, where Enter moves to the
-        # next: erased from the row below, each key took a row above
+        # next: erased from the row below, each key took a row above.
+        # Typed on once editline writes the prompt again, not once it
+        # shows the key: in between the terminal is not its, and echoes
+        # what is typed where the cursor is, under the head
         said = self.at_a_terminal(
             ("> ", "one\x1b\r"),
-            ("one^M", "two\x1b[13;2u"),
-            ("two^M", "three"),
+            (f"> one{NEW_ROW}", "two\x1b[13;2u"),
+            (f"> one{NEW_ROW}two{NEW_ROW}", "three"),
             ("three", "\x15\x04"),
         )
         head = "[claude-proj]"
