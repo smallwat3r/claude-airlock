@@ -45,7 +45,7 @@ from ..settings import (
     Settings,
     variable,
 )
-from .claude_args import is_a_command, says_permissions
+from .claude_args import is_a_command, says_option, says_permissions
 from .ending import Ending
 from .fingerprint import home_git_configs, included_configs
 from .home import home_args, place_in_base, session_state, statusline_of
@@ -145,6 +145,24 @@ def permission_args(settings: Settings, claude_args: list[str]) -> list[str]:
     if settings.ask or is_a_command(claude_args) or says_permissions(claude_args):
         return []
     return ["--dangerously-skip-permissions"]
+
+
+def model_args(settings: Settings, claude_args: list[str]) -> list[str]:
+    """The model and the effort claude starts with, those of
+    CLAUDE_AIRLOCK_MODEL and CLAUDE_AIRLOCK_EFFORT. Each is left out when
+    its setting is empty, or when claude's arguments give their own. Not
+    for a command of claude's that is no session. Given as arguments
+    because claude --print, as line mode runs it, takes no effortLevel
+    from settings.json. With = so that a value is never read as an
+    option of its own."""
+    if is_a_command(claude_args):
+        return []
+    chosen = (("--model", settings.model), ("--effort", settings.effort))
+    return [
+        f"{option}={value}"
+        for option, value in chosen
+        if value and not says_option(claude_args, option)
+    ]
 
 
 # The number of the one user the image has besides root, sandbox, which

@@ -41,6 +41,12 @@ def says_permissions(args: list[str]) -> bool:
     return any(_option_of(arg) in PERMISSION_OPTIONS for arg in args)
 
 
+def says_option(args: list[str], option: str) -> bool:
+    """Whether the arguments give an option, with its value apart or
+    after =."""
+    return any(_option_of(arg) == option for arg in args)
+
+
 def has_a_conversation(args: list[str]) -> bool:
     """Whether claude, run with these arguments, has a conversation with
     its user, the one thing a chat can stand in for the screen of."""

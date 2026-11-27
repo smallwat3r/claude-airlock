@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from harness import LauncherTest, mounted_copy
+from harness import CHOSEN, LauncherTest, mounted_copy
 
 from claude_airlock import docker, errors, launcher, settings
 from claude_airlock.recording import capture, sidecar
@@ -401,13 +401,13 @@ class DefaultSessionTest(LauncherTest):
 
     def test_claude_does_not_ask_before_it_uses_a_tool_unless_told_to(self):
         unasked = "--dangerously-skip-permissions"
-        assert self.command() == [unasked]
-        assert self.command("-p", "hi") == [unasked, "-p", "hi"]
+        assert self.command() == [unasked, *CHOSEN]
+        assert self.command("-p", "hi") == [unasked, *CHOSEN, "-p", "hi"]
         # Asked for, in the environment or the config file
-        assert self.command(CLAUDE_AIRLOCK_ASK="1") == []
+        assert self.command(CLAUDE_AIRLOCK_ASK="1") == CHOSEN
         self.write_config("CLAUDE_AIRLOCK_ASK=1")
-        assert self.command("-p", "hi") == ["-p", "hi"]
-        assert self.command(CLAUDE_AIRLOCK_ASK="0") == [unasked]
+        assert self.command("-p", "hi") == [*CHOSEN, "-p", "hi"]
+        assert self.command(CLAUDE_AIRLOCK_ASK="0") == [unasked, *CHOSEN]
 
     def test_how_to_go_about_permissions_is_the_users_to_say(self):
         for args in (
@@ -415,12 +415,44 @@ class DefaultSessionTest(LauncherTest):
             ["--permission-mode=acceptEdits", "-p", "hi"],
             ["--dangerously-skip-permissions"],
             ["--allow-dangerously-skip-permissions"],
-            # No session: a command of claude's, and bash
-            ["mcp", "list"],
-            ["update"],
         ):
+            assert self.command(*args) == [*CHOSEN, *args]
+        # No session: a command of claude's, and bash
+        for args in (["mcp", "list"], ["update"]):
             assert self.command(*args) == args
         assert "--dangerously-skip-permissions" not in self.command("--shell")
+
+    def test_claude_starts_on_opus_at_high_effort_unless_told_otherwise(self):
+        unasked = "--dangerously-skip-permissions"
+        assert CHOSEN == ["--model=opus", "--effort=high"]
+        assert self.command(
+            CLAUDE_AIRLOCK_MODEL="fable", CLAUDE_AIRLOCK_EFFORT="xhigh"
+        ) == [unasked, "--model=fable", "--effort=xhigh"]
+        # Empty leaves either to Claude Code, in the environment or the
+        # config file, and the environment wins
+        assert self.command(CLAUDE_AIRLOCK_MODEL="") == [unasked, "--effort=high"]
+        self.write_config("CLAUDE_AIRLOCK_EFFORT=")
+        assert self.command() == [unasked, "--model=opus"]
+        assert self.command(CLAUDE_AIRLOCK_EFFORT="max") == [
+            unasked,
+            "--model=opus",
+            "--effort=max",
+        ]
+
+    def test_the_model_and_the_effort_of_claudes_arguments_win(self):
+        unasked = "--dangerously-skip-permissions"
+        for args, kept in (
+            (["--model", "sonnet"], "--effort=high"),
+            (["--model=sonnet"], "--effort=high"),
+            (["--effort", "low"], "--model=opus"),
+            (["--effort=low", "-p", "hi"], "--model=opus"),
+        ):
+            assert self.command(*args) == [unasked, kept, *args]
+        both = ["--model", "sonnet", "--effort", "low"]
+        assert self.command(*both) == [unasked, *both]
+        # A prompt that names an option is no option
+        assert self.command("use --model") == [unasked, *CHOSEN, "use --model"]
+        assert "--model=opus" not in self.command("--shell")
 
     def test_the_session_is_told_its_settings(self):
         for flag in (

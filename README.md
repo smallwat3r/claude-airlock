@@ -91,6 +91,10 @@ The container is the sandbox, so `claude` is started with
 left as it is. [Known limits](#known-limits) says what a session can reach
 without being asked.
 
+It starts on Opus at high effort, `CLAUDE_AIRLOCK_MODEL` and
+`CLAUDE_AIRLOCK_EFFORT` change both, and a `--model` or `--effort` of your
+own wins.
+
 The launcher's own options, `claude-airlock --help` lists them with the
 settings:
 
@@ -180,6 +184,8 @@ How Claude Code runs:
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's native UI |
 | `CLAUDE_AIRLOCK_ASK` | `0` | `1` has Claude Code ask before it uses a tool, as it does outside the sandbox |
+| `CLAUDE_AIRLOCK_MODEL=fable` | `opus` | The model Claude Code starts with, as `--model` takes it. Empty for Claude Code's own, a `--model` of your own wins |
+| `CLAUDE_AIRLOCK_EFFORT=xhigh` | `high` | The effort Claude Code starts with, as `--effort` takes it. Empty for Claude Code's own, an `--effort` of your own wins |
 | `CLAUDE_AIRLOCK_INJECTION_STOP` | `0` | `1` has line mode stop a turn when what it read looks written to pass for the system or the user, see [docs/line-mode.md](docs/line-mode.md#stopping-a-turn-for-what-it-read). `0` flags it and goes on |
 | `CLAUDE_AIRLOCK_TELEMETRY` | `0` | `1` lets Claude Code send usage events and crash reports |
 
@@ -211,7 +217,9 @@ CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 - The environment wins, so one session can override the file. A variable
   that is set but empty counts as not set, and the value of the file is
   used. The exceptions are `CLAUDE_AIRLOCK_FEATURES` and
-  `CLAUDE_AIRLOCK_SHARED_DIR`, where empty means none.
+  `CLAUDE_AIRLOCK_SHARED_DIR`, where empty means none, and
+  `CLAUDE_AIRLOCK_MODEL` and `CLAUDE_AIRLOCK_EFFORT`, where empty leaves
+  the choice to Claude Code.
 - Values are taken literally, without quotes. A leading `~` is your home
   directory in the settings that take a path. A value in quotes, or with
   blanks around it, stops the launcher: taken as it is, it would hide or

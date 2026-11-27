@@ -69,6 +69,7 @@ from .sandbox.session import (
     base_args,
     container_name,
     git_config_args,
+    model_args,
     own_statusline_args,
     permission_args,
     run_session,
@@ -326,7 +327,8 @@ def _command_args(plan: Plan) -> list[str]:
     # A chat has claude speak JSON Lines, ahead of the user's arguments
     spoken = list(CHAT_ARGS) if plan.is_chat else []
     unasked = permission_args(plan.settings, plan.claude_args)
-    return plugin + add_dirs + spoken + unasked + plan.claude_args
+    chosen = model_args(plan.settings, plan.claude_args)
+    return plugin + add_dirs + spoken + unasked + chosen + plan.claude_args
 
 
 def collect_all_left_behind(host: Host) -> None:

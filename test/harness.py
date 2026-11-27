@@ -27,6 +27,12 @@ from claude_airlock import settings
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "claude-airlock"
+# What claude starts with unless told otherwise: the model and the effort
+# of the defaults, after the launcher's word on permissions
+CHOSEN = [
+    f"--model={settings.Settings().model}",
+    f"--effort={settings.Settings().effort}",
+]
 # Where the launchers the checks start keep what Python compiles of the
 # package, one place for all those of a worker: a launcher keeps it in the
 # home it is given (see compile_apart of bin/claude-airlock), and every

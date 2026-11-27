@@ -209,6 +209,12 @@ prints what differs from Docker's own runtime:
   `--dangerously-skip-permissions`: the container is what keeps a session
   from the host. `CLAUDE_AIRLOCK_ASK=1` has it ask as it does outside the
   sandbox, and a `--permission-mode` of your own is left alone.
+- **On Opus at high effort.** Claude Code is started with `--model=opus`
+  and `--effort=high`, `CLAUDE_AIRLOCK_MODEL` and `CLAUDE_AIRLOCK_EFFORT`
+  name others, and empty leaves them to Claude Code. Given as arguments,
+  as `claude --print` in [line mode](line-mode.md) takes no `effortLevel`
+  from `settings.json`. A `--model` or `--effort` of your own is left
+  alone.
 - **Without telemetry.** `DISABLE_TELEMETRY=1` and
   `DISABLE_ERROR_REPORTING=1` are set, so it sends no usage events and no
   crash reports. `CLAUDE_AIRLOCK_TELEMETRY=1` sends both. `DO_NOT_TRACK=1`

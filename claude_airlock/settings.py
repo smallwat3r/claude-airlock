@@ -101,6 +101,10 @@ class Settings:
     runtime: str = ""
     # Whether Claude Code asks before it uses a tool, as outside the sandbox
     ask: bool = False
+    # The model and the effort claude is started with, "" for those of
+    # Claude Code, see model_args of sandbox/session.py
+    model: str = "opus"
+    effort: str = "high"
     # Whether a session runs in line mode (chat/), not behind Claude
     # Code's own
     line_mode: bool = True
@@ -406,6 +410,16 @@ SETTINGS = (
     Setting("CACHE", Kind.SWITCH, "0 keeps ~/.cache on a tmpfs, nothing persists"),
     Setting("RUNTIME", Kind.TEXT, "container runtime, e.g. runsc-hostnet for gVisor"),
     Setting("ASK", Kind.SWITCH, "1 has Claude Code ask before it uses a tool"),
+    Setting(
+        "MODEL",
+        Kind.NAME,
+        "model Claude Code starts with, empty for its own",
+    ),
+    Setting(
+        "EFFORT",
+        Kind.NAME,
+        "effort Claude Code starts with, empty for its own",
+    ),
     Setting("LINE_MODE", Kind.SWITCH, "0 runs Claude Code with its native UI"),
     Setting(
         "INJECTION_STOP",
@@ -452,7 +466,7 @@ def settings_help() -> str:
     for setting in SETTINGS:
         says = setting.says
         default = getattr(defaults, setting.field)
-        if setting.kind is Kind.TEXT and default:
+        if setting.kind in (Kind.TEXT, Kind.NAME) and default:
             says += f" (default {default})"
         if not setting.config_file:
             says += ", not taken from the config file"
@@ -525,8 +539,9 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     """Settings from the environment, then the config file, then the
     defaults, each read as its kind says (see Kind). A list or a name in
     the environment wins also when set but empty, which says none (no
-    features, no shared directory). A switch, a choice or a text that is
-    set but empty says nothing, and the config file is asked next: an
+    features, no shared directory, Claude Code's own model and effort).
+    A switch, a choice or a text that is set but empty says nothing, and
+    the config file is asked next: an
     empty variable must not switch off a restriction the file switched on.
     What is hidden and what is protected are the lists of both, for the
     same reason: what one hides or protects, the other does not take
@@ -548,13 +563,13 @@ def load_settings(env: Mapping[str, str], config_file: str) -> Settings:
     def read(setting: Setting) -> Any:
         key, kind = setting.variable, setting.kind
         in_file = file_values.get(key)
+        default = getattr(defaults, setting.field)
         if kind is Kind.NAME:
-            return env.get(key, in_file)
+            return env.get(key, default if in_file is None else in_file)
         if kind is Kind.LIST:
             return items(env.get(key, in_file or ""))
         if kind is Kind.MERGED:
             return items(f"{in_file or ''}:{env.get(key, '')}")
-        default = getattr(defaults, setting.field)
         if kind is Kind.SWITCH:
             default = "1" if default else "0"
         elif isinstance(default, enum.Enum):

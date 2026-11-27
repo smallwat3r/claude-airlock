@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness import LauncherTest, Result
+from harness import CHOSEN, LauncherTest, Result
 
 from claude_airlock import settings
 from claude_airlock.docker import covered_arg, mount_arg
@@ -40,14 +40,14 @@ class ExtraDirsTest(LauncherTest):
             "--add-dir-ro", "~/ref", "-p", "hello", CLAUDE_AIRLOCK_FEATURES=""
         )
         assert f"--volume={self.ref}:{self.ref}:ro,z" in result.flags
-        unasked = "--dangerously-skip-permissions"
-        assert result.command == [f"--add-dir={self.ref}", unasked, "-p", "hello"]
+        unasked = ["--dangerously-skip-permissions", *CHOSEN]
+        assert result.command == [f"--add-dir={self.ref}", *unasked, "-p", "hello"]
 
     def test_a_prompt_is_not_taken_for_a_directory(self):
         # --add-dir is variadic, as two arguments it would take the prompt
         result = self.launch("--add-dir", "~/ref", "hello", CLAUDE_AIRLOCK_FEATURES="")
-        unasked = "--dangerously-skip-permissions"
-        assert result.command == [f"--add-dir={self.ref}", unasked, "hello"]
+        unasked = ["--dangerously-skip-permissions", *CHOSEN]
+        assert result.command == [f"--add-dir={self.ref}", *unasked, "hello"]
 
     def test_read_write_dir_and_its_secrets(self):
         (self.ref / ".env").touch()

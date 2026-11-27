@@ -54,6 +54,19 @@ class SettingsListTest(LauncherTest):
         with pytest.raises(errors.Fatal):
             settings.load_settings({"CLAUDE_AIRLOCK_DOCKER_SOCKET": "all"}, missing)
 
+    def test_a_name_falls_back_to_its_default_and_empty_says_none(self):
+        config = self.work / "config"
+        missing = str(self.work / "no-config")
+        assert settings.load_settings({}, missing).model == "opus"
+        config.write_text("CLAUDE_AIRLOCK_MODEL=\nCLAUDE_AIRLOCK_EFFORT=max\n")
+        read = settings.load_settings({}, str(config))
+        assert (read.model, read.effort) == ("", "max")
+        read = settings.load_settings(
+            {"CLAUDE_AIRLOCK_MODEL": "fable", "CLAUDE_AIRLOCK_EFFORT": ""},
+            str(config),
+        )
+        assert (read.model, read.effort) == ("fable", "")
+
     def test_the_config_file_takes_all_but_the_per_project_ones(self):
         left_out = {s.name for s in settings.SETTINGS} - settings.CONFIG_FILE_SETTINGS
         assert left_out == {"EXTRA_DIRS", "EXTRA_DIRS_RO"}
