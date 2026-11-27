@@ -279,12 +279,20 @@ Said apart, as something to read before you build, test or commit there:
 - What your tools run, wherever it is in the project or an extra
   directory: Makefiles and other build files, `package.json`,
   `pyproject.toml`, `conftest.py`, the configuration of a hook manager
-  (`.pre-commit-config.yaml`, `.husky`), `.envrc`, CI workflows, and what
-  an editor runs (`.vscode`, `.devcontainer`, `.dir-locals.el`).
+  (`.pre-commit-config.yaml`, `.husky`), `.envrc` and the Nix files it
+  can have direnv evaluate (`flake.nix`, `shell.nix`), CI workflows, the
+  release of yarn `.yarnrc.yml` runs (`.yarn/releases`), and what runs
+  as an editor opens a file, with no command typed: `.vscode`,
+  `.devcontainer`, `.dir-locals.el`, the configs of ESLint, Prettier and
+  Stylelint that are code (`eslint.config.js` and its kin) and
+  `.cargo/config.toml`. By their names in any case: on macOS make reads
+  `GNUMAKEFILE` as `GNUmakefile`.
 - Below the top of a project: `CLAUDE.md` and the `.claude` of a
   subdirectory, and the config and hooks of a repository that is there, or
   that a session planted there, with its submodules and the hooks its
-  `core.hooksPath` names, as at the top.
+  `core.hooksPath` names, as at the top, and what is still to be done of
+  a rebase or a cherry-pick: an `exec` line of it runs on
+  `git rebase --continue`.
 
 Said apart too, as something to read before the next session here:
 

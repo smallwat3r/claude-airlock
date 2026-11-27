@@ -6,6 +6,7 @@ by tampered.py. Read within bounds, see bounded.py."""
 
 from __future__ import annotations
 
+import functools
 import importlib.machinery
 import json
 import os
@@ -13,7 +14,7 @@ import re
 import shlex
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from itertools import islice
 
 from ..files import (
@@ -42,6 +43,14 @@ from .bounded import (
     tree_files,
 )
 from .plugins import INSTALLED
+
+
+def _js_configs(*stems: str) -> tuple[str, ...]:
+    """The names a config of a tool of JavaScript is run from, which it
+    looks for by its stem with each ending of JavaScript and TypeScript."""
+    endings = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
+    return tuple(stem + ending for stem in stems for ending in endings)
+
 
 # What Claude follows or starts in a project, on the host as in a session:
 # its settings, the servers it is told to run and its instructions. Relative
@@ -141,13 +150,26 @@ BUILD_FILES = frozenset(
         *(".dir-locals.el", ".dir-locals-2.el"),
         *("Dockerfile", "Vagrantfile", "Tiltfile"),
         *("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"),
+        # What direnv evaluates for an .envrc that says use nix, or use
+        # flake, and what the second fetches by
+        *("shell.nix", "default.nix", "flake.nix", "flake.lock"),
+        # What the checkers an editor runs as a file is opened load and
+        # run, with no command typed: ESLint, Prettier and Stylelint
+        *_js_configs("eslint.config", ".eslintrc"),
+        *_js_configs("prettier.config", ".prettierrc"),
+        *_js_configs("stylelint.config", ".stylelintrc"),
     )
 )
 # The directories all of which is such a file, by their name: the hooks of
 # husky, the tasks and settings an editor runs, a dev container
 BUILD_TREES = frozenset((".husky", ".vscode", ".devcontainer"))
-# And the one that is by where it is, in .github
-WORKFLOWS = (".github", "workflows")
+# And those that are by where they are, from the directory they are in:
+# what GitHub runs, and the release of yarn that .yarnrc.yml has every
+# yarn command run (yarnPath)
+NESTED_TREES = (".github/workflows", ".yarn/releases")
+# The same of files: what cargo is set by, and the editor's checker of Rust
+# runs cargo with (a rustc wrapper, a runner) as the project is opened
+NESTED_FILES = (".cargo/config.toml", ".cargo/config")
 # What tells that a directory below the top of a project is one Claude
 # follows instructions in, or one git runs hooks in: what the check above
 # watches at the top
@@ -156,6 +178,9 @@ CLAUDE_MARKS = frozenset(
 )
 # What git takes a directory for one of its own by, whatever its name
 GIT_HEAD = "HEAD"
+# The same and a .git as sets, for _named
+_HEAD = frozenset((GIT_HEAD,))
+_GIT = frozenset((".git",))
 # The directories that are not looked into for those: what git keeps for
 # itself, and what a package manager fills with thousands of other
 # projects' build files. What is in them can still run on the host, it is
@@ -185,6 +210,13 @@ _INCLUDES = re.compile(rb"include(if\..*)?\.path", re.DOTALL)
 # No more configs are followed from one config than this, a session can
 # have each include the next
 MOST_INCLUDED = 100
+# What a git directory holds of a rebase, or a cherry-pick or a revert of
+# several commits, still to be done: what it lists is done on --continue,
+# an exec line runs its command on the host
+GIT_TODOS = (
+    os.path.join("rebase-merge", "git-rebase-todo"),
+    os.path.join("sequencer", "todo"),
+)
 # Where a git directory keeps one of its own for each working tree made of
 # it (git worktree add), and how many of those are looked into
 GIT_WORKTREES = "worktrees"
@@ -580,9 +612,10 @@ def git_files(
 ) -> list[str]:
     """What is watched of one git directory: the files to hash, its
     configs hashed as those are, with the files they include. The file
-    that has git read another directory, and the config and hooks of
-    both, then those of the working trees it keeps. The hooks through a
-    link that leads into a directory within, see tree_files."""
+    that has git read another directory, and the config, the hooks and
+    what is still to be done of a rebase (see GIT_TODOS) of both, then
+    those of the working trees it keeps. The hooks through a link that
+    leads into a directory within, see tree_files."""
     watched = [os.path.join(git_dir, COMMON_DIR)]
     sources = git_sources(git_dir)
     sources += _worktree_sources(git_dir, watched, fingerprint)
@@ -591,6 +624,7 @@ def git_files(
             hash_git_config(config, fingerprint)
         hooks = tree_files(os.path.join(source, "hooks"), within=within)
         watched += hooks.into(fingerprint)
+        watched += [os.path.join(source, todo) for todo in GIT_TODOS]
     return watched
 
 
@@ -598,17 +632,30 @@ def repository_files(
     directory: str, fingerprint: dict[str, str], within: Sequence[str] = ()
 ) -> list[str]:
     """What is watched of the repository of a directory, its .git, at the
-    top of a project or below it: the files to hash, the git configs
-    hashed as those are. Its config and hooks, those of its submodules,
-    and those of the directory its core.hooksPath names."""
+    top of a project or below it, see git_dir_files. A .git that is a
+    file, in a working tree or a submodule, is where its directory is."""
     git_dir = os.path.join(directory, ".git")
-    # A file, in a working tree or a submodule: where its directory is
-    watched = [git_dir]
+    return [git_dir, *git_dir_files(git_dir, directory, fingerprint, within)]
+
+
+def git_dir_files(
+    git_dir: str,
+    top: str,
+    fingerprint: dict[str, str],
+    within: Sequence[str] = (),
+) -> list[str]:
+    """What is watched of a git directory: the files to hash, the git
+    configs hashed as those are. Its config and hooks, those of its
+    submodules, and those of the directory its core.hooksPath names, a
+    relative one from top. Top is the working tree of a .git, and the git
+    directory itself for one git takes for its own by what it holds, as
+    for a bare repository."""
     modules = module_git_dirs(os.path.join(git_dir, "modules")).into(fingerprint)
+    watched: list[str] = []
     for each in (git_dir, *modules):
         watched += git_files(each, fingerprint, within)
     for source in git_sources(git_dir):
-        for moved in moved_hooks_dirs(directory, source, within):
+        for moved in moved_hooks_dirs(top, source, within):
             watched += tree_files(moved, within=within).into(fingerprint)
     return watched
 
@@ -883,34 +930,76 @@ def _build_files(
         names = {*subdirs, *files}
         if directory != root:
             watched += _below_the_top(directory, names, fingerprint, within)
-        if GIT_HEAD in files:
+        if _named(files, _HEAD):
             # A git directory by what it holds, without a .git to say so:
-            # git takes it for one from there on down, with the config
-            # and the hooks a session left in it (core.fsmonitor runs a
-            # command on git status). At the top too, where only the .git
-            # of the project is looked for.
-            watched += git_files(directory, fingerprint, within)
-        built = sorted(BUILD_FILES & names)
-        watched += [os.path.join(directory, name) for name in built]
-        for name in sorted(BUILD_TREES.intersection(subdirs)):
-            tree = tree_files(os.path.join(directory, name), within=within)
-            watched += tree.into(fingerprint)
-        if WORKFLOWS[0] in subdirs:
-            tree = tree_files(os.path.join(directory, *WORKFLOWS), within=within)
-            watched += tree.into(fingerprint)
+            # git takes it for one from there on down, with what a session
+            # left in it (core.fsmonitor runs a command on git status). At
+            # the top too, where only the .git of the project is looked for.
+            watched += git_dir_files(directory, directory, fingerprint, within)
+        watched += _build_files_in(directory, names, subdirs, fingerprint, within)
         # In the order of their names: where there are more files than
         # are watched, the same ones fall past the count at the start and
-        # at the end of a session, whatever order the directory keeps
+        # at the end of a session, whatever order the directory keeps.
+        # What is not looked into by its exact name alone: a session could
+        # hide build files in a NODE_MODULES, which is none where case
+        # tells names apart.
+        trees = set(_named(subdirs, BUILD_TREES))
         subdirs[:] = [
             name
             for name in sorted(subdirs)
             if name not in NOT_LOOKED_INTO
-            and name not in BUILD_TREES
+            and name not in trees
             and os.path.join(directory, name) != os.path.join(root, WORKTREES)
         ]
     for directory in closed[:MOST_BUILD_FILES]:
         fingerprint[closed_entry(directory)] = UNWATCHED
     return watched
+
+
+@functools.cache
+def _folded(names: frozenset[str]) -> frozenset[str]:
+    return frozenset(name.casefold() for name in names)
+
+
+def _named(names: Iterable[str], wanted: frozenset[str]) -> list[str]:
+    """The names among those that are one of those wanted, whatever their
+    case, in their own case and the order of their names: where files
+    are told apart by case alone (Linux) another case is another file,
+    and watching it too is no harm. Where they are not (macOS), a tool
+    that looks for GNUmakefile is given GNUMAKEFILE, git takes .GIT for
+    .git and Claude reads claude.md."""
+    folded = _folded(wanted)
+    return sorted(name for name in names if name.casefold() in folded)
+
+
+def _nested(directory: str, subdirs: Sequence[str], paths: Sequence[str]) -> list[str]:
+    """Where in a directory the paths given are, each by its first part
+    in any case among the directories in it (see _named): every one that
+    is, a case where case tells names apart being another directory."""
+    found: list[str] = []
+    for path in paths:
+        top, _, inner = path.partition("/")
+        for name in _named(subdirs, frozenset((top,))):
+            found.append(os.path.join(directory, name, inner))
+    return found
+
+
+def _build_files_in(
+    directory: str,
+    names: set[str],
+    subdirs: list[str],
+    fingerprint: dict[str, str],
+    within: Sequence[str],
+) -> list[str]:
+    """What is watched of one directory for its tools, whatever the case
+    of the names (see _named): its build files, the trees that are all
+    such files, and those of NESTED_TREES and NESTED_FILES. Through a
+    link into a directory within, see tree_files."""
+    watched = [os.path.join(directory, name) for name in _named(names, BUILD_FILES)]
+    trees = [os.path.join(directory, name) for name in _named(subdirs, BUILD_TREES)]
+    for tree in trees + _nested(directory, subdirs, NESTED_TREES):
+        watched += tree_files(tree, within=within).into(fingerprint)
+    return watched + _nested(directory, subdirs, NESTED_FILES)
 
 
 def reaches_launcher(directories: Sequence[str]) -> bool:
@@ -1024,11 +1113,11 @@ def _below_the_top(
     project can be a directory of clones, each with its submodules and
     the hooks of a hook manager."""
     watched: list[str] = []
-    if CLAUDE_MARKS & names:
+    if _named(names, CLAUDE_MARKS):
         watched += _claude_files(
             directory, PROJECT_FILES, PROJECT_TREES, COMMAND_FILES, fingerprint, within
         )
-    if ".git" in names:
+    if _named(names, _GIT):
         watched += repository_files(directory, fingerprint, within)
     return watched
 
