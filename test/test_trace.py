@@ -16,20 +16,27 @@ from datetime import UTC, datetime
 
 import pytest
 from harness import LAUNCHER, LauncherTest, prompts_at
-from transcribed import events
+from transcribed import events, overview, prompt
 
 from claude_airlock import files, projects
 from claude_airlock.events import Event, Kind, Stage, Who, Wrong, clean, labelled
 from claude_airlock.recording import egress_log, recorder
 from claude_airlock.recording.changes import change_event
-from claude_airlock.report import calls, outcomes, summary, trace, transcript
+from claude_airlock.report import (
+    calls,
+    outcomes,
+    session_trace,
+    summary,
+    trace,
+    transcript,
+)
 from claude_airlock.report import entries as entries_module
 from claude_airlock.report.calls import call_details, call_label
 from claude_airlock.report.door_events import use_event
 from claude_airlock.report.entries import read_entries
 from claude_airlock.report.heredocs import without_heredocs
 from claude_airlock.report.layout import Layout, event_json, folded, went_wrong
-from claude_airlock.report.stream import Filter
+from claude_airlock.report.stream import EVERYTHING, Filter
 from claude_airlock.report.transcript import WalkOptions
 from claude_airlock.report.unseen import ran_between
 
@@ -320,9 +327,18 @@ class TraceTest(LauncherTest):
             assert outcomes.outside(written, "/p", None), repr(written)
             flag = outcomes.outside_flag(written, "/p", None)
             assert flag == outcomes.OUTSIDE_FLAG
-        for inside in ("src/x", " src/x", "~user/x", "/p/x "):
+        for inside in ("src/x", " src/x", "~user/x", "/p/x ", "//p/x", "///p/x"):
             assert not outcomes.outside(inside, "/p", None), repr(inside)
         assert outcomes.as_written_to("~/.bashrc") == "/home/sandbox/.bashrc"
+
+    def test_slashes_at_the_start_of_a_path_are_one(self):
+        # As Claude Code takes them, which normpath leaves two of
+        key = "/home/me/.ssh/id_ed25519"
+        for written in (f"/{key}", f"//{key}", f" /{key}"):
+            assert outcomes.taken_path(written, "/home/me/p", "/home/me/p") == key
+        assert outcomes.taken_path("x", "/p", "//p/sub") == "/p/sub/x"
+        assert not outcomes.outside("x", "/p", "//p")
+        assert outcomes.outside("//etc/x", "/p", None)
 
     def test_a_path_that_is_not_absolute_is_from_where_the_session_was(self):
         # Claude Code takes it from its working directory, which can be
@@ -475,8 +491,8 @@ class TraceTest(LauncherTest):
     def test_a_transcript_that_says_nowhere_when_it_ran_says_so_of_records(self):
         # The records are looked through for the time of the session
         path = self.write_transcript("0a", [{"type": "user", "message": {}}])
-        header, _ = trace.session_events(path, self.host, False)
-        assert labelled("network", trace.NO_TIME) in header
+        header, _ = session_trace.session_events(path, self.host, False)
+        assert labelled("network", session_trace.NO_TIME) in header
 
     def test_whether_a_transcript_was_read_whole_is_the_reading_s_to_say(self):
         path = self.write_transcript("0a", prompts_at(1e9, 1e9 + 1))
@@ -491,14 +507,14 @@ class TraceTest(LauncherTest):
         forged = self.write_transcript("0b", [*prompts_at(1e9), said])
         assert entries_module.read_transcript(forged).whole
         step = {"type": "assistant", "message": {"id": "msg_1"}}
-        read = trace.ReadTranscript.read(self.host, forged)
-        assert trace._steps_told([read], 0) == set()
+        read = session_trace.ReadTranscript.read(self.host, forged)
+        assert session_trace._steps_told([read], 0) == set()
         steps = self.write_transcript("0c", [step, said])
-        read = trace.ReadTranscript.read(self.host, steps)
-        assert trace._steps_told([read], 0) == {"msg_1"}
+        read = session_trace.ReadTranscript.read(self.host, steps)
+        assert session_trace._steps_told([read], 0) == {"msg_1"}
         with unittest.mock.patch.object(entries_module, "MOST_HELD", 1):
-            read = trace.ReadTranscript.read(self.host, steps)
-        assert trace._steps_told([read], 0) is None
+            read = session_trace.ReadTranscript.read(self.host, steps)
+        assert session_trace._steps_told([read], 0) is None
 
     def test_an_edit_is_compared_as_far_as_its_first_lines(self):
         # Comparing takes the square of the lines, a session's to write
@@ -944,7 +960,7 @@ class TraceTest(LauncherTest):
             transcript.write('{"x":"\n')
         recorder.catch_up(file, recorder.copy_path(self.host, file))
         file.unlink()
-        header, _ = trace.session_events(file, self.host, verbose=False)
+        header, _ = session_trace.session_events(file, self.host, verbose=False)
         assert (
             labelled(
                 "transcript",
@@ -997,6 +1013,17 @@ class TraceTest(LauncherTest):
         followed = self.launch("--trace", "all", "--follow")
         assert followed.status != 0
         assert "usage:" in followed.stderr
+
+    def test_at_a_terminal_each_session_of_all_says_its_day(self):
+        # Of the day the trace before it ended on
+        self.write_transcript("0d", [prompt("again", 30)])
+        day = f"{datetime(2026, 1, 2, 10, 0, 30, tzinfo=UTC).astimezone():%Y-%m-%d}"
+        files = trace._traced_files(self.host)
+        with unittest.mock.patch.object(
+            trace.Layout, "for_output", side_effect=lambda env: Layout(compact=True)
+        ):
+            shown = "".join(trace._every_trace(files, self.host, set(), EVERYTHING))
+        assert shown.count(f"\n# day         {day}\n") == 2
 
     def test_a_session_is_picked_by_its_whole_id_whatever_else_starts_with_it(self):
         # Left by a session next to its own, which could not be named
@@ -1130,15 +1157,35 @@ class TraceTest(LauncherTest):
         assert "half  a pair" in shown
         assert "# cost" not in shown
 
+    def test_the_header_says_when_by_the_earliest_and_the_latest_and_the_cost(self):
+        # The order of the entries is the session's to choose
+        late = {"type": "user", "timestamp": "2026-01-02T11:30:00Z"}
+        early = {"type": "user", "timestamp": "2026-01-02T10:00:00Z"}
+        spent = {
+            "type": "cost-state",
+            "totalCostUSD": 1.25,
+            "totalLinesAdded": 3,
+            "totalLinesRemoved": 1,
+        }
+        rows = overview([late, early, spent])
+        first, last = (
+            datetime(2026, 1, 2, hour, minute, tzinfo=UTC).astimezone()
+            for hour, minute in ((10, 0), (11, 30))
+        )
+        span = f"{first:%Y-%m-%d %H:%M} to {last:%H:%M} (90 min)"
+        assert rows["when"] == f"{span}, times are {first:%Z}"
+        assert (rows["cost"], rows["lines"]) == ("$1.25", "+3 -1")
+        assert "when" not in overview([spent])
+
     def test_the_header_names_so_many_values_and_each_at_so_much_length(self):
         # Each entry can give a branch of its own, of any length
         entries = [
             {"type": "user", "gitBranch": f"b{n}" + "x" * 5000} for n in range(9)
         ]
-        branch = dict(summary.overview(entries, 0))["branch"]
+        branch = overview(entries)["branch"]
         assert branch.endswith(", and 4 more")
         assert len(branch) < summary.MOST_LISTED * 210
-        assert dict(summary.overview([], 0))["branch"] == "?"
+        assert overview([])["branch"] == "?"
 
     def test_a_header_line_cannot_be_forged(self):
         forged = "main\ntranscript  as the launcher copied it (9 lines)"
@@ -1165,8 +1212,8 @@ class TraceTest(LauncherTest):
         self.add({"type": "user", "timestamp": "2020-01-01T00:00:00Z"})
         host = self.host
         file = self.transcripts / f"{self.SESSION}.jsonl"
-        with unittest.mock.patch.object(trace, "network", network):
-            trace.session_events(file, host, verbose=False)
+        with unittest.mock.patch.object(session_trace, "network", network):
+            session_trace.session_events(file, host, verbose=False)
         ((start, end),) = asked
         assert start < end
         assert datetime.fromtimestamp(end).year == 2026
@@ -1289,7 +1336,7 @@ class TakenOutTest(LauncherTest):
         options = WalkOptions()
         return (
             transcript.left_events(left, gone, "/p", options),
-            trace.removed_events(gone, left, "/p", options),
+            session_trace.removed_events(gone, left, "/p", options),
         )
 
     def test_a_result_taken_out_is_shown_as_it_was_under_the_name_of_its_call(self):

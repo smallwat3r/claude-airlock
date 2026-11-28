@@ -19,7 +19,9 @@ from transcribed import call, prompt, result
 
 from claude_airlock.errors import Fatal
 from claude_airlock.events import Event, Kind, Who
-from claude_airlock.report import programs, stats, stats_shown, trace_args
+from claude_airlock.report import programs, stats, stats_shown, summary, trace_args
+from claude_airlock.report.entries import title
+from claude_airlock.report.session_trace import SessionTrace
 
 STEP_USAGE = {
     "input_tokens": 10,
@@ -40,6 +42,13 @@ def step(step_id: str, second: int, **usage: int) -> dict:
 
 def cost(dollars: float) -> dict:
     return {"type": "cost-state", "totalCostUSD": dollars}
+
+
+def traced(entries: list[dict]) -> SessionTrace:
+    """The trace of a session of the project /p whose transcript holds
+    those entries, without events of its own."""
+    figures = summary.session_figures(entries, "/p")
+    return SessionTrace([], [], figures, title(entries), 0, summary.Flagged())
 
 
 class ProgramsTest:
@@ -94,6 +103,29 @@ class TallyTest:
             "  ... 1 more, see --json",
             "  ... and 2 counted past the 2 kept",
         ]
+
+    def test_tools_past_those_kept_are_counted_as_left_out(self, monkeypatch):
+        # A transcript names its tools as it likes, any number of them
+        monkeypatch.setattr(stats, "MOST_KEPT", 2)
+        summed = stats.Stats("/p")
+        for session, tools in (
+            ("0a", ("Read", "Edit", "Edit", "Read", "Read")),
+            ("0b", ("Grep", "Bash", "Bash")),
+        ):
+            calls = [call(f"c{at}", tool) for at, tool in enumerate(tools)]
+            summed.add(session, traced(calls))
+        assert len(summed.calls) == 2
+        assert summed.calls.left_out == 2
+        assert summed.calls.totals["calls"] == 8
+        # Those of the tool whose commands are counted are counted all
+        assert summed.command_calls == 2
+        assert "tool calls  8 (Read 3, Edit 2, and 2 counted past the 2 kept)" in (
+            stats_shown.stats_lines(summed)
+        )
+        said = json.loads(stats_shown.stats_json(summed))
+        assert said["calls"] == {"Read": 3, "Edit": 2}
+        assert said["left_out"] == {"calls": 2}
+        assert sum(one["calls"] for one in said["per_session"]) == 8
 
     def test_each_kind_of_flag_is_said(self):
         named = {one.name for one in dataclasses.fields(stats.Flags)}

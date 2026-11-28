@@ -1210,8 +1210,8 @@ class CaptureTailTest:
         follower = follow.Follower(mock.Mock(project_dir="/proj"), verbose=False)
         tail = self.tail()
         tail.capture = read_parts([(2.0, tcp(self.THERE, 443), True)])
-        follower._captures[(tail.sidecar, 1.0)] = tail
-        follower._denied = 3
+        follower.network._captures[(tail.sidecar, 1.0)] = tail
+        follower.network._denied = 3
         assert follower.traffic() == tails.Traffic(connections=1, hosts=1, denied=3)
         assert not follower.traffic()
 
@@ -1269,24 +1269,28 @@ class CaptureTailTest:
         known = [frozenset({"tcp good.test 443"}), frozenset({"tcp new.test 443"})]
         with (
             mock.patch.object(tails.CaptureSidecar, "running", return_value=sidecar),
-            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
-            mock.patch.object(follow.Follower, "_filtered_addresses") as addresses,
+            mock.patch.object(
+                follow.NetworkFollower, "_health_sources", return_value={}
+            ),
+            mock.patch.object(
+                follow.NetworkFollower, "_filtered_addresses"
+            ) as addresses,
             mock.patch.object(follow, "known_destinations", side_effect=known),
             mock.patch.object(follow, "read_traced_sessions", return_value=[]),
         ):
             # The capture of a session is up before the session is
             addresses.return_value = {}
-            follower._look_for_sessions(follow.Round())
-            (tail,) = follower._captures.values()
+            follower.network.look(follow.Round(), first=True)
+            (tail,) = follower.network._captures.values()
             assert (tail.filtered, tail._known) == (False, known[0])
             addresses.return_value = {"172.20.0.5": "claude-proj"}
-            follower._look_for_sessions(follow.Round())
+            follower.network.look(follow.Round(), first=False)
             assert tail.filtered
             # And what the project is known to reach is as the session
             # before left it
             sidecar[0] = ("claude-proj.capture", 9.0)
-            follower._look_for_sessions(follow.Round())
-            later = follower._captures[sidecar[0]]
+            follower.network.look(follow.Round(), first=False)
+            later = follower.network._captures[sidecar[0]]
             assert later._known == known[1]
 
     def test_a_capture_that_ended_is_let_go_of_after_a_last_look(self, tmp_path: Path):
@@ -1295,36 +1299,42 @@ class CaptureTailTest:
         sidecar = [("claude-proj.capture", 5.0)]
         with (
             mock.patch.object(tails.CaptureSidecar, "running") as running,
-            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
-            mock.patch.object(follow.Follower, "_filtered_addresses", return_value={}),
+            mock.patch.object(
+                follow.NetworkFollower, "_health_sources", return_value={}
+            ),
+            mock.patch.object(
+                follow.NetworkFollower, "_filtered_addresses", return_value={}
+            ),
             mock.patch.object(follow, "known_destinations", return_value=None),
             mock.patch.object(follow, "read_traced_sessions") as noted,
         ):
             running.return_value, noted.return_value = sidecar, []
             began = follow.Round()
-            follower._look_for_sessions(began)
+            follower.network.look(began, first=True)
             assert [note.split(maxsplit=1)[1] for note in began.notes] == [
                 "following the capture of claude-proj"
             ]
-            (tail,) = follower._captures.values()
-            # Past the first look, as poll counts them
-            follower._rounds = 1
-            # Docker did not answer: it is followed on as it was, not
-            # taken to have ended and read again from its start
+            (tail,) = follower.network._captures.values()
+            # Docker did not answer, past the first look: it is followed on
+            # as it was, not taken to have ended and read again from its
+            # start
             running.return_value = None
             unanswered = follow.Round()
-            follower._look_for_sessions(unanswered)
+            follower.network.look(unanswered, first=False)
             assert unanswered.notes == []
-            assert list(follower._captures.values()) == [tail]
+            assert list(follower.network._captures.values()) == [tail]
             running.return_value = sidecar
-            follower._look_for_sessions(follow.Round())
-            assert list(follower._captures.values()) == [tail]
+            follower.network.look(follow.Round(), first=False)
+            assert list(follower.network._captures.values()) == [tail]
             # Its session is over, its sidecar stopped: kept until the
             # copy its launcher makes of it is noted
             sidecar.clear()
             stopped = follow.Round()
-            follower._look_for_sessions(stopped)
-            assert (stopped.notes, list(follower._captures.values())) == ([], [tail])
+            follower.network.look(stopped, first=False)
+            assert (stopped.notes, list(follower.network._captures.values())) == (
+                [],
+                [tail],
+            )
             # Which has what the sidecar did not give by then
             now = time.time()
             copy = tmp_path / "claude-proj.capture-5.pcap"
@@ -1339,8 +1349,8 @@ class CaptureTailTest:
             )
             noted.return_value = [mock.Mock(capture=copy.name)]
             ended = follow.Round()
-            follower._look_for_sessions(ended)
-        assert follower._captures == {}
+            follower.network.look(ended, first=False)
+        assert follower.network._captures == {}
         said = [note.split(maxsplit=1)[1] for note in ended.notes]
         assert said == ["the capture of claude-proj ended"]
         assert [event.kind for _, event in ended.events] == [Kind.NET]
@@ -1364,17 +1374,21 @@ class CaptureTailTest:
         sidecar = [("claude-proj.capture", 5.0)]
         with (
             mock.patch.object(tails.CaptureSidecar, "running", return_value=sidecar),
-            mock.patch.object(follow.Follower, "_health_sources", return_value={}),
-            mock.patch.object(follow.Follower, "_filtered_addresses", return_value={}),
+            mock.patch.object(
+                follow.NetworkFollower, "_health_sources", return_value={}
+            ),
+            mock.patch.object(
+                follow.NetworkFollower, "_filtered_addresses", return_value={}
+            ),
             mock.patch.object(follow, "known_destinations", return_value=None),
             mock.patch.object(follow, "read_traced_sessions", return_value=[]),
             mock.patch.object(follow, "LAST_LOOK_WAIT", 0.0),
         ):
-            follower._look_for_sessions(follow.Round())
+            follower.network.look(follow.Round(), first=True)
             sidecar.clear()
             ended = follow.Round()
-            follower._look_for_sessions(ended)
-        assert follower._captures == {}
+            follower.network.look(ended, first=False)
+        assert follower.network._captures == {}
         assert ended.events == []
         said = [note.split(maxsplit=1)[1] for note in ended.notes]
         assert "the capture of claude-proj ended" in said
@@ -1470,7 +1484,7 @@ class TranscriptTailTest:
     def test_a_follower_says_when_a_transcript_is_written_faster_than_read(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
-        follower._docker = False
+        follower.network._docker = False
         add(self.file, *(prompt(f"before {number}") for number in range(30)))
         with (
             mock.patch.object(follow, "project_root", return_value="/proj"),
@@ -1498,7 +1512,7 @@ class TranscriptTailTest:
         # are read: the one followed is read first, the others in turn
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
-        follower._docker = False
+        follower.network._docker = False
         agents = [self.file.with_name(f"agent-a{number}.jsonl") for number in range(3)]
         for path in agents:
             path.touch()
@@ -1528,7 +1542,7 @@ class TranscriptTailTest:
     def test_a_follower_says_when_a_transcript_was_written_anew(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
-        follower._docker = False
+        follower.network._docker = False
         with (
             mock.patch.object(follow, "project_root", return_value="/proj"),
             mock.patch.object(follow, "subagent_files", return_value=[]),
@@ -1556,7 +1570,7 @@ class TranscriptTailTest:
     def test_a_follower_says_when_a_transcript_can_no_longer_be_read(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
-        follower._docker = False
+        follower.network._docker = False
         with (
             mock.patch.object(follow, "project_root", return_value="/proj"),
             mock.patch.object(follow, "subagent_files", return_value=[]),
@@ -1629,7 +1643,7 @@ class TranscriptTailTest:
             mock.patch.object(tails, "MOST_HISTORY", 3 << 10),
         ):
             follower = follow.Follower(host, False, only=self.file)
-            follower._docker = False
+            follower.network._docker = False
             first = follower.poll()
         assert first.events[-1][1].details == ["before 299"]
         assert len(first.events) == follow.HISTORY
@@ -1685,14 +1699,14 @@ class TranscriptTailTest:
             mock.patch.object(follow, "project_root", return_value="/proj"),
             mock.patch.object(follow, "MOST_FOLLOWED", 3),
         ):
-            follower._look_for_transcripts(follow.Round())
+            followed = follower.transcripts
+            followed._look_for_transcripts(follow.Round(), first=True)
             for path in many:
                 add(path, prompt("hello"))
             later = follow.Round()
-            follower._rounds = 1
-            follower._look_for_transcripts(later)
-            follower._look_for_transcripts(later)
-        assert len(follower._tails) == 3
+            followed._look_for_transcripts(later, first=False)
+            followed._look_for_transcripts(later, first=False)
+        assert len(follower.transcripts.tails) == 3
         assert later.notes == [
             (
                 "transcripts NOT ALL FOLLOWED: more than 3 were written to, what"
@@ -1707,9 +1721,9 @@ class TranscriptTailTest:
             mock.patch.object(follow, "MOST_FOLLOWED_SUBAGENTS", 2),
         ):
             agents = follow.Round()
-            follower._look_for_subagents(agents)
-            follower._look_for_subagents(agents)
-        assert len(follower._subagents) == 2
+            followed._look_for_subagents(agents, first=False)
+            followed._look_for_subagents(agents, first=False)
+        assert len(follower.transcripts._subagents) == 2
         assert agents.notes == [
             (
                 "subagents   NOT ALL FOLLOWED: more than 2 of the sessions"
@@ -1771,7 +1785,7 @@ class TranscriptTailTest:
             os.utime(path, (1, 1))
         host = mock.Mock(project_dir="/proj", transcript_copies_dir=str(self.copies))
         follower = follow.Follower(host, verbose=False)
-        follower._docker = False
+        follower.network._docker = False
         listed = [self.file, longer, alike]
         with (
             mock.patch.object(follow, "transcript_files", return_value=listed),

@@ -466,7 +466,7 @@ class AgentDoorTest(LauncherTest):
 
         def followed() -> list[str]:
             found = follow.Round()
-            follower._poll_notes(found)
+            follower.network.poll_notes(found)
             return [event.fields["path"] for _, event in found.events]
 
         note(paths[0])

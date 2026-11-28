@@ -18,6 +18,7 @@ from datetime import datetime
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat
 from ..files import UNREADABLE
+from ..oldest import forget_oldest
 from ..recording.procwatch import Secrets
 from .brief import TALK_LINES, amount, between, clip, shortened
 from .calls import (
@@ -96,7 +97,7 @@ MISS_SHARE = 2
 TYPED_MEANWHILE = "(typed while claude worked)"
 # Of the id of a call or of a step, as much as a live walk keeps to know
 # it by: Claude Code's are some tens of characters, and a longer one is
-# kept as what it hashes to, see kept_id
+# kept as what it hashes to, see bounded_id
 ID_WIDTH = 200
 # The kinds of what a transcript holds that a walk reads, besides those
 # told.py reads: the entries of the conversation, of a command of Claude
@@ -411,7 +412,7 @@ def _first_of_entry(told: dict[int, int], entry: dict, block: dict) -> bool:
     return told.setdefault(id(entry), id(block)) == id(block)
 
 
-def kept_id(said: str) -> str:
+def bounded_id(said: str) -> str:
     """The id of a call or of a step as a live walk keeps it: as it is,
     or what it hashes to when it is longer than ID_WIDTH, which a session
     can make it, for each of thousands, see digest_of."""
@@ -423,8 +424,8 @@ def kept_id(said: str) -> str:
 def _side_of(who: Who, entry: dict) -> tuple[Who, str]:
     """Whose side of a conversation an entry is of: claude's, or that of
     one subagent, which Claude Code names in each entry of its, kept as
-    the id of a call is, see kept_id."""
-    return who, kept_id(kept(entry.get("agentId")))
+    the id of a call is, see bounded_id."""
+    return who, bounded_id(kept(entry.get("agentId")))
 
 
 @dataclass(frozen=True)
@@ -682,8 +683,8 @@ class Walk:
 
     def _remember(self, kept: dict) -> None:
         """Let go of the oldest of what a live walk keeps."""
-        while self._live and len(kept) > MOST_REMEMBERED:
-            del kept[next(iter(kept))]
+        if self._live:
+            forget_oldest(kept, MOST_REMEMBERED)
 
     def _went_on(self, who: Who, entry: dict) -> list[Event]:
         """Live, the calls the model went on without: those it issued in
@@ -694,7 +695,7 @@ class Walk:
         said = step_of(entry)
         if not self._live or not said:
             return []
-        step = kept_id(said)
+        step = bounded_id(said)
         side = _side_of(who, entry)
         before, issued = self._at.get(side, ("", []))
         if before == step:
@@ -721,9 +722,9 @@ class Walk:
         """What the step an entry starts used, nothing for a later entry
         of the same step."""
         step = step_usage(entry) if self._tell_steps else None
-        if not step or kept_id(step[0]) in self._steps:
+        if not step or bounded_id(step[0]) in self._steps:
             return []
-        self._steps[kept_id(step[0])] = None
+        self._steps[bounded_id(step[0])] = None
         self._remember(self._steps)
         used = _step_event(self._when, who, self._usage.get(*step))
         # Said with the step it is about, or not at all
@@ -792,9 +793,9 @@ class Walk:
         return [said]
 
     def _key(self, said: str) -> str:
-        """What a call is known by, by its id: live as kept_id keeps it,
+        """What a call is known by, by its id: live as bounded_id keeps it,
         else as it is, the transcript being held whole anyway."""
-        return kept_id(said) if self._live else said
+        return bounded_id(said) if self._live else said
 
     def _call(self, who: Who, entry: dict, block: dict) -> list[Event]:
         """A call of a tool of Claude Code's, see call_event."""

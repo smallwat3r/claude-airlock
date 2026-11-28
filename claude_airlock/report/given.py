@@ -33,7 +33,7 @@ DIGEST_SIZE = 32
 def digest_of(text: object) -> bytes:
     """What a text is told from another by, which takes a pass over it:
     what is given again is known so before it is looked at for signs,
-    which takes many, and a long id is kept as it, see kept_id of
+    which takes many, and a long id is kept as it, see bounded_id of
     transcript.py. Empty for what is no text."""
     if not isinstance(text, str):
         return b""

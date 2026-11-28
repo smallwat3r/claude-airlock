@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from ..events import Event, Kind, Stage, Who, labelled
+from ..oldest import forget_oldest
 from .calls import call_label
 from .layout import shown_what, went_wrong
 
@@ -163,8 +164,7 @@ class Timeline:
             forgotten = self._now - TIMELINE_SLACK
             for call in [c for c, ran in self._calls.items() if ran.ended < forgotten]:
                 del self._calls[call]
-        while len(self._calls) > MOST_CALLS:
-            del self._calls[next(iter(self._calls))]
+        forget_oldest(self._calls, MOST_CALLS)
 
     def _mark(self, event: Event) -> None:
         if event.when < self._now - TIMELINE_SLACK:

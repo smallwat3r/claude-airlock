@@ -580,11 +580,11 @@ class WireTest(LauncherTest):
         follower = follow.Follower(self.host, verbose=False, container=CONTAINER)
         tail = tails.CaptureTail(f"{CONTAINER}.capture", verbose=False)
         tail.capture = self.captured(opened(now - 30), sent(time.time(), 80_000, 1))
-        follower._captures[(tail.sidecar, now - 60)] = tail
+        follower.network._captures[(tail.sidecar, now - 60)] = tail
         time.sleep(0.01)
         self.note(time.time(), 79_000)
         found = follow.Round()
-        follower._poll_notes(found)
+        follower.network.poll_notes(found)
         ((_, event),) = found.events
         assert event.notes == ["wire: [n1.1] 80 kB"]
 
@@ -658,14 +658,16 @@ class WireTest(LauncherTest):
         notes = []
         for started in (now - 200, now - 60):
             tail = tails.CaptureTail(
-                f"{CONTAINER}.capture", verbose=False, numbers=follower._numbers
+                f"{CONTAINER}.capture",
+                verbose=False,
+                numbers=follower.network._numbers,
             )
             tail.capture = self.captured(opened(started), sent(time.time(), 80_000, 1))
-            follower._captures = {(tail.sidecar, started): tail}
+            follower.network._captures = {(tail.sidecar, started): tail}
             time.sleep(0.01)
             self.note(time.time(), 79_000)
             found = follow.Round()
-            follower._poll_notes(found)
+            follower.network.poll_notes(found)
             notes += [event.notes for _, event in found.events]
         # Neither with another request, and each by a number of its own
         assert notes == [["wire: [n1.1] 80 kB"], ["wire: [n2.1] 80 kB"]]

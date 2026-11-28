@@ -127,8 +127,12 @@ def taken_path(path: str, project_dir: str, cwd: str | None) -> str:
     """The absolute path a tool of Claude Code's was given, as Claude
     Code takes it (see as_written_to), one that is not absolute from the
     directory the session was in then (cwd, see working_dir): it can be
-    one next to the project, and is the project when none is known."""
-    return os.path.normpath(os.path.join(cwd or project_dir, as_written_to(path)))
+    one next to the project, and is the project when none is known. Two
+    slashes at its start are one: POSIX lets a system take them as it
+    likes, and normpath keeps them, but Claude Code takes //home/me/x as
+    /home/me/x, and so does Linux."""
+    taken = os.path.normpath(os.path.join(cwd or project_dir, as_written_to(path)))
+    return "/" + taken.lstrip("/") if taken.startswith("//") else taken
 
 
 def outside(path: str, project_dir: str, cwd: str | None) -> bool:

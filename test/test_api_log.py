@@ -906,7 +906,7 @@ class ApiLogTest(LauncherTest):
 
         def followed(by: follow.Follower) -> list[str]:
             found = follow.Round()
-            by._poll_notes(found)
+            by.network.poll_notes(found)
             return [event.fields["message_id"] for _, event in found.events]
 
         # Not before the moment the following began

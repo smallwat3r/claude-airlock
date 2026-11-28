@@ -3,11 +3,12 @@ was asked and called and at what cost, the programs run, the files
 written, where the sandboxes reached and what they sent there, what was
 flagged, and each session on its own. How it is shown is stats_shown.py's.
 
-What its transcripts give is counted as the header of a session's trace
-counts it (see summary.py), each session once. What the launcher recorded
-of the sandbox is in the trace of every session that ran at the time, a
-transcript does not say which container wrote it (see name_container), so
-each event of it is counted once, however many traces it is in.
+What its transcripts give is counted from the figures the header of a
+session's trace says them by (see Figures of summary.py), each session
+once. What the launcher recorded of the sandbox is in the trace of every
+session that ran at the time, a transcript does not say which container
+wrote it (see name_container), so each event of it is counted once,
+however many traces it is in.
 
 Names, paths and commands are the sessions' to write, any number of them:
 no more names of each kind are kept than MOST_KEPT, past which they are
@@ -25,7 +26,6 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from ..events import Event, Kind, Who, Wrong
-from .entries import entry_times, prompts, title
 from .net_events import (
     made_connection,
     opened_secret,
@@ -35,16 +35,7 @@ from .net_events import (
 )
 from .programs import programs
 from .session_trace import SessionTrace
-from .summary import (
-    Tokens,
-    call_outcomes,
-    calls_by_tool,
-    files_written,
-    pages_fetched,
-    session_cost,
-    tokens_used,
-)
-from .told import told_from_outside
+from .summary import Tokens
 from .wire import is_upload, to_the_model
 
 # Of each kind of thing counted by its name (a destination, a program, a
@@ -233,7 +224,10 @@ class Stats:
     last: datetime | None = None
     prompts: int = 0
     not_from_you: int = 0
-    calls: Counter[str] = field(default_factory=Counter)
+    calls: Tally[str] = field(default_factory=Tally)
+    # The calls of COMMAND_TOOL, which the commands are counted of: as
+    # many as there were, whether its name was kept among the calls or not
+    command_calls: int = 0
     failed: int = 0
     refused: int = 0
     tokens: Tokens = field(default_factory=Tokens)
@@ -247,29 +241,26 @@ class Stats:
 
     def add(self, session: str, traced: SessionTrace) -> None:
         """Add the trace of a session: what its transcripts give as its
-        header counts it, and what the launcher recorded that was not
-        counted yet."""
-        entries = traced.entries
-        times = entry_times(entries)
-        self.first = min([*times, *filter(None, [self.first])], default=None)
-        self.last = max([*times, *filter(None, [self.last])], default=None)
-        asked = len(prompts(entries))
-        self.prompts += asked
-        self.not_from_you += told_from_outside(entries).total()
-        by_tool = calls_by_tool(entries)
-        self.calls.update(by_tool)
-        outcomes = call_outcomes(entries)
-        self.failed += outcomes.failed
-        self.refused += outcomes.refused
-        self.tokens += tokens_used(entries)
-        cost = session_cost(entries)
-        if cost is not None:
-            self.cost += cost
+        header counts it (see Figures), and what the launcher recorded
+        that was not counted yet."""
+        figures = traced.figures
+        self.first = min(filter(None, [figures.first, self.first]), default=None)
+        self.last = max(filter(None, [figures.last, self.last]), default=None)
+        self.prompts += figures.prompts
+        self.not_from_you += figures.from_outside.total()
+        for tool, count in figures.calls.items():
+            self.calls.add(tool, calls=count)
+        self.command_calls += figures.calls[COMMAND_TOOL]
+        self.failed += figures.outcomes.failed
+        self.refused += figures.outcomes.refused
+        self.tokens += figures.tokens
+        if figures.cost is not None:
+            self.cost += figures.cost
             self.costed += 1
-        written = files_written(entries, traced.project_dir)
+        written = figures.written
         for path, count in written.counts.items():
             self.files.add(path, writes=count, outside=path in written.outside)
-        for host, count in pages_fetched(entries).items():
+        for host, count in figures.pages.items():
             self.pages.add(host, fetches=count)
         flags = Flags(
             injections=traced.planted,
@@ -287,13 +278,13 @@ class Stats:
         self.sessions.append(
             SessionLine(
                 session,
-                max(times, default=None),
-                asked,
-                by_tool.total(),
-                outcomes.failed,
-                cost,
+                figures.last,
+                figures.prompts,
+                figures.calls.total(),
+                figures.outcomes.failed,
+                figures.cost,
                 flags.total(),
-                title(entries),
+                traced.title,
             )
         )
 

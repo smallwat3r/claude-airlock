@@ -7,7 +7,7 @@ from __future__ import annotations
 from claude_airlock.events import Event
 from claude_airlock.recording.procwatch import Secrets
 from claude_airlock.recording.secrets import session_secrets
-from claude_airlock.report import transcript
+from claude_airlock.report import summary, transcript
 from claude_airlock.report.transcript import WalkOptions
 from claude_airlock.settings import CONTAINER_HOME, Host, Settings
 
@@ -174,3 +174,10 @@ def events(
     those secrets flagged, none without any."""
     options = WalkOptions(verbose, secrets=secrets)
     return transcript.left_events(entries, [], PROJECT, options)
+
+
+def overview(entries: list[dict], planted: int = 0) -> dict[str, str]:
+    """The session at a glance, as the header of its trace says it with
+    so much of what it read showing a sign, see overview of summary.py."""
+    figures = summary.session_figures(entries, PROJECT)
+    return dict(summary.overview(entries, planted, figures))

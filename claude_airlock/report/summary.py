@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import operator
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
+from datetime import datetime
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
@@ -288,12 +289,56 @@ def call_outcomes(entries: list[dict]) -> CallOutcomes:
     )
 
 
-def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
-    """The session at a glance, as labelled values: what ran it, when, at
-    what cost, how many calls and how many of them failed. With how many
-    of what it read show signs of being planted, as its events count them
-    (see planted_shown)."""
+@dataclass(frozen=True)
+class Figures:
+    """What the transcripts of a session come to, worked out once from
+    their entries: when the first and the last of them were written, how
+    many prompts the user gave, those that came from outside the session
+    by where from (see told_from_outside), the calls of each tool and how
+    they ended, what the steps of the model used, what Claude Code says
+    the session cost, the files it wrote and the hosts it fetched pages
+    from. What the header of its trace says of it (see summary) and what
+    --trace stats sums of it (see Stats.add), which then agree."""
+
+    first: datetime | None
+    last: datetime | None
+    prompts: int
+    from_outside: Counter[str]
+    calls: Counter[str]
+    outcomes: CallOutcomes
+    tokens: Tokens
+    cost: float | None
+    written: Written
+    pages: Counter[str]
+
+
+def session_figures(entries: list[dict], project_dir: str) -> Figures:
+    """The figures of the entries of a session's transcripts, see Figures,
+    the files it wrote outside its project among them."""
+    # Not the first and the last: the order of the entries is the
+    # session's to choose
     times = entry_times(entries)
+    return Figures(
+        min(times, default=None),
+        max(times, default=None),
+        len(prompts(entries)),
+        told_from_outside(entries),
+        calls_by_tool(entries),
+        call_outcomes(entries),
+        tokens_used(entries),
+        session_cost(entries),
+        files_written(entries, project_dir),
+        pages_fetched(entries),
+    )
+
+
+def overview(
+    entries: list[dict], planted: int, figures: Figures
+) -> list[tuple[str, str]]:
+    """The session at a glance, as labelled values: what ran it, when, at
+    what cost, how many calls and how many of them failed, by the figures
+    of its entries. With how many of what it read show signs of being
+    planted, as its events count them (see planted_shown)."""
     cost = _cost_state(entries)
 
     def seen(key: str) -> str:
@@ -310,25 +355,21 @@ def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
         ("model", _listed(model for model in models if model != "<synthetic>")),
         ("permissions", seen("permissionMode")),
     ]
-    if times:
-        # Not the first and the last: the order of the entries is the
-        # session's to choose
-        first, last_time = min(times), max(times)
+    first, last_time = figures.first, figures.last
+    if first is not None and last_time is not None:
         minutes = int((last_time - first).total_seconds() // 60)
         span = f"{first:%Y-%m-%d %H:%M} to {last_time:%H:%M} ({minutes} min)"
         rows.append(("when", f"{span}, times are {first:%Z}"))
-    spent = session_cost(entries)
-    if spent is not None:
-        rows.append(("cost", f"${spent:.2f}"))
+    if figures.cost is not None:
+        rows.append(("cost", f"${figures.cost:.2f}"))
     if "totalLinesAdded" in cost:
         added, removed = cost.get("totalLinesAdded"), cost.get("totalLinesRemoved")
         rows.append(("lines", flat(f"+{added} -{removed}")[:PREVIEW_WIDTH]))
-    rows.append(("prompts", _prompts_said(entries)))
-    used = tokens_used(entries)
-    if used.steps:
-        rows.append(("tokens", tokens_said(used)))
-    rows.append(("tool calls", tools_said(calls_by_tool(entries))))
-    failed, not_run = call_outcomes(entries)
+    rows.append(("prompts", _prompts_said(figures)))
+    if figures.tokens.steps:
+        rows.append(("tokens", tokens_said(figures.tokens)))
+    rows.append(("tool calls", tools_said(figures.calls)))
+    failed, not_run = figures.outcomes
     rows.append(("failed", str(failed)))
     if not_run:
         rows.append(("refused", f"{not_run} calls were not allowed to run"))
@@ -340,18 +381,27 @@ def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
 def tools_said(by_tool: Counter[str]) -> str:
     """How many calls there are, then of the tools called most how many
     of each, the most first."""
-    named = by_tool.most_common(MOST_NAMED)
-    counts = ", ".join(f"{name} {count}" for name, count in named)
-    if len(by_tool) > len(named):
-        counts += f", and {len(by_tool) - len(named)} more"
-    return f"{by_tool.total()} ({counts})" if by_tool else "0"
+    return calls_said(by_tool.total(), by_tool.most_common())
 
 
-def _prompts_said(entries: list[dict]) -> str:
+def calls_said(total: int, ranked: Sequence[tuple[str, int]], past: str = "") -> str:
+    """How many calls there are, total, then of the tools ranked (each
+    with its calls, the most first) how many of each of those called
+    most, how many more tools there are, and past, what is to be said of
+    the calls of tools not ranked at all."""
+    named = ranked[:MOST_NAMED]
+    counts = [f"{name} {count}" for name, count in named]
+    if len(ranked) > len(named):
+        counts.append(f"and {len(ranked) - len(named)} more")
+    counts += [past] if past else []
+    return f"{total} ({', '.join(counts)})" if counts else "0"
+
+
+def _prompts_said(figures: Figures) -> str:
     """How many prompts the user gave, and how many came from outside
     the session, by where they came from, see told_from_outside."""
-    said = str(len(prompts(entries)))
-    away = told_from_outside(entries)
+    said = str(figures.prompts)
+    away = figures.from_outside
     if not away:
         return said
     # The most first, then by name
@@ -385,13 +435,13 @@ def files_written(entries: list[dict], project_dir: str) -> Written:
     )
 
 
-def _files_written(entries: list[dict], project_dir: str) -> list[str]:
+def _files_written(written: Written) -> list[str]:
     """Each file the session wrote and how often, flagged when it is
     outside the project, see files_written. No more than MOST_NAMED, then
     how many more, those outside first: a session can write any number."""
-    written, away = files_written(entries, project_dir)
-    lines = ["files written"] if written else []
-    paths = sorted(written.items(), key=lambda item: (item[0] not in away, item[0]))
+    counts, away = written
+    lines = ["files written"] if counts else []
+    paths = sorted(counts.items(), key=lambda item: (item[0] not in away, item[0]))
     for path, count in paths[:MOST_NAMED]:
         flag = OUTSIDE_FLAG if path in away else ""
         lines.append(f"  {shortened(flat(path))} x{count}{flag}")
@@ -415,10 +465,9 @@ def pages_fetched(entries: list[dict]) -> Counter[str]:
     return Counter(_url_host(url) for url in urls if isinstance(url, str))
 
 
-def _pages_fetched(entries: list[dict]) -> list[str]:
+def _pages_fetched(hosts: Counter[str]) -> list[str]:
     """Each host the session fetched a page from with its tools, no more
     than MOST_NAMED, then how many more."""
-    hosts = pages_fetched(entries)
     lines = ["pages fetched"] if hosts else []
     named = sorted(hosts.items())[:MOST_NAMED]
     lines += [f"  {shortened(flat(host))} x{count}" for host, count in named]
@@ -451,19 +500,27 @@ def _untold_rows(entries: list[dict]) -> list[tuple[str, str]]:
 
 
 def summary(
-    entries: list[dict], project_dir: str, planted: int, flagged: Flagged = Flagged()
+    entries: list[dict],
+    project_dir: str,
+    planted: int,
+    flagged: Flagged = Flagged(),
+    figures: Figures | None = None,
 ) -> list[str]:
     """What to know before reading on. planted as for overview, flagged
-    as the events count the calls that were, see flagged_shown."""
+    as the events count the calls that were, see flagged_shown, and the
+    figures of the entries as the trace worked them out, from the entries
+    when they are not given."""
+    if figures is None:
+        figures = session_figures(entries, project_dir)
     rows = [
         ("project", flat(project_dir)),
-        *overview(entries, planted),
+        *overview(entries, planted, figures),
         *_flagged_rows(flagged),
         *_untold_rows(entries),
     ]
     return [
         *(labelled(name, value) for name, value in rows),
         *instructions_read(entries),
-        *_files_written(entries, project_dir),
-        *_pages_fetched(entries),
+        *_files_written(figures.written),
+        *_pages_fetched(figures.pages),
     ]

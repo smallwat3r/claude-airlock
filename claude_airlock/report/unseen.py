@@ -1,6 +1,6 @@
 """The commands of a transcript that no process was seen of.
 
-The watcher of a session looks, it is not told (see procwatch.py): a
+The watcher of a session looks, it is not told (see procwatch/watcher.py): a
 process that lived shorter than the time between two looks is not in its
 record, and neither is what that process started and waited for. A trace
 then has the command, from the transcript, and nothing of what it ran,

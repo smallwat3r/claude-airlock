@@ -795,7 +795,7 @@ class ProcessTail:
     said from the file it is said to, path: how the session is doing,
     each connection and each socket that waits for them with the
     processes that hold it, the files of secrets they open, and those
-    processes (see procwatch.py). A line still being written is taken
+    processes (see procwatch/watcher.py). A line still being written is taken
     once it is whole, see said_since of processes.py."""
 
     def __init__(self, session: str, path: str) -> None:

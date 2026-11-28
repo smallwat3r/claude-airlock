@@ -30,7 +30,7 @@ from .stats import (
     Tally,
     by,
 )
-from .summary import tokens_said, tools_said
+from .summary import calls_said, tokens_said
 
 # Of each kind of name, how many the text names, the most first
 MOST_SHOWN = 10
@@ -75,6 +75,7 @@ def stats_json(stats: Stats) -> str:
     with its counts, and how many were counted past those."""
     network = stats.network
     tallies: dict[str, Tally] = {
+        "calls": stats.calls,
         "commands": stats.commands,
         "files_written": stats.files,
         "pages_fetched": stats.pages,
@@ -92,7 +93,9 @@ def stats_json(stats: Stats) -> str:
         "sessions": len(stats.sessions),
         "prompts": stats.prompts,
         "not_from_you": stats.not_from_you,
-        "calls": dict(stats.calls.most_common()),
+        "calls": {
+            tool: counts["calls"] for tool, counts in stats.calls.most(by("calls"))
+        },
         "failed": stats.failed,
         "refused": stats.refused,
         "tokens": asdict(stats.tokens),
@@ -143,7 +146,7 @@ def _calls_lines(stats: Stats) -> list[str]:
         asked += f", and {stats.not_from_you} NOT FROM YOU"
     lines = [
         labelled("prompts", asked),
-        labelled("tool calls", tools_said(stats.calls)),
+        labelled("tool calls", _tools_said(stats.calls)),
         labelled("failed", str(stats.failed)),
     ]
     if stats.refused:
@@ -160,6 +163,17 @@ def _calls_lines(stats: Stats) -> list[str]:
     return lines + ([labelled("flagged", flagged)] if flagged else [])
 
 
+def _tools_said(calls: Tally[str]) -> str:
+    """How many calls there are and of which tools, as the header of a
+    trace says it (see tools_said), and how often tools were counted past
+    the names kept."""
+    ranked = [(tool, counts["calls"]) for tool, counts in calls.most(by("calls"))]
+    past = ""
+    if calls.left_out:
+        past = f"and {calls.left_out} counted past the {calls.most_kept} kept"
+    return calls_said(calls.totals["calls"], ranked, past)
+
+
 def _flags_said(flags: Flags) -> str:
     """What was flagged, empty for nothing."""
     counts = asdict(flags)
@@ -173,7 +187,7 @@ def _named_lines(stats: Stats) -> list[str]:
     """The programs run, the files written and the pages fetched most."""
     lines = []
     if stats.commands:
-        calls = stats.calls[COMMAND_TOOL]
+        calls = stats.command_calls
         said = f"by the programs they run, of {calls} calls of {COMMAND_TOOL}"
         listed = _listed(stats.commands, by("calls"), _program_said)
         lines += [labelled("commands", said), *listed]
