@@ -13,10 +13,15 @@ from dataclasses import dataclass
 from ..events import flat, labelled
 from ..report import brief
 from ..report.entries import INPUT_TOKENS, content_blocks, measured
+from ..report.layout import BOLD, BRIGHT_GREEN, together
 from .console import Page
 from .drift import Drift
 from .said import NAME_KEPT, keep_open, kept_id, own
 
+# Said once a turn is over, and how in colour: bold bright green, see
+# ready_line of listener.py
+READY = labelled("ready", "claude has finished, waiting for your input")
+READY_STYLE = together(BOLD, BRIGHT_GREEN)
 # Seconds claude takes no step before a line says that the turn still
 # runs, and the most between two such lines: the wait is doubled after
 # each. At a terminal the line is one, said again in its place every

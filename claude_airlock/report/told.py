@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..events import Event, Kind, Who, Wrong, clean, flat
+from ..oldest import forget_oldest
 from .brief import PREVIEW_WIDTH, TALK_LINES, amount, between, clip, shortened
 from .entries import (
     MOST_LISTED,
@@ -474,7 +475,7 @@ class Asides:
         if removed:
             lines.append("MCP server instructions gone: " + ", ".join(removed))
         # Not named removed: that is what an event says of itself when it
-        # was taken out of the transcript, see removed_events of trace.py
+        # was taken out of the transcript, see removed_events of session_trace.py
         fields = {"kind": "mcp_instructions", "added": added, "gone": removed}
         return [Event(when, who, Kind.CONTEXT, lines, fields)] if lines else []
 
@@ -543,43 +544,12 @@ class Asides:
         return []
 
     def _api_error(self, entry: dict, when: float, who: Who) -> list[Event]:
-        """A request the API did not answer, or answered with an error,
-        which Claude Code tries again."""
-        error = entry.get("error")
-        about = error if isinstance(error, dict) else {"message": error}
-        said = about.get("formatted") or about.get("message")
-        why = (
-            shortened(flat(said))
-            if isinstance(said, str) and said
-            else "no reason given"
-        )
-        line = f"API error: {why}"
-        fields: dict = {"error": why}
-        wait = seconds(entry.get("retryInMs"))
-        attempt, most = (
-            counted(entry.get("retryAttempt")),
-            counted(entry.get("maxRetries")),
-        )
-        if wait is not None:
-            line += f", tried again after {wait:.1f}s"
-            fields["retry_in"] = wait
-        if attempt:
-            line += f" (retry {attempt}" + (f" of {most})" if most else ")")
-            fields.update(retry=attempt, retries=most)
-        return [Event(when, who, Kind.API, [line], fields, wrong=Wrong.THROUGHOUT)]
+        """A request the API did not answer, see api_error_event."""
+        return [api_error_event(entry, when, who)]
 
     def _compacted(self, entry: dict, when: float, who: Who) -> list[Event]:
-        """The conversation was summed up to make room: what the model
-        knows of what came before is from then on the summary."""
-        given = entry.get("compactMetadata") or entry.get("compact_metadata")
-        about = given if isinstance(given, dict) else {}
-        trigger = flat(about.get("trigger") or "")[:PREVIEW_WIDTH]
-        before = counted(about.get("preTokens", about.get("pre_tokens")))
-        line = "the conversation was compacted" + (f" ({trigger})" if trigger else "")
-        if before:
-            line += f", {amount(before)} tokens before"
-        fields = {"trigger": trigger or None, "pre_tokens": before}
-        return [Event(when, who, Kind.COMPACT, [line], fields)]
+        """The conversation was compacted, see compacted_event."""
+        return [compacted_event(entry, when, who)]
 
     def _mode_set(self, entry: dict, when: float, _who: Who) -> list[Event]:
         """The permission mode of the session, an event when it is another
@@ -647,17 +617,9 @@ class Asides:
         ]
 
     def _memory_saved(self, entry: dict, when: float, who: Who) -> list[Event]:
-        """Files Claude Code wrote to its memory, which a later session
-        of the project is given."""
-        paths = [
-            path for path in every(entry.get("writtenPaths")) if isinstance(path, str)
-        ]
-        if not paths:
-            return []
-        lines = [f"saved: {shortened(flat(path))}" for path in paths[:MOST_LISTED]]
-        if len(paths) > MOST_LISTED:
-            lines.append(f"saved: ... {len(paths) - MOST_LISTED} more")
-        return [Event(when, who, Kind.MEMORY, lines, {"paths": paths})]
+        """Files written to the memory, see memory_saved_event."""
+        event = memory_saved_event(entry, when, who)
+        return [event] if event else []
 
     def _bridged(self, entry: dict, when: float, who: Who) -> list[Event]:
         """Remote Control was switched on: whoever has the claude.ai
@@ -724,51 +686,143 @@ class Asides:
         return [Event(when, who, Kind.PUBLISHED, [line], fields)]
 
     def _denied(self, entry: dict, when: float, who: Who) -> list[Event]:
-        """A call the permissions refused, as Claude Code noted it apart
-        from its result: of which tool, and why. Gone wrong throughout."""
-        tool = kept(entry.get("tool_name"))
-        why = entry.get("decision_reason") or entry.get("message")
-        reason = shortened(flat(why)) if isinstance(why, str) and why else ""
-        line = f"permission DENIED: {shortened(flat(tool)) or '?'}"
-        fields = {
-            # Not named tool: no other event than a call has that, see
-            # call_event of calls.py
-            "denied_tool": tool,
-            "call": kept(entry.get("tool_use_id")),
-            "reason": why if isinstance(why, str) else None,
-        }
-        line += f": {reason}" if reason else ""
-        return [Event(when, who, Kind.MODE, [line], fields, wrong=Wrong.THROUGHOUT)]
+        """A call the permissions refused, see denied_event."""
+        return [denied_event(entry, when, who)]
 
     def _fell_back(self, entry: dict, when: float, who: Who) -> list[Event]:
-        """Claude Code went on with another model than the one asked for:
-        when that one failed, or refused the request, which is gone
-        wrong."""
-        was, model = kept(entry.get("originalModel")), kept(entry.get("fallbackModel"))
-        trigger = kept(entry.get("trigger"))
-        refused = (
-            entry.get("subtype") == "model_refusal_fallback" or trigger == "refusal"
+        """Another model gone on with, see fell_back_event."""
+        return [fell_back_event(entry, when, who)]
+
+
+# The events below are of what the transcript and what Claude Code says
+# over the pipe both tell, which line mode tells from the pipe as it
+# comes (see notices.py of chat): each made of a mapping in either shape,
+# the entry of the transcript or the message of the pipe, which name the
+# same in their own way, see _either.
+
+# Of what was done to a memory, no word longer than this is taken
+VERB_WIDTH = 20
+
+
+def _either(said: dict, *keys: str) -> object:
+    """The value of the first of keys that a mapping has, none when it
+    has none of them: as a transcript names it (retryInMs), and as
+    Claude Code says it over the pipe (retry_delay_ms)."""
+    return next((said[key] for key in keys if key in said), None)
+
+
+def api_error_event(said: dict, when: float, who: Who) -> Event:
+    """A request the API did not answer, or answered with an error,
+    which Claude Code tries again: as a transcript notes it (api_error),
+    or as Claude Code says it over the pipe (api_retry), of a subagent
+    too, whose error is the kind it was of. Gone wrong throughout."""
+    error = _either(said, "error", "error_category")
+    about = error if isinstance(error, dict) else {"message": error}
+    told = about.get("formatted") or about.get("message")
+    why = shortened(flat(told)) if isinstance(told, str) and told else "no reason given"
+    line = f"API error: {why}"
+    fields: dict = {"error": why}
+    wait = seconds(_either(said, "retryInMs", "retry_delay_ms"))
+    attempt = counted(_either(said, "retryAttempt", "attempt"))
+    most = counted(_either(said, "maxRetries", "max_retries"))
+    if wait is not None:
+        line += f", tried again after {wait:.1f}s"
+        fields["retry_in"] = wait
+    if attempt:
+        line += f" (retry {attempt}" + (f" of {most})" if most else ")")
+        fields.update(retry=attempt, retries=most)
+    return Event(when, who, Kind.API, [line], fields, wrong=Wrong.THROUGHOUT)
+
+
+def compacted_event(said: dict, when: float, who: Who) -> Event:
+    """The conversation was summed up to make room: what the model knows
+    of what came before is from then on the summary. With how many
+    tokens it held before, and after when that is said."""
+    given = said.get("compactMetadata") or said.get("compact_metadata")
+    about = given if isinstance(given, dict) else {}
+    trigger = flat(about.get("trigger") or "")[:PREVIEW_WIDTH]
+    before = counted(_either(about, "preTokens", "pre_tokens"))
+    after = counted(_either(about, "postTokens", "post_tokens"))
+    line = "the conversation was compacted" + (f" ({trigger})" if trigger else "")
+    if before:
+        line += f", {amount(before)} tokens before"
+        line += f", {amount(after)} after" if after is not None else ""
+    fields = {"trigger": trigger or None, "pre_tokens": before, "post_tokens": after}
+    return Event(when, who, Kind.COMPACT, [line], fields)
+
+
+def memory_saved_event(said: dict, when: float, who: Who) -> Event | None:
+    """Files Claude Code wrote to its memory, which a later session of
+    the project is given, each with what was done to it when that is
+    said (updated), none when no file is named."""
+    paths = [
+        path
+        for path in every(_either(said, "writtenPaths", "written_paths"))
+        if isinstance(path, str)
+    ]
+    if not paths:
+        return None
+    verb = _verb(said.get("verb")) or "saved"
+    lines = [f"{verb}: {shortened(flat(path))}" for path in paths[:MOST_LISTED]]
+    if len(paths) > MOST_LISTED:
+        lines.append(f"{verb}: ... {len(paths) - MOST_LISTED} more")
+    return Event(when, who, Kind.MEMORY, lines, {"paths": paths})
+
+
+def _verb(said: object) -> str:
+    """What was done to a memory as Claude Code says it (Updated), in
+    small letters, empty for what is no word of so many letters."""
+    if not isinstance(said, str) or len(said) > VERB_WIDTH:
+        return ""
+    return said.lower() if said.isascii() and said.isalpha() else ""
+
+
+def denied_event(said: dict, when: float, who: Who) -> Event:
+    """A call the permissions refused, as Claude Code noted it apart
+    from its result: of which tool, and why. Gone wrong throughout."""
+    tool = kept(said.get("tool_name"))
+    why = said.get("decision_reason") or said.get("message")
+    reason = shortened(flat(why)) if isinstance(why, str) and why else ""
+    line = f"permission DENIED: {shortened(flat(tool)) or '?'}"
+    fields = {
+        # Not named tool: no other event than a call has that, see
+        # call_event of calls.py
+        "denied_tool": tool,
+        "call": kept(said.get("tool_use_id")),
+        "reason": why if isinstance(why, str) else None,
+    }
+    line += f": {reason}" if reason else ""
+    return Event(when, who, Kind.MODE, [line], fields, wrong=Wrong.THROUGHOUT)
+
+
+def fell_back_event(said: dict, when: float, who: Who) -> Event:
+    """Claude Code went on with another model than the one asked for:
+    when that one failed, or refused the request, which is gone
+    wrong."""
+    was = kept(_either(said, "originalModel", "original_model"))
+    model = kept(_either(said, "fallbackModel", "fallback_model"))
+    trigger = kept(said.get("trigger"))
+    refused = said.get("subtype") == "model_refusal_fallback" or trigger == "refusal"
+    line = f"{shortened(flat(model)) or '?'}  was: {shortened(flat(was)) or '?'}"
+    category = kept(_either(said, "apiRefusalCategory", "api_refusal_category"))
+    if refused:
+        line += ", the model REFUSED the request" + (
+            f" ({shortened(flat(category))})" if category else ""
         )
-        line = f"{shortened(flat(model)) or '?'}  was: {shortened(flat(was)) or '?'}"
-        category = kept(entry.get("apiRefusalCategory"))
-        if refused:
-            line += ", the model REFUSED the request" + (
-                f" ({shortened(flat(category))})" if category else ""
-            )
-        elif trigger:
-            line += f", fell back: {shortened(flat(trigger))}"
-        fields = {
-            "model": model,
-            "was_model": was,
-            "trigger": trigger,
-            "refused": refused,
-            "category": category or None,
-        }
-        event = Event(when, who, Kind.MODEL, [line], fields)
-        if refused:
-            event.alerts.add(0)
-            event.went_wrong()
-        return [event]
+    elif trigger:
+        line += f", fell back: {shortened(flat(trigger))}"
+    fields = {
+        "model": model,
+        "was_model": was,
+        "trigger": trigger,
+        "refused": refused,
+        "category": category or None,
+    }
+    event = Event(when, who, Kind.MODEL, [line], fields)
+    if refused:
+        event.alerts.add(0)
+        event.went_wrong()
+    return event
 
 
 # What reads the entries of each kind that Asides tells of: of an
@@ -820,8 +874,7 @@ def _remember[K, V](remembered: dict[K, V], key: K, value: V) -> None:
     MOST_REMEMBERED: what is forgotten is told again."""
     remembered.pop(key, None)
     remembered[key] = value
-    while len(remembered) > MOST_REMEMBERED:
-        del remembered[next(iter(remembered))]
+    forget_oldest(remembered, MOST_REMEMBERED)
 
 
 def _model_shown(model: str, effort: str) -> str:

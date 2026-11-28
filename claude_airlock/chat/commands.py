@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from ..errors import Fatal
 from ..events import flat, labelled
 from ..report.entries import session_files, sessions_named
-from ..report.trace import session_rows
+from ..report.session_list import session_rows
 from ..settings import Host, variable
 from .console import Page
 from .said import Session, is_number, is_session_id

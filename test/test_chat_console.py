@@ -13,34 +13,37 @@ import pytest
 from chat_harness import written
 from harness import LauncherTest
 
-from claude_airlock.chat import console, talk
+from claude_airlock.chat import console
+from claude_airlock.chat import listener as listening
 from claude_airlock.chat import screen as screens
 from claude_airlock.chat import tasks as tasking
+from claude_airlock.chat import turn as turning
 from claude_airlock.events import Event, Who
 from claude_airlock.report.layout import Layout
 
 
 class ConsoleTest(LauncherTest):
     def test_the_end_of_a_turn_is_said_in_bright_green_in_colour(self):
-        assert talk.ready_line(Layout()) == f"# {talk.READY}"
+        assert listening.ready_line(Layout()) == f"# {turning.READY}"
         assert (
-            talk.ready_line(Layout(colour=True)) == f"\x1b[1;92m# {talk.READY}\x1b[0m"
+            listening.ready_line(Layout(colour=True))
+            == f"\x1b[1;92m# {turning.READY}\x1b[0m"
         )
 
     def test_a_turn_that_ends_with_tasks_still_running_says_so(self):
-        one = talk.ready_line(Layout(), tasking.Running(others=1))
-        two = talk.ready_line(Layout(), tasking.Running(others=2))
+        one = listening.ready_line(Layout(), tasking.Running(others=1))
+        two = listening.ready_line(Layout(), tasking.Running(others=2))
         assert "claude has paused, 1 task still runs" in one
         assert "claude has paused, 2 tasks still run" in two
         assert "has finished" not in one
         assert one.startswith("# ready ")
         # Its subagents are named as that, next to what else it left
         agent = tasking.Task("Map the code", agent=True)
-        both = talk.ready_line(Layout(), tasking.Running((agent, agent), (), 1))
+        both = listening.ready_line(Layout(), tasking.Running((agent, agent), (), 1))
         assert "claude has paused, 2 agents and 1 task still run, it goes" in both
         # Not one that has ended
-        ended = talk.ready_line(Layout(), tasking.Running(ended=(agent,)))
-        assert ended == f"# {talk.READY}"
+        ended = listening.ready_line(Layout(), tasking.Running(ended=(agent,)))
+        assert ended == f"# {turning.READY}"
 
     def test_a_word_is_completed_to_a_command_or_a_file_of_the_project(self):
         (self.project / "src").mkdir()

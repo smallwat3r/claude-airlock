@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..events import flat
+from ..oldest import forget_oldest
 from ..projects import transcript_dirs
 from ..report.entries import content_blocks
+from ..report.transcript import ID_WIDTH
 from ..settings import Host
 from .drift import Drift
 
@@ -21,9 +23,6 @@ MOST_LISTED = 1000
 # model, its mode, its version: they are shown above the prompt. Nor of
 # the name of a tool it called
 NAME_KEPT = 100
-# An id longer than this is none: ids are kept, and a line of claude's can
-# be as long as the session cares to make it
-ID_WIDTH = 200
 # The calls without a result yet that are kept, a session can make any
 # number of them
 MOST_OPEN = 1000
@@ -41,7 +40,10 @@ def is_number(typed: str) -> bool:
 
 def kept_id(value: object) -> str | None:
     """An id claude gives, of a call or a task, as it is kept: none for
-    what is no text, or is empty or longer than ID_WIDTH."""
+    what is no text, or is empty or longer than ID_WIDTH. An id longer
+    than that is none: ids are kept, and a line of claude's can be as
+    long as the session cares to make it. A trace keeps such an id as
+    what it hashes to instead, see bounded_id of transcript.py."""
     return value if isinstance(value, str) and 0 < len(value) <= ID_WIDTH else None
 
 
@@ -55,8 +57,7 @@ def keep_open[T](calls: dict[str, T], call: str, kept: T) -> None:
     """Keep what a call without a result yet is remembered by, under its
     id, the oldest let go of past MOST_OPEN."""
     calls[call] = kept
-    while len(calls) > MOST_OPEN:
-        del calls[next(iter(calls))]
+    forget_oldest(calls, MOST_OPEN)
 
 
 def is_session_id(value: object) -> bool:

@@ -374,6 +374,15 @@ def task_over(task: str, status: str = "completed", **more) -> dict:
 USED = {"total_tokens": 20502, "tool_uses": 2, "duration_ms": 2521}
 
 
+# When an event happened, as a line of it starts with in a file
+CLOCK = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d  ")
+
+
+def untimed(lines: list[str]) -> list[str]:
+    """Lines as they were written, without when, of those of an event."""
+    return [CLOCK.sub("", line) for line in lines]
+
+
 def lines_now(lines: list[str]) -> str:
     """What was written so far, where written gives it at its end."""
     assert isinstance(sys.stdout, io.StringIO)

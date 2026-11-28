@@ -116,6 +116,29 @@ class PipeTest:
             assert sent[0]
             assert not sent[-1]
 
+    def test_an_answer_is_said_however_much_else_waits_to_be(self):
+        # Claude played by what never reads what it is told, and as much
+        # waits to be said as may: what claude asked is answered all the
+        # same, it waits for that. Until as many answers wait too, which
+        # is said, the answer is not let go of without a word
+        with (
+            unittest.mock.patch.object(pipe, "SAID_BACKLOG", 4),
+            unittest.mock.patch.object(pipe, "ANSWERS_ROOM", 3),
+            played("sleep", "30") as agent,
+        ):
+            large = {"text": "x" * (1 << 20)}
+            sent = [agent.send(large) for _ in range(8)]
+            assert sent[0]
+            assert not sent[-1]
+            assert agent.respond("r1", {"behavior": "allow"})
+            assert agent.refuse("r2", "no")
+            # The room kept for answers is not taken by what else is told
+            assert not agent.send({"type": "small"})
+            answered = [agent.refuse(f"r{n}", "no") for n in range(3, 8)]
+            assert answered[0]
+            assert not answered[-1]
+            assert not agent.respond("r8", {"behavior": "allow"})
+
     def test_a_line_that_holds_too_much_once_read_is_not_taken_in(self):
         small = b'{"type": "x"}\n'
         assert files.held_size(small) >= len(small)

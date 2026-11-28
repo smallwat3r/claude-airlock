@@ -15,6 +15,7 @@ from chat_harness import (
     page,
     system,
     task_over,
+    untimed,
     written,
 )
 
@@ -34,7 +35,16 @@ class NoticesTest:
             said.system(system("status", status="compacting"))
             about = {"pre_tokens": 29232, "post_tokens": 7898}
             said.system(system("compact_boundary", compact_metadata=about))
-            said.system(system("api_retry", error="overloaded\x1b[2J"))
+            said.system(
+                system(
+                    "api_retry",
+                    error="overloaded\x1b[2J",
+                    attempt=1,
+                    max_retries=10,
+                    retry_delay_ms=531,
+                    error_status=529,
+                )
+            )
             # Of a subagent, which its transcript does not have, as claude
             # says it once each time. Not how long a call has run
             retry = {"agent_id": "a1", "attempt": 1, "max_retries": 10}
@@ -52,11 +62,14 @@ class NoticesTest:
             assert (still_running, started.running.others) == (1, 0)
             said.system(system("task_notification", task_id=["x"]))
             said.cleared()
-        assert lines == [
+        # What a trace tells too is the event it has for it
+        compacted = "the conversation was compacted, 29.2k tokens before, 7.9k after"
+        retried = "API error: overloaded[2J, tried again after 0.5s (retry 1 of 10)"
+        assert untimed(lines) == [
             "# chat        compacting the conversation",
-            "# chat        the conversation was compacted, 29.2k tokens to 7.9k",
-            "# chat        the API did not answer, trying again  overloaded[2J",
-            "# chat        the API did not answer a subagent, trying again  rate_limit",
+            f"claude   compact     {compacted}",
+            f"claude   api         {retried}",
+            "agent    api         API error: rate_limit (retry 1 of 10)",
             "# task        started: Run it",
             "# task        completed: Run it",
             "# chat        a new conversation, the one before is cleared",
@@ -132,23 +145,29 @@ class NoticesTest:
             # What is not what it should be says no more than it holds
             said.system(system("memory_saved", written_paths="x", verb=["x"]))
             said.system(system("permission_denied", tool_name={"x": 1}))
-        listed = ", ".join(paths[:3])
         other = "a message of another session"
-        assert lines == [
+        chats = [
             f"# {labelled('chat', said)}"
             for said in (
-                "claude refused bash without asking: denied by a rule[2J",
-                "claude refused webfetch of a subagent without asking: Permission denied.",
-                "claude-opus-5-5 failed (overloaded), this turn goes on with claude-fable-5-2",
                 "plugin install: started",
                 "plugin m install: failed, no\\nway",
-                f"claude updated 5 memories to {listed} and 2 more",
-                f"claude saved 1 memory to {paths[0]}",
                 f"{other} said to be from other (socket): held, mode-mismatch",
                 f"{other} (bridge): dropped, expired",
-                "claude saved 0 memories",
-                "claude refused a tool without asking",
             )
+        ]
+        # What a trace tells too is the event it has for it, a subagent's
+        # with who it is of, and what is not what it should be says no
+        # more than it holds
+        fell_back = "claude-fable-5-2  was: claude-opus-5-5, fell back: overloaded"
+        assert untimed(lines) == [
+            "claude   mode        permission DENIED: Bash: denied by a rule[2J",
+            "agent    mode        permission DENIED: WebFetch: Permission denied.",
+            f"claude   model       {fell_back}",
+            *chats[:2],
+            *(f"claude   memory      updated: {path}" for path in paths),
+            f"claude   memory      saved: {paths[0]}",
+            *chats[2:],
+            "claude   mode        permission DENIED: ?",
         ]
         assert {"init", "hook_started", "memory_saved"} <= said.known
 

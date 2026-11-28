@@ -24,6 +24,9 @@ POLL = 0.5
 IDLE_POLL = 2.0
 # Seconds a turn that is over is given for its last lines to be written
 SETTLE = 3.0
+# Seconds the call claude asks about is given to be written, before the
+# question is put, and the call a turn is stopped for, before why
+ASK_SETTLE = 1.0
 # What a chat shows whole of what the transcript has, see said_whole
 READ_WHOLE = (Kind.COMMAND,)
 
@@ -34,9 +37,9 @@ def _always(_event: Event) -> bool:
 
 
 # Of the events of the transcript, by their kind, whether one is what
-# claude told the chat of as it happened, which the chat says in its own
-# words (see notices.py), or notes itself (see changes.py), by the fields
-# told.py gives it. A request the API did not answer, which claude says
+# claude told the chat of as it happened, which the chat tells as the
+# same event made of what claude said (see notices.py), or notes itself
+# (see changes.py), by the fields told.py gives it. A request the API did not answer, which claude says
 # with an api_retry for each api_error. A task, but not one of the
 # schedule that fired, a turn that no user started, which notices.py
 # passes over. A call refused without asking the user, not a change of

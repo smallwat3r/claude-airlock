@@ -26,7 +26,9 @@ cleaned before they are shown, and the id claude gives for its session is
 not made a path of before it is seen to be one.
 
 The conversation itself, the threads it takes and how it ends, is in
-talk.py. What a chat does itself with a line (/mode, /resume, !COMMAND)
+talk.py, what it does with each thing claude says in listener.py, and
+what stops a turn for what claude was given to read in guard.py. What a
+chat does itself with a line (/mode, /resume, !COMMAND)
 is in commands.py and shell.py, what it says of claude's doings besides
 answering in notices.py, and of the tasks claude started, how many of
 its subagents run and how far each is, in tasks.py. What the egress

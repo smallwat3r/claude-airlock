@@ -66,15 +66,17 @@ and CPU the sandbox uses](img/line-mode.png)
   FILE`). Remote Control switched on, in red, and what it published.
 - A change of permission mode or model, the conversation being
   compacted, and a request to the API that is tried again, a subagent's
-  too. At the first
-  turn, the MCP servers of the session with those that are not
-  connected, and again when they change.
+  too: the `mode`, `model`, `compact` and `api` lines of
+  [Besides the calls](trace.md#besides-the-calls), under `agent` for a
+  subagent's. At the first turn, the MCP servers of the session with
+  those that are not connected, and again when they change.
 - What Claude Code does on its own: a task of its schedule that fired,
   a turn no one typed, with its prompt, a call it refused without asking
-  you, by a rule or its mode, and why, another model it goes on with
-  for the turn when the model failed, a plugin it installs, the memories
-  it saves and to which files, and a message of another session that it
-  holds back from the model, with who that session says it is.
+  you, by a rule or its mode, and why (`permission DENIED`), another
+  model it goes on with for the turn when the model failed, a plugin it
+  installs, the memories it saves and to which files (`memory`), and a
+  message of another session that it holds back from the model, with
+  who that session says it is.
 - Each reply, and what the subagents do, see
   [The subagents](#the-subagents). The lines of a subagent start with
   its number (`[a2]`), its calls with theirs after it (`[a2.3]`). What
@@ -409,7 +411,10 @@ until it is answered.
 - The stop is a brake, not a gate: the result is checked as claude is
   given it, not before. A page that asks in words no sign knows stops
   nothing, and neither do the signs that are words.
-- What a subagent was given to read stops the turn too.
+- What a subagent was given to read stops the turn too, and so does what
+  a call that ran on Anthropic's side gave claude, such as a page fetched
+  there (see [Outside the sandbox](trace.md#outside-the-sandbox)): it
+  comes in the reply of the model, next to the call.
 - When lines are piped in rather than typed, none is sent after a stop
   and the chat leaves: they were written before anyone knew, and nobody
   is there to ask.

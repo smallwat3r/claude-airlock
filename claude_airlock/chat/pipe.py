@@ -47,8 +47,12 @@ CHAT_ARGS = (
 LINE_LIMIT = 64 << 20
 BACKLOG = 1000
 BACKLOG_BYTES = 256 << 20
-# No more than so many lines wait to be said to claude, see Agent.send
+# No more than so many lines wait to be said to claude, see Agent.send,
+# and room for so many more that answer what it asked, see Agent.respond:
+# claude waits for each answer, and its turn with it, a user who typed
+# ahead of a session that did not read is not to leave it without one
 SAID_BACKLOG = 256
+ANSWERS_ROOM = 128
 # Of a line claude writes that is no object, what is shown
 PLAIN_WIDTH = 2000
 # No more lines than this are shown of what a session still writes to its
@@ -146,6 +150,16 @@ class Backlog:
             return item
 
 
+def _line(message: dict) -> bytes | None:
+    """A message to claude as the line it is said in, none for one that
+    cannot be written as JSON: what claude gave back as it gave it,
+    nested as deep as could just be read."""
+    try:
+        return json.dumps(message).encode() + b"\n"
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
 class Agent:
     """Claude Code in its container, spoken to over the pipes of the
     docker command that runs it. With run, what starts that command in
@@ -176,8 +190,12 @@ class Agent:
         self._on_end = on_end
         self._late = late or LauncherErrors()
         # What is to be said to claude, a line each, then None when no
-        # more is: written by a thread of its own, see _write
-        self._to_say: queue.Queue[bytes | None] = queue.Queue(SAID_BACKLOG)
+        # more is: written by a thread of its own, see _write. Added to
+        # one at a time, how many wait is what may be added, see _say
+        self._to_say: queue.Queue[bytes | None] = queue.Queue(
+            SAID_BACKLOG + ANSWERS_ROOM
+        )
+        self._saying = threading.Lock()
         self._requests = itertools.count(1)
         # What waits for the answer to a request of the chat's, by the id
         # it was asked under
@@ -308,16 +326,21 @@ class Agent:
         """Say something to claude, nothing to one that has ended. It is
         said in its turn, see _write. Whether it is: not once as much
         waits to be said as SAID_BACKLOG, to a session that does not
-        read it, nor what cannot be written as JSON, given back as claude
-        gave it, nested as deep as could just be read."""
-        try:
-            line = json.dumps(message).encode() + b"\n"
-        except (ValueError, TypeError, RecursionError):
-            return False
-        try:
-            self._to_say.put_nowait(line)
-        except queue.Full:
-            return False
+        read it, nor what cannot be written as JSON, see _line."""
+        line = _line(message)
+        return line is not None and self._say(line, SAID_BACKLOG)
+
+    def _say(self, line: bytes, most: int) -> bool:
+        """Have a line said in its turn, unless as many wait to be said
+        as most. Whether it is."""
+        with self._saying:
+            if self._to_say.qsize() >= most:
+                return False
+            try:
+                self._to_say.put_nowait(line)
+            except queue.Full:
+                # Taken by the None of close, which has no room kept
+                return False
         return True
 
     def prompt(self, text: str) -> bool:
@@ -370,19 +393,25 @@ class Agent:
         with self._asking:
             return bool(self._answers.keys() - self._unwaited)
 
-    def respond(self, asked: str, decision: dict) -> None:
-        """Answer what claude asked under an id. An answer that cannot be
-        said (see send), one that gives back an input too deep to be
-        written, is a refusal: claude waits for one, and its turn with
-        it."""
+    def respond(self, asked: str, decision: dict) -> bool:
+        """Answer what claude asked under an id, whether the answer is
+        said. Said while what else is told waits, in the room kept for
+        answers past SAID_BACKLOG (see ANSWERS_ROOM): claude waits for
+        it, and its turn with it. An answer that cannot be written as
+        JSON, one that gives back an input too deep to be, is a refusal,
+        for the same reason."""
         response = {"request_id": asked, "subtype": "success", "response": decision}
-        if not self.send({"type": "control_response", "response": response}):
-            self.refuse(asked, "the answer could not be said")
+        line = _line({"type": "control_response", "response": response})
+        if line is None:
+            return self.refuse(asked, "the answer could not be said")
+        return self._say(line, SAID_BACKLOG + ANSWERS_ROOM)
 
-    def refuse(self, asked: str, why: str) -> None:
-        """Say that what claude asked under an id is not answered."""
+    def refuse(self, asked: str, why: str) -> bool:
+        """Say that what claude asked under an id is not answered, as an
+        answer is said (see respond), and whether it is."""
         response = {"request_id": asked, "subtype": "error", "error": why}
-        self.send({"type": "control_response", "response": response})
+        line = _line({"type": "control_response", "response": response})
+        return line is not None and self._say(line, SAID_BACKLOG + ANSWERS_ROOM)
 
     def close(self) -> None:
         """Say that no more prompts come, which is how claude is left,

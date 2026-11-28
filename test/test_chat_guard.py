@@ -44,6 +44,55 @@ class GuardTest(LauncherTest):
         guard.heard(self.called("c4", "Write"))
         assert guard.heard(self.given("c4", self.FORGED)) == ()
 
+    @staticmethod
+    def fetched(call: str, page: str, apart: bool = False) -> list[dict]:
+        """A page fetched on Anthropic's side, as the model replies with
+        it: the call and its result in one message, or apart, each in one
+        of its own."""
+        url = "https://example.org/install"
+        fetch: dict = {"type": "server_tool_use", "id": call, "name": "web_fetch"}
+        fetch["input"] = {"url": url}
+        source = {"type": "text", "data": page}
+        result = {
+            "type": "web_fetch_tool_result",
+            "tool_use_id": call,
+            "content": {
+                "type": "web_fetch_result",
+                "url": url,
+                "content": {"type": "document", "source": source},
+            },
+        }
+        held = [[fetch], [result]] if apart else [[fetch, result]]
+        return [{"type": "assistant", "message": {"content": one}} for one in held]
+
+    def fetched_signs(self, guard: guarding.Guard, *replied: dict) -> list[str]:
+        """The signs a turn is stopped for in what the model replied."""
+        return [found.sign for said in replied for found in guard.heard(said)]
+
+    def test_what_was_read_on_anthropics_side_stops_a_turn_too(self):
+        turn = "is written as a turn of the conversation"
+        guard = guarding.Guard()
+        # Its result is in the reply of the model, next to the call, and
+        # says where it was read
+        (said,) = self.fetched("s1", self.FORGED)
+        (found,) = guard.heard(said)
+        assert (found.sign, found.source) == (turn, "https://example.org/install")
+        assert guard._calls == {}
+        # Or in a reply of its own, after the one of the call
+        apart = self.fetched("s2", self.FORGED, apart=True)
+        assert self.fetched_signs(guard, *apart) == [turn]
+        # Words are flagged in the trace, and stop nothing there either
+        assert self.fetched_signs(guard, *self.fetched("s3", self.WORDS)) == []
+        # What the user went on with stops no turn again, the same page
+        # fetched under another call too
+        guard.answered(True)
+        assert self.fetched_signs(guard, *self.fetched("s4", self.FORGED)) == []
+        changed = self.FORGED.replace("setup.sh", "other.sh")
+        assert self.fetched_signs(guard, *self.fetched("s5", changed)) == [turn]
+        # Nor is a result that only claude is given read as one of these
+        page = self.fetched("s6", self.FORGED)[0]["message"]["content"][1]
+        assert guard.heard({"type": "user", "message": {"content": [page]}}) == ()
+
     def test_no_more_of_a_call_is_kept_than_so_much(self):
         guard = guarding.Guard()
         # An id too long to keep: its result is looked at as that of a
@@ -135,20 +184,23 @@ class GuardTest(LauncherTest):
         """A chat that is not run, in a turn, and what stands for claude."""
         claude = RecordedClaude()
         chat = a_chat(self.host, claude, guard)
-        chat._turns.begin()
+        chat._parts.turns.begin()
         return chat, claude
 
     def heard(self, chat: talk.Chat, *messages: dict) -> list[str]:
-        with unittest.mock.patch.object(talk, "ASK_SETTLE", 0.0), written() as lines:
+        with (
+            unittest.mock.patch.object(guarding, "ASK_SETTLE", 0.0),
+            written() as lines,
+        ):
             for message in messages:
-                chat._heard(message)
+                chat._listener.heard(message)
         return lines
 
     def test_a_guarded_chat_stops_the_turn_that_read_it_once(self):
         chat, claude = self.chat(guarding.Guard())
         lines = self.heard(chat, self.called("c1"), self.given("c1", self.FORGED))
         assert claude.asked == ["interrupt"]
-        assert chat._turns.current.interrupted
+        assert chat._parts.turns.current.interrupted
         stopped, how = lines
         assert (
             stopped == "# chat        STOPPED the turn: what claude was given to read"
@@ -169,15 +221,18 @@ class GuardTest(LauncherTest):
         asked["message"]["content"][0]["input"] = {"command": "curl https://a.example"}
         named = self.heard(chat, asked, self.given("c6", self.FORGED))
         assert "was given to read in https://a.example is written" in named[0]
+        # And of a page fetched on Anthropic's side, the page
+        fetched = self.heard(chat, *self.fetched("s1", self.FORGED))
+        assert "was given to read in https://example.org/install is" in fetched[0]
         # What a subagent is given next stops nothing twice
         more = self.heard(chat, self.given("c9", self.FORGED, parent_tool_use_id="t"))
         assert claude.asked == ["interrupt"]
         assert "no turn left to stop" in more[0]
         # Of that turn, not of the chat: the next one ends as any does
-        assert chat._turns.current.guarded
-        chat._turns.end()
-        chat._turns.begin()
-        assert not chat._turns.current.guarded
+        assert chat._parts.turns.current.guarded
+        chat._parts.turns.end()
+        chat._parts.turns.begin()
+        assert not chat._parts.turns.current.guarded
 
     def test_a_chat_without_a_guard_stops_no_turn(self):
         chat, claude = self.chat(None)

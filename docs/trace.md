@@ -287,9 +287,9 @@ claude   remote   REMOTE CONTROL is on, the session can be driven from claude.ai
 | `mode` | The permission mode changed. The one the session started in is in the header. Or a call the permissions refused, which Claude Code noted apart from its result (`permission DENIED: Bash: ...`) |
 | `model` | Another model, or another effort, than the request before. Or Claude Code went on with another model than the one asked for: when that one failed (`fell back: overloaded`), or refused the request, which is in capitals (`the model REFUSED the request`) |
 | `api` | A request the API did not answer or refused, which Claude Code tried again |
-| `compact` | The conversation was summed up to make room: from there on claude knows what came before by the summary |
+| `compact` | The conversation was summed up to make room: from there on claude knows what came before by the summary. With how many tokens it held before, and after when Claude Code says (`--json` has `pre_tokens` and `post_tokens`) |
 | `task` | A subagent, or a command left to run, ended. Or a task of the session's schedule fired: a turn no one typed a prompt for, with the prompt it was given |
-| `memory` | Files Claude Code wrote to its memory, which a later session of the project is given |
+| `memory` | Files Claude Code wrote to its memory, which a later session of the project is given, each with what Claude Code says it did to it (`updated:`), else `saved:` |
 | `published` | A change the session published for review, created or pushed to, and the pull request it is linked to, once each |
 | `remote` | Remote Control is on: whoever has the claude.ai account can drive the session from there or a phone, so it is in capitals and kept by `--failed`. Again when the Remote Control session it is joined to changes, and when that ends |
 | `request` | With `CLAUDE_AIRLOCK_API_LOG=1`, a request to the model and what it used, see [The requests to the model](#the-requests-to-the-model) |

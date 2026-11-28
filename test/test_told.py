@@ -24,6 +24,7 @@ from transcribed import (
     events,
     given_texts,
     hook,
+    overview,
     project_secrets,
     prompt,
     replied,
@@ -766,7 +767,7 @@ class OriginTest:
             ("prompt", ["run the tests in the background"]),
             ("task", ["completed: Background command done"]),
         ]
-        assert dict(summary.overview(entries, 0))["prompts"] == "1"
+        assert overview(entries)["prompts"] == "1"
         # What a task of the schedule fired with is the prompt it was given
         fired = sent(
             "check the build", "task-notification", 5, subkind="scheduled-trigger"
@@ -831,7 +832,7 @@ class OriginTest:
         assert from_server.tag == ""
         assert summary.planted_shown([from_peer, from_server]) == 1
         assert summary.planted_reads([peer, pushed]) == 1
-        prompts = dict(summary.overview([prompt("hi"), peer, pushed], 0))["prompts"]
+        prompts = overview([prompt("hi"), peer, pushed])["prompts"]
         assert prompts == "1, and 2 NOT FROM YOU (channel 1, peer 1), see --failed"
 
     def test_an_origin_of_no_kind_there_is_is_not_the_user_s(self):
@@ -968,6 +969,76 @@ class BesidesTest:
         refusal = "the model REFUSED the request (cyber)"
         assert declined.details == [f"claude-sonnet-5  was: claude-opus-5-5, {refusal}"]
         assert went_wrong(declined)
+
+    def test_what_claude_says_over_the_pipe_is_the_same_event(self):
+        # Line mode tells these from what Claude Code says over the pipe,
+        # which names in snake_case what the transcript does not
+        paths = ["/m/a.md", "/m/b.md"]
+        models = ("claude-opus-5-5", "claude-sonnet-5")
+        alike = [
+            (
+                told.api_error_event,
+                {
+                    "error": {"message": "overloaded"},
+                    "retryInMs": 2000,
+                    "retryAttempt": 1,
+                    "maxRetries": 10,
+                },
+                {
+                    "error": "overloaded",
+                    "retry_delay_ms": 2000,
+                    "attempt": 1,
+                    "max_retries": 10,
+                    "error_status": 529,
+                },
+            ),
+            (
+                told.compacted_event,
+                {"compactMetadata": {"trigger": "auto", "preTokens": 29232}},
+                {"compact_metadata": {"trigger": "auto", "pre_tokens": 29232}},
+            ),
+            (
+                told.memory_saved_event,
+                {"writtenPaths": paths},
+                {"written_paths": paths, "verb": "Saved"},
+            ),
+            (
+                told.fell_back_event,
+                dict(zip(("originalModel", "fallbackModel"), models, strict=True)),
+                dict(zip(("original_model", "fallback_model"), models, strict=True)),
+            ),
+        ]
+        for build, noted, said in alike:
+            ones = [build(given, 1.0, Who.CLAUDE) for given in (noted, said)]
+            first, second = [
+                (one.what, one.details, one.fields, one.wrong) if one else None
+                for one in ones
+            ]
+            assert first == second, build
+            assert first is not None
+        # A subagent's retry names its error by its kind, and what was
+        # done to a memory is said when it is
+        retry = {"error_category": "rate_limit", "attempt": 2, "max_retries": 10}
+        assert told.api_error_event(retry, 1.0, Who.AGENT).details == [
+            "API error: rate_limit (retry 2 of 10)"
+        ]
+        for verb, said in (
+            ("Updated", "updated"),
+            # A word, or nothing said of what was done
+            ("Updated\x1b[2J", "saved"),
+            ("x" * (told.VERB_WIDTH + 1), "saved"),
+            (["Updated"], "saved"),
+        ):
+            saved = {"written_paths": paths[:1], "verb": verb}
+            updated = told.memory_saved_event(saved, 1.0, Who.CLAUDE)
+            assert updated is not None
+            assert updated.details == [f"{said}: /m/a.md"]
+        # And how many tokens are left after a compaction, when it is said
+        after = {"compact_metadata": {"pre_tokens": 29232, "post_tokens": 7898}}
+        assert told.compacted_event(after, 1.0, Who.CLAUDE).details == [
+            "the conversation was compacted, 29.2k tokens before, 7.9k after"
+        ]
+        assert told.memory_saved_event({"written_paths": "x"}, 1.0, Who.CLAUDE) is None
 
 
 class UntoldTest:
@@ -1271,6 +1342,12 @@ class SecretsFileTest:
         ]
         aws = f"{CONTAINER_HOME}/.aws/credentials"
         assert self.kinds("Edit", file_path=aws)[0] == "cloud"
+        # Slashes at its start are one, as Claude Code takes them
+        key = f"/{CONTAINER_HOME}/.ssh/id_ed25519"
+        assert self.kinds("Read", file_path=key) == [
+            "ssh",
+            f"SECRETS FILE: {key}, a file of SSH",
+        ]
         # By a name hidden from a session, from where the session was
         assert self.kinds("Read", file_path=".env")[0] == "hidden"
         assert self.kinds("NotebookEdit", notebook_path="sub/.env.local")[0] == "hidden"

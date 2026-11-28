@@ -13,7 +13,8 @@ import time
 from chat_harness import SESSION, LineModeTest, turns
 from packets import answer, pcap_file, tcp
 
-from claude_airlock.chat import pipe, talk
+from claude_airlock.chat import pipe
+from claude_airlock.chat import turn as turning
 from claude_airlock.sandbox import claude_args
 
 
@@ -116,7 +117,7 @@ class ChatTest(LineModeTest):
         assert re.search(r"# turn        \d+\.\ds, 0 calls", done.stdout)
         # Under it, that the prompt is the user's again
         assert re.search(
-            r"# turn [^\n]*\n" + re.escape(f"# {talk.READY}\n"), done.stdout
+            r"# turn [^\n]*\n" + re.escape(f"# {turning.READY}\n"), done.stdout
         )
 
     def test_every_prompt_is_a_turn(self):
@@ -206,7 +207,7 @@ class ChatTest(LineModeTest):
             f"# agent       completed: Read the docs, {used}  1 running, 1 ended\n",
             f"# agent       completed: Map the code, {used}  all 2 ended\n",
             "claude   reply       they are back\n",
-            f"# {talk.READY}\n",
+            f"# {turning.READY}\n",
         ]
         places = [done.stdout.find(line) for line in lines]
         assert -1 not in places, done.stdout

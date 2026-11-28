@@ -7,20 +7,39 @@ as claude has it: a line of the transcript comes later, and the model
 needs no longer than that for its next call. The turn is stopped before
 that call where it can be, nothing is taken back: claude has read the
 text, and whether it goes on with it in the conversation is the user's
-to say. What they said yes to is not asked of again, see Guard."""
+to say. What they said yes to is not asked of again, see Guard. How the
+turn is stopped, and the user asked, is Brake's to do."""
 
 from __future__ import annotations
 
 import hashlib
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..events import clean, labelled
+from ..report.calls import SERVER_CALLS
 from ..report.entries import block_text, content_blocks
-from ..report.outcomes import read_source, result_planted, said_source
+from ..report.layout import ALERT, Layout, Shown
+from ..report.outcomes import (
+    SERVER_RESULTS,
+    read_source,
+    result_planted,
+    said_source,
+    server_output,
+)
 from ..report.planted import Planted
+from .asking import ASKED_STYLE, said_yes
+from .followed import ASK_SETTLE
+from .parts import Parts
 from .said import NAME_KEPT, keep_open, kept_id
+from .turn import READY_STYLE
 
+# The blocks of what the model replied that are calls: of a tool of
+# Claude Code's, and of one that ran on Anthropic's side, whose result
+# comes in what the model replied too, next to it (see SERVER_RESULTS)
+CALLS = frozenset({"tool_use", *SERVER_CALLS})
 # Of where a call reads from that is kept to be said, see said_source: a
 # command can be of any length
 SOURCE_WIDTH = 1000
@@ -35,6 +54,13 @@ CLEAR = "clear the conversation, and what claude read with it? [y/N] "
 # What is said where the user is not asked, or gave no answer: what
 # claude is told next does not take the text back
 STILL_READ = "what it read stays in the conversation, only /clear takes it out"
+# Said once the user answered for a turn that was stopped and the
+# conversation is kept, in the colour of a turn that is over: nothing
+# goes on until they type
+WAITING = "nothing runs, claude waits for you: type how to go on, or continue"
+# Seconds a turn that was stopped is given to end, before the
+# conversation is cleared
+STOP_QUIET = 10.0
 
 
 def stop_said(found: tuple[Planted, ...], stopped: bool, asked: bool) -> list[str]:
@@ -110,19 +136,25 @@ class Guard:
 
     def heard(self, message: dict) -> tuple[Planted, ...]:
         """Take in what claude said or was given. The signs a turn is
-        stopped for, of the results it was given with it."""
-        blocks = content_blocks(message)
-        if message.get("type") == "assistant":
-            for block in blocks:
-                if block.get("type") == "tool_use":
-                    self._called(block)
-            return ()
-        return tuple(
-            sign
-            for block in blocks
-            if block.get("type") == "tool_result"
-            for sign in self._given(block)
-        )
+        stopped for, of the results it was given with it: of a call of
+        Claude Code's in what claude is given, and of a call that ran on
+        Anthropic's side in what the model replied, as the trace reads
+        it (see server_output)."""
+        replied = message.get("type") == "assistant"
+        found: list[Planted] = []
+        for block in content_blocks(message):
+            kind = block.get("type")
+            if not isinstance(kind, str):
+                continue
+            if replied and kind in CALLS:
+                self._called(block)
+            elif replied and kind in SERVER_RESULTS:
+                output, _ = server_output(block)
+                found += self._given(block.get("tool_use_id"), output)
+            elif not replied and kind == "tool_result":
+                output = block_text(block.get("content"))
+                found += self._given(block.get("tool_use_id"), output)
+        return tuple(found)
 
     def question(self) -> bool:
         """Whether the user is to be asked if claude goes on with what a
@@ -158,12 +190,12 @@ class Guard:
         said = said_source(given)[:SOURCE_WIDTH]
         keep_open(self._calls, call, Called(tool, _source_of(tool, given), said))
 
-    def _given(self, block: dict) -> tuple[Planted, ...]:
-        """The signs in the result of a call that a turn is stopped for,
-        of any tool when the call was not seen: its source is not known
-        then, and nothing is remembered of it."""
-        call = self._calls.pop(str(block.get("tool_use_id")), None)
-        output = block_text(block.get("content"))
+    def _given(self, said: object, output: str) -> tuple[Planted, ...]:
+        """The signs that a turn is stopped for in what a call gave claude
+        to read, by the id of the call its result names, of any tool when
+        the call was not seen: its source is not known then, and nothing
+        is remembered of it."""
+        call = self._calls.pop(str(said), None)
         if call is None:
             return tuple(sign for sign in result_planted("", output) if sign.stops)
         found = tuple(
@@ -182,3 +214,118 @@ class Guard:
             if len(self._asked) < MOST_ACCEPTED:
                 self._asked.update(_key(call.source, sign, read) for sign in new)
         return new
+
+
+class Brake:
+    """Stops a turn for what claude was just given to read, as Guard
+    finds it, and asks the user whether claude goes on with it. Given the
+    parts of the chat it writes to and asks through, and what it steers
+    of the chat: interrupt asks claude to end the turn that runs, and
+    says whether it was asked, send gives claude a prompt, and gone says
+    whether there is nobody left to ask, or to ask for."""
+
+    def __init__(
+        self,
+        guard: Guard,
+        parts: Parts,
+        interrupt: Callable[[], bool],
+        send: Callable[[str], None],
+        gone: Callable[[], bool],
+    ):
+        self._guard = guard
+        self._parts = parts
+        self._interrupt = interrupt
+        self._send = send
+        self._gone = gone
+        # Whether a turn was stopped and the user sent nothing since
+        self.stopped = False
+
+    def heard(self, message: dict) -> None:
+        """Take in what claude or a subagent of its said, or was given,
+        and stop the turn for what of it Guard finds."""
+        found = self._guard.heard(message)
+        if found:
+            self._stop(found)
+
+    def _stop(self, found: tuple[Planted, ...]) -> None:
+        """Stop the turn for what claude was just given to read: first of
+        all, its next call may be a moment away. Then say why, under the
+        call it is of. Claude has read the text, so whether it goes on
+        with it is the user's to say, and what it asked meanwhile is
+        refused. The user is asked where there is one to answer, once for
+        all that is found until they did."""
+        parts = self._parts
+        stopped = self._interrupt()
+        self.stopped = True
+        if parts.turns.running:
+            parts.turns.current.guarded = True
+        asks = parts.console.interactive
+        first = self._guard.question() if asks else True
+        if first:
+            # Not the question of an earlier stop, which is for this too
+            parts.asker.give_up()
+        parts.followed.settle(ASK_SETTLE)
+        said = stop_said(found, stopped, asks)
+        parts.page.put(parts.page.layout.header(said, ALERT))
+        parts.console.bell()
+        if asks and first:
+            parts.asked.then(self._ask_to_go_on)
+
+    def _ask_to_go_on(self) -> None:
+        """Ask whether claude goes on with what a turn was stopped for in
+        the conversation. A yes keeps it, and is remembered for what was
+        read (see Guard). Anything else asks whether the conversation is
+        cleared, which a yes alone does: the text is in it until then,
+        whatever claude is told, and what is cleared is not brought back.
+        No answer, the user interrupted or left, leaves it as it is. The
+        turn was stopped either way, so a conversation that is kept says
+        that the next line is the user's to type."""
+        went_on, clears = None, None
+        try:
+            went_on = self._said_yes(GO_ON)
+            if went_on is False:
+                clears = self._said_yes(CLEAR)
+        finally:
+            # Whatever came of it: a question that is never answered for
+            # would be the last one put
+            self._guard.answered(bool(went_on))
+        if self._gone():
+            return
+        if clears:
+            self._start_anew()
+            return
+        if went_on:
+            kept = "kept: not asked again for what it read"
+        elif clears is None:
+            kept = f"not answered: {STILL_READ}"
+        else:
+            kept = f"not cleared: {STILL_READ}"
+        page = self._parts.page
+        # Written together: the prompt that comes back is under both
+        said = page.layout.header([labelled("chat", kept)])
+        page.put([*said, waiting_line(page.layout)])
+
+    def _said_yes(self, question: str) -> bool | None:
+        """Put a question of a turn that was stopped, where it is not
+        missed. Whether it was answered with a yes, none for no answer."""
+        typed = self._parts.asker.ask(question, ASKED_STYLE)
+        return said_yes(typed)
+
+    def _start_anew(self) -> None:
+        """Clear the conversation, once the turn that was stopped is
+        over: what claude read goes with it."""
+        patience = time.monotonic() + STOP_QUIET
+        while self._parts.turns.running and time.monotonic() < patience:
+            if self._gone():
+                return
+            time.sleep(0.05)
+        self._parts.page.note(
+            "chat", "clearing the conversation, what claude read with it"
+        )
+        self._send("/clear")
+
+
+def waiting_line(layout: Layout) -> Shown:
+    """The line that says a turn that was stopped is not gone on with
+    until the user types, as a turn that is over is said."""
+    return layout.header([labelled("chat", WAITING)], READY_STYLE)[0]

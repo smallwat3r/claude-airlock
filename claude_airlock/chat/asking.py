@@ -96,6 +96,13 @@ LATE = (
 )
 # What is said of a question claude withdrew while it was before the user
 WITHDRAWN = "claude no longer asks that, it is not answered"
+# What is said of an answer to what claude asked that could not be said
+# to it, a session that has long read nothing it is told: it waits for
+# that answer, and its turn with it, until it is stopped
+NOT_ANSWERED = (
+    "the answer to claude was not sent, the session does not read what it"
+    " is told: Ctrl-C stops it"
+)
 # The least room the text of a question or an option is wrapped to,
 # however far in it starts
 NARROWEST_TEXT = 20
@@ -567,12 +574,12 @@ class Asker:
 
 
 class Answered(Protocol):
-    """Who is given the answer to what it asked under an id: claude, see
-    Agent."""
+    """Who is given the answer to what it asked under an id, each time
+    whether it could be: claude, see Agent."""
 
-    def respond(self, asked: str, decision: dict) -> None: ...
+    def respond(self, asked: str, decision: dict) -> bool: ...
 
-    def refuse(self, asked: str, why: str) -> None: ...
+    def refuse(self, asked: str, why: str) -> bool: ...
 
 
 class Asked:
@@ -676,17 +683,20 @@ class Asked:
         """Put what claude asked and give it the answer. What it asked
         of a turn the user interrupted since is refused unseen, as the
         question that was on the screen then was: claude waits for an
-        answer to each. Unless it withdrew what it asked, see Unanswered."""
+        answer to each. Unless it withdrew what it asked, see Unanswered.
+        An answer that could not be said to it is said not to be."""
         asked, withdrawn = unanswered.asked, unanswered.withdrawn
         try:
             wanted = self._asker.attend(unanswered.asked_at, unanswered)
             decision = self._asker.decide(unanswered.request) if wanted else REFUSED
-            if not withdrawn.is_set():
-                claude.respond(asked, decision)
+            if not withdrawn.is_set() and not claude.respond(asked, decision):
+                self._page.note("chat", NOT_ANSWERED)
         except Exception as error:  # noqa: BLE001
             self._page.note("chat", f"FAILED to ask, refused: {flat(repr(error))}")
-            if not withdrawn.is_set():
-                claude.refuse(asked, "the question could not be put")
+            if not withdrawn.is_set() and not claude.refuse(
+                asked, "the question could not be put"
+            ):
+                self._page.note("chat", NOT_ANSWERED)
         finally:
             with self._counting:
                 self._kept -= 1

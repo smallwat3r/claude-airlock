@@ -3,26 +3,36 @@ being compacted, a request to the API tried again, a task of its that
 starts or ends, a call it refused without asking, a model it fell back
 on, a plugin it installs, memories it saved, a message of another
 session it holds, a limit of the account that is near, the MCP servers it
-has and how each is."""
+has and how each is.
+
+What a trace tells too is told as the same event (see told.py), made of
+what claude says over the pipe: the chat tells it as it comes, and passes
+over what the transcript has of it later (see told_over_the_pipe). So is
+what only the pipe says: a request of a subagent's to the API that is
+tried again, and why a call was refused."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 
-from ..events import flat, labelled
+from ..events import Event, Who, flat, labelled
 from ..report.entries import measured
+from ..report.told import (
+    api_error_event,
+    compacted_event,
+    denied_event,
+    fell_back_event,
+    memory_saved_event,
+)
 from .console import Page
 from .said import kept_name
 from .tasks import Tasks, ended_line, started_line
-from .turn import tokens
 
 # Of what an error is said to be about, and of how a task is said to end
 ABOUT_WIDTH = 200
 # How claude says an MCP server is when it can be used
 CONNECTED = "connected"
-# Of the paths of memories saved, how many are named
-PATHS_NAMED = 3
 # What claude says set off another model when the model refused the
 # request, as told.py reads it too
 REFUSAL = "refusal"
@@ -151,8 +161,14 @@ class Notices:
         if message.get("status") == "compacting":
             self._page.note("chat", "compacting the conversation")
 
+    def _told(self, event: Event | None) -> None:
+        """Write an event as a trace has it, none for nothing to tell."""
+        if event is not None:
+            self._page.put(self._page.events([event]))
+
     def _retried(self, message: dict) -> None:
-        self._say_retried(message.get("error"))
+        """A request of claude's to the API is tried again (api_retry)."""
+        self._told(api_error_event(message, time.time(), Who.CLAUDE))
 
     def call_progress(self, message: dict) -> None:
         """How a call of claude's goes on, as claude says while it runs
@@ -162,39 +178,21 @@ class Notices:
         Heartbeat of turn.py."""
         retry = message.get("subagent_retry")
         if isinstance(retry, dict):
-            self._say_retried(retry.get("error_category"), " a subagent")
-
-    def _say_retried(self, error: object, whom: str = "") -> None:
-        """A request to the API is tried again, of claude's or of a
-        subagent's as whom says, for the error it says."""
-        why = flat(error or "")[:ABOUT_WIDTH]
-        line = labelled("chat", f"the API did not answer{whom}, trying again  {why}")
-        self._page.say([line.rstrip()])
+            self._told(api_error_event(retry, time.time(), Who.AGENT))
 
     def _denied(self, message: dict) -> None:
         """A call claude refused without asking the user, by a rule or its
         mode: the call and its result are in the transcript, why it was
-        refused only here."""
-        tool = kept_name(message.get("tool_name")).lower() or "a tool"
-        why = kept_name(message.get("decision_reason"), ABOUT_WIDTH) or kept_name(
-            message.get("message"), ABOUT_WIDTH
-        )
-        of = " of a subagent" if message.get("agent_id") else ""
-        said = f"claude refused {tool}{of} without asking" + (f": {why}" if why else "")
-        self._page.note("chat", said)
+        refused only here, and of a subagent's by whom."""
+        who = Who.AGENT if message.get("agent_id") else Who.CLAUDE
+        self._told(denied_event(message, time.time(), who))
 
     def _fell_back(self, message: dict) -> None:
         """Claude goes on with another model for the rest of the turn, the
         one it was given failed. Not when it refused the request, which
         the transcript says, see told_over_the_pipe."""
-        trigger = message.get("trigger")
-        if trigger == REFUSAL:
-            return
-        was = kept_name(message.get("original_model"), ABOUT_WIDTH) or "the model"
-        now = kept_name(message.get("fallback_model"), ABOUT_WIDTH) or "another"
-        why = kept_name(trigger, ABOUT_WIDTH).replace("_", " ")
-        because = f" ({why})" if why else ""
-        self._page.note("chat", f"{was} failed{because}, this turn goes on with {now}")
+        if message.get("trigger") != REFUSAL:
+            self._told(fell_back_event(message, time.time(), Who.CLAUDE))
 
     def _plugin(self, message: dict) -> None:
         """How the installing of a plugin goes, as claude says it: its
@@ -207,17 +205,7 @@ class Notices:
 
     def _remembered(self, message: dict) -> None:
         """Claude wrote memories of its own, the files it wrote them to."""
-        given = message.get("written_paths")
-        paths = given if isinstance(given, list) else []
-        named = ", ".join(
-            filter(None, (kept_name(path, ABOUT_WIDTH) for path in paths[:PATHS_NAMED]))
-        )
-        if named and len(paths) > PATHS_NAMED:
-            named += f" and {len(paths) - PATHS_NAMED} more"
-        to = f" to {named}" if named else ""
-        verb = kept_name(message.get("verb")).lower() or "saved"
-        memories = "memory" if len(paths) == 1 else "memories"
-        self._page.note("chat", f"claude {verb} {len(paths)} {memories}{to}")
+        self._told(memory_saved_event(message, time.time(), Who.CLAUDE))
 
     def _held(self, message: dict) -> None:
         """A message of another session for this one, which claude holds
@@ -247,14 +235,7 @@ class Notices:
         self._page.note("chat", "a new conversation, the one before is cleared")
 
     def _compacted(self, message: dict) -> None:
-        given = message.get("compact_metadata")
-        about = given if isinstance(given, dict) else {}
-        before = measured(about.get("pre_tokens"))
-        after = measured(about.get("post_tokens"))
-        sizes = ""
-        if before is not None and after is not None:
-            sizes = f", {tokens(before)} tokens to {tokens(after)}"
-        self._page.note("chat", f"the conversation was compacted{sizes}")
+        self._told(compacted_event(message, time.time(), Who.CLAUDE))
 
     def _task_started(self, message: dict) -> None:
         """A task of claude's started: a subagent, or what it left to

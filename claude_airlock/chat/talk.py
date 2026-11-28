@@ -9,20 +9,20 @@ third, one question at a time, and answered through the first (see
 asking.py): the second goes on listening meanwhile, a session whose
 subagents work on is not held up by a question nobody has answered yet.
 
-What each of them does is not here: what the session did is written by
-followed.py, a turn that is quiet is said to run by turn.py, how far the
-subagents of claude are is said by tasks.py, a line that is the chat's
-own to do is done by commands.py. A command of the user's has a thread
-more while it runs, which writes what it writes: the first waits for it,
-and reads a line meanwhile only when the user is asked something (see
-shell.py)."""
+What each of them does is not here: what claude says is taken in by
+listener.py, a turn is stopped for what claude was given to read by
+guard.py, what the session did is written by followed.py, a turn that is
+quiet is said to run by turn.py, how far the subagents of claude are is
+said by tasks.py, a line that is the chat's own to do is done by
+commands.py. The parts they share are made in parts.py. A command of the
+user's has a thread more while it runs, which writes what it writes: the
+first waits for it, and reads a line meanwhile only when the user is
+asked something (see shell.py)."""
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import enum
-import functools
 import math
 import os
 import queue
@@ -35,67 +35,38 @@ from types import FrameType
 from ..docker import docker_ok, project_slug
 from ..events import Event, Kind, flat, labelled
 from ..files import private_dir
-from ..projects import sandboxed_root
-from ..recording.changes import note_change
 from ..report.layout import (
-    ALERT,
     BOLD,
     BRIGHT_CYAN,
-    BRIGHT_GREEN,
     BRIGHT_MAGENTA,
     ITALIC,
     STYLES,
     Layout,
-    Shown,
     together,
 )
-from ..report.planted import Planted
 from ..settings import Host
-from .asking import ASKED_STYLE, Asked, Asker, said_yes
 from .commands import LOCAL, Commands, Did, Handover, Resume, Taken
 from .console import Console, Page
-from .drift import Drift
-from .followed import POLL, Followed
-from .guard import CLEAR, GO_ON, STILL_READ, Guard, stop_said
+from .followed import ASK_SETTLE, POLL
+from .guard import Brake, Guard
 from .hosts import HostQuestions, Hosts
-from .notices import Notices
+from .listener import Listener
+from .parts import Parts
 from .pipe import Agent, Answer, Unread
 from .plain import PlainLines
-from .reply import ReplyStream
-from .said import NAME_KEPT, Session, kept_id, own
 from .screen import Prompt, as_prompt
 from .shell import Shell
-from .status import Sandbox, StatusLine
-from .tasks import Progress, Running, Tasks, still_running
-from .turn import Heartbeat, Turns, Usage, ended_badly, turn_line
+from .status import Sandbox
+from .tasks import Progress
+from .turn import Heartbeat
 
 # What reaches claude for a chat, given what to tell once claude has ended
 # and the page to write what it still writes to its errors after that
 type Connect = Callable[[Callable[[], None], Page], Agent]
 
-# The messages of claude a chat knows and has no use for
-PASSED_OVER = frozenset(
-    {
-        "auth_status",
-        "keep_alive",
-        "prompt_suggestion",
-        "tool_use_summary",
-        "update_environment_variables",
-    }
-)
 PROMPT = as_prompt("> ")
 # After a line that ended with a backslash, which takes the next one too
 MORE = as_prompt(". ")
-# A turn that ran this many seconds rings when it ends, for a user who
-# looked elsewhere meanwhile
-LONG_TURN = 30.0
-# Said once a turn is over, and how in colour: bold bright green
-READY = labelled("ready", "claude has finished, waiting for your input")
-READY_STYLE = together(BOLD, BRIGHT_GREEN)
-# Said once the user answered for a turn that was stopped and the
-# conversation is kept, in the colour of a turn that is over: nothing
-# goes on until they type
-WAITING = "nothing runs, claude waits for you: type how to go on, or continue"
 # Where each side of the conversation starts, to be found among what the
 # session does: the line over a reply of claude bold and bright cyan, a
 # line the user sent bold and bright magenta
@@ -103,12 +74,6 @@ REPLY_HEAD_STYLE = together(BOLD, BRIGHT_CYAN)
 SENT_STYLE = together(BOLD, BRIGHT_MAGENTA)
 # Why claude says it makes a call, in italics under its bold label
 REASON_STYLE = ITALIC
-# Seconds the call claude asks about is given to be written, before the
-# question is put
-ASK_SETTLE = 1.0
-# Seconds a turn that was stopped is given to end, before the
-# conversation is cleared
-STOP_QUIET = 10.0
 # Seconds within which a second Ctrl-C at the prompt leaves, as it does in
 # Claude Code's own UI. One that comes later drops the line again.
 LEAVE_WITHIN = 3.0
@@ -131,11 +96,6 @@ ANSWER_WAIT = 1.0
 # Seconds lines that are all there, a file or a pipe, wait for claude to
 # answer what one of them asked of it, see _wait_for_turn
 ANSWER_PATIENCE = 10.0
-# What is said of what claude asks under an id that is none, and of a
-# call it asks about while as much of what it asked waits as may (see
-# MOST_WAITING of asking.py), which is refused without a question
-NO_ID = "claude asked under an id that is none, it cannot be answered"
-TOO_MUCH_ASKED = "as much of what claude asked waits for an answer as may"
 
 
 class Life(enum.Enum):
@@ -196,11 +156,6 @@ class Chat:
         hosts: Hosts | None = None,
     ):
         self._host = host
-        # What a turn is stopped by for what claude was given to read,
-        # none when the user switched that off
-        self._guard = guard
-        # Whether a turn was stopped by it and the user sent nothing since
-        self._guarded = False
         # How the sandbox was started as the launcher noted it, said first
         self._start = start
         # Of the session's container, to stop it by
@@ -208,93 +163,48 @@ class Chat:
         self._connect = connect
         # Claude, from when the chat is run
         self._agent: Agent
-        self._console = console or Console(host.project_dir)
-        self._console.commands = sorted(LOCAL)
-        self._page = Page(self._console, layout)
         self._handover = handover
-        # Told what claude no longer says as a chat reads it, by what
-        # reads it
-        self._drift = Drift()
-        self._session = Session(drift=self._drift)
-        self._turns = Turns()
-        self._usage = Usage(self._drift)
-        # The tasks claude started, its subagents among them
-        self._tasks = Tasks(self._drift)
-        self._notices = Notices(self._page, self._tasks)
+        console = console or Console(host.project_dir)
+        console.commands = sorted(LOCAL)
+        page = Page(console, layout)
+        self._parts = parts = Parts.made(host, sandbox, console, page, self._gone)
+        # What a turn is stopped by for what claude was given to read,
+        # none when the user switched that off
+        self._brake = (
+            Brake(guard, parts, self._interrupt_turn, self._send, self._gone)
+            if guard
+            else None
+        )
+        self._listener = Listener(parts, lambda: self._agent, self._brake)
         # What the session writes that is no message of claude's
-        self._plain = PlainLines(self._page)
-        self._replies = ReplyStream(self._page, lambda: self._followed.show(now=True))
-        self._followed = Followed(
-            host, sandbox.name, self._page, self._turns, self._replies
-        )
-        # Set when a turn ends, a question is put or claude ends
-        self._wake = threading.Event()
-        # The paths claude asks about are those of the sandbox: the project
-        # is the one the session knows, not where it is on the host
-        self._asker = Asker(
-            self._page,
-            self._console,
-            sandboxed_root(host),
-            self._gone,
-            self._wake.set,
-        )
-        # What claude asked and has no answer to yet, see _leave
-        self._asked = Asked(self._asker, self._page)
+        self._plain = PlainLines(page)
         # What the egress filter asks the user about, none when it does
         # not ask
         self._hosts = hosts and HostQuestions(
             hosts,
-            self._page,
-            self._asker,
-            self._asked,
-            self._console.interactive,
-            lambda: self._followed.settle(ASK_SETTLE),
+            page,
+            parts.asker,
+            parts.asked,
+            console.interactive,
+            lambda: parts.followed.settle(ASK_SETTLE),
         )
-        self._heartbeat = Heartbeat(self._page, self._turns, lambda: self._asker.asking)
+        self._heartbeat = Heartbeat(page, parts.turns, lambda: parts.asker.asking)
         self._progress = Progress(
-            self._page,
-            lambda: self._tasks.running,
-            lambda: self._asker.asking or self._replies.writing,
+            page,
+            lambda: parts.tasks.running,
+            lambda: parts.asker.asking or parts.replies.writing,
         )
-        self._status = StatusLine(
-            self._page,
-            sandbox,
-            self._session,
-            self._usage,
-            self._drift,
-            lambda: self._tasks.running,
-        )
-        self._shell = Shell(self._page, sandbox.name, lambda: self._asker.asking)
-        resume = Resume(self._page, host, self._turns, self._read_line, handover)
+        self._shell = Shell(page, sandbox.name, lambda: parts.asker.asking)
+        resume = Resume(page, host, parts.turns, self._read_line, handover)
         self._commands = Commands(
-            self._page,
-            self._session,
+            page,
+            parts.session,
             self._request,
             self._shell.run,
             resume.resume,
-            self._status.show,
-            self._status.refresh,
+            parts.status.show,
+            parts.status.refresh,
         )
-        # What takes in each kind of message claude says
-        self._takes: dict[str, Callable[[dict], None]] = {
-            "system": self._system,
-            "control_request": self._answer,
-            "control_cancel_request": self._withdrawn,
-            "control_response": self._answered,
-            "conversation_reset": self._reset,
-            "rate_limit_event": self._limited,
-            "stream_event": self._piece,
-            "tool_progress": self._notices.call_progress,
-            "result": self._turn_over,
-            "assistant": self._said,
-            "user": self._said,
-        }
-        # The kinds of message a chat knows, see Drift
-        self._known = PASSED_OVER.union(self._takes)
-        # Whether claude was asked for its settings and has not answered,
-        # and set once it answered the first time, or ended
-        self._settings_asked = False
-        self._settled = threading.Event()
         # When claude was last asked for something a line of the user's
         # asks of it, see _request
         self._requested = -math.inf
@@ -312,29 +222,29 @@ class Chat:
         ends. Returns how docker ended."""
         previous = signal.signal(signal.SIGINT, self._on_interrupt)
         connected = False
+        page = self._parts.page
         try:
-            self._agent = self._connect(self._session_ended, self._page)
+            self._agent = self._connect(self._session_ended, page)
             connected = True
             title = labelled("chat", flat(self._host.project_dir))
-            columns = self._page.layout.columns
-            self._page.say([f"{title}, /help says what there is", columns])
+            page.say([f"{title}, /help says what there is", page.layout.columns])
             if self._start:
-                self._page.put(self._page.events([self._start]))
-            listener = threading.Thread(target=self._listen, daemon=True)
-            listener.start()
-            self._asked.start(self._agent)
-            self._ask_settings()
-            if self._console.interactive and not self._page.redrawn:
+                page.put(page.events([self._start]))
+            listening = threading.Thread(target=self._listen, daemon=True)
+            listening.start()
+            self._parts.asked.start(self._agent)
+            self._listener.ask_settings()
+            if self._parts.console.interactive and not page.redrawn:
                 # Where the first prompt stays as it is written, it
                 # waits a moment for what claude goes by. At a terminal
                 # its status is written again in its place when that
                 # comes, and lines that are all there wait for nothing
-                self._settled.wait(SETTLE_WAIT)
+                self._listener.settled.wait(SETTLE_WAIT)
             # What the session was started with heads the first prompt
             # too: that is when it matters most
-            self._status.refresh()
+            self._parts.status.refresh()
             self._converse()
-            return self._leave(listener)
+            return self._leave(listening)
         except BaseException:
             # However the chat ends, the session ends with it: what the
             # launcher checks next is checked of a session that is over
@@ -343,7 +253,7 @@ class Chat:
             raise
         finally:
             signal.signal(signal.SIGINT, previous)
-            self._console.close()
+            self._parts.console.close()
 
     def _abandon(self) -> None:
         """End a session the chat can no longer talk to: no more prompts
@@ -378,21 +288,21 @@ class Chat:
             # For the command the user runs
             self._shell.interrupt()
             return
-        if self._life.leaving or (self._turns.running and not self._life.over):
+        if self._life.leaving or (self._parts.turns.running and not self._life.over):
             # Acted on by the thread that listens, see _listen: what
             # claude asked is refused with it, which is not done from here
             self._interrupt = True
         elif self._reading:
             # Where the wait for the line can be ended, see there
-            self._console.interrupt(frame)
+            self._parts.console.interrupt(frame)
 
     def _session_ended(self) -> None:
         """Told by the thread that reads claude. A wait for a line would
         go on until the user ends it: it is ended as Ctrl-C would. One
         that has not started yet sees that claude is over, see _read."""
         self._becomes(Life.ended)
-        self._wake.set()
-        self._settled.set()
+        self._parts.wake.set()
+        self._listener.settled.set()
         if self._reading:
             os.kill(os.getpid(), signal.SIGINT)
 
@@ -401,19 +311,20 @@ class Chat:
         status above its prompt when headed. As Ctrl-C when claude has
         ended, there is nobody left to read it. The answer to a question is
         not kept among the lines typed."""
+        parts = self._parts
         self._reading = True
         try:
             # After _reading is set: an end that comes from here on is told
             # by _session_ended, one that came before is seen here
             if self._life.over:
                 raise KeyboardInterrupt
-            return self._console.read(prompt, lambda: not self._asker.asking, headed)
+            return parts.console.read(prompt, lambda: not parts.asker.asking, headed)
         except KeyboardInterrupt:
-            self._console.end_line()
+            parts.console.end_line()
             raise
         finally:
             self._reading = False
-            self._page.touched()
+            parts.page.touched()
 
     def _read_line(self, prompt: Prompt, headed: bool = False) -> str | Taken | None:
         """A line from the user as _read has it, given first to the
@@ -423,9 +334,9 @@ class Chat:
         try:
             line = self._read(prompt, headed)
         except KeyboardInterrupt:
-            self._asker.line_dropped()
+            self._parts.asker.line_dropped()
             raise
-        if line is not None and self._asker.take(line):
+        if line is not None and self._parts.asker.take(line):
             return Taken.ANSWER
         return line
 
@@ -440,12 +351,14 @@ class Chat:
             # line is read meanwhile unless they are asked something
             self._shell.wait()
             self._wait_for_answer()
-            if not self._console.interactive:
+            if not self._parts.console.interactive:
                 self._wait_for_turn()
-                if self._guarded:
+                if self._brake and self._brake.stopped:
                     # Nobody is there to say how to go on, and the lines
                     # that are left were written before this was known
-                    self._page.note("chat", "the lines left are not sent, leaving")
+                    self._parts.page.note(
+                        "chat", "the lines left are not sent, leaving"
+                    )
                     return
             try:
                 line = (
@@ -462,7 +375,7 @@ class Chat:
                 continue
             dropped = -math.inf
             if line is None:
-                self._console.end_line()
+                self._parts.console.end_line()
                 return
             if line is Taken.ANSWER:
                 continue
@@ -485,7 +398,7 @@ class Chat:
         now = time.monotonic()
         if now - dropped <= LEAVE_WITHIN:
             return None
-        self._page.note("chat", "Ctrl-C again leaves")
+        self._parts.page.note("chat", "Ctrl-C again leaves")
         return now
 
     def _wait_for_turn(self) -> None:
@@ -495,17 +408,18 @@ class Chat:
         question is the line after the prompt that led to it. What a line
         asked of claude (/mode) is waited for no longer than ANSWER_PATIENCE:
         a claude that does not answer it holds up no line after it."""
+        parts = self._parts
         patience = self._requested + ANSWER_PATIENCE
         while (
             (
-                self._turns.running
+                parts.turns.running
                 or (self._agent.pending and time.monotonic() < patience)
             )
-            and not self._asker.asking
+            and not parts.asker.asking
             and not self._life.over
         ):
-            self._wake.wait(0.2)
-            self._wake.clear()
+            parts.wake.wait(0.2)
+            parts.wake.clear()
 
     def _request(
         self, subtype: str, on_answer: Answer | None = None, **more: object
@@ -526,7 +440,7 @@ class Chat:
         which wait for more than that, see _wait_for_turn. And once for
         what was asked: a claude that does not answer holds up no
         prompt after the first."""
-        if self._page.redrawn or not self._console.interactive:
+        if self._parts.page.redrawn or not self._parts.console.interactive:
             return
         patience = self._requested + ANSWER_WAIT
         while (
@@ -538,25 +452,19 @@ class Chat:
         """Give claude a prompt. While a turn runs claude takes it up
         when it can: within that turn between two of its steps, or as a
         turn of its own after it, which it then says it starts."""
-        started = self._begin()
-        self._guarded = False
+        started = self._listener.begin()
+        if self._brake:
+            self._brake.stopped = False
         if self._agent.prompt(text) is False:
             unread = "not sent, the session does not read what it is told"
-            self._page.note("chat", f"{unread}: Ctrl-C stops it")
+            self._parts.page.note("chat", f"{unread}: Ctrl-C stops it")
         elif not started:
-            self._page.note("chat", "sent, claude takes it up when it can")
-
-    def _begin(self) -> bool:
-        """Start a turn unless one runs, the prompt held back while it
-        does (see Console.hold). Whether one was started."""
-        started = self._turns.begin()
-        if started:
-            self._console.hold(True)
-        return started
+            self._parts.page.note("chat", "sent, claude takes it up when it can")
 
     def _listen(self) -> None:
         """Take in what claude says and write what the session does,
         until claude has ended."""
+        parts = self._parts
         # The messages in a row that could not be taken in
         stumbled = 0
         # When what the session did was last looked at
@@ -577,7 +485,7 @@ class Chat:
                     # to wait until it pauses
                     self._interrupt = False
                     # What claude asked is refused with it
-                    self._asker.give_up()
+                    parts.asker.give_up()
                     self._stop()
                 try:
                     claudes = self._taken_in(message)
@@ -595,22 +503,22 @@ class Chat:
                     if stumbled >= MOST_FAILED:
                         raise
                     skipped = f"FAILED to show a message: {flat(repr(error))[:200]}"
-                    self._page.say([labelled("chat", skipped)])
-            self._replies.turn_over()
-            self._followed.show(now=True)
+                    parts.page.say([labelled("chat", skipped)])
+            parts.replies.turn_over()
+            parts.followed.show(now=True)
             self._plain.say_left_out(now=True)
             if not self._life.left:
-                self._page.note("chat", "the session ended")
+                parts.page.note("chat", "the session ended")
         except Exception as error:  # noqa: BLE001
             # Whatever it is, the user is told and can leave: a chat that
             # no longer writes would pass for a session that does nothing
             failed = labelled(
                 "chat", f"FAILED, nothing more is shown: {flat(repr(error))}"
             )
-            self._page.say([failed])
+            parts.page.say([failed])
         finally:
             self._session_ended()
-            self._asked.close()
+            parts.asked.close()
 
     def _taken_in(self, message: dict | str | Unread) -> bool:
         """Take in what came over the pipe. Whether it was a message of
@@ -619,7 +527,7 @@ class Chat:
         (see Agent), nor what stands for a line that could not be
         read."""
         if isinstance(message, dict):
-            self._heard(message)
+            self._listener.heard(message)
             return True
         if isinstance(message, Unread):
             self._plain.unread()
@@ -636,165 +544,20 @@ class Chat:
         changed them, and so may the time, at which a limit starts
         again, and how wide the terminal is. What is written next then
         has them under it as they are."""
-        self._status.refresh()
+        self._parts.status.refresh()
         self._progress.show()
-        self._followed.show()
+        self._parts.followed.show()
         if self._hosts:
             self._hosts.look()
         self._heartbeat.beat()
         self._plain.say_left_out()
 
-    def _heard(self, message: dict) -> None:
-        """Take in one thing claude said, by its kind, then say what of
-        it was not as a chat reads it (see Drift). Not of the empty one
-        that stands for nothing said, see _listen."""
-        kind = message.get("type")
-        take = self._takes.get(kind) if isinstance(kind, str) else None
-        try:
-            if take:
-                take(message)
-        finally:
-            # Also of one that could not be taken in, which may be why.
-            # What fails here is not to stand in for what failed there
-            if message:
-                with contextlib.suppress(Exception):
-                    self._changed(message)
-
-    def _changed(self, message: dict) -> None:
-        """Say what of a message was not as a chat reads it, and note it
-        for a trace of the session, which has no other way to know."""
-        change = self._drift.told(
-            message, self._known, self._session.version, self._notices.known
-        )
-        if not change:
-            return
-        self._page.note("chat", change.said)
-        # A record that cannot be written is no reason to stop
-        with contextlib.suppress(OSError):
-            note_change(self._host, self._name, change.said)
-
-    def _system(self, message: dict) -> None:
-        if self._session.heard(message):
-            self._turn_started()
-        self._notices.system(message)
-
-    def _answered(self, message: dict) -> None:
-        """Claude answered a request of the chat's, which is told to
-        what asked for it, see Agent.request."""
-        self._agent.answered(message)
-        # The mode may have changed
-        self._status.refresh()
-        self._wake.set()
-
-    def _ask_settings(self) -> None:
-        """Ask claude which settings it goes by, for the effort the
-        status shows: no message of a turn says it. As the chat starts,
-        and after each turn, which may have changed it (/effort, /model).
-        Not waited for, and not asked again while no answer came: a
-        version that does not know the request shows no effort."""
-        if self._settings_asked:
-            return
-        self._settings_asked = True
-        self._agent.request("get_settings", self._settings_said, waited=False)
-
-    def _settings_said(self, response: dict) -> None:
-        """Take in the settings claude answers that it goes by. The
-        status is written again once an answer was taken in, see
-        _answered."""
-        self._settings_asked = False
-        try:
-            if response.get("subtype") != "success":
-                self._drift.missed("settings")
-                return
-            applied = self._drift.field(response.get("response"), "applied", dict)
-            if applied is not None:
-                self._session.settled(applied)
-        finally:
-            # Whatever it answered, the first prompt waits no longer
-            self._settled.set()
-
-    def _reset(self, _message: dict) -> None:
-        self._notices.cleared()
-
-    def _limited(self, message: dict) -> None:
-        self._notices.limit(message.get("rate_limit_info"))
-        self._status.limits.heard(message.get("rate_limit_info"))
-
-    def _said(self, message: dict) -> None:
-        """Take in what claude or a subagent of its said, or was given:
-        a reply, a tool call or its result."""
-        self._turns.current.heard(message)
-        found = self._guard.heard(message) if self._guard else ()
-        if self._guard and found:
-            self._guard_turn(self._guard, found)
-        if message.get("type") == "assistant" and own(message):
-            self._session.replied(message)
-            self._usage.step(message)
-            self._replies.whole(message)
-
-    def _turn_started(self) -> None:
-        """Claude said that a turn starts, and which session it is of:
-        that one is followed, /clear goes on as another. The turn is one
-        claude starts on its own unless a prompt started it."""
-        self._console.commands = sorted({*LOCAL, *self._session.commands})
-        # The prompt has the status from the first turn on
-        self._status.refresh()
-        self._notices.servers(self._session.servers)
-        self._followed.follow(self._session.id)
-        self._begin()
-
-    def _piece(self, message: dict) -> None:
-        """Take in a piece of what claude itself is making: its reply,
-        and whether it thinks."""
-        if not own(message):
-            return
-        event = self._drift.field(message, "event", dict)
-        if event is None:
-            return
-        if not isinstance(event.get("type"), str):
-            self._drift.missed("event.type")
-        self._turns.current.piece(event)
-        self._replies.piece(event)
-
-    def _turn_over(self, result: dict) -> None:
-        """A turn ended: write the rest of it and what it took. Not for a
-        result when no turn runs, nor one of a subagent's: a turn that
-        is over is not over again, and the next one has not started."""
-        if not self._turns.running or not own(result):
-            return
-        self._replies.turn_over()
-        self._followed.settle()
-        more = self._usage.parts(result, self._session.model)
-        turn = self._turns.current
-        self._page.working("")
-        # A command of Claude Code's that went well took nothing worth a
-        # line: the model was not asked and no call was made
-        if more or turn.said or turn.interrupted or ended_badly(result):
-            self._page.say([turn_line(turn, result, more)])
-        # And what it did on the network, as its capture saw it: since
-        # the turn before, what the session does between two is in the
-        # next one's
-        reached = self._followed.network()
-        if reached:
-            self._page.say([labelled("network", reached)])
-        self._status.refresh()
-        self._ask_settings()
-        if not turn.guarded:
-            # Not of a turn that was stopped for what claude read: it has
-            # not finished, and what comes next is said where it stopped
-            ready = ready_line(self._page.layout, self._tasks.running)
-            self._page.put([ready])
-        if not turn.interrupted and time.monotonic() - turn.started >= LONG_TURN:
-            self._console.bell()
-        self._console.hold(False)
-        self._turns.end()
-        self._wake.set()
-
     def _interrupt_turn(self) -> bool:
         """Ask claude to end the turn that runs. Whether it was asked:
         not without a turn, and not twice for one."""
-        turn = self._turns.current
-        if not self._turns.running or turn.interrupted:
+        turns = self._parts.turns
+        turn = turns.current
+        if not turns.running or turn.interrupted:
             return False
         turn.interrupted = True
         self._agent.request("interrupt")
@@ -804,100 +567,27 @@ class Chat:
         """Ctrl-C: claude is asked to end the turn that runs, and the
         second time the session is stopped. So is one that is slow to
         leave."""
+        page = self._parts.page
         if not self._life.leaving and self._interrupt_turn():
-            self._page.note("chat", "interrupting, Ctrl-C again stops the session")
-        elif self._life.leaving or self._turns.running:
-            self._page.note("chat", "stopping the session")
+            page.note("chat", "interrupting, Ctrl-C again stops the session")
+        elif self._life.leaving or self._parts.turns.running:
+            page.note("chat", "stopping the session")
             docker_ok("stop", self._name)
 
-    def _guard_turn(self, guard: Guard, found: tuple[Planted, ...]) -> None:
-        """Stop the turn for what claude was just given to read: first of
-        all, its next call may be a moment away. Then say why, under the
-        call it is of. Claude has read the text, so whether it goes on
-        with it is the user's to say, and what it asked meanwhile is
-        refused. The user is asked where there is one to answer, once for
-        all that is found until they did."""
-        stopped = self._interrupt_turn()
-        self._guarded = True
-        if self._turns.running:
-            self._turns.current.guarded = True
-        asks = self._console.interactive
-        first = guard.question() if asks else True
-        if first:
-            # Not the question of an earlier stop, which is for this too
-            self._asker.give_up()
-        self._followed.settle(ASK_SETTLE)
-        said = stop_said(found, stopped, asks)
-        self._page.put(self._page.layout.header(said, ALERT))
-        self._console.bell()
-        if asks and first:
-            self._asked.then(functools.partial(self._ask_to_go_on, guard))
-
-    def _ask_to_go_on(self, guard: Guard) -> None:
-        """Ask whether claude goes on with what a turn was stopped for in
-        the conversation. A yes keeps it, and is remembered for what was
-        read (see Guard). Anything else asks whether the conversation is
-        cleared, which a yes alone does: the text is in it until then,
-        whatever claude is told, and what is cleared is not brought back.
-        No answer, the user interrupted or left, leaves it as it is. The
-        turn was stopped either way, so a conversation that is kept says
-        that the next line is the user's to type."""
-        went_on, clears = None, None
-        try:
-            went_on = self._said_yes(GO_ON)
-            if went_on is False:
-                clears = self._said_yes(CLEAR)
-        finally:
-            # Whatever came of it: a question that is never answered for
-            # would be the last one put
-            guard.answered(bool(went_on))
-        if self._gone():
-            return
-        if clears:
-            self._start_anew()
-            return
-        if went_on:
-            kept = "kept: not asked again for what it read"
-        elif clears is None:
-            kept = f"not answered: {STILL_READ}"
-        else:
-            kept = f"not cleared: {STILL_READ}"
-        layout = self._page.layout
-        # Written together: the prompt that comes back is under both
-        said = layout.header([labelled("chat", kept)])
-        self._page.put([*said, _waiting_line(layout)])
-
-    def _said_yes(self, question: str) -> bool | None:
-        """Put a question of a turn that was stopped, where it is not
-        missed. Whether it was answered with a yes, none for no answer."""
-        typed = self._asker.ask(question, ASKED_STYLE)
-        return said_yes(typed)
-
-    def _start_anew(self) -> None:
-        """Clear the conversation, once the turn that was stopped is
-        over: what claude read goes with it."""
-        patience = time.monotonic() + STOP_QUIET
-        while self._turns.running and time.monotonic() < patience:
-            if self._gone():
-                return
-            time.sleep(0.05)
-        self._page.note("chat", "clearing the conversation, what claude read with it")
-        self._send("/clear")
-
-    def _leave(self, listener: threading.Thread) -> int:
+    def _leave(self, listening: threading.Thread) -> int:
         """End the session, which leaves when it is told no more prompts
         come. Ctrl-C stops one that does not, see _stop."""
         self._becomes(Life.leave)
-        self._asker.give_up()
+        self._parts.asker.give_up()
         # What claude asked is answered before it is told to leave, a
         # refusal that came too late would not be read
-        self._asked.answered_within(LEAVE_QUIET)
+        self._parts.asked.answered_within(LEAVE_QUIET)
         self._agent.close()
         told = False
         started = time.monotonic()
         while True:
-            if listener.is_alive():
-                listener.join(0.1)
+            if listening.is_alive():
+                listening.join(0.1)
             elif not self._agent.drain():
                 break
             elif self._interrupt:
@@ -909,7 +599,7 @@ class Chat:
                 waiting = labelled(
                     "chat", "waiting for the session to end, Ctrl-C stops it"
                 )
-                self._page.say([waiting])
+                self._parts.page.say([waiting])
         self._say_how_to_go_on()
         return self._agent.status()
 
@@ -917,53 +607,10 @@ class Chat:
         """Say how the session that was left is gone on with, unless
         another one is about to be."""
         resumed = self._handover is not None and self._handover.session
-        if self._session.id and self._life.left and not resumed:
-            again = f"claude-airlock --line-mode --resume {self._session.id}"
-            self._page.note("chat", f"to go on with this session: {again}")
-
-    def _answer(self, message: dict) -> None:
-        """Answer what claude asks its host: whether a tool may be used,
-        which is the user's to say. Anything else is not for a chat, and
-        said to be asked. Not what is asked under an id that is none,
-        which no answer could name: it is the session's to send, nested
-        as deep as can be read, and answered it would be written back."""
-        request = message.get("request")
-        asked = kept_id(message.get("request_id"))
-        if asked is None:
-            self._page.note("chat", NO_ID)
-            return
-        if not isinstance(request, dict) or request.get("subtype") != "can_use_tool":
-            what = (
-                flat(request.get("subtype", "?")) if isinstance(request, dict) else "?"
-            )
-            self._page.say(
-                [
-                    labelled(
-                        "chat", f"claude asked for {what}, which a chat cannot answer"
-                    )
-                ]
-            )
-            self._agent.refuse(asked, "not supported by claude-airlock --line-mode")
-            return
-        try:
-            # The call it asks about first, the question comes under it
-            self._followed.settle(ASK_SETTLE)
-        finally:
-            # Put however that went: claude waits for an answer to what
-            # it asked, and the turn with it. Refused at once when as
-            # much of it waits as may
-            if not self._asked.put(asked, request):
-                self._agent.refuse(asked, "too much is asked at once")
-                tool = flat(request.get("tool_name", "?")).lower()[:NAME_KEPT]
-                self._page.note("chat", f"REFUSED {tool} unasked: {TOO_MUCH_ASKED}")
-
-    def _withdrawn(self, message: dict) -> None:
-        """Claude no longer asks what it asked under an id, see
-        Asked.cancel. Not under one that is none, which nothing was
-        asked under, see _answer."""
-        asked = kept_id(message.get("request_id"))
-        if asked is not None:
-            self._asked.cancel(asked)
+        session = self._parts.session.id
+        if session and self._life.left and not resumed:
+            again = f"claude-airlock --line-mode --resume {session}"
+            self._parts.page.note("chat", f"to go on with this session: {again}")
 
 
 def _joined(lines: list[str], line: str) -> str | None:
@@ -976,26 +623,6 @@ def _joined(lines: list[str], line: str) -> str | None:
     text = "\n".join([*lines, line]).strip()
     lines.clear()
     return text
-
-
-def _waiting_line(layout: Layout) -> Shown:
-    """The line that says a turn that was stopped is not gone on with
-    until the user types, as a turn that is over is said."""
-    return layout.header([labelled("chat", WAITING)], READY_STYLE)[0]
-
-
-def ready_line(layout: Layout, running: Running | None = None) -> Shown:
-    """What is said once a turn is over, for the eye to find where claude
-    stopped and the prompt is the user's again: bright green in colour.
-    With subagents or other tasks of claude's that still run, it says
-    so: the turn is over and the work is not, claude takes up again
-    when one of them ends."""
-    said = READY
-    left = still_running(running) if running else ""
-    if left:
-        paused = f"claude has paused, {left}, it goes on when one ends"
-        said = labelled("ready", paused)
-    return layout.header([said], READY_STYLE)[0]
 
 
 def chat(

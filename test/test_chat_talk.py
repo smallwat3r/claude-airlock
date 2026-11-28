@@ -27,6 +27,7 @@ from chat_harness import (
     lines_now,
     page,
     task_over,
+    untimed,
     written,
 )
 from harness import LauncherTest
@@ -49,19 +50,21 @@ class TalkTest(LauncherTest):
     def test_the_status_follows_what_claude_says_while_a_turn_runs(self):
         chat = a_chat(self.host)
         with written():
-            chat._status.refresh()
-            assert chat._console._head == ["[claude-test] net:open"]
+            chat._parts.status.refresh()
+            assert chat._parts.console._head == ["[claude-test] net:open"]
             # Between the start of a turn and its end: the mode claude
             # goes into, the model that replied, a limit of the account
-            chat._heard(
+            chat._listener.heard(
                 {"type": "system", "subtype": "status", "permissionMode": "plan"}
             )
-            chat._heard({"type": "assistant", "message": {"model": "claude-fable-5-2"}})
+            chat._listener.heard(
+                {"type": "assistant", "message": {"model": "claude-fable-5-2"}}
+            )
             limit = {"rateLimitType": "seven_day", "utilization": 0.95}
-            chat._heard({"type": "rate_limit_event", "rate_limit_info": limit})
+            chat._listener.heard({"type": "rate_limit_event", "rate_limit_info": limit})
             # Made again with each look at what the session did
             chat._look()
-        assert chat._console._head == [
+        assert chat._parts.console._head == [
             "[claude-test] net:open  Fable 5.2 mode:plan  7d:95% used"
         ]
 
@@ -88,16 +91,16 @@ class TalkTest(LauncherTest):
             # Not where lines are all there, which wait for the turn,
             # nor once the answer came
             chat._commands.do("/mode plan")
-            chat._console.interactive = False
+            chat._parts.console.interactive = False
             assert waited() < 0.2
-            chat._console.interactive = True
+            chat._parts.console.interactive = True
             claude.pending = False
             assert waited() < 0.2
 
     def test_lines_that_are_all_there_wait_a_while_for_an_answer_and_no_more(self):
         claude = RecordedClaude()
         chat = a_chat(self.host, claude, typed=True)
-        chat._console.interactive = False
+        chat._parts.console.interactive = False
         claude.pending = True
 
         def waited() -> float:
@@ -122,27 +125,29 @@ class TalkTest(LauncherTest):
         )
         with written() as lines:
             for said in heard:
-                chat._heard(said)
+                chat._listener.heard(said)
             chat._look()
-            assert chat._status.refresh() == ["[claude-test] net:open  agents:2"]
+            assert chat._parts.status.refresh() == ["[claude-test] net:open  agents:2"]
             # Where lines stay, how far they are is said after a while.
             # Not into a reply of claude's that is being written
             assert chat._progress.since is not None
             chat._progress.since -= tasking.SAID_EVERY
             writing = {"type": "content_block_start", "content_block": {"type": "text"}}
-            chat._heard({"type": "stream_event", "event": writing})
+            chat._listener.heard({"type": "stream_event", "event": writing})
             chat._look()
             assert "# agents " not in lines_now(lines)
-            chat._heard(
+            chat._listener.heard(
                 {"type": "stream_event", "event": {"type": "content_block_stop"}}
             )
             chat._look()
             assert "# agents " in lines_now(lines)
-            chat._heard(task_over("a2", usage=USED))
+            chat._listener.heard(task_over("a2", usage=USED))
             # A turn that ends while one still runs says so
-            chat._turns.begin()
-            chat._heard({"type": "result", "subtype": "success", "is_error": False})
-            chat._status.show()
+            chat._parts.turns.begin()
+            chat._listener.heard(
+                {"type": "result", "subtype": "success", "is_error": False}
+            )
+            chat._parts.status.show()
         used = "2 calls, 1.5k tokens"
         ended = "completed: Read the docs, 2 calls, 20.5k tokens, 3s"
         paused = "claude has paused, 1 agent still runs, it goes on when one ends"
@@ -170,19 +175,19 @@ class TalkTest(LauncherTest):
     def test_a_result_ends_only_a_turn_that_runs_and_is_claudes(self):
         chat = a_chat(self.host)
         over = {"type": "result", "subtype": "success", "is_error": False}
-        chat._turns.begin()
+        chat._parts.turns.begin()
         with written() as lines:
             # Of a subagent: the turn goes on
-            chat._heard({**over, "parent_tool_use_id": "t1"})
-        assert chat._turns.running
+            chat._listener.heard({**over, "parent_tool_use_id": "t1"})
+        assert chat._parts.turns.running
         assert lines == []
         with written() as lines:
-            chat._heard(over)
-        assert not chat._turns.running
+            chat._listener.heard(over)
+        assert not chat._parts.turns.running
         assert lines
         # Once more: no turn runs to end, nothing is said again
         with written() as lines:
-            chat._heard(over)
+            chat._listener.heard(over)
         assert lines == []
 
     def test_a_chat_is_over_or_left_by_who_ended_first(self):
@@ -223,7 +228,7 @@ class TalkTest(LauncherTest):
             return line
 
         chat._read = read
-        chat._console.interactive = True
+        chat._parts.console.interactive = True
         with (
             written() as lines,
             unittest.mock.patch.object(talk.time, "monotonic", lambda: clock[0]),
@@ -238,15 +243,15 @@ class TalkTest(LauncherTest):
         # Raised where the line is waited for, see Console.interrupt
         chat._on_interrupt(2, None)
         with written(), pytest.raises(KeyboardInterrupt):
-            chat._console.read("> ")
-        chat._turns.begin()
+            chat._parts.console.read("> ")
+        chat._parts.turns.begin()
         chat._on_interrupt(2, None)
         assert chat._interrupt
 
     def test_ctrl_c_is_acted_on_however_fast_the_session_writes(self):
         claude, hosts = RecordedClaude(), WaitingHosts()
         chat = a_chat(self.host, claude, hosts=hosts)
-        chat._turns.begin()
+        chat._parts.turns.begin()
         stop = threading.Event()
 
         def flood() -> None:
@@ -307,7 +312,10 @@ class TalkTest(LauncherTest):
 
         for message in ({"type": "odd"}, {"type": "fine"}, None):
             claude.messages.put(message)
-        with written() as lines, unittest.mock.patch.object(chat, "_heard", heard):
+        with (
+            written() as lines,
+            unittest.mock.patch.object(chat._listener, "heard", heard),
+        ):
             chat._listen()
         assert lines == [
             "# chat        FAILED to show a message: ValueError('odd')",
@@ -321,7 +329,10 @@ class TalkTest(LauncherTest):
         for _ in range(talk.MOST_FAILED + 2):
             claude.messages.put({"type": "odd"})
         failing = unittest.mock.Mock(side_effect=ValueError("odd"))
-        with written() as lines, unittest.mock.patch.object(chat, "_heard", failing):
+        with (
+            written() as lines,
+            unittest.mock.patch.object(chat._listener, "heard", failing),
+        ):
             chat._listen()
         # The user is told, and can leave: the chat holds the session as
         # ended, it is not waited for
@@ -349,13 +360,13 @@ class TalkTest(LauncherTest):
             asked.append(prompt)
             return "y"
 
-        chat._asker.ask = ask
+        chat._parts.asker.ask = ask
         # The project is under the home of the container for the session,
         # whose paths these are, wherever it is on the host
         for path in ("/home/sandbox/proj/a.py", "/etc/hosts"):
             edit = {"file_path": path, "old_string": "a", "new_string": "b"}
             with written():
-                chat._asker.decide({"tool_name": "Edit", "input": edit})
+                chat._parts.asker.decide({"tool_name": "Edit", "input": edit})
         assert asked == [
             "allow edit file: /home/sandbox/proj/a.py? [y/a/N] ",
             "allow edit file: /etc/hosts  OUTSIDE PROJECT? [y/a/N] ",
@@ -368,8 +379,8 @@ class TalkTest(LauncherTest):
         chat = a_chat(self.host)
         with written() as lines:
             for message in messages:
-                chat._turns.begin()
-                chat._heard(message)
+                chat._parts.turns.begin()
+                chat._listener.heard(message)
         return [line for line in lines if "CHANGED" in line]
 
     def test_a_chat_says_nothing_of_what_claude_says_as_it_reads_it(self):
@@ -446,9 +457,9 @@ class TalkTest(LauncherTest):
             "subagent_retry": {**retry, "error_category": "overloaded"},
         }
         with written() as lines:
-            chat._heard(progress)
-        said = "the API did not answer a subagent, trying again  overloaded"
-        assert lines == [f"# {labelled('chat', said)}"]
+            chat._listener.heard(progress)
+        said = "agent    api         API error: overloaded (retry 2 of 10)"
+        assert untimed(lines) == [said]
 
     def test_a_chat_says_what_changed_in_what_claude_says(self):
         usage = {"input_tokens": 10, "output_tokens": 5}
@@ -532,14 +543,14 @@ class TalkTest(LauncherTest):
 
         def followed(follower: Follower) -> list[Event]:
             found = Round()
-            follower._poll_notes(found)
+            follower.network.poll_notes(found)
             return [event for _, event in found.events]
 
         # A note is of the thousandth of a second it was added in
         time.sleep(0.002)
         with written():
             for _ in range(2):
-                chat._heard({"type": "new_thing", "text": "secret"})
+                chat._listener.heard({"type": "new_thing", "text": "secret"})
         rows, events = change_events(host, 0, float("inf"))
         assert rows == [
             (
@@ -560,7 +571,7 @@ class TalkTest(LauncherTest):
         time.sleep(0.002)
         assert followed(Follower(host, verbose=False)) == []
         with written():
-            chat._heard({"type": "another_thing"})
+            chat._listener.heard({"type": "another_thing"})
         assert [event.what for event in followed(mine)] == ["changed"] * 2
         assert followed(mine) + followed(others) == []
 
@@ -591,8 +602,8 @@ class FollowedTest(LauncherTest):
             (session, Who.AGENT, "reply", ["done"])
         ]
         # Of the network, its own container alone
-        assert follower._ours("claude-test")
-        assert not follower._ours("claude-test-2")
+        assert follower.network.ours("claude-test")
+        assert not follower.network.ours("claude-test-2")
 
     def test_a_reply_left_open_holds_back_what_the_session_did_for_a_while(self):
         # Its end never told, a reply that kept the launcher's own lines
@@ -660,11 +671,11 @@ class FollowedTest(LauncherTest):
         other = SESSION.replace("3fa9", "4fa9")
         with written():
             for session in (SESSION, other, "../elsewhere"):
-                chat._heard(
+                chat._listener.heard(
                     {"type": "system", "subtype": "init", "session_id": session}
                 )
         # What is not an id changes nothing
-        tails = chat._followed._follower._tails
+        tails = chat._parts.followed._follower.transcripts.tails
         assert [path.stem for path in tails] == [other]
 
     def test_a_reply_of_before_the_chat_is_history_one_since_is_told_by_the_pipe(self):
