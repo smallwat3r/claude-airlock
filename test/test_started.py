@@ -9,8 +9,8 @@ import json
 import re
 import time
 
-from fakes import INFO, gvisor
-from harness import LauncherTest, prompts_at
+from fakes import HOSTNET, INFO, docker_info, gvisor
+from harness import LauncherTest, gvisor_socket, prompts_at
 
 from claude_airlock import settings
 from claude_airlock.events import Who
@@ -47,6 +47,11 @@ class StartTest:
         assert (start.memory, start.pids, start.cpus) == ("8g", "256", "1.5")
         # No sidecar sees into a session under gVisor
         assert start.recorded == ("connections", "memory and CPU use")
+        told = started.Start.of(
+            chosen, gvisor("--network=host"), "", [], ssh_agent=False, told=True
+        )
+        # Unless gVisor tells what runs in it
+        assert told.recorded == ("connections", "processes")
         # The host had no agent to forward
         assert start.open == ("config:rw", "telemetry")
         assert start.dirs == ("/home/me/ref (ro)", "/srv/data")
@@ -174,6 +179,25 @@ class LaunchTest(LauncherTest):
         assert start["image"] == result.image
         # Not worth a word when the session ends
         assert "of this session" not in result.stderr
+
+    @gvisor_socket
+    def test_processes_are_said_to_be_recorded_where_gvisor_tells_them(self):
+        config = f"--pod-init-config={self.host.pod_init_config}"
+        told = docker_info(runsc=[*HOSTNET, config], runsc_hostnet=HOSTNET)
+        for chosen, recorded in (
+            ("runsc", ["processes"]),
+            ("runsc-hostnet", ["memory and CPU use"]),
+        ):
+            result = self.launch(
+                CLAUDE_AIRLOCK_RUNTIME=chosen,
+                CLAUDE_AIRLOCK_PROC_LOG="1",
+                FAKE_INFO=told,
+                FAKE_RUNNING="claude-proj",
+                session="sleep 0.5",
+            )
+            assert result.status == 0, result.stderr
+            start = self.noted()[-2]
+            assert start["recorded"] == recorded, chosen
 
     def test_the_plugins_switched_on_are_noted_with_their_versions(self):
         claude = self.home / ".claude"

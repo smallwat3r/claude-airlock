@@ -10,7 +10,7 @@ import os
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -28,7 +28,6 @@ from .recording.egress_log import net_log
 from .recording.gvisor import session_monitored
 from .recording.host_health import collect_left_behind, health_recorded
 from .recording.processes import Watcher, processes_recorded
-from .recording.procwatch import Secrets
 from .recording.recorder import transcripts_copied
 from .recording.secrets import session_secrets
 from .recording.socket_watch import socket_proxy_watched
@@ -260,34 +259,29 @@ def session(plan: Plan) -> int:
         return ending.status(status)
 
 
+@contextmanager
 def _session_watched(
     plan: Plan, name: str, owner: str, runtime: Runtime
-) -> AbstractContextManager[None]:
+) -> Iterator[bool]:
     """The recorder for CLAUDE_AIRLOCK_PROC_LOG while a session runs. It
     is normally a sidecar that records the session's processes and its
     memory and CPU use. Under a runtime where a sidecar cannot see into
     the session, the launcher records memory and CPU use from outside
-    instead, and what runs in it as the runtime tells where it can.
+    instead, and what runs in it as the runtime tells where it can (see
+    gvisor.py). Yields whether the runtime is listened to for that.
     owner is the container whose network namespace the session is in."""
     settings, host = plan.settings, plan.host
     # The files of secrets whose opening either records
     secrets = session_secrets(settings, host, mounted_dirs(plan.dirs, host))
     if settings.proc_log and not runtime.JOINABLE:
-        return _recorded_from_outside(host, name, runtime, secrets)
-    return processes_recorded(settings, host, name, owner, plan.image.tag, secrets)
-
-
-@contextmanager
-def _recorded_from_outside(
-    host: Host, name: str, runtime: Runtime, secrets: Secrets
-) -> Iterator[None]:
-    """The memory and CPU use of a session, and what runs in it as its
-    runtime tells, where it can (see gvisor.py)."""
-    with (
-        session_monitored(host, name, runtime, secrets) as monitor,
-        health_recorded(host, name, runtime.shown, monitor),
-    ):
-        yield
+        with (
+            session_monitored(host, name, runtime, secrets) as monitor,
+            health_recorded(host, name, runtime.shown, monitor),
+        ):
+            yield monitor is not None
+        return
+    with processes_recorded(settings, host, name, owner, plan.image.tag, secrets):
+        yield False
 
 
 def _hidden(plan: Plan, remembered: Remembered) -> Hidden:
@@ -400,9 +394,9 @@ def recorded_session(
             session_captured(settings, host, name, image.tag),
             session_address_recorded(settings, host, name, owner),
             socket_proxy_watched(settings, host, name, owner),
-            _session_watched(plan, name, owner, runtime),
         ):
             running.enter_context(recording)
+        told = running.enter_context(_session_watched(plan, name, owner, runtime))
         copier = running.enter_context(transcripts_copied(host))
         running.enter_context(login_shared(host))
         hit = running.enter_context(limits_watched(settings, name))
@@ -429,6 +423,7 @@ def recorded_session(
             # The agent's door is open when the host has an agent
             ssh_agent=bool(agent_args),
             net_ask=hosts is not None,
+            told=told,
             plugins=enabled_plugins(host.claude_dir, host.project_dir),
             # A --shell session runs bash, which is given no plugin
             servers=image.language_servers if plan.runs_claude else (),

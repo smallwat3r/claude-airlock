@@ -90,20 +90,23 @@ class Start:
         *,
         ssh_agent: bool,
         net_ask: bool = False,
+        told: bool = False,
         plugins: Iterable[str] = (),
         servers: Iterable[str] = (),
     ) -> Start:
         """The start of a session with those settings, under that runtime
         and in a container of that image, the SSH agent forwarded or
         not, the user asked about the hosts its filter does not allow or
-        not, with those plugins switched on and those language servers
-        of the image."""
+        not, told by the runtime what runs in it or not (see gvisor.py),
+        with those plugins switched on and those language servers of the
+        image."""
         recorded = []
         if settings.net_log:
             recorded.append("connections")
         if settings.proc_log:
-            # Under a runtime no sidecar can see into, see host_health.py
-            seen = runtime.JOINABLE
+            # Under a runtime no sidecar can see into, see host_health.py,
+            # unless the runtime tells
+            seen = runtime.JOINABLE or told
             recorded.append("processes" if seen else "memory and CPU use")
         if settings.api_log:
             # The session's own word, kept as it comes, see api_log.py

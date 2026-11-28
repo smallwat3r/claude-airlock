@@ -13,8 +13,8 @@ a custom `claude` program.
 ![The launcher on the host starts the session container, a capture sidecar
 and a process sidecar that share one network namespace, and reads their
 records and the transcript while the session runs, the egress proxy, the
-Docker socket proxy, the SSH agent and the gVisor runtime are
-opt-in](docs/img/architecture.excalidraw.png)
+Docker socket proxy, the SSH agent and the gVisor runtime, which tells the
+launcher what runs, are opt-in](docs/img/architecture.excalidraw.png)
 
 What you get:
 
