@@ -130,7 +130,8 @@ What a session is given and what it is kept from.
   refuses to run for a user it has no entry for.
 - No program of the image is setuid or setgid, and a process that crashes
   leaves no core dump.
-- What a session installs in `~/.cache` (`uv tool install`, `go install`)
+- What a session installs in `~/.cache` (`uv tool install`,
+  `uv python install`, `go install`)
   comes last in `PATH`. The cache outlives the session, and a command left
   there cannot stand in for one of the image.
 - Writable space is the mounts, the cache volume and a few size-capped

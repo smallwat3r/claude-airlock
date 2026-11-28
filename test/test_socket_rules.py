@@ -98,7 +98,10 @@ class ModesTest:
             assert passes(SocketAccess.FULL, path), path
             assert not passes(SocketAccess.LIMITED, path), path
 
-    def test_full_passes_nothing_that_asks_for_another_protocol(self):
-        rules = Path(DOCKERFILE_DIR, PROXY_RULES[SocketAccess.FULL]).read_text()
-        refusal = rules.index("http-request deny if { req.hdr(Upgrade) -m found }")
-        assert refusal < rules.index("http-request allow")
+    def test_no_mode_passes_what_asks_for_another_protocol(self):
+        for mode in SocketAccess:
+            if mode not in PROXY_RULES:
+                continue
+            rules = Path(DOCKERFILE_DIR, PROXY_RULES[mode]).read_text()
+            refusal = rules.index("http-request deny if { req.hdr(Upgrade) -m found }")
+            assert refusal < rules.index("http-request allow"), mode

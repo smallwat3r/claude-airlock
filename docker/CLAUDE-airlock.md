@@ -41,7 +41,10 @@ their shell, or in ~/.config/claude-airlock/config for every session).
   that allows listed domains only, over HTTP, HTTPS and git over SSH:
   direct connections, DNS lookups and other protocols (a database, say)
   fail. A 403 from the proxy is a blocked domain, tell the user to add it
-  to docker/allowed-domains.txt of their claude-airlock checkout.
+  to docker/allowed-domains.txt of their claude-airlock checkout. Unless
+  it was for a port other than 80, 443 and 22 (a tunnel, 443 and 22
+  alone), or for a name that leads to a loopback or link-local address:
+  the list does not change those, say so instead.
 - CLAUDE_AIRLOCK_NET_ASK (off unless 1, with the filter, and listed only
   where the user can be asked: not listed, a request for a domain that is
   not listed is refused at once, as above). On, a request

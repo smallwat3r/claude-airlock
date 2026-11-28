@@ -4,10 +4,13 @@ into the Dockerfiles and the launcher's own code."""
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
+import io
 import json
 import re
 import stat
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,22 @@ spec.loader.exec_module(pins)
 def test_a_version_or_a_checksum_is_taken_as_it_is():
     for said in ("go1.27.4", "v0.4.0", "2.1.326", "1.0.0+build-1", "ab" * 32):
         assert pins.plain(said, "x") == said
+
+
+def test_a_redirect_is_followed_to_https_alone():
+    handler = pins._HttpsOnly()
+    asked = urllib.request.Request("https://github.com/a/releases/download/v1/x")
+    headers = http.client.HTTPMessage()
+    for elsewhere in ("http://objects.example/x", "ftp://objects.example/x"):
+        with pytest.raises(ValueError, match="not HTTPS"):
+            handler.redirect_request(
+                asked, io.BytesIO(), 302, "Found", headers, elsewhere
+            )
+    followed = handler.redirect_request(
+        asked, io.BytesIO(), 302, "Found", headers, "https://objects.example/x"
+    )
+    assert followed is not None
+    assert followed.full_url == "https://objects.example/x"
 
 
 def test_what_would_be_read_as_more_than_a_pin_ends_the_run():

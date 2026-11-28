@@ -29,7 +29,11 @@ RUN if [ "$HOST_HOME" != /home/sandbox ]; then \
 
 # Same dir as /home/sandbox/.local/bin via the symlink, but /doctor checks PATH for
 # the literal $HOME/.local/bin (the host home), so add it to silence the warning.
-ENV PATH="${HOST_HOME}/.local/bin:${PATH}"
+# Last, as nothing there is to stand in for a command of the image.
+ENV PATH="${PATH}:${HOST_HOME}/.local/bin"
+# The Pythons uv installs are linked where its tools are, in ~/.cache last
+# in PATH (see base.Dockerfile), not in ~/.local/bin, which is read-only
+ENV UV_PYTHON_BIN_DIR=/home/sandbox/.cache/bin
 
 # Claude Code: exact version from npm. Declared here and not further up, a
 # new version then rebuilds from this layer on only. The cache npm fills is

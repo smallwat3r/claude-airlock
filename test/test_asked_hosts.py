@@ -407,6 +407,16 @@ class AskedHostsTest(LauncherTest):
         (helper,) = (line for line in conf if line.startswith("external_acl_type"))
         assert " %>a %>rd %>rP /bin/bash /etc/squid/ask-helper" in helper
 
+    def test_the_proxy_serves_neither_its_own_pages_nor_another_scheme(self):
+        # Its pages tell of every session it serves, and ftp:// would have
+        # it open connections of its own: both refused ahead of any allow
+        conf = (ROOT / "docker" / "squid.conf").read_text().splitlines()
+        rules = [line.split() for line in conf if line.startswith("http_access")]
+        first_allow = next(n for n, rule in enumerate(rules) if rule[1] == "allow")
+        assert ["http_access", "deny", "manager"] in rules[:first_allow]
+        assert ["http_access", "deny", "!CONNECT", "!web"] in rules[:first_allow]
+        assert "acl web proto HTTP HTTPS" in conf
+
     def test_the_helper_lets_only_so_many_hosts_of_a_session_wait(self):
         self.asked()
         requests = [f"{n} {ADDRESS} h{n}.test 443" for n in range(12)]

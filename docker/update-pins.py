@@ -38,8 +38,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from functools import cache
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import NamedTuple
+from typing import IO, NamedTuple
 
 REGISTRY_ACCEPT = (
     "application/vnd.oci.image.index.v1+json, "
@@ -70,13 +71,36 @@ COMPILE_COMMAND = "docker/update-pins.py"
 NPM_HELD = frozenset(("react", "react-dom"))
 
 
+class _HttpsOnly(urllib.request.HTTPRedirectHandler):
+    """Redirects followed to HTTPS alone. A download of a release is a
+    redirect as a rule, and the bytes whose checksum is pinned are those
+    at its end: urllib would follow one to plain HTTP or FTP."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not newurl.startswith("https://"):
+            raise ValueError(f"redirected to what is not HTTPS: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_HttpsOnly)
+
+
 def fetch(url: str, headers: dict | None = None, method: str = "GET"):
     # Pins are only as good as where they are from: nothing but HTTPS,
-    # never a file or another scheme a built URL could turn out to be
+    # never a file or another scheme a built URL could turn out to be,
+    # nor one it is redirected to
     if not url.startswith("https://"):
         raise ValueError(f"not an HTTPS URL: {url}")
     req = urllib.request.Request(url, headers=headers or {}, method=method)  # noqa: S310
-    return urllib.request.urlopen(req, timeout=60)  # noqa: S310
+    return _OPENER.open(req, timeout=60)
 
 
 def fetch_json(url: str, headers: dict | None = None):
@@ -240,7 +264,12 @@ def pin_mcap(pins: Pins) -> None:
         "https://api.github.com/repos/foxglove/mcap/releases?per_page=100"
     )
     prefix = "releases/mcap-cli/"
-    tags = (r["tag_name"] for r in releases)
+    # A release made public, not one still being tried out
+    tags = (
+        r["tag_name"]
+        for r in releases
+        if not r.get("prerelease") and not r.get("draft")
+    )
     mcap = next((t.removeprefix(prefix) for t in tags if t.startswith(prefix)), None)
     pins.set_arg("MCAP_VERSION", mcap)
     url = f"https://github.com/foxglove/mcap/releases/download/{prefix}{mcap}"

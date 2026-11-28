@@ -19,6 +19,6 @@ RUN apt-get update \
     && curl -fsSL "https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-${TYPST_ARCH}-unknown-linux-musl.tar.xz" \
     -o /tmp/typst.tar.xz \
     && echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c - \
-    && tar -C /usr/local/bin --strip-components=1 -xJf /tmp/typst.tar.xz \
+    && tar -C /usr/local/bin --no-same-owner --strip-components=1 -xJf /tmp/typst.tar.xz \
     "typst-${TYPST_ARCH}-unknown-linux-musl/typst" \
     && rm /tmp/typst.tar.xz
