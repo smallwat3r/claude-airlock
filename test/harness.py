@@ -314,9 +314,10 @@ class LauncherTest:
         self.cleanup = cleanup
         # Not pytest's tmp_path: that is named after the check, and the
         # words of a name are found in what the launcher says of a path,
-        # and it is too long for the path of a socket. Resolved, on macOS
-        # the temporary directory sits behind a symlink.
-        temp = cleanup.enter_context(tempfile.TemporaryDirectory())
+        # and it is too long for the path of a socket. In /tmp, not the
+        # temporary directory of macOS, whose path is too long for one
+        # too. Resolved, on macOS /tmp sits behind a symlink.
+        temp = cleanup.enter_context(tempfile.TemporaryDirectory(dir="/tmp"))
         self.work = Path(temp).resolve()
         self.home = self.work / "home"
         self.project = self.home / "proj"
