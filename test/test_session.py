@@ -637,6 +637,173 @@ class HomeTest(LauncherTest):
         assert result.status == 0, result.stderr
         assert skills.is_symlink()
         assert "was a link" not in result.stderr
+        assert f"--volume={skills}:{self.CLAUDE}/skills:ro,z" in result.flags
+
+    def dotfiles_given(self, *names: str) -> Path:
+        """Parts of ~/.claude kept in a repository of dotfiles, linked to
+        from there, that a session was given: mounted while they lead
+        where the user had them, and the repository remembered as one a
+        session could write. The repository."""
+        claude = self.home / ".claude"
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        for name in names:
+            if name in settings.CONFIG_FILES:
+                (dotfiles / name).write_text("{}\n")
+                (claude / name).unlink()
+            else:
+                (dotfiles / name).mkdir()
+                if (claude / name).exists():
+                    (claude / name).rmdir()
+            (claude / name).symlink_to(dotfiles / name)
+        result = self.launch("--add-dir", str(dotfiles))
+        assert result.status == 0, result.stderr
+        for name in names:
+            mode = "z" if name in ("plugins", "projects") else "ro,z"
+            assert f"--volume={claude / name}:{self.CLAUDE}/{name}:{mode}" in (
+                result.flags
+            )
+        (self.work / "log").unlink()
+        return dotfiles
+
+    def test_a_part_a_session_made_lead_out_of_what_it_writes_is_not_mounted(self):
+        # The session pointed what is in the repository at a key, at the
+        # home: the next launch of any project would have mounted either
+        dotfiles = self.dotfiles_given("CLAUDE.md", "skills")
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("a key\n")
+        for name, leads_to in (("CLAUDE.md", key), ("skills", self.home)):
+            moved = dotfiles / name
+            moved.rename(dotfiles / f"old-{name}")
+            moved.symlink_to(leads_to)
+        result = self.launch()
+        assert result.status == 0, result.stderr
+        assert not [flag for flag in result.flags if str(key) in flag]
+        assert not [f for f in result.flags if f.startswith(f"--volume={self.home}:")]
+        # An empty one of the launcher's in the place of each, read-only,
+        # not the base's, which every sandboxed session writes
+        file = self.state / "history" / "stand-ins" / "CLAUDE.md"
+        empty = self.state / "history" / "empty"
+        for name, stand_in in (("CLAUDE.md", file), ("skills", empty)):
+            target = f"{self.CLAUDE}/{name}"
+            assert self.mounted_at(result.flags, target) == [
+                f"--volume={stand_in}:{target}:ro,z"
+            ]
+            assert (
+                f"{self.home / '.claude' / name} is not mounted, the session has an"
+                f" empty one: it is, or goes through, a link out of {dotfiles},"
+                " which a session could have made"
+            ) in result.stderr
+        assert file.read_text() == ""
+        assert list(empty.iterdir()) == []
+
+    def test_a_part_the_session_writes_that_leads_to_the_home_ends_the_launch(self):
+        # Mounted writable, that would be all of the home
+        dotfiles = self.dotfiles_given("plugins")
+        (dotfiles / "plugins").rmdir()
+        (dotfiles / "plugins").symlink_to(self.home)
+        plugins = self.home / ".claude" / "plugins"
+        self.assert_refused(
+            self.launch(),
+            f"refusing to mount {plugins}: it is, or goes through, a link out of"
+            f" {dotfiles}, which a session could have made",
+        )
+        # And of the configuration when it is writable, a stand-in would
+        # take in what the session writes there and lose it
+        plugins.unlink()
+        plugins.mkdir()
+        hooks = self.home / ".claude" / "hooks"
+        hooks.rmdir()
+        (dotfiles / "hooks").mkdir()
+        hooks.symlink_to(dotfiles / "hooks")
+        assert self.launch(CLAUDE_AIRLOCK_RW_CONFIG="1").status == 0
+        (self.work / "log").unlink()
+        (dotfiles / "hooks").rmdir()
+        (self.home / ".ssh").mkdir()
+        (dotfiles / "hooks").symlink_to(self.home / ".ssh")
+        self.assert_refused(
+            self.launch(CLAUDE_AIRLOCK_RW_CONFIG="1"),
+            f"refusing to mount {hooks}: it is, or goes through, a link out of"
+            f" {dotfiles}",
+        )
+
+    def test_a_part_that_leads_into_what_is_read_only_is_read_only_too(self):
+        # The plugins kept in a kit of the shared directory that is
+        # protected, the hooks in a directory mounted read-only: writable
+        # through ~/.claude, a session would change them there
+        kit = self.home / "claude-shared" / "kit"
+        (kit / "plugins").mkdir(parents=True)
+        ref = self.home / "ref"
+        (ref / "hooks").mkdir()
+        claude = self.home / ".claude"
+        (claude / "plugins").symlink_to(kit / "plugins")
+        (claude / "hooks").rmdir()
+        (claude / "hooks").symlink_to(ref / "hooks")
+        result = self.launch(
+            "--add-dir-ro",
+            str(ref),
+            CLAUDE_AIRLOCK_PROTECT=str(kit),
+            CLAUDE_AIRLOCK_RW_CONFIG="1",
+        )
+        assert result.status == 0, result.stderr
+        for name, kept in (("plugins", kit), ("hooks", ref)):
+            target = f"{self.CLAUDE}/{name}"
+            assert self.mounted_at(result.flags, target) == [
+                f"--volume={claude / name}:{target}:ro,z"
+            ]
+            assert (
+                f"{claude / name} is mounted read-only: it leads into {kept}, which"
+                " is read-only in this session"
+            ) in result.stderr
+        # What leads elsewhere stays as it was asked for
+        assert f"--volume={claude / 'skills'}:{self.CLAUDE}/skills:z" in result.flags
+
+    def test_what_is_hidden_where_a_part_leads_is_hidden_through_it_too(self):
+        # The skills kept in the shared directory, with files of secrets
+        # among them: hidden there, and the same files under another name
+        # through ~/.claude
+        shared = self.home / "claude-shared"
+        skills = shared / "skills"
+        (skills / "deep").mkdir(parents=True)
+        (skills / "deep" / ".env").write_text("TOKEN=x\n")
+        (skills / "key.pem").write_text("a key\n")
+        # And CLAUDE.md as what a link named as a file of secrets leads to
+        (shared / "notes.md").write_text("TOKEN=x\n")
+        (shared / ".env").symlink_to(shared / "notes.md")
+        (shared / "plugins").mkdir()
+        claude = self.home / ".claude"
+        (claude / "skills").rmdir()
+        (claude / "skills").symlink_to(skills)
+        (claude / "plugins").symlink_to(shared / "plugins")
+        (claude / "CLAUDE.md").unlink()
+        (claude / "CLAUDE.md").symlink_to(shared / "notes.md")
+        closed = skills / "closed"
+        if os.getuid() != 0:
+            closed.mkdir()
+            closed.chmod(0)
+            self.cleanup.callback(closed.chmod, 0o700)
+        result = self.launch(CLAUDE_AIRLOCK_SHADOW="*.pem")
+        assert result.status == 0, result.stderr
+        for name in ("deep/.env", "key.pem"):
+            assert f"--volume=/dev/null:{skills / name}:ro" in result.flags
+            assert f"--volume=/dev/null:{self.CLAUDE}/skills/{name}:ro" in result.flags
+        if os.getuid() != 0:
+            empty = self.state / "history" / "empty"
+            for path in (closed, f"{self.CLAUDE}/skills/closed"):
+                assert f"--volume={empty}:{path}:ro,z" in result.flags
+        # A file that is hidden is kept back as one of secrets is
+        stand_in = self.state / "history" / "stand-ins" / "CLAUDE.md"
+        assert self.mounted_at(result.flags, f"{self.CLAUDE}/CLAUDE.md") == [
+            f"--volume={stand_in}:{self.CLAUDE}/CLAUDE.md:ro,z"
+        ]
+        assert (
+            f"{claude / 'CLAUDE.md'} is not mounted, the session has an empty one:"
+            f" it leads to {shared / 'notes.md'}, which is hidden from a session"
+        ) in result.stderr
+        # Nothing more for what holds none
+        under = f":{self.CLAUDE}/plugins/"
+        assert not [flag for flag in result.flags if under in flag]
 
     def test_a_file_where_a_directory_of_claude_goes_is_said_in_a_line(self):
         hooks = self.home / ".claude" / "hooks"
@@ -754,6 +921,25 @@ class SocketProxyTest(LauncherTest):
     def test_the_socket_is_mounted_read_only(self):
         _, sidecar = self.sidecar_for(settings.SocketAccess.LIMITED)
         assert f"--volume={socket_proxy.DOCKER_SOCK}:/var/run/docker.sock:ro" in sidecar
+
+    def test_the_proxy_holding_the_socket_has_no_capabilities_and_writes_little(
+        self,
+    ):
+        # Root in its container, as its image runs it, with no capability
+        # and a root filesystem it cannot write, but for where the config
+        # is rendered from the rules
+        for mode in (settings.SocketAccess.LIMITED, settings.SocketAccess.FULL):
+            (self.work / "log").unlink(missing_ok=True)
+            _, sidecar = self.sidecar_for(mode)
+            image = sidecar.index(socket_proxy.PROXY_IMAGE)
+            for option in (
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--read-only",
+                "--tmpfs=/tmp:size=1m",
+            ):
+                assert sidecar.index(option) < image, option
+            assert not [arg for arg in sidecar if arg.startswith("--cap-add")]
 
     def test_off_by_default(self):
         assert socket_proxy.socket_proxy_args(settings.Settings()) == []

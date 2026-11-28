@@ -165,16 +165,6 @@ def ensure_network(name: str, internal: bool = False) -> set[str]:
     return set(state.containers)
 
 
-def session_address(name: str) -> str:
-    """The container's address on its network, empty until it has one."""
-    addresses = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
-    found = docker_output("container", "inspect", f"--format={addresses}", name)
-    try:
-        return str(ipaddress.ip_address(found.split()[0]))
-    except (IndexError, ValueError):
-        return ""
-
-
 def session_addresses(name: str) -> tuple[str, ...]:
     """Every address docker gave the container on its networks, none
     until it has one: the one of IPv4, and the one of IPv6 on a daemon

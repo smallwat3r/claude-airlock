@@ -5,9 +5,13 @@ writes from outside the session."""
 
 from __future__ import annotations
 
+import contextlib
 import json
+import signal
+import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +24,7 @@ from claude_airlock import settings
 from claude_airlock.launcher import Launcher
 from claude_airlock.recording import host_health, processes
 from claude_airlock.report import tails
-from claude_airlock.sandbox import runtime
+from claude_airlock.sandbox import limits, runtime
 
 CONTAINER = "0a1b2c3d4e5f"
 
@@ -193,6 +197,46 @@ class LaunchTest(LauncherTest):
             "#   its limit of processes was RUN INTO 2 times, which ends the"
             " session as a whole" in shown
         )
+
+
+class LimitsTest(LauncherTest):
+    """What docker says of a session's limits while it runs, listened to
+    from outside it."""
+
+    @contextlib.contextmanager
+    def watched(self) -> Iterator[tuple[limits.LimitsHit, list[subprocess.Popen]]]:
+        """limits_watched, with the docker events it started."""
+        started: list[subprocess.Popen] = []
+        popen = limits.docker_popen
+
+        def kept(*args: str, **options: object) -> subprocess.Popen:
+            started.append(popen(*args, **options))
+            return started[-1]
+
+        with (
+            mock.patch.object(limits, "docker_popen", kept),
+            limits.limits_watched(settings.Settings(memory="2g"), "claude-proj") as hit,
+        ):
+            yield hit, started
+
+    def test_what_docker_said_is_heard_and_its_pipe_closed_after(self, monkeypatch):
+        monkeypatch.setenv("FAKE_EVENTS", "oom\noom")
+        with self.watched() as (hit, started):
+            started[0].wait(10.0)
+        assert hit.out_of_memory == 2
+        assert "ran into its memory limit of 2g 2 times" in hit.lines()[0]
+        assert started[0].stdout is not None
+        assert started[0].stdout.closed
+
+    def test_a_docker_that_does_not_end_when_told_is_ended_all_the_same(self):
+        stubborn = self.work / "bin" / "docker"
+        stubborn.write_text("#!/bin/sh\ntrap '' TERM\nexec sleep 30\n")
+        with self.watched() as (hit, started):
+            pass
+        assert started[0].returncode == -signal.SIGKILL
+        assert started[0].stdout is not None
+        assert started[0].stdout.closed
+        assert hit.lines() == []
 
 
 class HostHealthTest(LauncherTest):

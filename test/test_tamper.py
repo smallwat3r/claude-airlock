@@ -23,7 +23,14 @@ from harness import LAUNCHER, ROOT, LauncherTest
 
 from claude_airlock import cli, files, launcher
 from claude_airlock.errors import Fatal
-from claude_airlock.sandbox import bounded, tamper, tampered
+from claude_airlock.sandbox import (
+    bounded,
+    build_files,
+    git_config,
+    shared_config,
+    tamper,
+    tampered,
+)
 from claude_airlock.sandbox import fingerprint as watched
 from claude_airlock.sandbox.ending import Ending
 
@@ -90,7 +97,7 @@ class TamperingTest(LauncherTest):
         slow.write_text("#!/bin/sh\nexec sleep 60\n")
         slow.chmod(0o755)
         started = time.monotonic()
-        with unittest.mock.patch.object(watched, "GIT_SECONDS", 0.2):
+        with unittest.mock.patch.object(git_config, "GIT_SECONDS", 0.2):
             assert config_hash(str(config)) == bounded.file_hash(str(config))
             assert watched.moved_hooks_dirs(str(self.project)) == []
         assert time.monotonic() - started < 30
@@ -100,13 +107,13 @@ class TamperingTest(LauncherTest):
         # config of 300 kB that lists as 20 GB
         config = self.project / ".git" / "config"
         config.write_text(f'[a "{"s" * 200_000}"]\n' + "k\n" * 100_000)
-        assert watched.git_listing(str(config)) is None
+        assert git_config.git_listing(str(config)) is None
         assert config_hash(str(config)) == bounded.file_hash(str(config))
         # Nor is git given a file no config comes near
         config.write_text("[core]\n\tbare = false\n")
-        assert watched.git_listing(str(config)) is not None
-        with unittest.mock.patch.object(watched, "GIT_CONFIG_BYTES", 8):
-            assert watched.git_listing(str(config)) is None
+        assert git_config.git_listing(str(config)) is not None
+        with unittest.mock.patch.object(git_config, "GIT_CONFIG_BYTES", 8):
+            assert git_config.git_listing(str(config)) is None
 
     def test_a_file_the_git_config_includes_is_reported(
         self, subtests: pytest.Subtests
@@ -137,7 +144,7 @@ class TamperingTest(LauncherTest):
         watched.hash_git_config(str(config), fingerprint)
         assert set(fingerprint) == {str(config), str(self.project / "a.gitconfig")}
         # And of a chain of them no more are followed than are watched
-        with unittest.mock.patch.object(watched, "MOST_INCLUDED", 1):
+        with unittest.mock.patch.object(git_config, "MOST_INCLUDED", 1):
             fingerprint = {}
             watched.hash_git_config(str(config), fingerprint)
         rest = f"{config}: more than 1 configs included, the rest"
@@ -150,7 +157,7 @@ class TamperingTest(LauncherTest):
         large = self.project / "large.gitconfig"
         large.write_text("[core]\n\tbare = false\n" + "# more\n" * 20)
         before: dict[str, str] = {}
-        with unittest.mock.patch.object(watched, "GIT_CONFIG_BYTES", 64):
+        with unittest.mock.patch.object(git_config, "GIT_CONFIG_BYTES", 64):
             watched.hash_git_config(str(config), before)
             assert before[str(large)] == "not read: " + bounded.file_stamp(str(large))
             # What was written to it since still shows
@@ -224,10 +231,10 @@ class TamperingTest(LauncherTest):
         told = {"GIT_DIR": str(self.project / ".git"), "HOME": str(self.home)}
         cleanup.enter_context(unittest.mock.patch.dict(os.environ, told))
         started = time.monotonic()
-        with unittest.mock.patch.object(watched, "GIT_SECONDS", 5.0):
+        with unittest.mock.patch.object(git_config, "GIT_SECONDS", 5.0):
             for name in ("a", "b"):
                 nested = self.project / "vendor" / name / ".git" / "config"
-                assert watched.git_listing(str(nested)) is not None
+                assert git_config.git_listing(str(nested)) is not None
         assert time.monotonic() - started < 5
 
     def test_a_hooks_directory_an_included_config_names_is_watched(self):
@@ -253,7 +260,7 @@ class TamperingTest(LauncherTest):
             "[core]\n\thooksPath = .githooks\n"
         )
         started = time.monotonic()
-        with unittest.mock.patch.object(watched, "GIT_SECONDS", 20.0):
+        with unittest.mock.patch.object(git_config, "GIT_SECONDS", 20.0):
             found = watched.moved_hooks_dirs(str(self.project))
         assert time.monotonic() - started < 10
         # On a condition that does not hold here too: more is watched
@@ -459,8 +466,8 @@ class TamperingTest(LauncherTest):
     def test_git_lists_a_config_once_and_no_more_of_them_than_one_look_runs(self):
         config = self.project / ".git" / "config"
         config.write_text("[core]\n\thooksPath = hooks\n")
-        runs = unittest.mock.Mock(wraps=watched._git_says)
-        with unittest.mock.patch.object(watched, "_git_says", runs):
+        runs = unittest.mock.Mock(wraps=git_config._git_says)
+        with unittest.mock.patch.object(git_config, "_git_says", runs):
             watched.host_exec_fingerprint([str(self.project)])
         # For its hooks and for its hooksPath, in every working tree too
         listed = [call.args[2] for call in runs.call_args_list]
@@ -759,8 +766,8 @@ class TamperingTest(LauncherTest):
         self.base.mkdir(parents=True)
         servers = {"mcpServers": {"kept": {"command": "mine"}}}
         config.write_text(json.dumps({"theme": "dark", "env": {}, **servers}))
-        said = sorted(watched._servers_in(servers))
-        assert watched.shared_config_hashes(str(config)) == {
+        said = sorted(shared_config._servers_in(servers))
+        assert shared_config.shared_config_hashes(str(config)) == {
             str(config): bounded.sha256_hex(json.dumps(said).encode())
         }
 
@@ -770,13 +777,13 @@ class TamperingTest(LauncherTest):
         environment = {f"V{number:03}": "x" for number in range(150)}
         environment["L" * 300] = "long"
         config.write_text(json.dumps({"env": environment}))
-        before = watched.shared_config_hashes(str(config))
+        before = shared_config.shared_config_hashes(str(config))
         named = [path for path in before if ": the environment, " in path]
-        assert len(named) == watched.MOST_ENVIRONMENT_NAMED
+        assert len(named) == shared_config.MOST_ENVIRONMENT_NAMED
         # The rest together, and a change there shows as well
         environment["L" * 300] = "changed"
         config.write_text(json.dumps({"env": environment}))
-        after = watched.shared_config_hashes(str(config))
+        after = shared_config.shared_config_hashes(str(config))
         changed = tampered.differing(before, after)
         assert changed == [f"{config}: the rest of the environment"]
         said = tampered._shared_changes(changed, str(config))
@@ -1143,18 +1150,18 @@ class LauncherItselfTest:
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(name)
         cleanup.enter_context(
-            unittest.mock.patch.object(watched, "CHECKOUT_DIR", str(self.checkout))
+            unittest.mock.patch.object(build_files, "CHECKOUT_DIR", str(self.checkout))
         )
 
     def changed(self, directories: list[str]) -> list[str]:
-        before = watched.build_fingerprint(directories)
+        before = build_files.build_fingerprint(directories)
         with open(self.checkout / "docker" / "allowed-domains.txt", "a") as allowed:
             allowed.write(".example.org\n")
         with open(self.checkout / "claude_airlock" / "cli.py", "a") as module:
             module.write("import os\n")
         (self.checkout / "claude_airlock" / "__pycache__" / "new.pyc").touch()
         (self.checkout / "README.md").write_text("more\n")
-        return tampered.differing(before, watched.build_fingerprint(directories))
+        return tampered.differing(before, build_files.build_fingerprint(directories))
 
     def test_what_a_session_changed_of_the_launcher_is_named(
         self, subtests: pytest.Subtests, capsys: pytest.CaptureFixture[str]
@@ -1166,13 +1173,13 @@ class LauncherItselfTest:
         # The checkout as the project, in it, and a part of it
         for mounted in (self.checkout, self.checkout.parent, self.checkout / "docker"):
             with subtests.test(mounted=mounted.name):
-                assert watched.reaches_launcher([str(mounted)])
+                assert build_files.reaches_launcher([str(mounted)])
                 assert self.changed([str(mounted)]) == own
-        before = watched.build_fingerprint([str(self.checkout)])
+        before = build_files.build_fingerprint([str(self.checkout)])
         (self.checkout / "bin" / "claude-airlock").write_text("#!/bin/sh\n")
         (self.checkout / "Makefile").write_text("all:\n")
         tampered.report_build_changes(
-            before, watched.build_fingerprint([str(self.checkout)])
+            before, build_files.build_fingerprint([str(self.checkout)])
         )
         said = capsys.readouterr().err
         itself, _, tools = said.partition("these files that your tools run")
@@ -1187,7 +1194,7 @@ class LauncherItselfTest:
         # The launcher looks for its package at the top of its checkout:
         # a module left there, or a package, is its own to run
         mounted = [str(self.checkout)]
-        before = watched.build_fingerprint(mounted)
+        before = build_files.build_fingerprint(mounted)
         planted = [
             self.checkout / "readline.py",
             self.checkout / "fast.so",
@@ -1201,7 +1208,7 @@ class LauncherItselfTest:
         (self.checkout / "notes.txt").write_text("more\n")
         (self.checkout / "docs").mkdir()
         (self.checkout / "docs" / "trace.py").write_text("import os\n")
-        after = watched.build_fingerprint(mounted)
+        after = build_files.build_fingerprint(mounted)
         assert tampered.differing(before, after) == sorted(map(str, planted))
         tampered.report_build_changes(before, after)
         itself = capsys.readouterr().err
@@ -1209,12 +1216,16 @@ class LauncherItselfTest:
         assert f"  {self.checkout}/readline.py\n" in itself
         # A link to a directory is a package as the directory is
         (self.checkout / "linked").symlink_to(self.checkout / "readline")
-        again = watched.build_fingerprint(mounted)
+        again = build_files.build_fingerprint(mounted)
         assert tampered.differing(after, again) == [
             str(self.checkout / "linked" / "__init__.py")
         ]
-        assert watched.is_launcher_file(str(self.checkout / "linked" / "__init__.py"))
-        assert not watched.is_launcher_file(str(self.checkout / "docs" / "trace.py"))
+        assert build_files.is_launcher_file(
+            str(self.checkout / "linked" / "__init__.py")
+        )
+        assert not build_files.is_launcher_file(
+            str(self.checkout / "docs" / "trace.py")
+        )
 
     def test_a_link_at_the_top_that_cannot_be_followed_is_watched_as_it_is(
         self, tmp_path: Path
@@ -1230,13 +1241,13 @@ class LauncherItselfTest:
             (self.checkout / "closed.py").symlink_to(closed / "inner")
             links.append(self.checkout / "closed.py")
         try:
-            before = watched.build_fingerprint(mounted)
+            before = build_files.build_fingerprint(mounted)
             for link in links:
                 assert str(link) in before
             # And what it is changed to lead to is a change
             loop.unlink()
             loop.symlink_to("readline")
-            after = watched.build_fingerprint(mounted)
+            after = build_files.build_fingerprint(mounted)
             assert str(loop) in tampered.differing(before, after)
         finally:
             if os.getuid() != 0:
@@ -1247,11 +1258,11 @@ class LauncherItselfTest:
     ):
         project = tmp_path / "code" / "other"
         project.mkdir()
-        assert not watched.reaches_launcher([str(project)])
+        assert not build_files.reaches_launcher([str(project)])
         assert self.changed([str(project)]) == []
         # By where a directory leads
         (project / "link").symlink_to(self.checkout)
-        assert watched.reaches_launcher([str(project / "link")])
+        assert build_files.reaches_launcher([str(project / "link")])
 
     def test_a_name_made_to_drive_the_terminal_does_not(
         self, capsys: pytest.CaptureFixture[str]

@@ -20,7 +20,7 @@ import pytest
 from harness import ROOT, LauncherTest, mounted_copy
 
 from claude_airlock.launcher import Launcher
-from claude_airlock.sandbox import asked_hosts
+from claude_airlock.sandbox import asked_hosts, egress_proxy
 from claude_airlock.settings import Host, Settings
 
 At = asked_hosts.Destination
@@ -169,6 +169,26 @@ class AskedHostsTest(LauncherTest):
         (self.root / ".left" / "172.20.0.3" / "allowed").mkdir(parents=True)
         asked_hosts.drop_left_behind(self.host)
         assert list(self.root.iterdir()) == []
+
+    def test_a_look_at_the_proxy_makes_nothing_to_ask_through(self):
+        # Made when the proxy is started from it, not by whoever asks
+        # whether the one that runs is current
+        assert not egress_proxy.egress_proxy_current(self.host)
+        assert not self.root.exists()
+        assert asked_hosts.asked_hosts_root(self.host) == str(self.root)
+        assert stat.S_IMODE(self.root.stat().st_mode) == 0o755
+        assert not egress_proxy.egress_proxy_current(self.host)
+
+    def test_the_address_asked_for_is_the_first_of_ipv4(self):
+        # Docker gives each network an address of IPv4 and one of IPv6
+        # where the daemon has both, the helper takes the first alone
+        for said, address in (
+            (f"fd00::5 {ADDRESS} fd00::6", ADDRESS),
+            ("fd00::5", ""),
+            ("", ""),
+        ):
+            with mock.patch.dict(os.environ, {"FAKE_IP": said}):
+                assert asked_hosts._ipv4_address("claude-proj") == address, said
 
     def test_the_address_is_waited_for_while_the_session_runs(self):
         filtered = Settings(net_filter=True, net_ask=True)

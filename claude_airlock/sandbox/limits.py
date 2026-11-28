@@ -8,8 +8,8 @@ outside it, and says what it heard when the session is over.
 
 That a session ran into its limit of processes (CLAUDE_AIRLOCK_PIDS) is no
 event of docker's. The sidecar that notes the processes reads it from the
-session's own count, see procwatch.py. Under a runtime where no sidecar
-can, the launcher reads it from the cgroup of the container, see
+session's own count, see the procwatch package. Under a runtime where no
+sidecar can, the launcher reads it from the cgroup of the container, see
 host_health.py."""
 
 from __future__ import annotations
@@ -81,8 +81,23 @@ def limits_watched(settings: Settings, name: str) -> Iterator[LimitsHit]:
     finally:
         # What docker said as the session ended is read first
         listener.join(0.3)
-        with suppress(OSError):
-            events.terminate()
+        _ended(events)
         listener.join(2.0)
-        with suppress(OSError, subprocess.TimeoutExpired):
+        # Once the listener is done with it, which the end of docker sees
+        # to: closed under a read, the close would wait for the read
+        if events.stdout and not listener.is_alive():
+            events.stdout.close()
+
+
+def _ended(events: subprocess.Popen) -> None:
+    """End what listens to docker, killed when it does not end when it
+    is told to."""
+    with suppress(OSError):
+        events.terminate()
+    try:
+        events.wait(2.0)
+    except subprocess.TimeoutExpired:
+        with suppress(OSError):
+            events.kill()
+        with suppress(subprocess.TimeoutExpired):
             events.wait(2.0)

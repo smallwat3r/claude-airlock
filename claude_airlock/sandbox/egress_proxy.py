@@ -19,9 +19,9 @@ from ..docker import (
     docker_ok,
     mount_arg,
 )
-from ..files import private_dir
 from ..notice import warn
 from ..settings import DOCKERFILE_DIR, EGRESS_PORT, Host
+from .asked_hosts import asked_hosts_root
 from .networks import EGRESS_PROXY, FILTER_NET, FILTER_NETS, ensure_network
 from .shared_proxy import SharedProxy
 
@@ -57,20 +57,6 @@ SQUID_FILES = {
 }
 
 
-def asked_hosts_root(host: Host) -> str:
-    """The directory the proxy is given to ask through, made as needed.
-    The proxy runs as a user of its own and has to get into it, so it is
-    not for the user alone as the rest of the launcher's state is: the
-    state directory above it is, which keeps everyone else on the host
-    out of it."""
-    private_dir(host.state_dir)
-    root = host.asked_hosts_dir
-    os.makedirs(root, exist_ok=True)
-    # Whatever the umask made of it
-    os.chmod(root, 0o755)  # noqa: S103, the proxy's user reads it
-    return root
-
-
 def _egress_proxy(host: Host) -> SharedProxy:
     """The squid sidecar as it is to be started now, its files as they
     are on disk."""
@@ -79,8 +65,9 @@ def _egress_proxy(host: Host) -> SharedProxy:
         for name, target in SQUID_FILES.items()
     }
     options = (
-        # Written to by the proxy too: the hosts that wait for an answer
-        mount_arg(asked_hosts_root(host), ASKED_HOSTS_MOUNT, "z"),
+        # Written to by the proxy too: the hosts that wait for an answer.
+        # Made before the proxy is started, see start_egress_proxy.
+        mount_arg(host.asked_hosts_dir, ASKED_HOSTS_MOUNT, "z"),
         f"--volume={EGRESS_LOG_VOLUME}:{EGRESS_LOG_DIR}",
     )
     return SharedProxy(EGRESS_PROXY, FILTER_NET, SQUID_IMAGE, files, options)
@@ -93,6 +80,8 @@ def start_egress_proxy(host: Host) -> None:
     It reads copies of its files, what is edited while it runs is for the
     proxy that replaces it."""
     ensure_network(FILTER_NET, internal=True)
+    # What it is given to ask through
+    asked_hosts_root(host)
     _egress_proxy(host).start(host)
     docker_must("network", "connect", "bridge", EGRESS_PROXY)
     # The internal networks of the sessions with a socket proxy, those that
@@ -120,7 +109,11 @@ def _wait_for_egress_proxy(timeout: float = 15.0) -> None:
 def egress_proxy_current(host: Host) -> bool:
     """Running, and started from the config as it is on disk now. A stale
     proxy is replaced on the next filtered start, which briefly drops the
-    connections of other filtered sessions."""
+    connections of other filtered sessions. Nothing is made for it: none
+    is started from a directory to ask through that is not there, see
+    start_egress_proxy."""
+    if not os.path.isdir(host.asked_hosts_dir):
+        return False
     return _egress_proxy(host).current()
 
 

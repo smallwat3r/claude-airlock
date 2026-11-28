@@ -19,7 +19,8 @@ from itertools import islice
 from operator import attrgetter
 from typing import NamedTuple
 
-from ..files import GONE, is_under, open_plain
+from ..files import GONE, open_plain
+from ..paths import is_under
 
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
@@ -144,9 +145,9 @@ class Look:
     every working tree of a repository through a link say, is listed
     once. And what git said of each config, by its path, so that one is
     listed once however often it is asked about, but for one that says
-    too much to be kept (see git_listing). Taken anew for each
-    fingerprint, in the same order at the start and at the end of a
-    session: the same are past a bound both times, unless a session
+    too much to be kept (see git_listing of git_config.py). Taken anew
+    for each fingerprint, in the same order at the start and at the end
+    of a session: the same are past a bound both times, unless a session
     changed what comes before them."""
 
     def __init__(self, most: int | None = None, runs: int | None = None) -> None:

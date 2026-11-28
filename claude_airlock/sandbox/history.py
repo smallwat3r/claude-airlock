@@ -35,12 +35,13 @@ import re
 from collections import deque
 from pathlib import Path
 
-from ..docker import env_arg, mount_arg, project_slug
+from ..docker import env_arg, mount_arg, project_slug, refuse_past_most
 from ..errors import Fatal
 from ..files import json_object, last_lines, open_plain, private_dir, write_whole
 from ..projects import project_roots, transcript_dirs
 from ..settings import CONTAINER_CLAUDE, Host, Settings, variable
-from .mounts import empty_dir, refuse_past_most
+from .hidden import empty_dir
+from .withheld import HostMounts
 
 # What Claude Code names the transcripts of a worktree after: the project's
 # own name, then its path below the project (.claude/worktrees/NAME) dashed
@@ -172,31 +173,43 @@ def _prepare_store(host: Host) -> Path:
     return store
 
 
-def _prepare_shared(host: Host) -> Path:
+def _prepare_shared(host: Host) -> None:
     """The host's ~/.claude with what is mounted from it in place when the
-    history is shared: there has to be something to mount."""
-    shared = Path(host.claude_dir)
+    history is shared: there has to be something to mount. Made where
+    nothing is, never through a link that leads nowhere: what such a
+    link leads to is withheld's to say, see history_args, and making it
+    would make a file wherever it points. Fatal for what is no directory
+    where one is to be, nothing could be mounted over it."""
     for name in PER_PROJECT_DIRS:
-        (shared / name).mkdir(exist_ok=True)
-    prompts = shared / PROMPT_HISTORY
-    if not prompts.exists():
-        prompts.touch(mode=0o600)
-    return shared
+        path = os.path.join(host.claude_dir, name)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(path):
+                raise Fatal(
+                    f"{path} is not a directory, where Claude Code keeps its"
+                    f" {name}: move it aside for a session to start"
+                ) from None
+    prompts = os.path.join(host.claude_dir, PROMPT_HISTORY)
+    if not os.path.lexists(prompts):
+        # Left as it is when another launcher was first
+        write_whole(prompts, "", replace=False)
 
 
-def history_args(settings: Settings, host: Host) -> list[str]:
+def history_args(settings: Settings, host: Host, from_host: HostMounts) -> list[str]:
     """What a session is given of the history, on top of its ~/.claude:
     the project's own, with the transcripts of other projects covered, or
-    the host's when it is shared."""
+    the host's when it is shared. Those of the host through from_host,
+    where each is asked where it leads, see HostMounts.claude_part: the
+    session writes to them, so one that is kept back ends the launch."""
     claude = CONTAINER_CLAUDE
     kept = (*PER_PROJECT_DIRS, PROMPT_HISTORY)
     if settings.shared_history:
-        shared = _prepare_shared(host)
-        return [
-            # Said in docker/CLAUDE-airlock.md
-            env_arg(variable("shared_history"), 1),
-            *(mount_arg(str(shared / name), f"{claude}/{name}", "z") for name in kept),
-        ]
+        _prepare_shared(host)
+        for name in kept:
+            from_host.claude_part(name, "z", needed=True)
+        # Said in docker/CLAUDE-airlock.md
+        return [env_arg(variable("shared_history"), 1)]
     others = _other_projects(host)
     args = []
     if others:

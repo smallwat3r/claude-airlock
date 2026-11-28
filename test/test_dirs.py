@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest.mock
 from pathlib import Path
@@ -16,10 +17,15 @@ from claude_airlock import cli, notice, settings
 from claude_airlock.action import Action
 from claude_airlock.docker import covered_arg, mount_arg
 from claude_airlock.errors import Fatal
-from claude_airlock.sandbox import home, mounts, remembered
+from claude_airlock.sandbox import home, mounts, remembered, withheld
 from claude_airlock.sandbox.ending import Ending
+from claude_airlock.sandbox.hidden import Hidden, hidden_files, openable
+from claude_airlock.sandbox.placed import Placed
 from claude_airlock.sandbox.runtime import DOCKERS_OWN
 
+# The bound of the files to hide, by its name for a patch: hidden is what
+# the checks here call what a launch hides
+MOST_HIDDEN = "claude_airlock.sandbox.hidden.MOST_HIDDEN"
 # Root lists and enters a directory whatever its mode says
 closed_to_its_owner = pytest.mark.skipif(
     os.getuid() == 0, reason="no directory is closed to root"
@@ -204,11 +210,11 @@ class ExtraDirsTest(LauncherTest):
         # Neither the launcher nor a session can open it, or change that
         closed = self.project / "data"
         closed.mkdir()
-        assert mounts.openable(str(closed))
+        assert openable(str(closed))
         with unittest.mock.patch.object(os, "getuid", return_value=os.getuid() + 1):
-            assert not mounts.openable(str(closed))
-        assert not mounts.openable(str(self.project / "none"))
-        assert not mounts.openable(str(self.project / ".env"))
+            assert not openable(str(closed))
+        assert not openable(str(self.project / "none"))
+        assert not openable(str(self.project / ".env"))
 
     def test_a_protected_path_named_through_a_link_elsewhere_is_refused_too(self):
         # A link of the user's into the shared directory, which is in no
@@ -477,29 +483,74 @@ class TooManyMountsTest(LauncherTest):
 
     def test_more_files_to_hide_than_can_be_mounted_end_the_launch(self):
         # The project has a .env and a .netrc
-        found = mounts.hidden_files(self.launch_settings(), self.host, [])
+        found = hidden_files(self.launch_settings(), [str(self.project)])
         assert len(found.files) == 2
         with (
-            unittest.mock.patch.object(mounts, "MOST_HIDDEN", 1),
+            unittest.mock.patch(MOST_HIDDEN, 1),
             pytest.raises(
                 Fatal, match=f"more than 1 files of secrets .* in {self.project}"
             ),
         ):
-            mounts.hidden_files(self.launch_settings(), self.host, [])
+            hidden_files(self.launch_settings(), [str(self.project)])
+
+    @closed_to_its_owner
+    def test_files_hidden_again_count_with_the_directories_that_are_covered(self):
+        # The project has a .env and a .netrc, and a directory a session
+        # closed: three, then a file hidden through a link at an earlier
+        # launch, which a session can have removed since
+        closed = self.project / "data"
+        closed.mkdir()
+        closed.chmod(0o000)
+        self.cleanup.callback(closed.chmod, 0o755)
+        again = self.project / "plain"
+        again.touch()
+        launch = self.launch_settings()
+        with unittest.mock.patch(MOST_HIDDEN, 3):
+            found = hidden_files(launch, [str(self.project)])
+            assert (len(found.files), found.covered) == (2, [str(closed)])
+            with pytest.raises(
+                Fatal,
+                match="more than 3 files of secrets to hide and directories that"
+                f" cannot be looked into, {closed} among them",
+            ):
+                hidden_files(launch, [str(self.project)], [str(again)])
+
+    def test_what_is_hidden_again_through_another_mount_counts_too(self):
+        # The project has a .env and a .netrc: two, then the same two
+        # again where a mount of the host's leads into the project
+        found = hidden_files(self.launch_settings(), [str(self.project)])
+        target = "/home/sandbox/.claude/plugins"
+        with unittest.mock.patch.object(withheld, "MOST_HIDDEN", 4):
+            from_host = withheld.HostMounts(
+                self.host, roots=(str(self.project),), hidden=found
+            )
+            assert from_host.mount(str(self.project), target, "z") is None
+        assert f"--volume=/dev/null:{target}/.env:ro" in from_host.args
+        with (
+            unittest.mock.patch.object(withheld, "MOST_HIDDEN", 3),
+            pytest.raises(
+                Fatal,
+                match="more than 3 files of secrets to hide and directories covered,"
+                f" with those under {self.project}",
+            ),
+        ):
+            withheld.HostMounts(
+                self.host, roots=(str(self.project),), hidden=found
+            ).mount(str(self.project), target, "z")
 
     def test_more_directories_to_hold_than_can_be_mounted_end_the_launch(self):
         deep = self.project / "a" / "b" / "c"
         deep.mkdir(parents=True)
         (deep / ".env").touch()
         hidden = [str(deep / ".env")]
-        assert len(mounts._held_in_place([], self.host, [], mounts.Hidden(hidden))) == 3
+        assert len(mounts._held_in_place([], self.host, [], Hidden(hidden))) == 3
         with (
             unittest.mock.patch.object(mounts, "MOST_HELD", 2),
             pytest.raises(
                 Fatal, match=f"more than 2 directories to hold .* {deep}/.env among"
             ),
         ):
-            mounts._held_in_place([], self.host, [], mounts.Hidden(hidden))
+            mounts._held_in_place([], self.host, [], Hidden(hidden))
 
     def test_a_directory_deeper_than_a_path_goes_ends_the_launch(self):
         # Neither hidden nor covered, a session would read what is in it,
@@ -517,7 +568,7 @@ class TooManyMountsTest(LauncherTest):
         with pytest.raises(
             Fatal, match=f"cannot tell what to hide in {self.project}/d+/.*File name"
         ):
-            mounts.hidden_files(self.launch_settings(), self.host, [])
+            hidden_files(self.launch_settings(), [str(self.project)])
 
     def test_a_name_with_a_line_break_is_said_on_the_line_it_is_in(
         self, capsys: pytest.CaptureFixture[str]
@@ -526,7 +577,7 @@ class TooManyMountsTest(LauncherTest):
         # launcher's when the launch ends on it
         forged = self.project / "x\nclaude-airlock: all is well" / "deeper"
         forged.mkdir(parents=True)
-        hidden = mounts.Hidden([str(forged / ".env")])
+        hidden = Hidden([str(forged / ".env")])
         with (
             unittest.mock.patch.object(mounts, "MOST_HELD", 1),
             pytest.raises(Fatal) as refused,
@@ -553,12 +604,11 @@ class MovedMeanwhileTest(LauncherTest):
         self.deep.mkdir(parents=True)
         (self.deep / ".env").touch()
 
-    def placed(self, dirs: list[mounts.ExtraDir] | None = None) -> mounts.Placed:
+    def placed(self, dirs: list[mounts.ExtraDir] | None = None) -> Placed:
         dirs = dirs or []
-        hidden = mounts.hidden_files(
-            settings.load_settings({}, os.devnull), self.host, dirs
-        )
-        return mounts.Placed.of([], self.host, dirs, hidden)
+        roots = mounts.mounted_dirs(dirs, self.host)
+        hidden = hidden_files(settings.load_settings({}, os.devnull), roots)
+        return Placed.of([], self.host, dirs, hidden)
 
     def test_a_directory_held_in_place_swapped_for_a_link_ends_the_launch(self):
         placed = self.placed()
@@ -628,6 +678,82 @@ class MovedMeanwhileTest(LauncherTest):
         (dotfiles / "gitconfig").write_text("[user]\n\tname = me\n")
         with pytest.raises(Fatal, match="it is another than was planned"):
             planned.placed.refuse_moved()
+
+    def test_a_part_of_claude_swapped_for_a_link_between_plan_and_run_ends_it(self):
+        # CLAUDE.md and the plugins kept in a repository of dotfiles, linked
+        # to from ~/.claude: a session that runs meanwhile swaps what is
+        # there for a link to a key, to the home, for docker to mount that
+        dotfiles = self.project / "dotfiles"
+        (dotfiles / "plugins").mkdir(parents=True)
+        (dotfiles / "CLAUDE.md").write_text("# Mine\n")
+        claude = self.home / ".claude"
+        (claude / "CLAUDE.md").unlink()
+        (claude / "CLAUDE.md").symlink_to(dotfiles / "CLAUDE.md")
+        (claude / "plugins").symlink_to(dotfiles / "plugins")
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir(exist_ok=True)
+        key.write_text("secret\n")
+        launch = settings.load_settings({}, os.devnull)
+        image = unittest.mock.Mock(tag="img", language_servers=())
+        plan = cli.Plan(launch, self.host, image, Action.RUN, [], [], [])
+        home.prepare_home(self.host)
+        for name, leads_to, options in (
+            ("CLAUDE.md", key, "ro,z"),
+            ("plugins", self.home, "z"),
+        ):
+            planned = cli.session_run_args(plan, "claude-proj", DOCKERS_OWN, "")
+            target = f"/home/sandbox/.claude/{name}"
+            assert mount_arg(str(claude / name), target, options) in planned.args
+            planned.placed.refuse_moved()
+            (dotfiles / name).rename(dotfiles / f"old-{name}")
+            (dotfiles / name).symlink_to(leads_to)
+            with pytest.raises(
+                Fatal, match=f"{claude / name}: it leads elsewhere than was planned"
+            ):
+                planned.placed.refuse_moved()
+            (dotfiles / name).unlink()
+            (dotfiles / f"old-{name}").rename(dotfiles / name)
+
+    def test_every_path_of_the_home_mounted_is_looked_at_again(self):
+        # Whatever mounts it: each part of ~/.claude, the shared history,
+        # the git config and the statusline, all kept in a repository of
+        # dotfiles a session writes. One that went round HostMounts would
+        # not be looked at again before docker run.
+        dotfiles = self.project / "dotfiles"
+        dotfiles.mkdir()
+        claude = self.home / ".claude"
+        home.prepare_home(self.host)
+        trees = (*settings.CONFIG_TREES, "plugins", "projects", "file-history")
+        for name in (*trees, *settings.CONFIG_FILES, "paste-cache", "history.jsonl"):
+            kept = dotfiles / name.replace("/", "-")
+            if name.endswith((".json", ".md", ".jsonl")):
+                kept.write_text("{}\n")
+            else:
+                kept.mkdir()
+            shutil.rmtree(claude / name, ignore_errors=True)
+            (claude / name).unlink(missing_ok=True)
+            (claude / name).symlink_to(kept)
+        (dotfiles / "gitconfig").write_text("[user]\n\tname = me\n")
+        (self.home / ".gitconfig").symlink_to(dotfiles / "gitconfig")
+        (dotfiles / "line.sh").write_text("#!/bin/sh\n")
+        (self.home / "line.sh").symlink_to(dotfiles / "line.sh")
+        (dotfiles / "settings.json").write_text(
+            '{"statusLine": {"type": "command", "command": "~/line.sh"}}\n'
+        )
+        shared = {"CLAUDE_AIRLOCK_SHARED_HISTORY": "1"}
+        launch = settings.load_settings(shared, os.devnull)
+        image = unittest.mock.Mock(tag="img", language_servers=())
+        plan = cli.Plan(launch, self.host, image, Action.RUN, [], [], [])
+        planned = cli.session_run_args(plan, "claude-proj", DOCKERS_OWN, "")
+        own = (str(self.project), str(self.state))
+        sources = {
+            arg.removeprefix("--volume=").split(":")[0]
+            for arg in planned.args
+            if arg.startswith(f"--volume={self.home}/")
+        }
+        from_home = {source for source in sources if not source.startswith(own)}
+        assert len(from_home) == len(trees) + len(settings.CONFIG_FILES) + 4
+        assert from_home == {led.path for led in planned.placed.led}
 
     def test_what_moves_between_the_plan_and_docker_run_ends_the_launch(self):
         planned = cli.session_run_args

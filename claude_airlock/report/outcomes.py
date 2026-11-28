@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..events import clean, flat
-from ..files import is_within
+from ..paths import is_within
 from ..recording.procwatch import Secrets
 from ..settings import CONTAINER_HOME
 from .brief import PREVIEW_WIDTH

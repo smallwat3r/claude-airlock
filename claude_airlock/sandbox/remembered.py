@@ -2,7 +2,7 @@
 turned to its use since, for later launches to go by:
 
 - The files of secrets that were hidden through a link named as one (see
-  hidden_files of mounts.py). A session can remove the link, and with it
+  hidden_files of hidden.py). A session can remove the link, and with it
   all that said the file holds secrets: they go on being hidden while
   they are there.
 - The directories that were a session's to write. A link a session left

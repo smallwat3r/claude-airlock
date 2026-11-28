@@ -26,19 +26,25 @@ What a session is given and what it is kept from.
   against what it was when the mounts were planned, and each directory
   held in place, protected path, hidden file and hidden directory below
   one, a part at a time, for a link or another directory in its place.
-  So is each file of the host mounted on its own (the git config, the
-  files it includes, a statusline) that leads into a directory a session
-  can write, or could at an earlier launch: it has to lead where it did.
-  A session that runs meanwhile and can write there could otherwise
-  swap a directory to be held in place for a link to your home, for
-  docker to mount that writable, or `~/.gitconfig` kept in a dotfiles
-  repository for a link to a key. Such a change ends the launch, with the
-  path named. Docker resolves the paths itself after that, so a moment
+  So is each path of the host mounted on its own (the git config, the
+  files it includes, a statusline, the parts of your `~/.claude`) that
+  leads into a directory a session can write, or could at an earlier
+  launch: it has to lead where it did. A session that runs meanwhile and
+  can write there could otherwise swap a directory to be held in place
+  for a link to your home, for docker to mount that writable, or
+  `~/.gitconfig` or `~/.claude/CLAUDE.md` kept in a dotfiles repository
+  for a link to a key. Such a change ends the launch, with the path
+  named. Docker resolves the paths itself after that, so a moment
   remains in which one can still be moved.
 - Read-only wins. A directory asked for both ways, by `--add-dir` and
   `--add-dir-ro` or their settings, the shared directory too, is mounted
   read-only, whichever came first. The project itself is always
-  writable: asking for it read-only is refused.
+  writable: asking for it read-only is refused. A part of your
+  `~/.claude` a session would write (`plugins`, `projects`, the shared
+  history, the configuration with `CLAUDE_AIRLOCK_RW_CONFIG=1`) that
+  leads into, or holds, a directory mounted read-only or a path
+  `CLAUDE_AIRLOCK_PROTECT` protects is mounted read-only too, and the
+  launch says so.
 - A directory mounted inside another stays where it is, the project
   too: in a session, the directories between the two cannot be renamed
   or removed, as with a protected path below.
@@ -50,16 +56,31 @@ What a session is given and what it is kept from.
   place of something mounted there, or a file of another kind, it is
   removed and made anew before the mounts, and the launch says so: a
   mount over a link would go where the link leads.
+- Each part of your `~/.claude` that is mounted can be a link of yours,
+  into a dotfiles repository say, and is mounted while it leads where
+  it should. Not one that goes through a link in a directory a session
+  can write, or could at an earlier launch, and leads out of it, as with
+  the git config below, nor one that leads to a directory no session is
+  given (`~/.ssh`, the launcher's settings and records) or to your home,
+  nor a file with the name of a secrets file, nor what is hidden in a
+  directory a session is given (see below). The configuration has an
+  empty stand-in in its place then, read-only, and the launch says why.
+  What a session writes there (`plugins`, `projects`, the shared history,
+  the configuration with `CLAUDE_AIRLOCK_RW_CONFIG=1`) ends the launch
+  instead, with it named: what the session wrote to a stand-in would be
+  lost.
 - The login is shared all the same. The launcher carries it between the
   host and the sandbox while a session runs, so a session starts logged
   in. On macOS, where Claude Code keeps the login in the Keychain, the
   launcher reads it there and writes back what a session renews, with
   `security` as Claude Code does. A locked Keychain is left alone, and
   the session keeps the login it was last given. If a session leaves
-  something in place of its login that does not read as one, it is never
-  carried to the host, the host's login is put back instead. Logins to
-  MCP servers, kept in the same place, are not carried either way: the
-  host's stay on the host, a session's in the sandbox.
+  something in place of its login that does not read as one, a link, a
+  pipe, a directory or a file too large to be one among them, it is never
+  carried to the host, not as a logout either. The host's login is put
+  back instead, but over a directory, which the session has to remove
+  first. Logins to MCP servers, kept in the same place, are not carried
+  either way: the host's stay on the host, a session's in the sandbox.
 - With `CLAUDE_AIRLOCK_API_LOG=1`, a directory for this session alone at
   `~/.local/state/api-log`, where Claude Code writes what it sends to
   the model. The copy the launcher keeps is in no session.
@@ -118,6 +139,13 @@ What a session is given and what it is kept from.
   directory. That file stays hidden at later launches while it is there,
   link or no link, since a session can remove the link. The launcher
   remembers the latest 1000 such files, across all projects.
+  - Where a part of your `~/.claude` leads into a mounted directory, what
+    is hidden there is hidden through it too, as the same files are
+    there under another name: through `~/.claude/skills` as a link into
+    the shared directory, its `.env` files read as empty, and a
+    directory hidden whole there is empty. A file there that is hidden,
+    or in a directory hidden whole, is not mounted as a part of
+    `~/.claude`.
   - The directories above a hidden file cannot be renamed or removed in a
     session (`Device or resource busy`). A session cannot read the file,
     but could otherwise move it under `node_modules`, where the next
@@ -129,8 +157,9 @@ What a session is given and what it is kept from.
     again (`chmod u+rx`) to have it back. One it cannot look into for
     another reason, a path deeper than the system takes for one, ends the
     launch, with it named: docker could not mount anything there either.
-  - More than 1000 such files and directories, or more than 2000
-    directories held above them, end the launch, with one of them named.
+  - More than 1000 such files and directories, those hidden again
+    through `~/.claude` among them, or more than 2000 directories held
+    above them, end the launch, with one of them named.
     Each is a mount of its own, and docker takes only so many.
 - **The history of other projects.** Their transcripts are covered by
   empty directories. The prompt history, the paste cache and the file
@@ -493,7 +522,10 @@ Command lines and logs can still carry secrets.
 
 The proxy is given the daemon's socket at `/var/run/docker.sock`. A
 daemon that keeps its socket elsewhere, rootless or colima, is not
-reached: the session has no Docker, and the launch says so.
+reached: the session has no Docker, and the launch says so. It runs with
+all capabilities dropped, `no-new-privileges` and a read-only root
+filesystem, with a small tmpfs at `/tmp` for the config its image
+renders from the rules.
 
 **The egress filter**, with `CLAUDE_AIRLOCK_NET_FILTER=1`:
 

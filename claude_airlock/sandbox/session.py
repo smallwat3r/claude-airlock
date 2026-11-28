@@ -1,6 +1,6 @@
 """The session container: its name, its docker run options and the run
-itself. What of the host is mounted into it is in mounts.py, how the
-launcher ends while it runs in ending.py."""
+itself. What of the host is mounted into it is in mounts.py and
+withheld.py, how the launcher ends while it runs in ending.py."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import os
 import re
 import shlex
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import Protocol
 
 from ..action import Action
 from ..docker import (
@@ -29,13 +29,13 @@ from ..docker import (
 )
 from ..files import (
     expand_home,
-    is_under,
     private_dir,
     settings_object,
     try_lock_file,
     write_whole,
 )
 from ..notice import warn
+from ..paths import is_under
 from ..settings import (
     CONTAINER_CLAUDE,
     CONTAINER_HOME,
@@ -47,12 +47,12 @@ from ..settings import (
 )
 from .claude_args import is_a_command, says_option, says_permissions
 from .ending import Ending
-from .fingerprint import home_git_configs, included_configs
+from .git_config import home_git_configs, included_configs
 from .home import home_args, place_in_base, session_state, statusline_of
 from .image import Image
-from .mounts import NOTHING_WRITTEN, Written, withheld
 from .networks import PROXY_NETWORKS
 from .runtime import DOCKERS_OWN, Runtime
+from .withheld import HostMounts
 
 # Of the name of a session, as much as is kept: a file takes no more than
 # 255 bytes for a name, and the launcher names files after a session with
@@ -210,10 +210,15 @@ def user_args(host: Host) -> list[str]:
 
 
 def base_args(
-    settings: Settings, host: Host, name: str, runtime: Runtime = DOCKERS_OWN
+    settings: Settings,
+    host: Host,
+    name: str,
+    from_host: HostMounts,
+    runtime: Runtime = DOCKERS_OWN,
 ) -> list[str]:
     """What every session gets: identity, the core mounts, the hardening and
-    the resource limits, adjusted for its runtime."""
+    the resource limits, adjusted for its runtime. What is mounted of the
+    host's ~/.claude goes through from_host, see home_args."""
     return [
         "--rm",
         "--interactive",
@@ -266,7 +271,7 @@ def base_args(
         env_arg("GIT_CONFIG_KEY_1", "tag.gpgsign"),
         env_arg("GIT_CONFIG_VALUE_1", "false"),
         mount_arg(host.project_dir, host.project_dir, "z"),
-        *home_args(host),
+        *home_args(host, from_host),
         # ~/.local/share/claude is NOT mounted. It holds the versioned claude
         # binary the launcher symlinks to, mounting the host's copy shadows
         # the image's baked-in version, dangling the symlink (exit 127). The
@@ -317,51 +322,38 @@ def _configured_statusline(host: Host) -> list[str]:
     return [os.path.normpath(path) for path in named if os.path.isabs(path)]
 
 
-class HostFiles(NamedTuple):
-    """The mounts of files of the host, as options of docker run, with the
-    files they mount, for Placed of mounts.py to look at again right
-    before docker run: one that leads into a directory a session can
-    write is the session's to swap for a link meanwhile."""
-
-    args: list[str]
-    files: list[str]
-
-
-def own_statusline_args(
-    settings: Settings,
-    host: Host,
-    mounted: Sequence[str],
-    written: Written = NOTHING_WRITTEN,
-) -> HostFiles:
+def mount_own_statusline(
+    host: Host, mounted: Sequence[str], from_host: HostMounts
+) -> None:
     """A statusline of the user's own, for Claude Code's native UI: the
     file ~/.claude/settings.json runs as one is mounted alone, read-only,
-    where the settings name it. Claude Code runs it in the container,
-    which has the settings and without this not the file.
+    where the settings name it, through from_host. Claude Code runs it in
+    the container, which has the settings and without this not the file.
 
     Only a plain file of the home directory, where a session has nothing
     but what the launcher mounts: a path anywhere else could be a
     program of the image, which the host's must not stand in for. Not
     what is in the project or a directory mounted next to it (mounted),
-    which is there already, nor what withheld of mounts.py keeps back:
+    which is there already, nor what withheld of withheld.py keeps back:
     one that is, or goes through, a link out of a directory a session
-    can write or could (written), which the session could have pointed
-    anywhere, a file whose name says it holds secrets, and one in a
-    directory that is never a session's to have, the user's keys, the
-    launcher's settings and records. Where a session can write the
-    settings (CLAUDE_AIRLOCK_RW_CONFIG, or settings kept as a link into
-    a directory it is given), it names the file, and would be given any
-    of the home it named. What the script needs besides itself has to be
-    in the image, or in a directory mounted next to the project
+    can write or could, which the session could have pointed anywhere,
+    a file whose name says it holds secrets, and one in a directory that
+    is never a session's to have, the user's keys, the launcher's
+    settings and records. Where a session can write the settings
+    (CLAUDE_AIRLOCK_RW_CONFIG, or settings kept as a link into a
+    directory it is given), it names the file, and would be given any of
+    the home it named. What the script needs besides itself has to be in
+    the image, or in a directory mounted next to the project
     (CLAUDE_AIRLOCK_EXTRA_DIRS_RO)."""
+    # Claude's own directory is the one where a statusline is kept as a
+    # rule, and what of it a session has is the launcher's to say
+    but = (host.claude_dir,)
     for path in _configured_statusline(host):
         if not is_under(path, host.home) or not os.path.isfile(path):
             continue
         if any(is_under(path, root) for root in mounted):
             continue
-        # Claude's own directory is the one where a statusline is kept as
-        # a rule, and what of it a session has is the launcher's to say
-        but = (host.claude_dir,)
-        refused = withheld(path, host, written, settings.shadow, but)
+        refused = from_host.refused(path, but)
         if refused:
             warn(f"the statusline {path} is not mounted: {refused.said}")
             continue
@@ -371,8 +363,10 @@ def own_statusline_args(
             # There already with what the launcher mounts of ~/.claude,
             # or no place for it could be made
             continue
-        return HostFiles([mount_arg(path, f"{CONTAINER_HOME}/{inner}", "ro,z")], [path])
-    return HostFiles([], [])
+        refused = from_host.mount(path, f"{CONTAINER_HOME}/{inner}", "ro,z", but)
+        if refused:
+            warn(f"the statusline {path} is not mounted: {refused.said}")
+        return
 
 
 # What a session can write to outside its mounts. /tmp is where builds and
@@ -468,13 +462,11 @@ def _git_files(host: Host) -> list[tuple[str, str]]:
     return found
 
 
-def _git_file_mountable(
-    path: str, what: str, settings: Settings, host: Host, written: Written
-) -> bool:
+def _git_file_mounted(path: str, target: str, what: str, from_host: HostMounts) -> bool:
     """Whether a file of the git config, one git reads or one a config
-    includes (what says which), is mounted, see withheld of mounts.py.
-    Said when it is not."""
-    refused = withheld(path, host, written, settings.shadow)
+    includes (what says which), is mounted at target, through from_host,
+    see withheld of withheld.py. Said when it is not."""
+    refused = from_host.mount(path, target, "ro,z")
     if refused:
         warn(f"{path}, which {what}, is not mounted: {refused.said}")
     return refused is None
@@ -484,50 +476,45 @@ def _include_mounted(
     path: str,
     by: str,
     *,
-    settings: Settings,
-    host: Host,
     mounted: Sequence[str],
-    written: Written,
+    forwarded: Container[str],
+    from_host: HostMounts,
 ) -> bool:
-    """Whether a file a git config (by) includes is mounted. Not when it
-    is in the project or a directory mounted next to it, which is there
-    already, and says nothing. Nor when the config that names it is, or
-    leads into, a directory a session can write or could: dotfiles kept
-    in a repository, for one. What it includes is then the session's to
-    name, for the next launch of any project to mount, ~/.aws/credentials
-    as well as a config. Nor what withheld keeps back, see
-    _git_file_mountable."""
+    """Whether a file a git config (by) includes is mounted, at its own
+    path, unless it already is as a file git reads (forwarded). Not when
+    it is in the project or a directory mounted next to it, which is
+    there already, and says nothing. Nor when the config that names it
+    is, or leads into, a directory a session can write or could: dotfiles
+    kept in a repository, for one. What it includes is then the
+    session's to name, for the next launch of any project to mount,
+    ~/.aws/credentials as well as a config. Nor what withheld keeps back,
+    see _git_file_mounted."""
     if any(is_under(path, root) for root in mounted):
         return False
-    if written.holds(by):
+    if from_host.written.holds(by):
         real = os.path.realpath(by)
         leads = f" (it leads to {real})" if real != by else ""
         said = f"{by}, which includes it, is a session's to write{leads}"
         warn(f"{path}, which the git config includes, is not mounted: {said}")
         return False
-    return _git_file_mountable(path, "the git config includes", settings, host, written)
+    if path in forwarded:
+        return True
+    return _git_file_mounted(path, path, "the git config includes", from_host)
 
 
-def git_config_args(
-    settings: Settings,
-    host: Host,
-    mounted: Sequence[str],
-    written: Written = NOTHING_WRITTEN,
-) -> HostFiles:
-    """Forward the git config, read-only, and no credentials with it (see
-    XDG_GIT_FORWARDED). Not what withheld of mounts.py keeps back: a
-    file that is, or goes through, a link out of a directory a session
-    can write or could (written), as ~/.gitconfig kept as a link into a
-    repository of dotfiles can, which the session could have pointed at
-    a key, nor one in a directory that is never a session's to have, nor
-    one whose name says it holds secrets. Of what it includes, the same,
-    and not what a config a session can write names, see
-    _include_mounted."""
-    args = []
+def mount_git_config(host: Host, mounted: Sequence[str], from_host: HostMounts) -> None:
+    """Forward the git config, read-only, through from_host, and no
+    credentials with it (see XDG_GIT_FORWARDED). Not what withheld of
+    withheld.py keeps back: a file that is, or goes through, a link out of
+    a directory a session can write or could, as ~/.gitconfig kept as a
+    link into a repository of dotfiles can, which the session could have
+    pointed at a key, nor one in a directory that is never a session's
+    to have, nor one whose name says it holds secrets. Of what it
+    includes, the same, and not what a config a session can write names,
+    see _include_mounted."""
     forwarded: dict[str, None] = {}
     for path, target in _git_files(host):
-        if _git_file_mountable(path, "git reads", settings, host, written):
-            args.append(mount_arg(path, target, "ro,z"))
+        if _git_file_mounted(path, target, "git reads", from_host):
             forwarded[path] = None
 
     # Files pulled in with include/includeIf (e.g. a work identity under
@@ -538,14 +525,10 @@ def git_config_args(
     # _include_mounted keeps back, nor what that includes, which git in
     # the session cannot read then.
     included = partial(
-        _include_mounted, settings=settings, host=host, mounted=mounted, written=written
+        _include_mounted, mounted=mounted, forwarded=forwarded, from_host=from_host
     )
     configs = [path for path in home_git_configs(host) if path in forwarded]
-    for path in included_configs(configs, host.home, included):
-        if path not in forwarded:
-            args.append(mount_arg(path, path, "ro,z"))
-            forwarded[path] = None
-    return HostFiles(args, list(forwarded))
+    included_configs(configs, host.home, included)
 
 
 class Through(Protocol):

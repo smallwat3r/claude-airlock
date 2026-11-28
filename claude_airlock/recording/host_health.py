@@ -47,9 +47,10 @@ from typing import Protocol
 
 from ..background import ASK_EVERY, in_background, wait_for
 from ..docker import docker_output
-from ..files import is_under, json_object, private_dir
+from ..files import json_object, private_dir
 from ..launcher import Launcher, session_alive
 from ..notice import warn
+from ..paths import is_under
 from ..settings import Host
 from .processes import KEPT_RECORDS, SOON_OVER, Watcher
 from .procwatch import LIMITS_EVERY, CgroupHealth, LineFile, Note, Room, lined, stamped

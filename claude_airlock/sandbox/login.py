@@ -50,6 +50,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -196,6 +197,11 @@ class Login:
     version: tuple[int, ...] = ()
     # When it was written, in nanoseconds
     written: int = 0
+    # Whether what holds it is a plain file to be read, or nothing. Not a
+    # link, a directory, a pipe or a file too large to be a login, which
+    # a session can leave in the place of its own: that is no login, and
+    # no logout either.
+    plain: bool = True
 
     @cached_property
     def said(self) -> bytes | None:
@@ -206,7 +212,9 @@ class Login:
     @cached_property
     def fit(self) -> bool:
         """Whether it can be another store's: no login, or what reads
-        as one."""
+        as one, in a plain file (see plain)."""
+        if not self.plain:
+            return False
         return self.content is None or _reads_as_login(self.content)
 
     @cached_property
@@ -300,36 +308,56 @@ class LoginFile:
         self._kept: Login | None = None
 
     def read(self) -> Login:
-        """The login in the file. One that is not a regular file of a sane
-        size is none: a session could leave a link or a pipe in the base.
-        What was read last while the file is the same, see LoginFile."""
+        """The login in the file, none when there is no file. What is no
+        regular file of a sane size is no login, nor a logout (see
+        Login.plain): a session could leave a link, a directory or a pipe
+        in the base. What was read last while the file is the same, see
+        LoginFile. OSError when what is there cannot be told, in a
+        directory a session closed."""
         try:
-            stamp = stat_stamp(os.lstat(self.path))
-        except OSError:
-            stamp = None
+            about = os.lstat(self.path)
+        except FileNotFoundError:
+            self._kept = None
+            return Login()
+        stamp = stat_stamp(about)
         if self._kept is not None and self._kept.version == stamp:
             return self._kept
         self._kept = None
+        if not stat.S_ISREG(about.st_mode) or about.st_size > MOST_READ:
+            return Login(version=stamp, plain=False)
         file = open_plain(self.path)
         if file is None:
-            return Login()
+            return self._unopened(stamp)
         with file:
             found = os.fstat(file.fileno())
             if found.st_size > MOST_READ:
-                return Login()
+                return Login(version=stat_stamp(found), plain=False)
             login = Login(file.read(MOST_READ), stat_stamp(found), found.st_mtime_ns)
         if stamp_settled(found):
             self._kept = login
         return login
 
+    def _unopened(self, stamp: tuple[int, ...]) -> Login:
+        """What a regular file that could not be opened is: no login, when
+        it is still the one that was looked at, which is closed to the
+        launcher. OSError when it is gone or another since, as a login
+        renewed is: the next look tells which."""
+        try:
+            again = stat_stamp(os.lstat(self.path))
+        except OSError:
+            again = None
+        if again != stamp:
+            raise OSError(f"{self.path} was replaced as it was read")
+        return Login(version=stamp, plain=False)
+
     def unchanged(self, login: Login) -> bool:
         """Whether the file is still the one that was read, by its stamp,
-        see LoginFile."""
+        see LoginFile, or still not there."""
         try:
             found = os.lstat(self.path)
         except OSError:
-            return login.content is None
-        return login.content is not None and stat_stamp(found) == login.version
+            return login.content is None and login.plain
+        return bool(login.version) and stat_stamp(found) == login.version
 
     def write(self, content: bytes | None) -> bool:
         """Make the file hold a login, whole or not at all: by a rename,
@@ -547,13 +575,17 @@ class LoginPair:
 
     def settle(self) -> None:
         """Make the two the same, from the one that changed. Never from
-        the base when what is there does not read as a login: the base
-        is a session's to write, and the host's own claude would be
-        logged in with whatever was carried over. The host's is then
-        put back in its place."""
+        the base when what is there does not read as a login, nor is a
+        plain file (see Login.plain): the base is a session's to write,
+        and the host's own claude would be logged in with whatever was
+        carried over, or logged out. The host's is then put back in its
+        place. Nothing either way while the host's is no plain file, a
+        link of the user's: it is theirs to put right."""
         ours = Held(self.ours, self.ours.read())
+        if not ours.login.plain:
+            return
         theirs = Held(self.theirs, self.theirs.read())
-        if ours.login.shared == theirs.login.shared:
+        if ours.login.shared == theirs.login.shared and theirs.login.plain:
             self.note(ours.login)
             return
         shared = _last_shared(self.host)

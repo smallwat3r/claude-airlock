@@ -673,29 +673,3 @@ def expand_home(path: str, home: str) -> str:
     if path == "~":
         return home
     return home + path[1:] if path.startswith("~/") else path
-
-
-def is_under(path: str, directory: str) -> bool:
-    """Whether a path is under a directory, not the directory itself. By
-    both as they are written, neither is resolved: who asks resolves them
-    first where a link counts. The root holds every other path."""
-    return path.startswith(directory.rstrip(os.sep) + os.sep)
-
-
-def leads_under(path: str, directory: str) -> bool:
-    """Whether a path is under a directory as both are written, or by
-    where they lead: a link into it is in it."""
-    if is_under(path, directory):
-        return True
-    return is_under(os.path.realpath(path), os.path.realpath(directory))
-
-
-def is_within(path: str, directory: str) -> bool:
-    """Whether a path is a directory or under it, see is_under."""
-    return path == directory or is_under(path, directory)
-
-
-def overlap(one: str, other: str) -> bool:
-    """Whether one of two directories is the other or is inside it,
-    either way round, see is_within."""
-    return is_within(one, other) or is_within(other, one)

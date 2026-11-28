@@ -2,8 +2,9 @@
 or that Claude follows there: the check of a session, taken as it starts
 and run once it is over, by this launcher or by the next one.
 
-What is watched and how it is read is in fingerprint.py, within the bounds
-of bounded.py, and what is said of a change in tampered.py."""
+What is watched and how it is read is in fingerprint.py and build_files.py,
+within the bounds of bounded.py, and what is said of a change in
+tampered.py."""
 
 from __future__ import annotations
 
@@ -18,13 +19,9 @@ from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..projects import memory_dirs
 from ..settings import Host
-from .fingerprint import (
-    agent_memory_dirs,
-    build_fingerprint,
-    home_git_configs,
-    host_exec_fingerprint,
-    project_names,
-)
+from .build_files import build_fingerprint
+from .fingerprint import agent_memory_dirs, host_exec_fingerprint, project_names
+from .git_config import home_git_configs
 from .history import own_names
 from .home import CONFIG, SHARED_AGENT_MEMORY
 from .tampered import (

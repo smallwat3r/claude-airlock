@@ -293,7 +293,9 @@ class LoginPairTest(LauncherTest):
         with unittest.mock.patch.object(login, "open_plain", reads):
             self.settled(RENEWED, RENEWED)
             self.pair.settle()
-        assert reads.call_count == 4
+        # Both at each look, but for the sandbox's at the first, when it
+        # was not there to be opened
+        assert reads.call_count == 3
 
     def test_what_is_no_login_in_the_sandbox_alone_is_dropped(self):
         self.theirs.write_text("not a login")
@@ -317,6 +319,55 @@ class LoginPairTest(LauncherTest):
         # Neither read as the sandbox's login, nor written through
         assert self.ours.read_text() == "login"
         assert elsewhere.read_text() == "not a login"
+
+    def test_what_is_no_plain_file_in_the_sandbox_is_no_logout(
+        self, subtests: pytest.Subtests
+    ):
+        # Left by a session in the place of its login: carried, it would
+        # log the host out, or cut its login to its servers'. The host's
+        # is put back instead, over all that a rename goes over.
+        account = {"accessToken": "a", "refreshToken": "r"}
+        held = json.dumps({"claudeAiOauth": account, "mcpOAuth": {"s": {}}})
+        self.ours.write_text(held)
+        self.pair.settle()
+        put_back = self.theirs.read_text()
+        assert json.loads(put_back) == {"claudeAiOauth": account}
+        elsewhere = self.home / "elsewhere"
+        elsewhere.write_text(put_back)
+
+        def closed() -> None:
+            self.theirs.write_text(put_back)
+            self.theirs.chmod(0)
+
+        left = {
+            "a link": lambda: self.theirs.symlink_to(elsewhere),
+            "a pipe": lambda: os.mkfifo(self.theirs),
+            "too large": lambda: self.theirs.write_text(" " * (login.MOST_READ + 1)),
+            **({"closed": closed} if os.getuid() != 0 else {}),
+        }
+        for what, leave in left.items():
+            with subtests.test(left=what):
+                self.theirs.unlink()
+                leave()
+                os.utime(self.ours, (1, 1))
+                self.pair.settle()
+                assert self.ours.read_text() == held
+                assert not self.theirs.is_symlink()
+                assert self.theirs.read_text() == put_back
+        # Nothing goes over a directory, and the host keeps its login
+        self.theirs.unlink()
+        self.theirs.mkdir()
+        self.pair.settle_quietly()
+        assert self.ours.read_text() == held
+        assert self.theirs.is_dir()
+        # Nor does a base a session closed say there is no login
+        if os.getuid() != 0:
+            self.theirs.rmdir()
+            self.theirs.write_text(put_back)
+            self.base.chmod(0)
+            self.cleanup.callback(self.base.chmod, 0o700)
+            self.pair.settle_quietly()
+            assert self.ours.read_text() == held
 
     def test_a_look_that_fails_does_not_end_the_session(self):
         self.ours.write_text("login")

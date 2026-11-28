@@ -45,8 +45,7 @@ from ..background import in_background, wait_for
 from ..files import json_object, locked, private_dir, write_whole
 from ..launcher import Launcher, session_alive
 from ..settings import NAME, Host, Settings
-from .egress_proxy import asked_hosts_root
-from .networks import session_address
+from .networks import session_addresses
 
 
 class Hosts(enum.StrEnum):
@@ -96,6 +95,20 @@ MOST_WAITING = 8
 # What a directory that is being made or dropped is named with first: no
 # address, so the helper never looks into one
 ASIDE = "."
+
+
+def asked_hosts_root(host: Host) -> str:
+    """The directory the proxy is given to ask through, made as needed.
+    The proxy runs as a user of its own and has to get into it, so it is
+    not for the user alone as the rest of the launcher's state is: the
+    state directory above it is, which keeps everyone else on the host
+    out of it."""
+    private_dir(host.state_dir)
+    root = host.asked_hosts_dir
+    os.makedirs(root, exist_ok=True)
+    # Whatever the umask made of it
+    os.chmod(root, 0o755)  # noqa: S103, the proxy's user reads it
+    return root
 
 
 @contextmanager
@@ -266,11 +279,20 @@ class AskedHosts:
             os.unlink(self._path(Hosts.WAITING, asked))
 
 
+def _ipv4_address(owner: str) -> str:
+    """The first address of IPv4 docker gave a container, empty until it
+    has one: the helper takes no other, see AskedHosts.open."""
+    for address in session_addresses(owner):
+        if ipaddress.ip_address(address).version == 4:
+            return address
+    return ""
+
+
 def _open_once_addressed(asked: AskedHosts, owner: str, stop: threading.Event) -> None:
     """Have the proxy ask for a session once its address is known, which
     is when its container is up. owner is the container the address
     belongs to: the session, or its capture sidecar."""
-    address = wait_for(lambda: session_address(owner), stop)
+    address = wait_for(lambda: _ipv4_address(owner), stop)
     if address and not asked.open(address):
         print(
             f"{NAME}: the egress filter cannot ask for a session at {address},"

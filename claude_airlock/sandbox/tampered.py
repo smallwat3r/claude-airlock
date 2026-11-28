@@ -7,24 +7,26 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
-from ..files import is_within
 from ..notice import warn
+from ..paths import is_within
 from ..settings import CHECKOUT_DIR, NAME
 from .bounded import left_out
+from .build_files import is_launcher_file
 from .fingerprint import (
     CONFIG_WATCHED_TREES,
-    ENVIRONMENT_NAMED,
-    ENVIRONMENT_REST,
     MOST_PROJECTS,
     PROJECTS,
-    SHARED_STEERING,
     WATCHED_TREE_DEPTH,
-    is_launcher_file,
     project_names,
-    shared_part,
 )
 from .history import is_own
 from .home import SHARED_AGENT_MEMORY
+from .shared_config import (
+    ENVIRONMENT_NAMED,
+    ENVIRONMENT_REST,
+    SHARED_STEERING,
+    shared_part,
+)
 
 # The changed ones that are named, the others are counted
 MOST_NAMED = 20

@@ -1,9 +1,9 @@
 """Which files of a session are taken to hold secrets, for what records
 its processes to say when one of them opens one (see Secrets of
-procwatch.py, and gvisor.py): the logins of the tools a session can have,
+procwatch, and gvisor.py): the logins of the tools a session can have,
 the keys of SSH, of GnuPG and of the clouds, and the files of the names
 hidden from it as files of secrets, in the directories it is given (see
-hidden_files of mounts.py). Those read as empty, what opens one is after
+hidden_files of hidden.py). Those read as empty, what opens one is after
 what it held. One of those names made elsewhere, a fixture of a test in
 /tmp say, is no secret kept from it.
 
@@ -17,7 +17,7 @@ import enum
 import os
 from collections.abc import Sequence
 
-from ..sandbox.mounts import SHADOW_EXEMPT, SHADOWED_NAMES
+from ..sandbox.hidden import SHADOW_EXEMPT, SHADOWED_NAMES
 from ..settings import CONTAINER_CLAUDE, CONTAINER_HOME, Host, Settings
 from .procwatch import Secrets
 

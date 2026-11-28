@@ -93,6 +93,36 @@ class HistoryTest(LauncherTest):
         assert (shared / "paste-cache").is_dir()
         assert not list((self.state / "history").glob("proj-*"))
 
+    def test_a_shared_history_a_session_made_lead_elsewhere_ends_the_launch(self):
+        # The prompt history kept in a repository a session was given, and
+        # linked to from ~/.claude: the session made it a link to a key,
+        # then to where nothing is yet, for the launcher to make a file
+        dotfiles = self.home / "dotfiles"
+        dotfiles.mkdir()
+        shared = self.home / ".claude" / "history.jsonl"
+        shared.rename(dotfiles / "history.jsonl")
+        shared.symlink_to(dotfiles / "history.jsonl")
+        launched = self.launch(
+            "--add-dir", str(dotfiles), CLAUDE_AIRLOCK_SHARED_HISTORY="1"
+        )
+        assert launched.status == 0, launched.stderr
+        assert f"--volume={shared}:{CLAUDE}/history.jsonl:z" in launched.flags
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("a key\n")
+        planted = self.home / ".config" / "autostart" / "planted.desktop"
+        for leads_to in (key, planted):
+            (dotfiles / "history.jsonl").unlink()
+            (dotfiles / "history.jsonl").symlink_to(leads_to)
+            (self.work / "log").unlink()
+            self.assert_refused(
+                self.launch(CLAUDE_AIRLOCK_SHARED_HISTORY="1"),
+                f"refusing to mount {shared}: it is, or goes through, a link out of"
+                f" {dotfiles}, which a session could have made",
+            )
+        assert not planted.exists()
+        assert not planted.parent.exists()
+
     def test_more_other_projects_than_can_be_covered_end_the_launch(self):
         # A session that can write ~/.claude/projects can make any number,
         # each a mount: docker would be given more than the system takes

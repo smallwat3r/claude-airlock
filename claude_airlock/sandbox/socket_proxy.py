@@ -10,6 +10,8 @@ import stat
 from pathlib import Path
 
 from ..docker import (
+    DROP_CAPABILITIES,
+    Tmpfs,
     docker_ok,
     env_arg,
     mount_arg,
@@ -33,6 +35,9 @@ PROXY_RULES = {
 DOCKER_SOCK = "/var/run/docker.sock"
 # Where the image reads the rules of the mode from
 RULES_TEMPLATE = "/usr/local/etc/haproxy/haproxy.cfg.template"
+# Where its entrypoint writes the config it renders from them, the one
+# file it writes, of a few kilobytes
+RENDERED = Tmpfs("/tmp", 1)  # noqa: S108, in the container
 
 
 def network_name(settings: Settings) -> str:
@@ -114,12 +119,25 @@ def _socket_proxy_options() -> tuple[str, ...]:
     GET under /containers, where attach/ws writes to a container and
     archive and export read its files. And should a future image ignore
     the template, its stock rules would deny containers rather than open
-    them up."""
+    them up.
+
+    It holds the socket of a daemon that runs as root, and every session
+    of its mode reaches it, so it is given no more than it needs. It runs
+    as root, the image's user, and reaches what it uses by the rights of
+    its owner or of everyone, which take no capability: the socket is
+    root's, the copy of the rules is for all to read, and the tmpfs it
+    writes to is root's. Its root filesystem is read-only, but for that
+    tmpfs, where its entrypoint renders the config (RENDERED): HAProxy
+    writes nothing, the rules name no pidfile, no state and no socket of
+    its own, and it listens on a port that needs no right of root's."""
     return (
         mount_arg(DOCKER_SOCK, "/var/run/docker.sock", "ro"),
         # Among what the stock rules allow unless told: should they be
         # used after all, they do not
         env_arg("EVENTS", 0),
+        DROP_CAPABILITIES,
+        "--read-only",
+        RENDERED.arg(),
     )
 
 

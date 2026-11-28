@@ -16,6 +16,9 @@ what is named here:
                                       those of other projects covered, see
                                       history.py
 
+Each the user's, links too, as long as what it leads to is no session's
+doing, see HostMounts.claude_part.
+
 On top of the base go what a project's sessions remember (history.py) and
 a tmpfs for what Claude Code keeps for one session (session_state).
 The config (.claude.json) is the base's own, see _seed_config. The login
@@ -46,8 +49,10 @@ from ..settings import (
     Settings,
     variable,
 )
+from .hidden import empty_dir
 from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .login import LOGIN
+from .withheld import HostMounts
 
 CONFIG = ".claude.json"
 # What the agents remember for every project (their memory of the user's
@@ -257,20 +262,15 @@ def place_in_base(host: Host, inner: str) -> bool:
         return False
 
 
-def home_args(host: Host) -> list[str]:
+def home_args(host: Host, from_host: HostMounts) -> list[str]:
     """The base as a session's ~/.claude, and the directories of the
-    host's that a session writes to. Plugins stay the host's and writable
+    host's that a session writes to, through from_host (see
+    HostMounts.claude_part). Plugins stay the host's and writable
     (claude updates them itself): what a session changes of them is not
     prevented, it is said when the session ends, see tamper.py."""
-    return [
-        mount_arg(host.sandbox_claude_dir, CONTAINER_CLAUDE, "z"),
-        *(
-            mount_arg(
-                os.path.join(host.claude_dir, name), f"{CONTAINER_CLAUDE}/{name}", "z"
-            )
-            for name in WRITABLE_TREES
-        ),
-    ]
+    for name in WRITABLE_TREES:
+        from_host.claude_part(name, "z", needed=True)
+    return [mount_arg(host.sandbox_claude_dir, CONTAINER_CLAUDE, "z")]
 
 
 def session_state() -> list[Tmpfs]:
@@ -312,7 +312,33 @@ def session_state() -> list[Tmpfs]:
     ]
 
 
-def protect_config_args(settings: Settings, host: Host) -> list[str]:
+# Where the launcher keeps the empty files it mounts in the place of those
+# of ~/.claude that are kept back, see stand_in
+STAND_INS = "stand-ins"
+
+
+def stand_in(host: Host, name: str) -> str:
+    """What is mounted in the place of a part of the host's ~/.claude
+    that withheld keeps back, by its name there: nothing, as prepare_home
+    makes of one that is not there. An empty directory of the launcher's
+    for a directory, an empty file of its own for a file, {} for one
+    that holds JSON, made anew when it is not that."""
+    if name not in CONFIG_FILES:
+        return empty_dir(host)
+    content = "{}\n" if name.endswith(".json") else ""
+    path = os.path.join(private_dir(os.path.join(host.history_dir, STAND_INS)), name)
+    try:
+        kept = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        kept = None
+    if kept != content:
+        write_whole(path, content)
+    return path
+
+
+def protect_config_args(
+    settings: Settings, host: Host, from_host: HostMounts
+) -> list[str]:
     """The host's settings.json and hooks hold commands the host's own
     claude runs. Writable, a compromised session could plant a hook there
     and get code execution outside the sandbox, so they are mounted
@@ -322,14 +348,28 @@ def protect_config_args(settings: Settings, host: Host) -> list[str]:
     so that none can be created either, in the base, where the sandboxed
     sessions would follow it. The cost: none of these can be changed from
     inside the sandbox. CLAUDE_AIRLOCK_RW_CONFIG=1 opts out, they are then
-    the host's and writable."""
-    mode = "z" if settings.rw_config else "ro,z"
-    args = [
-        mount_arg(
-            os.path.join(host.claude_dir, item), f"{CONTAINER_CLAUDE}/{item}", mode
+    the host's and writable.
+
+    Each through from_host, see HostMounts.claude_part. One that withheld
+    keeps back has a stand-in in its place, empty and read-only, and the
+    launch says why: without one, the session would have the base's,
+    which every sandboxed session writes and follows. Writable, it ends
+    the launch instead, as what a session wrote to a stand-in would be
+    lost. What is returned is the stand-ins, and what the session is
+    told."""
+    args = []
+    for item in PROTECTED_CONFIG:
+        if settings.rw_config:
+            from_host.claude_part(item, "z", needed=True)
+            continue
+        refused = from_host.claude_part(item, "ro,z")
+        if refused is None:
+            continue
+        path = os.path.join(host.claude_dir, item)
+        warn(f"{path} is not mounted, the session has an empty one: {refused.said}")
+        args.append(
+            mount_arg(stand_in(host, item), f"{CONTAINER_CLAUDE}/{item}", "ro,z")
         )
-        for item in PROTECTED_CONFIG
-    ]
     if settings.rw_config:
         # Said in docker/CLAUDE-airlock.md
         args.append(env_arg(variable("rw_config"), 1))

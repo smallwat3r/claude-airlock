@@ -42,7 +42,7 @@ def unstartable(problem: OSError, args: Sequence[str]) -> Fatal:
     the one line it is: docker missing, there and not to be run, or
     given more than the system takes, which a session can have brought
     about with the files and directories that are each mounted (see
-    hidden_files of sandbox/mounts.py and history_args of
+    hidden_files of sandbox/hidden.py and history_args of
     sandbox/history.py)."""
     if isinstance(problem, FileNotFoundError):
         return Fatal(NOT_FOUND)
@@ -57,6 +57,20 @@ def unstartable(problem: OSError, args: Sequence[str]) -> Fatal:
             f" {size // 1024} kB, {mounts} of them mounts"
         )
     return Fatal(f"docker {' '.join(args[:1])} cannot be started: {problem.strerror}")
+
+
+def refuse_past_most(count: int, most: int, what: str) -> None:
+    """Fatal for more of a kind of mount than most: each is an argument
+    of docker run, which the system takes only so many of, and what each
+    is for is a session's to make any number of. Said with what they are
+    for, and where: whoever asks gives the paths in what flat, a session
+    names them, and a line break in a name would start a line of its own
+    (see flat)."""
+    if count > most:
+        raise Fatal(
+            f"more than {most} {what}: more than can each be mounted, a"
+            " session may have made them"
+        )
 
 
 def patience(args: tuple[str, ...]) -> float:
@@ -217,7 +231,9 @@ def mount_arg(
     make a directory of it, owned by root, in the place of the file that
     was meant. Not a path said to be the daemon's: one of the machine
     docker runs in, which is not this one under Docker Desktop, and
-    cannot be looked for here."""
+    cannot be looked for here. Nothing is asked of where a path leads:
+    one of the user's that is no directory a session is given goes
+    through HostMounts of sandbox/withheld.py, which asks."""
     for path in (source, target):
         if not volume_takes(path):
             raise Fatal(f"cannot mount {flat(path)}: {NO_COLON}")

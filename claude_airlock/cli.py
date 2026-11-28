@@ -37,10 +37,11 @@ from .report.digest import report_session
 from .report.follow import follow
 from .report.trace import trace
 from .sandbox.asked_hosts import hosts_asked
+from .sandbox.build_files import reaches_launcher
 from .sandbox.claude_args import has_a_conversation, resumed_args
 from .sandbox.egress_proxy import start_egress_proxy
 from .sandbox.ending import Ending, ending_passed_on, interrupts_held
-from .sandbox.fingerprint import reaches_launcher
+from .sandbox.hidden import Hidden, hidden_files
 from .sandbox.history import history_args
 from .sandbox.home import prepare_home, protect_config_args
 from .sandbox.image import PLUGIN_DIR, Image, build_image, prepare_image, prune_images
@@ -48,22 +49,19 @@ from .sandbox.limits import limits_watched
 from .sandbox.login import login_shared
 from .sandbox.mounts import (
     ExtraDir,
-    Hidden,
-    Placed,
-    Written,
     add_extra_dir,
     configured_extra_dirs,
     extra_dir_args,
-    hidden_files,
     mounted_dirs,
     protect_args,
     protect_env_args,
     protected_dirs,
-    refuse_unsafe_dir,
+    read_only_paths,
     refuse_withheld_dirs,
     writable_dirs,
 )
 from .sandbox.network import network_args, session_network
+from .sandbox.placed import Placed
 from .sandbox.plugins import enabled_plugins
 from .sandbox.proxy_use import sidecars_locked
 from .sandbox.remembered import Remembered, remember
@@ -72,15 +70,16 @@ from .sandbox.session import (
     Through,
     base_args,
     container_name,
-    git_config_args,
     model_args,
-    own_statusline_args,
+    mount_git_config,
+    mount_own_statusline,
     permission_args,
     run_session,
     session_args,
 )
 from .sandbox.socket_proxy import say_without_socket, socket_proxy_args
 from .sandbox.tamper import PendingCheck
+from .sandbox.withheld import HostMounts, Written, refuse_unsafe_dir
 from .settings import (
     CHECKOUT_DIR,
     NAME,
@@ -289,7 +288,8 @@ def _hidden(plan: Plan, remembered: Remembered) -> Hidden:
     the files hidden through a link remembered: hidden again at later
     launches, whatever becomes of the links."""
     linked_before = remembered.hidden_through_links
-    hidden = hidden_files(plan.settings, plan.host, plan.dirs, linked_before)
+    roots = mounted_dirs(plan.dirs, plan.host)
+    hidden = hidden_files(plan.settings, roots, linked_before)
     remember(plan.host, hidden_through_links=hidden.linked)
     return hidden
 
@@ -315,26 +315,33 @@ def session_run_args(plan: Plan, name: str, runtime: Runtime, capture: str) -> R
     remembered = Remembered.load(host)
     hidden = _hidden(plan, remembered)
     mounted = mounted_dirs(dirs, host)
-    # Resolved once, for every file of the host asked about
-    written = Written.of(remembered.written)
-    git = git_config_args(settings, host, mounted, written)
-    statusline = own_statusline_args(settings, host, mounted, written)
+    # Every path of the host that is no directory the session is given
+    # goes through this, and is looked at again before docker run, see
+    # HostMounts. Resolved once, for every path of the host asked about.
+    from_host = HostMounts(
+        host,
+        Written.of(remembered.written),
+        settings.shadow,
+        roots=tuple(mounted),
+        read_only=tuple(read_only_paths(dirs, settings, host, protected)),
+        hidden=hidden,
+    )
+    mount_git_config(host, mounted, from_host)
+    mount_own_statusline(host, mounted, from_host)
     args = [
-        *base_args(settings, host, name, runtime),
+        *base_args(settings, host, name, from_host, runtime),
         *session_args(plan.action, os.environ),
-        *protect_config_args(settings, host),
-        *history_args(settings, host),
+        *protect_config_args(settings, host, from_host),
+        *history_args(settings, host, from_host),
         *extra_dir_args(dirs),
         *protect_args(protected, host, dirs, hidden),
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
-        *git.args,
-        *statusline.args,
+        *from_host.args,
         *hidden.args(host),
     ]
-    files = (*git.files, *statusline.files)
-    placed = Placed.of(protected, host, dirs, hidden, remembered.written, files)
+    placed = Placed.of(protected, host, dirs, hidden, remembered.written, from_host)
     return RunArgs(args, placed)
 
 

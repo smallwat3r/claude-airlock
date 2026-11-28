@@ -74,7 +74,9 @@ class SharedProxy:
             f"--label={SIDECAR_CONFIG_LABEL}={self.config}",
             # Nothing it runs gains what it was not started with, and one
             # gone wrong does not fill the host with processes. Its
-            # capabilities are left as its image expects them.
+            # capabilities are left as its image expects them, but where
+            # its options take them away: squid starts as root and gives
+            # its workers a user of their own, the socket proxy needs none.
             NO_NEW_PRIVILEGES,
             f"--pids-limit={PROXY_PIDS}",
             *(mount_arg(kept.copy(target), target, "ro,z") for target in self.files),
