@@ -61,7 +61,14 @@ from pathlib import Path
 from typing import Protocol
 
 from ..background import in_background
-from ..files import json_object, open_plain, private_dir, write_whole
+from ..files import (
+    json_object,
+    open_plain,
+    private_dir,
+    stamp_settled,
+    stat_stamp,
+    write_whole,
+)
 from ..settings import Host
 
 LOGIN = ".credentials.json"
@@ -249,6 +256,8 @@ class Held:
 
 
 def _version_of(found: os.stat_result) -> tuple[int, ...]:
+    """What tells the Keychain from the same written since, see
+    Keychain: a file that security writes anew with each change."""
     return (found.st_ino, found.st_mtime_ns, found.st_size)
 
 
@@ -265,14 +274,42 @@ def _as_typed(words: list[str]) -> str | None:
 
 
 class LoginFile:
-    """A login kept in a file: the base's, and the host's but on macOS."""
+    """A login kept in a file: the base's, and the host's but on macOS.
+
+    Looked at every LOOK_EVERY, it is read again only once it changed:
+    what was read last is kept, with the stamp of the file it was read
+    from as its version (see stat_stamp), and given again while the file
+    has that stamp still. The inode, the size and when the file was
+    written are not enough for that. A renewed login is as long as the
+    one before, its tokens are of one length, so one written again in
+    place within the time a file system keeps such times by has all
+    three the same, and so has one a session writes and then gives back
+    the time it was written. When what is known of the file last changed
+    is the system's to set, and no session can put it back, but it is
+    kept as coarsely: so a file read before its stamp settled (see
+    stamp_settled) is read again at the next look. A file renamed into
+    the place of another can be given the inode of the one it replaced,
+    but it is written after that one was read, and so has another stamp.
+    The same stamp tells whether the file is still the one that was read
+    before another login is written over it, see unchanged."""
 
     def __init__(self, path: str):
         self.path = path
+        # What was last read, while it can be taken as still there, see
+        # read
+        self._kept: Login | None = None
 
     def read(self) -> Login:
         """The login in the file. One that is not a regular file of a sane
-        size is none: a session could leave a link or a pipe in the base."""
+        size is none: a session could leave a link or a pipe in the base.
+        What was read last while the file is the same, see LoginFile."""
+        try:
+            stamp = stat_stamp(os.lstat(self.path))
+        except OSError:
+            stamp = None
+        if self._kept is not None and self._kept.version == stamp:
+            return self._kept
+        self._kept = None
         file = open_plain(self.path)
         if file is None:
             return Login()
@@ -280,19 +317,24 @@ class LoginFile:
             found = os.fstat(file.fileno())
             if found.st_size > MOST_READ:
                 return Login()
-            return Login(file.read(MOST_READ), _version_of(found), found.st_mtime_ns)
+            login = Login(file.read(MOST_READ), stat_stamp(found), found.st_mtime_ns)
+        if stamp_settled(found):
+            self._kept = login
+        return login
 
     def unchanged(self, login: Login) -> bool:
-        """Whether the file is still the one that was read."""
+        """Whether the file is still the one that was read, by its stamp,
+        see LoginFile."""
         try:
             found = os.lstat(self.path)
         except OSError:
             return login.content is None
-        return login.content is not None and _version_of(found) == login.version
+        return login.content is not None and stat_stamp(found) == login.version
 
     def write(self, content: bytes | None) -> bool:
         """Make the file hold a login, whole or not at all: by a rename,
         as Claude Code writes it. None removes it."""
+        self._kept = None
         if content is None:
             Path(self.path).unlink(missing_ok=True)
             return True

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import IO, Any
 
 from .errors import Fatal
+from .events import flat
 from .notice import warn
 
 NOT_FOUND = "docker was not found on PATH"
@@ -219,10 +220,10 @@ def mount_arg(
     cannot be looked for here."""
     for path in (source, target):
         if not volume_takes(path):
-            raise Fatal(f"cannot mount {path}: {NO_COLON}")
+            raise Fatal(f"cannot mount {flat(path)}: {NO_COLON}")
     if source.startswith("/") and not daemons and not os.path.lexists(source):
         raise Fatal(
-            f"cannot mount {source}: it does not exist, docker would make a"
+            f"cannot mount {flat(source)}: it does not exist, docker would make a"
             " directory of it, owned by root"
         )
     return "--volume=" + ":".join(part for part in (source, target, options) if part)

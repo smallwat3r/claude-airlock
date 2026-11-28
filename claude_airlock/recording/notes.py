@@ -11,10 +11,11 @@ once, and what a note holds may have been chosen by a session."""
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 
-from ..files import append_kept, json_object
+from ..files import append_kept, json_object, stamp_settled, stat_stamp
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,9 @@ class Notes:
 class NewNotes:
     """The notes added to a record since it was last looked at, for what
     follows the sessions as they run. From when it is made: what was
-    noted before is a trace's to show."""
+    noted before is a trace's to show. The record is read again only
+    once its file changed, by its stamp (see stat_stamp): it is looked at
+    every second, and holds thousands of lines of every project."""
 
     def __init__(self, notes: Notes, project: str, session: str | None = None):
         self._notes = notes
@@ -69,9 +72,22 @@ class NewNotes:
         # were given, several can be noted in one moment
         self._since = time.time()
         self._given = 0
+        # The stamp of the file as it was last read, none before that and
+        # while it changed too lately for the stamp to tell it from what
+        # is written next, see stamp_settled
+        self._read_as: tuple[int, ...] | None = None
 
     def poll(self) -> list[dict]:
-        """The notes added since the last time."""
+        """The notes added since the last time, none when the file has
+        the stamp it had when it was last read."""
+        try:
+            about = os.stat(self._notes.path)
+        except OSError:
+            return []
+        stamp = stat_stamp(about)
+        if stamp == self._read_as:
+            return []
+        self._read_as = stamp if stamp_settled(about) else None
         new = []
         at_since = 0
         read = self._notes.read

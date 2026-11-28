@@ -18,25 +18,43 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, BinaryIO
 
-# Where a file goes on from a hole of a sparse file, where the system
-# can tell: none with it, a file is then read through its holes
+# Where a file goes on from a hole of a sparse file, and where the next
+# hole starts, where the system can tell: none with it, a file is then
+# read through its holes
 SEEK_DATA = getattr(os, "SEEK_DATA", -1)
+SEEK_HOLE = getattr(os, "SEEK_HOLE", -1)
+# What a line is taken in as, for what stands for it, in the place of each
+# hole that is in it, with how long the hole is, see digested_lines
+HOLE_TAKEN_AS = b"\0a hole of %d bytes\0"
 # What a session can write is read a line at a time, and no line longer
 # than this is held in memory
 LINE_LIMIT = 32 << 20
+# A file that changed less long ago than this may not be told by its stamp
+# from what is written next, see stat_stamp: a clock that ticks coarsely
+# gives two writes the same time
+STAMP_SETTLES_NS = 2 * 10**9
+# The errors of what is gone since it was listed, by a build or a session,
+# and of what is in a directory closed to the launcher
+GONE = frozenset((errno.ENOENT, errno.ENOTDIR))
+CLOSED = frozenset((errno.EACCES, errno.EPERM))
 # Of a line longer than that, what is read at a time by what takes it in
 # without holding it, see digested_lines
 PIECE = 1 << 20
 # What a line of JSON takes once read, see held_size: twice its bytes,
-# for a text of characters that take several, then so much for the line
-# and for each value in it (an empty object in a list takes less, one
-# nested in another about this). And how much one line may take: past
-# it a line is not read, as one that is too long is not.
+# for a text of characters that take several, and four times for a line
+# with a byte past ASCII: a single character past the first 65536 has
+# Python keep the whole text at four bytes for each character. Then so
+# much for the line and for each value in it (an empty object in a list
+# takes less, one nested in another about this). And how much one line
+# may take: past it a line is not read, as one that is too long is not.
+HELD_BY_BYTE = 2
+HELD_BY_WIDE_BYTE = 4
 HELD_BY_LINE = 200
 HELD_BY_VALUE = 80
 # Of a line of JSON, what held_size looks at: the quotes of its strings and
@@ -354,24 +372,58 @@ def read_plain(path: str | Path, most: int, *, links: bool = False) -> bytes | N
     return NotRead.TOO_LARGE if len(content) > most else content
 
 
+def file_id(about: os.stat_result) -> tuple[int, int]:
+    """Which file it is, whatever its name and however it changed: its
+    device and its inode."""
+    return (about.st_dev, about.st_ino)
+
+
+def stat_stamp(about: os.stat_result) -> tuple[int, ...]:
+    """What tells a file from the same written since, without reading
+    it: which file it is, how long, when it was written, and when what is
+    known of it last changed, which the system sets and no session can
+    put back, as it can the time it was written. Two writes within a tick
+    of a coarse clock can leave the same stamp, see stamp_settled."""
+    return (*file_id(about), about.st_size, about.st_mtime_ns, about.st_ctime_ns)
+
+
+def stamp_settled(about: os.stat_result) -> bool:
+    """Whether the stamp of a file tells it from what may be written next:
+    it last changed longer ago than STAMP_SETTLES_NS. One that did not is
+    read again at the next look, whatever its stamp, see stat_stamp."""
+    changed = max(about.st_mtime_ns, about.st_ctime_ns)
+    return time.time_ns() - changed > STAMP_SETTLES_NS
+
+
+def whole_lines(read: bytes, most: int) -> tuple[list[bytes], int]:
+    """The lines a read of at most most bytes holds whole, each without
+    its line feed, and how much of the read they take, to go on from
+    there: what follows the last line feed is a line still being written,
+    read again with what comes after it. Split at line feeds alone, as a
+    record of lines of JSON is written: what else reads as the end of a
+    line is the session's to put within one. A read of most bytes with no
+    line feed is passed over whole: a line longer than is read at a time
+    would be read again without end."""
+    whole = read.rfind(b"\n") + 1
+    if not whole:
+        return [], len(read) if len(read) >= most else 0
+    return read[: whole - 1].split(b"\n"), whole
+
+
 def bounded_lines(file: IO[bytes], longest: int = LINE_LIMIT) -> Iterator[bytes | None]:
     """The lines of a file a session can write, each with its end, a last
     one without when that is how the file ends. None in the place of a
     line longer than longest, which is passed over and not held in
-    memory: a file can be made one line as large as the disk, a hole
-    that takes no room on it."""
+    memory: a file can be made one line as large as the disk. And of a
+    line with a hole of a sparse file in it, which is not read (see
+    _UpToAHole), as digested_lines has it: Claude Code writes no such
+    line."""
+    data = _UpToAHole(file)
     while True:
-        line = file.readline(longest + 1)
-        if not line:
+        line, _, found = _next_line(data, longest, _not_taken)
+        if not found:
             return
-        if len(line) <= longest or line.endswith(b"\n"):
-            yield line
-            continue
-        # The rest of it, a piece at a time, past what is a hole
-        while line and not line.endswith(b"\n"):
-            _past_a_hole(file)
-            line = file.readline(longest)
-        yield None
+        yield line
 
 
 def last_lines(
@@ -391,11 +443,11 @@ def last_lines(
 
 
 def _past_a_hole(file: IO[bytes]) -> None:
-    """Move a file that is read through a line too long to take past the
-    hole of a sparse file it is in, if any: a hole holds no line break,
-    and a session can make one as large as the disk takes at no cost of
-    its own, for whoever reads it to read through. Nothing where the file
-    or the system has no such thing to tell, a pipe or gVisor."""
+    """Move a file that is read past the hole of a sparse file it is in,
+    if any, see _UpToAHole: a hole holds no line break, and a session can
+    make one as large as the disk takes at no cost of its own, for
+    whoever reads it to read through. Nothing where the file or the
+    system has no such thing to tell, a pipe or gVisor."""
     try:
         file.seek(file.tell(), SEEK_DATA)
     except OSError as error:
@@ -407,6 +459,64 @@ def _past_a_hole(file: IO[bytes]) -> None:
         pass
 
 
+class _UpToAHole:
+    """A file a session can write, read no further at a time than the
+    next hole of it, and moved past a hole with how long it was. A hole
+    holds no line break, and a session can make one as large as the disk
+    takes, and any number of them, at no cost of its own, for whoever
+    reads the file to read through as zeros. Read as it is where the
+    system cannot tell where a hole is, of a pipe or on gVisor."""
+
+    def __init__(self, file: IO[bytes]) -> None:
+        self._file = file
+        self._hole = self._next_hole()
+
+    def _next_hole(self) -> int | None:
+        """Where the next hole starts, the end of the file when no hole is
+        on the way, none when that cannot be told."""
+        if SEEK_HOLE < 0:
+            return None
+        try:
+            here = self._file.tell()
+        except OSError:
+            # A pipe, which is read as it comes
+            return None
+        try:
+            hole = self._file.seek(here, SEEK_HOLE)
+        except OSError as error:
+            if error.errno != errno.ENXIO:
+                return None
+            # At the end, or past it
+            hole = here
+        except ValueError:
+            return None
+        self._file.seek(here)
+        return hole
+
+    def past(self) -> int:
+        """Move past the hole the file is at: how long that was, nothing
+        when it is at none. Where the system tells where a hole starts
+        but not where it ends, the file is read as it is from there."""
+        if self._hole is None:
+            return 0
+        here = self._file.tell()
+        if here < self._hole:
+            return 0
+        _past_a_hole(self._file)
+        gone = self._file.tell() - here
+        self._hole = self._next_hole()
+        if not gone and self._hole == here:
+            self._hole = None
+        return gone
+
+    def readline(self, most: int) -> bytes:
+        """A line, or as much of it as comes before the next hole, of no
+        more than most bytes."""
+        if self._hole is not None:
+            most = min(most, max(self._hole - self._file.tell(), 0))
+        return self._file.readline(most)
+
+
 def digested_lines(
     file: BinaryIO, longest: int = LINE_LIMIT
 ) -> Iterator[tuple[bytes, bytes | None]]:
@@ -415,22 +525,53 @@ def digested_lines(
     longer than longest, as bounded_lines has it: that one is taken in a
     piece at a time for what stands for it and never held, so what
     compares two files line by line still tells it from any other. Not a
-    last line without its end."""
+    last line without its end. A hole of a sparse file is not read (see
+    _UpToAHole): a line with one is none Claude Code writes, it is taken
+    in as how long each hole is (HOLE_TAKEN_AS) and passed on as None, as
+    a line too long is. What stands for it is then not what would for
+    the same line written out in zeros, which only a session makes."""
+    data = _UpToAHole(file)
     while True:
-        line: bytes | None = file.readline(longest + 1)
-        if not line:
+        digest = hashlib.sha256()
+        line, whole, _ = _next_line(data, longest, digest.update)
+        if not whole:
             return
-        digest = hashlib.sha256(line)
-        whole = line.endswith(b"\n")
-        if len(line) > longest and not whole:
-            line = None
-            while piece := file.readline(PIECE):
-                digest.update(piece)
-                if piece.endswith(b"\n"):
-                    whole = True
-                    break
-        if whole:
-            yield digest.digest(), line
+        yield digest.digest(), line
+
+
+def _not_taken(_piece: bytes) -> None:
+    """What takes in nothing of a line, see _next_line."""
+
+
+def _next_line(
+    data: _UpToAHole, longest: int, taken: Callable[[bytes], object]
+) -> tuple[bytes | None, bool, bool]:
+    """The next line of a file read up to its holes, see _UpToAHole: the
+    line, none for one longer than longest or with a hole in it, which
+    is not held, then whether it ends with a line feed, and whether there
+    was any more of the file at all. What is read of it is given to
+    taken a piece at a time, a hole as how long it is (HOLE_TAKEN_AS), no
+    more of a line that is not held than PIECE at a time."""
+    held: list[bytes] | None = []
+    length = 0
+    whole = found = False
+    while not whole:
+        if gone := data.past():
+            taken(HOLE_TAKEN_AS % gone)
+            held = None
+            found = True
+        piece = data.readline(longest + 1 - length if held is not None else PIECE)
+        if not piece:
+            break
+        taken(piece)
+        found = True
+        length += len(piece)
+        whole = piece.endswith(b"\n")
+        if held is not None:
+            held.append(piece)
+            if length > longest and not whole:
+                held = None
+    return (None if held is None else b"".join(held)), whole, found
 
 
 def held_size(line: bytes) -> int:
@@ -444,14 +585,24 @@ def held_size(line: bytes) -> int:
     open is not one, what is in it counts as if it were outside. An
     escaped quote or backslash is taken out before the quotes are
     paired, then all but the quotes and what sets values apart, which
-    leaves the strings in every other piece between quotes."""
+    leaves the strings in every other piece between quotes. Its bytes
+    count for more where one of them is past ASCII, see
+    HELD_BY_WIDE_BYTE."""
     bare = line.replace(b"\\\\", b"").replace(b'\\"', b"")
     pieces = bare.translate(None, _NOT_COUNTED).split(b'"')
     outside = pieces[0::2]
     if len(pieces) % 2 == 0:
         outside.append(pieces[-1])
     values = sum(piece.count(mark) for piece in outside for mark in _SET_APART)
-    return 2 * len(line) + HELD_BY_LINE + HELD_BY_VALUE * values
+    return held_by(line) * len(line) + HELD_BY_LINE + HELD_BY_VALUE * values
+
+
+def held_by(text: str | bytes) -> int:
+    """How many bytes each character or byte of a text takes once it is
+    held as a string, at the most: Python keeps a string at the width of
+    its widest character, and one past ASCII is counted as wide as any
+    can be."""
+    return HELD_BY_BYTE if text.isascii() else HELD_BY_WIDE_BYTE
 
 
 def held_object(line: bytes) -> tuple[dict | None, int]:
@@ -467,8 +618,9 @@ def held_object(line: bytes) -> tuple[dict | None, int]:
 def line_read(line: bytes | None) -> tuple[dict | None, int]:
     """A whole line of a transcript as the entry it holds, none for an
     empty one, with about how much that takes once read (see held_size).
-    A line that holds none, or was too long to read (see bounded_lines),
-    is an entry that says so, which takes no more than an empty line:
+    A line that holds none, or was not read, too long or with a hole in
+    it (see bounded_lines), is an entry that says so, which takes no more
+    than an empty line:
     Claude Code writes no such line, a session that writes half a line
     ahead of an entry does, and what it did there must not go without a
     word."""

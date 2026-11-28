@@ -32,21 +32,29 @@ class Pieces(io.BytesIO):
 
 
 class Sparse(Pieces):
-    """A file with a hole, as a system that tells where data is again
-    has it: from start to end, where it reads as nothing but zeros."""
+    """A file with holes, as a system that tells where they are has it:
+    each from its start to its end, where it reads as nothing but zeros.
+    Where data goes on from a hole, and where the next one starts, the
+    end of the file when none does."""
 
-    def __init__(self, content: bytes, start: int, end: int) -> None:
+    def __init__(self, content: bytes, *holes: tuple[int, int]) -> None:
         super().__init__(content)
-        self.hole = (start, end)
+        self.holes = sorted(holes)
 
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
-        if whence != files.SEEK_DATA:
+        if whence not in (files.SEEK_DATA, files.SEEK_HOLE):
             return super().seek(offset, whence)
-        start, end = self.hole
-        if start <= offset < end:
-            if end >= len(self.getbuffer()):
+        size = len(self.getbuffer())
+        if offset >= size:
+            raise OSError(errno.ENXIO, "No such device or address")
+        inside = [(start, end) for start, end in self.holes if start <= offset < end]
+        if whence == files.SEEK_HOLE:
+            later = [start for start, _ in self.holes if start > offset]
+            return super().seek(offset if inside else min([*later, size]))
+        if inside:
+            offset = inside[0][1]
+            if offset >= size:
                 raise OSError(errno.ENXIO, "No such device or address")
-            offset = end
         return super().seek(offset)
 
 
@@ -54,7 +62,7 @@ class FilesTest(LauncherTest):
     def test_a_line_too_long_to_take_is_not_read_through_its_holes(self):
         hole = bytes(100_000)
         tail = b"y\n" + b'{"after": 1}\n'
-        sparse = Sparse(b'{"a": 1}\n' + b"x" * 50 + hole + tail, 59, 100_059)
+        sparse = Sparse(b'{"a": 1}\n' + b"x" * 50 + hole + tail, (59, 100_059))
         assert list(files.bounded_lines(sparse, 30)) == [
             b'{"a": 1}\n',
             None,
@@ -63,13 +71,34 @@ class FilesTest(LauncherTest):
         # The hole was not read, the data after it was
         assert sum(sparse.taken) < 200
         # Nor one that goes on to the end
-        sparse = Sparse(b"x" * 50 + hole, 50, 100_050)
+        sparse = Sparse(b"x" * 50 + hole, (50, 100_050))
         assert list(files.bounded_lines(sparse, 30)) == [None]
         assert sum(sparse.taken) < 100
         # Where holes cannot be told, the line is read through
         with unittest.mock.patch.object(files, "SEEK_DATA", -1):
             dense = Pieces(b"x" * 50 + hole + tail)
             assert list(files.bounded_lines(dense, 30))[-1] == b'{"after": 1}\n'
+
+    def test_a_line_with_a_hole_is_read_as_none_whatever_its_length(self):
+        # Shorter than a line may be, as digested_lines has it: a line
+        # Claude Code never writes, and the hole is not read as zeros
+        line = b'{"a": 1}\n'
+        holed = b'{"b": "' + bytes(1000) + b'"}\n'
+        sparse = Sparse(line + holed + line, (16, 1016))
+        assert list(files.bounded_lines(sparse, 2000)) == [line, None, line]
+        assert sum(sparse.taken) < 100
+        sparse = Sparse(line + holed + line, (16, 1016))
+        found = [held for _, held in files.digested_lines(sparse, 2000)]
+        assert found == [line, None, line]
+        # And a last one without its end, a hole to the end of the file
+        sparse = Sparse(line + b"x" + bytes(1000), (10, 1010))
+        assert list(files.bounded_lines(sparse, 2000)) == [line, None]
+        # Nor is a pipe asked where a hole is, it has none
+        read, write = os.pipe()
+        with os.fdopen(write, "wb") as written:
+            written.write(holed + b"last")
+        with os.fdopen(read, "rb") as piped:
+            assert list(files.bounded_lines(piped, 2000)) == [holed, b"last"]
 
     def test_a_file_is_written_whole_and_for_the_user_alone(self):
         file = self.work / "record"
@@ -247,6 +276,43 @@ class FilesTest(LauncherTest):
         # Never more of a line at a time than may be held of one
         assert max(read.taken) == 1001
 
+    def test_what_stands_for_a_line_is_had_without_reading_its_holes(self):
+        # A line then a hole to the end, as truncate -s 16T leaves it
+        line = b'{"a": 1}\n'
+        sparse = Sparse(line + b"x" + bytes(100_000), (10, 100_010))
+        assert list(files.digested_lines(sparse, 1000)) == [
+            (hashlib.sha256(line).digest(), line)
+        ]
+        assert sum(sparse.taken) < 100
+        # Holes each shorter than a line may be, any number of them: a
+        # line with one is none Claude Code writes, it stands for itself
+        # as the holes it has, and is not held
+        holed = b"x" + bytes(1000) + b"\n"
+        holes = [(at + 1, at + 1001) for at in range(0, 50 * 1002, 1002)]
+        sparse = Sparse(holed * 50 + line, *holes)
+        found = list(files.digested_lines(sparse, 2000))
+        assert [line for _, line in found] == [None] * 50 + [line]
+        assert sum(sparse.taken) < 200
+        assert len({digest for digest, _ in found}) == 2
+        assert found[0][0] != hashlib.sha256(holed).digest()
+        # Where holes cannot be told, the same lines are read through
+        with unittest.mock.patch.object(files, "SEEK_HOLE", -1):
+            dense = Pieces(holed + line)
+            assert list(files.digested_lines(dense, 2000)) == [
+                (hashlib.sha256(holed).digest(), holed),
+                (hashlib.sha256(line).digest(), line),
+            ]
+
+    def test_a_line_past_ascii_is_held_at_four_bytes_a_byte(self):
+        # One character past the first 65536 has Python keep the whole
+        # text at four bytes for each
+        ascii_line = b'"' + b"x" * 1000 + b'"'
+        wide_line = b'"' + "\U0001f600".encode() + b"x" * 996 + b'"'
+        assert len(wide_line) == len(ascii_line)
+        assert files.held_size(ascii_line) >= 2 * len(ascii_line)
+        assert files.held_size(wide_line) >= 4 * len(wide_line)
+        assert files.held_size(wide_line) > files.held_size(ascii_line)
+
     def test_only_a_json_object_is_one(self):
         assert files.json_object('{"a": 1}\n') == {"a": 1}
         assert files.json_object(b'{"a": "\xff"}') == {"a": "�"}
@@ -263,3 +329,41 @@ class FilesTest(LauncherTest):
             ("rel", "rel"),
         ):
             assert files.expand_home(path, home) == expanded
+
+
+class ReadOnTest:
+    def test_whole_lines_are_taken_and_a_line_still_written_is_left(self):
+        read = b'{"a": 1}\n{"b": 2}\n{"c"'
+        assert files.whole_lines(read, 64) == ([b'{"a": 1}', b'{"b": 2}'], 18)
+        # Split at line feeds alone, what else ends a line is within one
+        lines, _ = files.whole_lines(b"one\rtwo\xe2\x80\xa8three\n", 64)
+        assert lines == [b"one\rtwo\xe2\x80\xa8three"]
+        assert files.whole_lines(b"", 64) == ([], 0)
+        assert files.whole_lines(b"not whole yet", 64) == ([], 0)
+        # A read as long as is read at a time with no end of a line in
+        # it is passed over, it would be read again without end
+        assert files.whole_lines(b"x" * 64, 64) == ([], 64)
+
+    def test_a_file_is_told_from_the_same_written_since(self, tmp_path):
+        record = tmp_path / "record.jsonl"
+        record.write_text("one\n")
+        before = os.stat(record)
+        assert files.stat_stamp(before) == files.stat_stamp(os.stat(record))
+        assert files.file_id(before) == (before.st_dev, before.st_ino)
+        # Written again to the same length and time: what the system
+        # notes of it changed all the same
+        record.write_text("two\n")
+        os.utime(record, ns=(before.st_atime_ns, before.st_mtime_ns))
+        now = os.stat(record)
+        assert files.stat_stamp(now) != files.stat_stamp(before)
+        # Only a stamp of a while ago is taken to tell it from what comes
+        assert not files.stamp_settled(now)
+        later = now.st_ctime_ns + 2 * files.STAMP_SETTLES_NS
+        with unittest.mock.patch.object(time, "time_ns", return_value=later):
+            assert files.stamp_settled(now)
+
+    def test_a_text_past_ascii_is_held_wider(self):
+        assert files.held_by("plain") == files.HELD_BY_BYTE
+        assert files.held_by(b"plain") == files.HELD_BY_BYTE
+        assert files.held_by("café") == files.HELD_BY_WIDE_BYTE
+        assert files.held_by("café".encode()) == files.HELD_BY_WIDE_BYTE

@@ -8,13 +8,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest.mock
 from pathlib import Path
 
 import pytest
 from harness import LauncherTest
 
-from claude_airlock import settings
+from claude_airlock import files, settings
 from claude_airlock.sandbox import login
 
 LOGIN = ".credentials.json"
@@ -238,6 +239,61 @@ class LoginPairTest(LauncherTest):
         login.LoginPair(self.host).settle()
         assert held(self.theirs) == {"mcpOAuth": of_session}
         assert held(self.ours) == {"mcpOAuth": of_host}
+
+    def test_a_login_is_read_again_only_once_its_file_changed(self):
+        self.ours.write_text(RENEWED)
+        self.settled(RENEWED, RENEWED)
+        reads = unittest.mock.Mock(wraps=login.open_plain)
+        # Long enough after both were written for what was read to stand
+        later = time.time_ns() + 2 * files.STAMP_SETTLES_NS
+        with (
+            unittest.mock.patch.object(login, "open_plain", reads),
+            unittest.mock.patch.object(login.time, "time_ns", return_value=later),
+        ):
+            self.pair.settle()
+            assert reads.call_count == 2
+            self.pair.settle()
+            assert reads.call_count == 2
+            # Written again in place as long as it was, and given back when
+            # it was written: what the system sets of it tells it apart
+            written = self.ours.stat()
+            renewed = RENEWED.replace("renewed", "again!!")
+            self.ours.write_text(renewed)
+            os.utime(self.ours, ns=(written.st_atime_ns, written.st_mtime_ns))
+            assert self.ours.stat().st_ino == written.st_ino
+            self.settled(renewed, renewed)
+            # And one put in its place
+            replaced = self.work / "replaced"
+            replaced.write_text(RENEWED)
+            replaced.replace(self.theirs)
+            self.settled(RENEWED, RENEWED)
+
+    def test_a_login_written_again_with_its_old_stamp_is_not_written_over(self):
+        # Renewed in place as long as it was, and given back when it was
+        # written, as an inode reused by a rename can leave it: what the
+        # system sets of it tells it from the one read, and the other
+        # side's login does not go over it
+        self.ours.write_text(RENEWED)
+        store = login.LoginFile(str(self.ours))
+        read = store.read()
+        written = self.ours.stat()
+        renewed = RENEWED.replace("renewed", "again!!")
+        self.ours.write_text(renewed)
+        os.utime(self.ours, ns=(written.st_atime_ns, written.st_mtime_ns))
+        assert self.ours.stat().st_ino == written.st_ino
+        assert not store.unchanged(read)
+        assert not login.Held(store, read).take(login.Login(b'{"token":"other"}'))
+        assert self.ours.read_text() == renewed
+
+    def test_a_login_read_as_it_was_written_is_read_again(self):
+        # Within the time a file system keeps such times by, a file written
+        # again can have all of its stamp the same: it is read at every look
+        self.ours.write_text(RENEWED)
+        reads = unittest.mock.Mock(wraps=login.open_plain)
+        with unittest.mock.patch.object(login, "open_plain", reads):
+            self.settled(RENEWED, RENEWED)
+            self.pair.settle()
+        assert reads.call_count == 4
 
     def test_what_is_no_login_in_the_sandbox_alone_is_dropped(self):
         self.theirs.write_text("not a login")
