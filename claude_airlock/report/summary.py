@@ -9,9 +9,11 @@ events.py."""
 
 from __future__ import annotations
 
+import operator
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from ..events import Event, Kind, flat, labelled
@@ -210,15 +212,89 @@ def _listed(values: Iterable[object]) -> str:
     return ", ".join(found[:MOST_LISTED]) + (f", and {more} more" if more > 0 else "")
 
 
+@dataclass(frozen=True)
+class Tokens:
+    """What the steps of the model used, as the API counted it: the
+    tokens written, those read, of them those read from the cache, and
+    over how many steps."""
+
+    out: int = 0
+    read: int = 0
+    cached: int = 0
+    steps: int = 0
+
+    def __add__(self, other: Tokens) -> Tokens:
+        return Tokens(*map(operator.add, astuple(self), astuple(other)))
+
+
+def tokens_said(used: Tokens) -> str:
+    """What the steps of the model used, as the header says it."""
+    total = (
+        f"{amount(used.out)} out, {amount(used.read)} in"
+        f" ({amount(used.cached)} from the cache)"
+    )
+    return f"{total}, over {used.steps} steps of the model"
+
+
+def tokens_used(entries: list[dict]) -> Tokens:
+    """What the steps of the model the entries are of used, each step
+    once: each entry of a step repeats the usage of the whole step."""
+    steps = [
+        step_tokens(u) for u in dict(filter(None, map(step_usage, entries))).values()
+    ]
+    return Tokens(
+        sum(used["output_tokens"] for used in steps),
+        sum(used[kind] for used in steps for kind in INPUT_TOKENS),
+        sum(used["cache_read_input_tokens"] for used in steps),
+        len(steps),
+    )
+
+
+def _cost_state(entries: list[dict]) -> dict:
+    """The last of the entries in which Claude Code says what the session
+    cost, empty when none does."""
+    return next((e for e in reversed(entries) if e.get("type") == "cost-state"), {})
+
+
+def session_cost(entries: list[dict]) -> float | None:
+    """What Claude Code says the session cost, in dollars, none when it
+    does not, see _cost_state."""
+    return measured(_cost_state(entries).get("totalCostUSD"))
+
+
+def calls_by_tool(entries: list[dict]) -> Counter[str]:
+    """How many calls the entries make of each tool, by its cleaned name."""
+    return Counter(
+        shortened(flat(block.get("name", "?"))) for _, block in tool_calls(entries)
+    )
+
+
+class CallOutcomes(NamedTuple):
+    """How many results say their call failed, and how many that it was
+    not let run."""
+
+    failed: int
+    refused: int
+
+
+def call_outcomes(entries: list[dict]) -> CallOutcomes:
+    """What the results of the entries say of their calls. Each of them: a
+    result added under the id of a call that failed does not make it one
+    that did not."""
+    results = every_result(entries)
+    return CallOutcomes(
+        sum(bool(block.get("is_error")) for _, block in results),
+        sum(refused(entry) for entry, _ in results),
+    )
+
+
 def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
     """The session at a glance, as labelled values: what ran it, when, at
     what cost, how many calls and how many of them failed. With how many
     of what it read show signs of being planted, as its events count them
     (see planted_shown)."""
-    calls = tool_calls(entries)
     times = entry_times(entries)
-    last = {str(e.get("type")): e for e in entries}
-    cost = last.get("cost-state", {})
+    cost = _cost_state(entries)
 
     def seen(key: str) -> str:
         return _listed(e.get(key) for e in entries)
@@ -241,41 +317,34 @@ def overview(entries: list[dict], planted: int) -> list[tuple[str, str]]:
         minutes = int((last_time - first).total_seconds() // 60)
         span = f"{first:%Y-%m-%d %H:%M} to {last_time:%H:%M} ({minutes} min)"
         rows.append(("when", f"{span}, times are {first:%Z}"))
-    spent = measured(cost.get("totalCostUSD"))
+    spent = session_cost(entries)
     if spent is not None:
         rows.append(("cost", f"${spent:.2f}"))
     if "totalLinesAdded" in cost:
         added, removed = cost.get("totalLinesAdded"), cost.get("totalLinesRemoved")
         rows.append(("lines", flat(f"+{added} -{removed}")[:PREVIEW_WIDTH]))
     rows.append(("prompts", _prompts_said(entries)))
-    steps = [
-        step_tokens(u) for u in dict(filter(None, map(step_usage, entries))).values()
-    ]
-    if steps:
-        wrote = sum(used["output_tokens"] for used in steps)
-        read = sum(used[kind] for used in steps for kind in INPUT_TOKENS)
-        cached = sum(used["cache_read_input_tokens"] for used in steps)
-        total = (
-            f"{amount(wrote)} out, {amount(read)} in ({amount(cached)} from the cache)"
-        )
-        rows.append(("tokens", f"{total}, over {len(steps)} steps of the model"))
-
-    by_tool = Counter(shortened(flat(block.get("name", "?"))) for _, block in calls)
-    named = by_tool.most_common(MOST_NAMED)
-    counts = ", ".join(f"{name} {count}" for name, count in named)
-    if len(by_tool) > len(named):
-        counts += f", and {len(by_tool) - len(named)} more"
-    rows.append(("tool calls", f"{len(calls)} ({counts})" if calls else "0"))
-    # Each of them: a result added under the id of a call that failed
-    # does not make it one that did not
-    results = every_result(entries)
-    rows.append(("failed", str(sum(bool(b.get("is_error")) for _, b in results))))
-    not_run = sum(refused(entry) for entry, _ in results)
+    used = tokens_used(entries)
+    if used.steps:
+        rows.append(("tokens", tokens_said(used)))
+    rows.append(("tool calls", tools_said(calls_by_tool(entries))))
+    failed, not_run = call_outcomes(entries)
+    rows.append(("failed", str(failed)))
     if not_run:
         rows.append(("refused", f"{not_run} calls were not allowed to run"))
     if planted:
         rows.append((INJECTION, f"{read_said(planted)}, see --failed"))
     return rows
+
+
+def tools_said(by_tool: Counter[str]) -> str:
+    """How many calls there are, then of the tools called most how many
+    of each, the most first."""
+    named = by_tool.most_common(MOST_NAMED)
+    counts = ", ".join(f"{name} {count}" for name, count in named)
+    if len(by_tool) > len(named):
+        counts += f", and {len(by_tool) - len(named)} more"
+    return f"{by_tool.total()} ({counts})" if by_tool else "0"
 
 
 def _prompts_said(entries: list[dict]) -> str:
@@ -297,14 +366,30 @@ def _more(count: int, flag: str = "") -> list[str]:
     return [f"  ... {count} more{flag}"] if count > 0 else []
 
 
+class Written(NamedTuple):
+    """Each file a session wrote with how often, and of those the ones
+    outside the project."""
+
+    counts: Counter[str]
+    outside: set[str]
+
+
+def files_written(entries: list[dict], project_dir: str) -> Written:
+    """The files the session wrote, see Written: outside the project by a
+    path that is not absolute, when it was from a directory outside, see
+    outside."""
+    found = list(written_paths(entries))
+    return Written(
+        Counter(path for path, _ in found),
+        {path for path, cwd in found if outside(path, project_dir, cwd)},
+    )
+
+
 def _files_written(entries: list[dict], project_dir: str) -> list[str]:
     """Each file the session wrote and how often, flagged when it is
-    outside the project: by a path that is not absolute, when it was
-    from a directory outside, see outside. No more than MOST_NAMED, then
+    outside the project, see files_written. No more than MOST_NAMED, then
     how many more, those outside first: a session can write any number."""
-    found = list(written_paths(entries))
-    written = Counter(path for path, _ in found)
-    away = {path for path, cwd in found if outside(path, project_dir, cwd)}
+    written, away = files_written(entries, project_dir)
     lines = ["files written"] if written else []
     paths = sorted(written.items(), key=lambda item: (item[0] not in away, item[0]))
     for path, count in paths[:MOST_NAMED]:
@@ -323,11 +408,17 @@ def _url_host(url: str) -> str:
         return url
 
 
+def pages_fetched(entries: list[dict]) -> Counter[str]:
+    """Each host the session fetched a page from with its tools, and how
+    often."""
+    urls = [call_input(block).get("url") for _, block in tool_calls(entries)]
+    return Counter(_url_host(url) for url in urls if isinstance(url, str))
+
+
 def _pages_fetched(entries: list[dict]) -> list[str]:
     """Each host the session fetched a page from with its tools, no more
     than MOST_NAMED, then how many more."""
-    urls = [call_input(block).get("url") for _, block in tool_calls(entries)]
-    hosts = Counter(_url_host(url) for url in urls if isinstance(url, str))
+    hosts = pages_fetched(entries)
     lines = ["pages fetched"] if hosts else []
     named = sorted(hosts.items())[:MOST_NAMED]
     lines += [f"  {shortened(flat(host))} x{count}" for host, count in named]

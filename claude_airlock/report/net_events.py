@@ -129,6 +129,37 @@ def name_container(events: list[Event], name: str, shown: bool) -> None:
             event.tag = f"[{clean(name)}]"
 
 
+def made_connection(event: Event) -> bool:
+    """Whether an event is of a connection the session made, or of what
+    it sent another way than over TCP: those say how they were carried,
+    see _connection_event and _flow_event."""
+    return event.kind is Kind.NET and "transport" in event.fields
+
+
+def taken_connection(event: Event) -> bool:
+    """Whether an event is of a connection made to the session, see
+    _told_of."""
+    return event.kind is Kind.NET and event.fields.get("inbound") is True
+
+
+def proxy_request(event: Event) -> bool:
+    """Whether an event is of a request to the egress proxy, see
+    proxy_event."""
+    return event.kind is Kind.NET and "denied" in event.fields
+
+
+def stands_out(event: Event) -> bool:
+    """Whether an event is of a connection or a lookup that stands out,
+    see _noticed_event and _flag_event."""
+    return event.kind in (Kind.NET, Kind.DNS) and bool(event.fields.get("flagged"))
+
+
+def opened_secret(event: Event) -> bool:
+    """Whether an event is of a file of secrets that a process opened
+    and that is not its own to read, see opened_events."""
+    return event.kind is Kind.SECRET and not event.fields.get("own")
+
+
 def _proxy_requests(recorded: Recorded) -> tuple[list[str], list[Event]]:
     """What filtered sessions asked the egress proxy for, as summary lines
     and as one event per request, each with the container it came from

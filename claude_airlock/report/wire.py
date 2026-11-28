@@ -234,6 +234,18 @@ class Wire:
         ]
 
 
+def is_upload(event: Event) -> bool:
+    """Whether an event is of something long sent over a connection, see
+    upload_event."""
+    return event.kind is Kind.NET and event.fields.get("upload") is True
+
+
+def to_the_model(event: Event) -> bool:
+    """Whether an event is of what was sent to the model's API or came
+    back from it, see upload_event and answer_event."""
+    return event.kind is Kind.NET and event.fields.get("model_api") is True
+
+
 def _upload_fields(upload: Upload) -> dict[str, object]:
     source_port, address, port = upload.key
     return {

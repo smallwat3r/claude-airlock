@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import bisect
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 # What starts a here-document in a command: << or <<-, then the word that
@@ -297,9 +298,35 @@ def without_heredocs(lines: list[str]) -> list[str]:
     """The lines of a command without what its here-documents hold, each
     said to be so many lines instead: a script fed to an interpreter is
     as a rule most of the command, and the line that starts it tells what
-    it is given to. The lines are those a shell reads, as they were
-    written. One whose end is not found, or that the shell does more with
-    than hand it on (see _expanded), is left as it is with all that
+    it is given to. See _read for which are left out."""
+    return [
+        part if isinstance(part, str) else f"... here-document of {part}, see --verbose"
+        for part in _read(lines)
+    ]
+
+
+def heredocs_dropped(lines: list[str]) -> list[str]:
+    """The lines of a command without what its here-documents hold, and
+    nothing in their place: the lines a shell runs. See _read for which
+    are left out."""
+    return [part for part in _read(lines) if isinstance(part, str)]
+
+
+@dataclass(frozen=True)
+class _LeftOut:
+    """What a here-document holds, left out of a command: so many lines."""
+
+    lines: int
+
+    def __str__(self) -> str:
+        return "1 line" if self.lines == 1 else f"{self.lines} lines"
+
+
+def _read(lines: list[str]) -> Iterator[str | _LeftOut]:
+    """The lines of a command, each here-document's body as how many
+    lines it holds instead. The lines are those a shell reads, as they
+    were written. One whose end is not found, or that the shell does more
+    with than hand it on (see _expanded), is left as it is with all that
     follows, and so is what only reads as one or is in doubt, see
     _Command."""
     # Where each line is, as it is and without the tabs <<- lets the word
@@ -310,11 +337,10 @@ def without_heredocs(lines: list[str]) -> list[str]:
     for at, line in enumerate(lines):
         plain.setdefault(line, []).append(at)
         tabbed.setdefault(line.lstrip("\t"), []).append(at)
-    shown: list[str] = []
     index = 0
     command = _Command()
     while index < len(lines):
-        shown.append(lines[index])
+        yield lines[index]
         starts = command.starts(lines[index])
         index += 1
         for start in starts:
@@ -324,8 +350,5 @@ def without_heredocs(lines: list[str]) -> list[str]:
             if end == len(lines) or _expanded(start, lines[index:end]):
                 command.doubt()
                 break
-            body = end - index
-            held = "1 line" if body == 1 else f"{body} lines"
-            shown.append(f"... here-document of {held}, see --verbose")
+            yield _LeftOut(end - index)
             index = end + 1
-    return shown
