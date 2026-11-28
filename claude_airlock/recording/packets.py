@@ -7,8 +7,10 @@ as raises NotThis, and is passed over."""
 from __future__ import annotations
 
 import enum
+import functools
 import socket
-from dataclasses import dataclass
+import struct
+from typing import NamedTuple
 
 from ..reader import Cursor, NotThis
 
@@ -99,13 +101,27 @@ class TcpFlag(enum.IntFlag):
     ACK = 0x10
 
 
+# The flags of a packet as they are read, by the byte of the header that
+# has them: the others are dropped. Worked out once, a capture has up to
+# hundreds of thousands of packets.
+_TCP_FLAGS = tuple(
+    TcpFlag(byte & (TcpFlag.FIN | TcpFlag.SYN | TcpFlag.RST | TcpFlag.ACK))
+    for byte in range(256)
+)
+_NO_FLAGS = _TCP_FLAGS[0]
+
 # Where the sequence numbers of TCP start over: they are of 32 bits
 SEQUENCE_SPACE = 1 << 32
 
+# What a connection is known by: the session's port, and the address and
+# the port of the other end
+type Key = tuple[int, str, int]
 
-@dataclass(frozen=True)
-class Packet:
-    """A captured packet over IPv4 or IPv6."""
+
+class Packet(NamedTuple):
+    """A captured packet over IPv4 or IPv6. A named tuple, which is
+    quicker to make than an object of a class: a capture can have
+    hundreds of thousands."""
 
     when: float
     # By the session, as opposed to received by it
@@ -131,6 +147,14 @@ class Packet:
     length: int = 0
 
     @property
+    def key(self) -> Key:
+        """The connection it is of, see Key: by where it went of one the
+        session sent, by where it came from of one it was sent."""
+        if self.sent:
+            return (self.source_port, self.destination, self.port)
+        return (self.port, self.source, self.source_port)
+
+    @property
     def carried_from(self) -> int:
         """Where in its stream what a TCP packet carries starts: at its
         sequence number, or the one after for a SYN, which takes one of
@@ -150,42 +174,63 @@ def is_loopback(address: str) -> bool:
     return address.startswith("127.") or address == "::1"
 
 
-def _ip_in_frame(link_type: int, frame: bytes) -> tuple[bytes, bool, int]:
-    """The IP packet a captured frame carries, whether the session sent it
-    and the version of IP it is, 4 or 6. Raises NotThis for a frame that
-    carries something else. An Ethernet frame does not say who sent it, it
-    counts as sent."""
-    reader = Cursor(frame)
+# The headers that are read, by where their fields are, each read in one
+# go: a cooked frame of either version and an Ethernet one, the headers of
+# IPv4 and IPv6, and of TCP its ports, numbers and flags
+_COOKED_2 = struct.Struct("!H8xB9x")
+_COOKED = struct.Struct("!H12xH")
+_ETHERNET = struct.Struct("!12xH")
+_IPV4 = struct.Struct("!BxHxxHxBxx4s4s")
+_IPV6 = struct.Struct("!4xHBx16s16s")
+_TCP = struct.Struct("!HHIIBB")
+_PORTS = struct.Struct("!HH")
+# How many addresses are known as text at a time: a capture reaches few as
+# a rule, and a session that reaches many has them worked out again
+MOST_ADDRESSES_KNOWN = 4096
+
+
+@functools.lru_cache(maxsize=MOST_ADDRESSES_KNOWN)
+def _ipv4_text(raw: bytes) -> str:
+    return socket.inet_ntoa(raw)
+
+
+@functools.lru_cache(maxsize=MOST_ADDRESSES_KNOWN)
+def _ipv6_text(raw: bytes) -> str:
+    return socket.inet_ntop(socket.AF_INET6, raw)
+
+
+def _ip_in_frame(link_type: int, frame: bytes) -> tuple[int, bool, int]:
+    """Where in a captured frame the IP packet it carries starts, whether
+    the session sent it and the version of IP it is, 4 or 6. Raises
+    NotThis for a frame that carries something else, and struct.error
+    for one cut short of its header, see parse_packet. An Ethernet frame
+    does not say who sent it, it counts as sent."""
     match link_type:
         case LinkType.COOKED_2:
-            ethertype = reader.number(2)
-            reader.skip(8)  # reserved, interface, hardware type
-            sent = reader.number(1) == COOKED_SENT
-            reader.skip(9)  # address length and address
+            ethertype, kind = _COOKED_2.unpack_from(frame)
+            at, sent = _COOKED_2.size, kind == COOKED_SENT
         case LinkType.COOKED:
-            sent = reader.number(2) == COOKED_SENT
-            reader.skip(12)  # hardware type, address length and address
-            ethertype = reader.number(2)
+            kind, ethertype = _COOKED.unpack_from(frame)
+            at, sent = _COOKED.size, kind == COOKED_SENT
         case LinkType.ETHERNET:
-            reader.skip(12)  # the two addresses
-            ethertype, sent = reader.number(2), True
+            (ethertype,) = _ETHERNET.unpack_from(frame)
+            at, sent = _ETHERNET.size, True
         case _:
             raise NotThis
     if ethertype == EtherType.IPV4:
-        return reader.rest(), sent, 4
+        return at, sent, 4
     if ethertype == EtherType.IPV6:
-        return reader.rest(), sent, 6
+        return at, sent, 6
     raise NotThis
 
 
-@dataclass(frozen=True)
-class IpHeader:
+class IpHeader(NamedTuple):
     """What the IP header of a packet says, of either version."""
 
     protocol: int
     source: str
     destination: str
-    # Where in the packet what IP carries starts
+    # Where in the frame what IP carries starts
     transport_at: int
     # How long that is, captured or not, None when the header does not
     # say: a packet the kernel has yet to split says 0 there
@@ -195,36 +240,34 @@ class IpHeader:
     later_fragment: bool
 
 
-def _ipv4_header(datagram: bytes) -> IpHeader:
-    ip = Cursor(datagram)
-    header_length = (ip.number(1) & 0x0F) * 4
-    ip.skip(1)  # service
-    total_length = ip.number(2)
-    ip.skip(2)  # id
-    later = bool(ip.number(2) & IPV4_FRAGMENT_OFFSET)
-    ip.skip(1)  # time to live
-    protocol = ip.number(1)
-    ip.skip(2)  # checksum
-    source, destination = (socket.inet_ntoa(ip.take(4)) for _ in range(2))
-    length = max(total_length - header_length, 0) if total_length else None
-    return IpHeader(protocol, source, destination, header_length, length, later)
-
-
-def _ipv6_header(datagram: bytes) -> IpHeader:
-    """The IPv6 header, and the headers after it that come ahead of the
-    transport's: a session can put those there, and what it sends must
-    not go unread for it."""
-    ip = Cursor(datagram)
-    ip.skip(4)  # version, class, flow
-    payload_length = ip.number(2)
-    protocol = ip.number(1)
-    ip.skip(1)  # hop limit
-    source, destination = (
-        socket.inet_ntop(socket.AF_INET6, ip.take(16)) for _ in range(2)
+def _ipv4_header(frame: bytes, at: int) -> IpHeader:
+    """The IPv4 header that starts at a place in a frame. Raises
+    struct.error for one cut short, see parse_packet."""
+    first, total_length, fragment, protocol, source, destination = _IPV4.unpack_from(
+        frame, at
     )
-    at, later = IPV6_HEADER, False
+    header_length = (first & 0x0F) * 4
+    length = max(total_length - header_length, 0) if total_length else None
+    return IpHeader(
+        protocol,
+        _ipv4_text(source),
+        _ipv4_text(destination),
+        at + header_length,
+        length,
+        bool(fragment & IPV4_FRAGMENT_OFFSET),
+    )
+
+
+def _ipv6_header(frame: bytes, start: int) -> IpHeader:
+    """The IPv6 header that starts at a place in a frame, and the headers
+    after it that come ahead of the transport's: a session can put those
+    there, and what it sends must not go unread for it. Raises
+    struct.error for a header cut short, see parse_packet, and NotThis
+    for headers that go on too long or past the frame."""
+    payload_length, protocol, source, destination = _IPV6.unpack_from(frame, start)
+    at, later = start + IPV6_HEADER, False
     for _ in range(IPV6_MOST_HEADERS):
-        extension = Cursor(datagram, at)
+        extension = Cursor(frame, at)
         if protocol in IPV6_OPTION_HEADERS:
             protocol = extension.number(1)
             at += (extension.number(1) + 1) * 8
@@ -239,41 +282,52 @@ def _ipv6_header(datagram: bytes) -> IpHeader:
             break
     else:
         raise NotThis
-    carried = payload_length - (at - IPV6_HEADER)
+    carried = payload_length - (at - start - IPV6_HEADER)
     length = max(carried, 0) if payload_length else None
-    return IpHeader(protocol, source, destination, at, length, later)
+    return IpHeader(
+        protocol, _ipv6_text(source), _ipv6_text(destination), at, length, later
+    )
 
 
 def parse_packet(when: float, link_type: int, frame: bytes) -> Packet:
     """A captured frame as a packet. Raises NotThis unless it is IPv4 or
-    IPv6, whole as far as its headers go."""
-    datagram, sent, version = _ip_in_frame(link_type, frame)
-    ip = _ipv4_header(datagram) if version == 4 else _ipv6_header(datagram)
-    carried = datagram[ip.transport_at :]
-    length = len(carried) if ip.length is None else ip.length
-    source_port = port = sequence = acknowledgement = 0
-    tcp_flags = TcpFlag(0)
-    payload = carried
-    transport = Cursor(carried)
-    if ip.protocol == Protocol.TCP:
-        if ip.later_fragment:
-            raise NotThis
-        source_port, port = transport.number(2), transport.number(2)
-        sequence, acknowledgement = transport.number(4), transport.number(4)
-        tcp_header_length = (transport.number(1) >> 4) * 4
-        # The flags that are not read are dropped
-        tcp_flags = TcpFlag(transport.number(1) & sum(TcpFlag))
-        payload = carried[tcp_header_length:]
-        # As the IP header has it, the capture cuts a long payload short
-        length = (
-            len(payload) if ip.length is None else max(length - tcp_header_length, 0)
-        )
-    elif ip.later_fragment:
-        payload = b""
-    elif ip.protocol in PORTED_TRANSPORTS:
-        source_port, port = transport.number(2), transport.number(2)
-        if ip.protocol == Protocol.UDP:
-            payload = carried[UDP_HEADER:]
+    IPv6, whole as far as its headers go: a header cut short is found
+    where it is read, as struct.error, which is told as that here for
+    them all."""
+    try:
+        at, sent, version = _ip_in_frame(link_type, frame)
+        ip = _ipv4_header(frame, at) if version == 4 else _ipv6_header(frame, at)
+        transport_at = ip.transport_at
+        captured = max(len(frame) - transport_at, 0)
+        length = captured if ip.length is None else ip.length
+        source_port = port = sequence = acknowledgement = 0
+        tcp_flags = _NO_FLAGS
+        if ip.protocol == Protocol.TCP:
+            if ip.later_fragment:
+                raise NotThis
+            source_port, port, sequence, acknowledgement, offset, flags = (
+                _TCP.unpack_from(frame, transport_at)
+            )
+            tcp_header_length = (offset >> 4) * 4
+            # The flags that are not read are dropped
+            tcp_flags = _TCP_FLAGS[flags]
+            payload = frame[transport_at + tcp_header_length :]
+            # As the IP header has it, the capture cuts a long payload short
+            length = (
+                len(payload)
+                if ip.length is None
+                else max(length - tcp_header_length, 0)
+            )
+        elif ip.later_fragment:
+            payload = b""
+        elif ip.protocol in PORTED_TRANSPORTS:
+            source_port, port = _PORTS.unpack_from(frame, transport_at)
+            skipped = UDP_HEADER if ip.protocol == Protocol.UDP else 0
+            payload = frame[transport_at + skipped :]
+        else:
+            payload = frame[transport_at:]
+    except struct.error:
+        raise NotThis from None
     return Packet(
         when,
         sent,

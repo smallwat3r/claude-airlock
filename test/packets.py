@@ -126,12 +126,16 @@ def dns_response(name: str, address: str) -> bytes:
     return ipv4(17, "127.0.0.11", "127.0.0.1", datagram)
 
 
-def client_hello(name: str, offered: tuple[str, ...] = ()) -> bytes:
+def client_hello(name: str, offered: tuple[str, ...] = (), shared: int = 0) -> bytes:
     """The hello of a TLS client that asks for a server by name, none
-    when the name is empty, and offers to speak what is given."""
+    when the name is empty, and offers to speak what is given. With
+    shared, a key of that many bytes ahead of the name, as a browser's
+    of more than a kilobyte can be."""
     host = name.encode()
     server_name = struct.pack("!HBH", len(host) + 3, 0, len(host)) + host
     extensions = struct.pack("!HH", 0x000A, 2) + b"\x00\x1d"
+    if shared:
+        extensions += struct.pack("!HH", 0x0033, shared) + bytes(shared)
     if name:
         extensions += struct.pack("!HH", 0, len(server_name)) + server_name
     if offered:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import socket
+import struct
 from dataclasses import dataclass, field
 
 from ..reader import Cursor, NotThis
@@ -17,6 +18,11 @@ from ..reader import Cursor, NotThis
 HTTP_METHODS = ("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS", "CONNECT")
 DNS_IS_RESPONSE = 0x8000
 DNS_ERROR_CODE = 0x000F
+# The header of a DNS message, read in one go: its id, its flags, how many
+# questions and answers it has, then the counts of the two other sections.
+# What is shorter than it is no message.
+_DNS_HEADER = struct.Struct("!HHHH4x")
+DNS_HEADER = _DNS_HEADER.size
 # The two top bits of a length that is a pointer to the rest of a name
 DNS_POINTER = 0xC0
 # The kinds of record that are named, the others show as their number,
@@ -41,8 +47,17 @@ DNS_ERRORS = {
 }
 # What a lookup says that was asked and never answered
 NO_ANSWER = "no answer"
-# A name cannot have more labels than this, a longer walk is a loop
+# A name cannot have more labels than this, a longer walk is a loop. It is
+# also all the labels and pointers followed in a message: of one name
+# alone, that of the question, those of the answers are passed over
+# without following theirs
 DNS_MOST_LABELS = 127
+# No more of a name is kept than this, its labels and the dots between
+# them: DNS allows no longer, and a session can send what it likes, of
+# which each byte can take four to write (see dns_label). Of one that is
+# longer its last labels are kept, the domain it goes to, after CUT_NAME.
+DNS_LONGEST_NAME = 255
+CUT_NAME = "..."
 # The bytes of a label that are written after a backslash, as dig does:
 # they mean something in a name written out
 DNS_ESCAPED = frozenset(b'.\\"();@$')
@@ -76,7 +91,9 @@ class Name:
     """A name a DNS message asks about, as it is read from its bytes:
     written as dig writes it (see dns_label), its labels so written, how
     many bytes it and its longest label are on the wire, and whether all
-    of it is what a host name is made of (see HOST_BYTES)."""
+    of it is what a host name is made of (see HOST_BYTES). Of a name
+    longer than DNS_LONGEST_NAME the text and the labels are of its last
+    labels alone, what it is made of and how long it is of all of it."""
 
     text: str
     labels: tuple[str, ...]
@@ -87,11 +104,18 @@ class Name:
     @classmethod
     def of(cls, raw: list[bytes]) -> Name:
         """The name of labels as they came."""
-        labels = tuple(map(dns_label, raw))
+        length = sum(map(len, raw)) + max(len(raw) - 1, 0)
+        # The last labels that fit, each with the dot ahead of it
+        first, size = len(raw), -1
+        while first and size + len(raw[first - 1]) + 1 <= DNS_LONGEST_NAME:
+            first -= 1
+            size += len(raw[first]) + 1
+        labels = tuple(map(dns_label, raw[first:]))
+        text = ".".join(labels)
         return cls(
-            ".".join(labels),
+            CUT_NAME + text if first else text,
             labels,
-            sum(map(len, raw)) + max(len(raw) - 1, 0),
+            length,
             max(map(len, raw), default=0),
             not any(label.translate(None, HOST_BYTES) for label in raw),
         )
@@ -100,23 +124,20 @@ class Name:
 @dataclass(frozen=True)
 class Lookup:
     """An answer of the resolver: for which name and kind of record it
-    was asked, the addresses it gave, and what it said went wrong. With
-    the name as it was read, when it was (see Name): one is not compared
-    by that, it is the name over again."""
+    was asked, the addresses it gave, and what it said went wrong."""
 
     when: float
     name: str
     kind: str
     addresses: tuple[str, ...]
     error: str
-    named: Name | None = field(default=None, compare=False, repr=False)
 
 
 def _dns_labels(message: bytes, at: Cursor) -> list[bytes]:
     """The labels of the name at a cursor in a DNS message, the cursor
     left after it. A name can end in a pointer to the rest of it,
     elsewhere in the message, which is followed without moving the cursor
-    further."""
+    further. No more labels and pointers than DNS_MOST_LABELS in all."""
     labels: list[bytes] = []
     reader = at
     for _ in range(DNS_MOST_LABELS):
@@ -128,6 +149,22 @@ def _dns_labels(message: bytes, at: Cursor) -> list[bytes]:
             return labels
         else:
             labels.append(reader.take(length))
+    raise NotThis
+
+
+def _pass_name(at: Cursor) -> None:
+    """Move a cursor past the name it is at in a DNS message, without
+    following a pointer it ends in: where the name goes on is not read.
+    The name of each answer is, for one, and a session can have it go
+    through a long chain of pointers."""
+    for _ in range(DNS_MOST_LABELS):
+        length = at.number(1)
+        if length & DNS_POINTER == DNS_POINTER:
+            at.skip(1)
+            return
+        if length == 0:
+            return
+        at.skip(length)
     raise NotThis
 
 
@@ -164,56 +201,73 @@ def dns_label(raw: bytes) -> str:
 class DnsMessage:
     """A DNS message as it is read: its id, whether it is a response, the
     kind of record it is about (by number) and the lookup it makes, with
-    the addresses a response gives and the error it reports."""
+    the error a response reports and without the addresses it gives, see
+    answered. With the name as it was read (see Name), and the message
+    itself, where its answers start and how many it says there are."""
 
     id: int
     response: bool
     asked: int
     lookup: Lookup
+    named: Name
+    message: bytes = field(repr=False, compare=False)
+    answers_at: int = field(default=0, repr=False)
+    answers: int = field(default=0, repr=False)
+
+    def answered(self) -> Lookup:
+        """Its lookup with the addresses its answers give, as far as they
+        go: one that was captured only in part gives those that came
+        before the cut."""
+        if not self.response:
+            return self.lookup
+        addresses: list[str] = []
+        reader = Cursor(self.message, self.answers_at)
+        try:
+            for _ in range(self.answers):
+                _pass_name(reader)
+                kind = reader.number(2)
+                reader.skip(6)  # class, time to live
+                data = reader.take(reader.number(2))
+                family = DNS_ADDRESS_FAMILIES.get(kind)
+                if family is not None:
+                    try:
+                        addresses.append(socket.inet_ntop(family, data))
+                    except (OSError, ValueError):
+                        continue
+        except NotThis:
+            pass
+        return dataclasses.replace(self.lookup, addresses=tuple(addresses))
 
 
-def dns_message(when: float, message: bytes, answered: bool = True) -> DnsMessage:
+def dns_message(when: float, message: bytes) -> DnsMessage:
     """A DNS query or response as a lookup: the name and kind of record it
-    is about, and of a response the addresses it gives and the error it
-    reports. A response that was captured only in part, as one longer than
-    the capture takes is, gives the addresses that came before the cut.
-    Without answered the addresses are not read, for what first asks which
-    question a response is to: they are what takes long to read, and a
-    session can send any number of answers nobody asked for. Raises
-    NotThis for anything that is not about exactly one name."""
-    reader = Cursor(message)
-    ident = reader.number(2)
-    flags, questions, answers = (reader.number(2) for _ in range(3))
-    reader.skip(4)  # the counts of the two other sections
+    is about, and of a response the error it reports. Not the addresses
+    a response gives, for what first asks which question a response is
+    to: they are what takes long to read, and a session can send any
+    number of answers nobody asked for. They are read from it once it is
+    one that was asked, see DnsMessage.answered. Raises NotThis for
+    anything that is not about exactly one name."""
+    try:
+        ident, flags, questions, answers = _DNS_HEADER.unpack_from(message)
+    except struct.error:
+        raise NotThis from None
     if questions != 1:
         raise NotThis
+    reader = Cursor(message, DNS_HEADER)
     labels = _dns_labels(message, reader)
     asked = reader.number(2)
     reader.skip(2)  # the class asked for
     if not labels:
         raise NotThis
     response = bool(flags & DNS_IS_RESPONSE)
-    addresses = []
-    try:
-        for _ in range(answers if response and answered else 0):
-            _dns_labels(message, reader)
-            kind = reader.number(2)
-            reader.skip(6)  # class, time to live
-            data = reader.take(reader.number(2))
-            family = DNS_ADDRESS_FAMILIES.get(kind)
-            if family is not None:
-                try:
-                    addresses.append(socket.inet_ntop(family, data))
-                except (OSError, ValueError):
-                    continue
-    except NotThis:
-        pass
     code = flags & DNS_ERROR_CODE if response else 0
     error = DNS_ERRORS.get(code, f"error {code}") if code else ""
     kind_asked = DNS_RECORDS.get(asked, f"type {asked}")
     named = Name.of(labels)
-    lookup = Lookup(when, named.text, kind_asked, tuple(addresses), error, named)
-    return DnsMessage(ident, response, asked, lookup)
+    lookup = Lookup(when, named.text, kind_asked, (), error)
+    return DnsMessage(
+        ident, response, asked, lookup, named, message, reader.at, answers
+    )
 
 
 def unanswered(query: Lookup) -> Lookup:
@@ -253,6 +307,12 @@ class Hello:
     offered: tuple[str, ...]
     whole: bool
 
+    @property
+    def told(self) -> bool:
+        """Whether it says all it could: the name of its server, or that
+        it names none."""
+        return bool(self.name) or self.whole
+
 
 def _offered(listed: bytes) -> tuple[str, ...]:
     """What an ALPN extension lists, see MOST_OFFERED."""
@@ -265,17 +325,38 @@ def _offered(listed: bytes) -> tuple[str, ...]:
     return tuple(found)
 
 
-def tls_hello(record: bytes) -> Hello | None:
-    """The hello of a TLS client, none for anything else and for one cut
-    before its extensions begin."""
-    hello = Cursor(record)
+def _handshake(sent: bytes) -> bytes:
+    """What the records of TLS handshake that some bytes start with hold,
+    one after the other, as far as the bytes go: a message of the
+    handshake can be cut into as many records as its sender likes, each
+    with a length of its own, and a server joins them. Read as one, the
+    header of the next record would be taken for what the message holds,
+    which is the sender's to make read as anything. Empty when they do not
+    start with such a record."""
+    records = Cursor(sent)
+    held: list[bytes] = []
     try:
-        if hello.number(1) != TLS_HANDSHAKE:
-            return None
-        hello.skip(4)  # record version and length
-        if hello.number(1) != TLS_CLIENT_HELLO:
-            return None
-        hello.skip(3 + 2 + 32)  # handshake length, version, random
+        while records.rest() and records.number(1) == TLS_HANDSHAKE:
+            records.skip(2)  # version
+            length = records.number(2)
+            fragment = sent[records.at : records.at + length]
+            held.append(fragment)
+            records.skip(len(fragment))
+    except NotThis:
+        pass
+    return b"".join(held)
+
+
+def tls_hello(sent: bytes) -> Hello | None:
+    """The hello of a TLS client that some bytes start with, see
+    _handshake, none for anything else and for one cut before its
+    extensions begin. Read within the length it says it has."""
+    handshake = _handshake(sent)
+    if len(handshake) < 4 or handshake[0] != TLS_CLIENT_HELLO:
+        return None
+    hello = Cursor(handshake[4 : 4 + int.from_bytes(handshake[1:4], "big")])
+    try:
+        hello.skip(2 + 32)  # version, random
         hello.skip(hello.number(1))  # session id
         hello.skip(hello.number(2))  # cipher suites
         hello.skip(hello.number(1))  # compression methods

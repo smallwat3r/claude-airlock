@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from ..docker import docker, docker_bytes, docker_ok
 from ..errors import Fatal
+from ..files import whole_lines
 from ..notice import warn
 from ..sandbox.egress_proxy import (
     EGRESS_ACCESS_LOG,
@@ -102,10 +103,13 @@ def _as_recorded(address: str) -> str:
     return str(getattr(found, "ipv4_mapped", None) or found)
 
 
-def parse_proxy_request(line: str) -> ProxyRequest | None:
+def parse_proxy_request(line: bytes) -> ProxyRequest | None:
     """A line of the proxy's log, none for anything else: squid's native
-    format, then the bytes the session sent (see docker/squid.conf)."""
-    said = line.split()
+    format, then the bytes the session sent (see docker/squid.conf). Its
+    fields are told apart by the whitespace of ASCII alone: the URL is
+    the session's to write, and other whitespace in it would split it
+    into more fields."""
+    said = [field.decode("utf-8", "replace") for field in line.split()]
     try:
         ended, milliseconds, address, result, size, method, url = said[:7]
         return ProxyRequest(
@@ -125,10 +129,10 @@ def parse_proxy_request(line: str) -> ProxyRequest | None:
 def _made_by(
     request: ProxyRequest, session: TracedSession, start: float, end: float
 ) -> bool:
-    """Whether a session made a request between start and end: it came
-    from the address this line of the session has (one that has several
-    has a line for each) and was open at some point of that time.
-    The proxy logs a tunnel when it closes, which can be much later."""
+    """Whether a session may have made a request between start and end:
+    it came from the address this line of the session has (one that has
+    several has a line for each) and was open at some point of that time,
+    while the session ran."""
     return (
         session.ip == request.address
         and request.ended >= max(start, session.start)
@@ -136,15 +140,28 @@ def _made_by(
     )
 
 
+def _began_in(request: ProxyRequest, sessions: list[TracedSession]) -> TracedSession:
+    """Of the sessions a request was open in, the one it began in: the
+    last to start by then. The proxy logs a tunnel when it closes, which
+    can be once its session ended and the address was given to the next.
+    Of one that reads as begun before any of them, the first: the proxy
+    has a clock of its own, which can be a little behind."""
+    began = [session for session in sessions if session.start <= request.began]
+    if began:
+        return max(began, key=lambda session: session.start)
+    return min(sessions, key=lambda session: session.start)
+
+
 def requests_made(
     logged: list[ProxyRequest], sessions: list[TracedSession], start: float, end: float
 ) -> Iterator[tuple[ProxyRequest, TracedSession]]:
     """Each request of the log that one of the sessions made between
-    start and end, see _made_by, with the session that made it."""
+    start and end, see _made_by, with the session that made it, see
+    _began_in."""
     for request in logged:
-        by = next((s for s in sessions if _made_by(request, s, start, end)), None)
-        if by is not None:
-            yield request, by
+        made = [s for s in sessions if _made_by(request, s, start, end)]
+        if made:
+            yield request, _began_in(request, made)
 
 
 def end_of_log(log: str, most: int, marked: bool = False) -> str:
@@ -160,18 +177,18 @@ def end_of_log(log: str, most: int, marked: bool = False) -> str:
     )
 
 
-def whole_lines(log: bytes) -> str:
-    """The lines of what end_of_log gave, as text. A log that is longer
-    than is read does not start with the start of a line: what there is
-    of that one is left out, and it is said that not all was read, a
-    session then has nothing in it of what it asked before."""
+def _whole(log: bytes) -> bytes:
+    """The lines of what end_of_log gave. A log that is longer than is
+    read does not start with the start of a line: what there is of that
+    one is left out, and it is said that not all was read, a session then
+    has nothing in it of what it asked before."""
     if len(log) > MOST_READ:
         warn(
             f"the egress proxy's log is longer than the {MOST_READ >> 20} MB"
             " that are read of it: what was asked before those is not shown"
         )
         log = log[log.find(b"\n") + 1 :]
-    return log.decode("utf-8", "replace")
+    return log
 
 
 @dataclass(frozen=True)
@@ -233,8 +250,7 @@ def raw_log(stderr: int | None = None) -> bytes | None:
 
 def proxy_log(stderr: int | None = None) -> ProxyLog | None:
     """The egress proxy's log, the rotated file then the current one, as
-    far back as MOST_READ (see whole_lines), None when it cannot be
-    read."""
+    far back as MOST_READ (see _whole), None when it cannot be read."""
     raw = raw_log(stderr)
     if raw is None:
         return None
@@ -242,7 +258,9 @@ def proxy_log(stderr: int | None = None) -> ProxyLog | None:
     rotated = raw.startswith(mark)
     raw = raw[len(mark) :] if rotated else raw
     shortened = rotated or len(raw) > MOST_READ
-    lines = whole_lines(raw).splitlines()
+    # At the end of a line alone: what text takes for one besides is the
+    # session's to put in a URL
+    lines = _whole(raw).split(b"\n")
     return ProxyLog([r for r in map(parse_proxy_request, lines) if r], shortened)
 
 
@@ -286,14 +304,9 @@ def logged_since(offset: int | None) -> tuple[int, list[ProxyRequest]] | None:
         start = int(first)
     except ValueError:
         return None
-    # A line still being written is left for the next time. Not what
-    # holds no end of a line in all that is read at a time: that is no
-    # line of the log, and would be asked for again without end
-    whole = log[: log.rfind(b"\n") + 1]
-    if not whole and len(log) >= MOST_READ:
-        return start + len(log), []
-    lines = whole.decode("utf-8", "replace").splitlines()
-    return start + len(whole), [r for r in map(parse_proxy_request, lines) if r]
+    # A line still being written is left for the next time, see whole_lines
+    lines, taken = whole_lines(log, MOST_READ)
+    return start + taken, [r for r in map(parse_proxy_request, lines) if r]
 
 
 def net_log() -> int:

@@ -14,7 +14,7 @@ from typing import NamedTuple
 
 from ..reader import NotThis
 from .packets import RESOLVER, Packet, Protocol, TcpFlag, is_loopback
-from .payloads import Lookup, dns_message, unanswered
+from .payloads import DNS_HEADER, Lookup, Name, dns_message, unanswered
 
 # What a lookup is flagged for: a name or one label of it longer than
 # names are, or this many different names under one parent. Data can be
@@ -58,18 +58,32 @@ DNS_LENGTH = 2
 # which must not use up what the lookups it has the resolver make are read
 # with, in whatever order the two are read.
 MOST_LOOKUPS = 100_000
-# Nor are more DNS messages read than this, whatever comes of them: one
-# that is none, an answer nobody asked for and a query asked again leave
-# no lookup to count, and over TCP a packet can hold hundreds, each as
-# short as it says it is, down to the two bytes of its length alone. A
-# lookup takes two messages, so this is twice what MOST_LOOKUPS of them
-# take. Past it the messages are counted and not read, the same.
-MOST_DNS_READ = 4 * MOST_LOOKUPS
+# Nor are more bytes of DNS messages read than this, whatever comes of
+# them: one that is none, an answer nobody asked for and a query asked
+# again leave no lookup to count, and over TCP a packet can hold dozens.
+# By their bytes, which is what reading them takes, and not by their
+# number: a session that sends many short ones uses no more of it than one
+# that sends the same bytes in a few. Far more than MOST_LOOKUPS take, and
+# most of what a part of the capture can hold (see capture.py), which is
+# then said to have stopped. Past it the messages are counted and not
+# read, the same.
+MOST_DNS_BYTES = 64 * 1024 * 1024
+# What a message is charged at the least of that: reading one takes its
+# time whatever its length, and a session that sends the shortest there
+# are, answers nobody asked for, would have each share take seconds
+LEAST_CHARGED = 64
 # Nor more addresses in all than this, in the lookups that are kept: one
 # answer can give thousands, and each takes some 650 bytes once it is
 # known by the name it was looked up under. Past it a lookup is counted
 # and not kept, as one past MOST_LOOKUPS is.
 MOST_ADDRESSES = 200_000
+
+
+def _charged(length: int) -> int | None:
+    """What a DNS message of a length is charged of what is read, see
+    LEAST_CHARGED. None for what is shorter than a header: that is no
+    message, and is neither read nor counted."""
+    return max(length, LEAST_CHARGED) if length >= DNS_HEADER else None
 
 
 def _domain_of(labels: list[str]) -> str:
@@ -163,20 +177,20 @@ def at_resolver(packet: Packet) -> bool:
 @dataclass
 class _Share:
     """What was read and kept of one share of the DNS messages, see
-    MOST_LOOKUPS: Docker's resolver's, or the rest. How many messages
-    were read, how many lookups are kept, and how many addresses those
-    give."""
+    MOST_LOOKUPS: Docker's resolver's, or the rest. How many bytes of
+    messages were read, how many lookups are kept, and how many addresses
+    those give."""
 
     read: int = 0
     kept: int = 0
     addresses: int = 0
 
     def left(self) -> int:
-        """How many more messages are read: none once MOST_LOOKUPS are
-        kept, else what is left of MOST_DNS_READ."""
+        """How many more bytes of messages are read: none once
+        MOST_LOOKUPS are kept, else what is left of MOST_DNS_BYTES."""
         if self.kept >= MOST_LOOKUPS:
             return 0
-        return max(MOST_DNS_READ - self.read, 0)
+        return max(MOST_DNS_BYTES - self.read, 0)
 
     def room_for(self, lookup: Lookup) -> bool:
         """Whether a lookup can be kept, see MOST_ADDRESSES."""
@@ -186,6 +200,21 @@ class _Share:
     def keep(self, lookup: Lookup) -> None:
         self.kept += 1
         self.addresses += len(lookup.addresses)
+
+
+# What a query and its answer are matched by: its id, its name in small
+# letters and the kind of record it asks for (by number)
+type _Question = tuple[int, str, int]
+
+
+class _Pending(NamedTuple):
+    """A query the session sent to a resolver that has not been answered:
+    the lookup it asks for, its name as it was read and the share it is
+    of."""
+
+    query: Lookup
+    named: Name
+    share: _Share
 
 
 @dataclass
@@ -198,7 +227,7 @@ class Lookups:
     # The lookups that stand out, each with what for, see DNS_MANY_NAMES
     flagged: list[tuple[str, Lookup]] = field(default_factory=list)
     # The DNS messages that were not read, past MOST_LOOKUPS or
-    # MOST_DNS_READ: of a packet over TCP that was not looked into, one
+    # MOST_DNS_BYTES: of a packet over TCP that was not looked into, one
     unread: int = 0
     # And how many times what was sent to a resolver over TCP could not
     # be read to its end, see _over_tcp: a query may have gone unseen
@@ -214,12 +243,10 @@ class Lookups:
     # the session's doing, the address is what it reached
     answered: dict[str, LookedUp] = field(default_factory=dict)
     # The queries the session sent to a resolver that have not been
-    # answered, by the key of their answer, each as the lookup it asks
-    # for and the share it is of, and those of them said to have had none
-    _pending: dict[tuple[int, str, int], tuple[Lookup, _Share]] = field(
-        default_factory=dict, repr=False
-    )
-    _silent: set[tuple[int, str, int]] = field(default_factory=set, repr=False)
+    # answered, by what their answer is matched by, and those of them said
+    # to have had none
+    _pending: dict[_Question, _Pending] = field(default_factory=dict, repr=False)
+    _silent: set[_Question] = field(default_factory=set, repr=False)
     _expired_at: float = field(default=0.0, repr=False)
     # What was read and kept of what is Docker's resolver's, and of the
     # rest, apart, see MOST_LOOKUPS
@@ -267,9 +294,10 @@ class Lookups:
         left without its end is kept for the next packet of the same
         stream. A packet that was not captured whole gives what there is
         of its last message, and nothing is kept: where the next one
-        starts is not known. No more messages than are still read, see
-        _Share.left: what is left of the packet then counts as one that
-        was not, and is not looked into.
+        starts is not known. What is shorter than a header is passed
+        over. No more bytes of messages than are still read, see
+        _Share.left: what is left of the packet then counts as one
+        message that was not, and is not looked into.
 
         Where a stream cannot be read to its end, that is counted (see
         cut), never passed over: a packet of the session's that is
@@ -284,15 +312,22 @@ class Lookups:
         held, since = self._held_before(stream, packet)
         data = held + packet.payload
         messages: list[bytes] = []
-        at = 0
-        while len(data) - at >= DNS_LENGTH and len(messages) < left:
-            end = at + DNS_LENGTH + int.from_bytes(data[at : at + DNS_LENGTH], "big")
+        at, over = 0, False
+        while len(data) - at >= DNS_LENGTH:
+            length = data[at] << 8 | data[at + 1]
+            end = at + DNS_LENGTH + length
             if len(data) < end:
                 break
-            messages.append(data[at + DNS_LENGTH : end])
+            charged = _charged(length)
+            if charged is not None:
+                if charged > left:
+                    over = True
+                    break
+                left -= charged
+                messages.append(data[at + DNS_LENGTH : end])
             at = end
         data = data[at:]
-        if data and len(messages) >= left:
+        if over:
             self.unread += 1
             self._missed(since)
             return messages
@@ -352,18 +387,20 @@ class Lookups:
         it is answered. An answer counts when it comes from a resolver
         (docker's, or a server it reached) and is the answer to one of
         those: one that was not asked for, or that came from anywhere else
-        on loopback, is nothing the resolver said."""
-        if not is_dns(packet):
+        on loopback, is nothing the resolver said. What is shorter than a
+        header is no message."""
+        charged = _charged(len(message))
+        if charged is None or not is_dns(packet):
             return
         share = self._share(packet)
-        if not share.left():
+        if charged > share.left():
             self.unread += 1
             self._missed(packet.when)
             return
-        share.read += 1
+        share.read += charged
         try:
             # Its question alone at first, see dns_message
-            found = dns_message(packet.when, message, answered=False)
+            found = dns_message(packet.when, message)
         except NotThis:
             return
         self._expire(packet.when)
@@ -372,35 +409,41 @@ class Lookups:
             # On loopback a capture has each packet once, as one that came
             # in: what goes to the resolver there is the session's query
             if packet.sent or packet.destination == RESOLVER:
-                self._ask(key, found.lookup, share)
+                self._ask(key, _Pending(found.lookup, found.named, share))
             return
         from_resolver = packet.source == RESOLVER or (
             not packet.sent and not is_loopback(packet.source)
         )
         if not from_resolver or key not in self._pending:
             return
-        _, asked_of = self._pending.pop(key)
+        asked = self._pending.pop(key)
         self._silent.discard(key)
-        self._keep(dns_message(packet.when, message).lookup, asked_of)
+        self._keep(found.answered(), found.named, asked.share)
 
-    def _ask(self, key: tuple[int, str, int], query: Lookup, share: _Share) -> None:
-        """Keep a query to match its answer with, as the lookup it asks
-        for, with the share it is of. Past DNS_MOST_PENDING the oldest
-        goes: queries that are never answered must not keep the later
-        ones, and their answers, from being taken."""
+    def _ask(self, key: _Question, pending: _Pending) -> None:
+        """Keep a query to match its answer with. Past DNS_MOST_PENDING
+        the oldest goes: queries that are never answered must not keep
+        the later ones, and their answers, from being taken."""
         if key in self._pending:
             return
         while len(self._pending) >= DNS_MOST_PENDING:
             oldest = next(iter(self._pending))
-            asked, of = self._pending.pop(oldest)
-            if oldest not in self._silent:
-                self._keep(unanswered(asked), of)
+            self._give_up(oldest, self._pending.pop(oldest))
             self._silent.discard(oldest)
-        self._pending[key] = (query, share)
+        self._pending[key] = pending
 
-    def _keep(self, lookup: Lookup, share: _Share) -> None:
+    def _give_up(self, key: _Question, pending: _Pending) -> None:
+        """Keep a query that is not waited for any more as a lookup that
+        had no answer, once for each."""
+        if key not in self._silent:
+            self._silent.add(key)
+            self._keep(unanswered(pending.query), pending.named, pending.share)
+
+    def _keep(self, lookup: Lookup, named: Name | None, share: _Share) -> None:
         """Keep a lookup of a share, as long as there is room for it, see
-        MOST_LOOKUPS."""
+        MOST_LOOKUPS, and flag it when it stands out by its name as it was
+        read, see _flag. That is not kept with it: its labels take as much
+        again as its name, and are not needed once it is flagged."""
         if not share.room_for(lookup):
             # Of the queries still waiting when the last one was kept
             self.unread += 1
@@ -410,7 +453,8 @@ class Lookups:
             return
         share.keep(lookup)
         self.lookups.append(lookup)
-        self._flag(lookup)
+        if named is not None:
+            self._flag(lookup, named)
         if lookup.kind in ("A", "AAAA"):
             for address in lookup.addresses:
                 self.answered.setdefault(address, LookedUp()).add(
@@ -424,20 +468,22 @@ class Lookups:
         if now - self._expired_at < 1.0:
             return
         self._expired_at = now
-        for key, (asked, share) in self._pending.items():
-            if now - asked.when > DNS_WAIT and key not in self._silent:
-                self._silent.add(key)
-                self._keep(unanswered(asked), share)
+        for key, pending in self._pending.items():
+            if now - pending.query.when > DNS_WAIT:
+                self._give_up(key, pending)
 
     def finish(self) -> None:
         """Say of what was asked and never answered, of a capture that
-        ended, that it was not. Not for one that is still growing."""
-        for key, (asked, share) in self._pending.items():
-            if key not in self._silent:
-                self._silent.add(key)
-                self._keep(unanswered(asked), share)
+        ended, that it was not, and count what is still held of a stream
+        over TCP as not read to its end: its rest never came. Not for one
+        that is still growing."""
+        for key, pending in self._pending.items():
+            self._give_up(key, pending)
+        held, self._held = self._held, {}
+        for stream, rest in held.items():
+            self._lost(stream, rest.since)
 
-    def _flag(self, lookup: Lookup) -> None:
+    def _flag(self, lookup: Lookup, named: Name) -> None:
         """Note a lookup that stands out, a name once however often it is
         asked for: one longer than names are, one with bytes no host name
         has, the one that makes it DNS_MANY_NAMES under the same parent,
@@ -446,9 +492,9 @@ class Lookups:
         by its case too, as it went: data can be carried in that as well,
         a resolver passes it on. Where it is counted goes by small letters,
         a domain is the same in any case. What the name is made of is as
-        it was read, see Name of payloads.py: nothing of one that was not."""
-        named = lookup.named
-        if named is None or lookup.name in self._looked_up:
+        it was read, see Name of payloads.py: of one longer than names can
+        be, its last labels, which are always long enough to flag."""
+        if lookup.name in self._looked_up:
             return
         self._looked_up.add(lookup.name)
         labels = [label.lower() for label in named.labels]

@@ -50,7 +50,7 @@ from ..settings import Host, Settings
 from .answers import ANSWERS_PART, DOWNLOADS_PART
 from .model_api import MODEL_API
 from .packets import RESOLVER
-from .payloads import HTTP_METHODS
+from .payloads import HTTP_METHODS, TLS_CLIENT_HELLO, TLS_HANDSHAKE, TLS_MAJOR
 from .pcap import Capture, read_capture
 from .records import TracedSession
 from .sidecar import Sidecar
@@ -64,6 +64,12 @@ CAPTURE_FILE = "/capture.pcap"
 # when a capture ran into it. The limit is each part's own.
 PACKET_LIMIT = 100_000
 SNAP_LENGTH = 1024
+# Of the packets that start a connection, and with them its hello of TLS,
+# the whole of one as a link of 1500 bytes carries it. A browser shuffles
+# the parts of its hello and sends keys of more than a kilobyte, the name
+# of the server is then past SNAP_LENGTH as often as not, and its hello
+# would read as one that could not be read
+HELLO_SNAP_LENGTH = 2048
 # Of a packet taken for when it was sent and how long it was alone: its
 # headers, with the options IP and TCP can have. Where those are shorter,
 # as they are as a rule, the rest is the start of what it carries: some
@@ -101,8 +107,10 @@ _ENDS6 = f"({_TCP6} and ip6[53:1] & 0x07 != 0)"
 SAMPLED_BITS = 0x3FFF
 # A packet of TCP that carries something: what is left of its length
 # once its headers are taken off
-_CARRIES = f"ip[2:2] - ((ip[0:1] & 0x0f) << 2) - {_PAYLOAD} != 0"
-_CARRIES6 = "ip6[4:2] - ((ip6[52:1] & 0xf0) >> 2) != 0"
+_CARRIED = f"ip[2:2] - ((ip[0:1] & 0x0f) << 2) - {_PAYLOAD}"
+_CARRIED6 = "ip6[4:2] - ((ip6[52:1] & 0xf0) >> 2)"
+_CARRIES = f"{_CARRIED} != 0"
+_CARRIES6 = f"{_CARRIED6} != 0"
 _SAMPLED = (
     f"(tcp[4:2] & {SAMPLED_BITS:#x} = 0 and {_CARRIES} and not dst net 127.0.0.0/8)"
 )
@@ -163,6 +171,32 @@ def _http_methods(load: str) -> str:
 _NOT_RESOLVER = f"not host {RESOLVER}"
 _NOT_DNS = f"not port 53 and {_NOT_RESOLVER}"
 _DNS_CARRIED = f"port 53 and ((ip and {_CARRIES}) or ({_TCP6} and {_CARRIES6}))"
+
+
+def _hello_starts(header: str, payload: str, carried: str) -> str:
+    """The part of the filter for a packet that starts a hello of TLS, by
+    the header its payload is read through, where in that the payload
+    starts and how long it is: a record of the handshake that holds the
+    start of a client hello. Or one that has its first bytes alone, of
+    a client that sends them a few at a time: the five of a record's
+    header, or the start of a client hello without one, with the length
+    of a hello and the version of TLS after it. A packet with fewer bytes
+    than a part reads ends the filter there, those that read further
+    come later."""
+
+    def at(place: int) -> str:
+        return f"{header}[{payload}{f' + {place}' if place else ''}:1]"
+
+    record, major, hello = (
+        f"{byte:#04x}" for byte in (TLS_HANDSHAKE, TLS_MAJOR, TLS_CLIENT_HELLO)
+    )
+    return (
+        f"({carried} = 5 and {at(0)} = {record} and {at(1)} = {major})"
+        f" or ({at(0)} = {hello} and {at(1)} = 0x00 and {at(4)} = {major})"
+        f" or ({at(0)} = {record} and {at(5)} = {hello})"
+    )
+
+
 TCP_FILTER = (
     f"{_NOT_RESOLVER} and not ({_DNS_CARRIED}) and ("
     # What starts, answers or ends a connection, but for the session's
@@ -172,11 +206,11 @@ TCP_FILTER = (
     " or (not port 53 and ("
     # A packet of every gigabyte, see SAMPLED_BITS
     f"{_SAMPLED} or {_SAMPLED6}"
-    # A TLS handshake record holding a client hello
-    f" or (tcp[{_PAYLOAD}:1] = 0x16 and tcp[{_PAYLOAD} + 5:1] = 0x01)"
+    # The start of a client hello
+    f" or {_hello_starts('tcp', _PAYLOAD, _CARRIED)}"
     # Last, a packet without that much payload ends the filter there
     + _http_methods(f"tcp[{_PAYLOAD}:4]")
-    + f" or ({_TCP6} and ip6[{_PAYLOAD6}:1] = 0x16 and ip6[{_PAYLOAD6} + 5:1] = 0x01)"
+    + f" or ({_TCP6} and ({_hello_starts('ip6', _PAYLOAD6, _CARRIED6)}))"
     + f" or ({_TCP6} and ({_http_methods(f'ip6[{_PAYLOAD6}:4]')[4:]}))"
     + ")))"
 )
@@ -279,7 +313,7 @@ DOWNLOADS_FILTER = (
     ")"
 )
 PARTS = (
-    Part("tcp", CAPTURE_FILE, "", TCP_FILTER),
+    Part("tcp", CAPTURE_FILE, "", TCP_FILTER, snap=HELLO_SNAP_LENGTH),
     Part("dns", "/dns.pcap", ".dns", DNS_FILTER),
     Part("direct", "/direct.pcap", ".direct", DIRECT_FILTER),
     Part("flows", "/flows.pcap", ".flows", FLOWS_FILTER),
@@ -588,7 +622,7 @@ def read_parts(main: Path, whole: bool = True) -> Capture:
     others = [main.with_name(main.name + part.suffix) for part in PARTS[1:]]
     capture = read_capture(main, others)
     capture.lookups_whole = whole and lookups_whole(capture)
-    capture.look_at_hellos()
+    capture.look_at_hellos(over=True)
     return capture
 
 

@@ -4,7 +4,6 @@ and what --trace shows of it."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import shutil
@@ -139,6 +138,7 @@ class CaptureFileTest:
             pytest.skip("no tcpdump here")
         there, window = "198.51.100.7", 3 << 30
         direct = ipv4(17, "172.20.0.5", "9.9.9.9", udp(53))
+        hello = client_hello("sni.test")
         packets = {
             "tcp": [
                 tcp(there, 443),
@@ -146,8 +146,15 @@ class CaptureFileTest:
                 tcp("9.9.9.9", 53),
                 tcp("9.9.9.9", 53, 0x11),
                 tcp(there, 443, 0x10, b"x" * 100, sequence=window + 65535),
-                tcp(there, 443, 0x18, client_hello("sni.test")),
+                tcp(there, 443, 0x18, hello),
                 tcp(there, 80, 0x18, b"GET / HTTP/1.1\r\n\r\n"),
+                # A hello whose header is sent on its own, and the rest
+                tcp(there, 443, 0x18, hello[:5]),
+                tcp(there, 443, 0x18, hello[5:]),
+                *(
+                    ipv6(6, "2001:db8::5", "2001:db8::9", tcp_header(443, 0x18) + sent)
+                    for sent in (hello, hello[:5], hello[5:])
+                ),
             ],
             "dns": [dns_query("a.test"), dns_response("a.test", there)],
             # What ends a connection to port 53 with its last bytes is
@@ -226,7 +233,7 @@ class CaptureFileTest:
             lookup = payloads.Lookup(
                 float(at), f"n{at}.test", "A", ("198.51.100.7",), ""
             )
-            capture.dns._keep(lookup, share)
+            capture.dns._keep(lookup, None, share)
         started = time.monotonic()
         for at in range(count):
             assert capture.name_of("198.51.100.7", at + 0.5) == f"n{at}.test"
@@ -235,7 +242,7 @@ class CaptureFileTest:
         assert capture.name_of("198.51.100.7", -1.0) is None
         # One that comes out of its turn is put where its time is
         late = payloads.Lookup(9.7, "late.test", "A", ("198.51.100.7",), "")
-        capture.dns._keep(late, share)
+        capture.dns._keep(late, None, share)
         assert capture.name_of("198.51.100.7", 9.8) == "late.test"
         assert capture.name_of("198.51.100.7", 9.6) == "n9.test"
 
@@ -392,6 +399,30 @@ class CaptureFileTest:
         with pytest.raises(NotThis):
             payloads.dns_message(0.0, loop)
 
+    def test_the_names_of_the_answers_are_not_followed(self):
+        # Each answer named by a pointer to a chain of a hundred more, in
+        # the data of a record ahead of them: followed, each would take
+        # as long to read as a hundred names
+        question = b"\x01a\x04test\x00" + struct.pack("!HH", 1, 1)
+        data_at = 12 + len(question) + 12
+        chain, previous = b"", 12
+        for _ in range(120):
+            at = data_at + len(chain)
+            chain += struct.pack("!H", 0xC000 | previous)
+            previous = at
+        holder = b"\xc0\x0c" + struct.pack("!HHIH", 16, 1, 60, len(chain)) + chain
+        record = struct.pack("!HHHIH", 0xC000 | previous, 1, 1, 60, 4)
+        record += socket.inet_aton("198.51.100.7")
+        message = struct.pack("!HHHHHH", 7, 0x8180, 1, 45, 0, 0)
+        message += question + holder + record * 44
+        with unittest.mock.patch.object(
+            payloads, "_dns_labels", wraps=payloads._dns_labels
+        ) as named:
+            found = payloads.dns_message(1.0, message).answered()
+        assert found.addresses == ("198.51.100.7",) * 44
+        # The question's alone
+        assert named.call_count == 1
+
 
 class ToldOfConnectionsTest:
     """What a capture tells of a connection besides where it went: who
@@ -540,8 +571,11 @@ class ToldOfConnectionsTest:
                 client_hello(""),
                 ["its hello names no server, it was reached as good.test"],
             ),
-            # Cut before its end: it may name its server past the cut
-            (client_hello("", ("h2", "http/1.1"))[:-4], []),
+            # Cut before its end, it may name its server past the cut
+            (
+                client_hello("", ("h2", "http/1.1"))[:-4],
+                ["its hello could not be read, it was reached as good.test"],
+            ),
         ):
             capture = read_parts([looked_up, *self.connected(hello)])
             assert [what for _, what, _ in capture.noticed] == noted
@@ -584,6 +618,194 @@ class ToldOfConnectionsTest:
         looked_up = (1.0, dns_response("db.test", self.THERE), False)
         capture = read_parts([looked_up, *self.connected(client_hello(""), port=5432)])
         assert capture.noticed == []
+
+    @staticmethod
+    def in_records(hello: bytes, at: int) -> bytes:
+        """A hello of one record of TLS in two, the first with so many
+        bytes of what it holds."""
+        body = hello[5:]
+        return b"".join(
+            b"\x16\x03\x01" + struct.pack("!H", len(part)) + part
+            for part in (body[:at], body[at:])
+        )
+
+    def test_a_hello_is_read_however_it_is_cut(self):
+        looked_up = (1.0, dns_response("cdn.test", self.THERE), False)
+        hello = client_hello("other.test")
+        noted = ["its hello asks for other.test, it was reached as cdn.test"]
+        # In two records, which a server joins: read as one, the header
+        # of the second would be taken for bytes of the hello
+        for at in (1, 4, 40, len(hello) - 10):
+            records = self.in_records(hello, at)
+            assert payloads.tls_hello(records) == payloads.Hello(
+                "other.test", (), whole=True
+            )
+            capture = read_parts([looked_up, *self.connected(records)])
+            assert [what for _, what, _ in capture.noticed] == noted, at
+        # The header of its record sent on its own, then the rest: the
+        # capture takes both, and they are read together
+        capture = read_parts([looked_up, *self.connected(hello[:5], hello[5:])])
+        assert [what for _, what, _ in capture.noticed] == noted
+        # Sent a few bytes at a time: the capture has its start in the
+        # part of all that is sent alone, and nothing of its name
+        pieces = [hello[at : at + 7] for at in range(0, len(hello), 7)]
+        sent = self.connected(*pieces)
+        capture = read_parts([looked_up, *sent[:2]], elsewhere=sent[2:])
+        (connection,) = capture.connections
+        assert (connection.speaks, connection.hello) == ("tls", None)
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello could not be read, it was reached as cdn.test"
+        ]
+        # Cut by the capture before its name
+        cut = tcp(self.THERE, 443, 0x18, hello, sequence=101)
+        kept = pcap.parse_packet(2.1, 276, pcap_file([(2.1, cut, True)])[40:])
+        capture = pcap.Capture()
+        for packet in (*self.connected(), looked_up):
+            frames = PcapReader().feed(pcap_file([packet]))
+            pcap.take_frames(capture, frames)
+        capture.add(kept._replace(payload=kept.payload[:60]))
+        capture.look_at_hellos(over=True)
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello could not be read, it was reached as cdn.test"
+        ]
+        # Not where nothing is said of a hello: an address that was not
+        # looked up, lookups that may be missing, another port than that
+        # of HTTPS
+        assert read_parts(sent[:2], elsewhere=sent[2:]).noticed == []
+        missing = read_parts([looked_up, *sent[:2]], False, elsewhere=sent[2:])
+        assert missing.noticed == []
+        elsewhere = self.connected(*pieces, port=UNNAMED)
+        capture = read_parts([looked_up, *elsewhere[:2]], elsewhere=elsewhere[2:])
+        assert capture.noticed == []
+
+    def test_a_hello_longer_than_the_capture_keeps_is_said_not_flagged(self):
+        # As a browser's: keys of more than a kilobyte ahead of its name,
+        # begun in a packet as long as a link carries. The rest goes on
+        # mid-key, which the part of what starts a connection does not take
+        looked_up = (1.0, dns_response("cdn.test", self.THERE), False)
+        hello = client_hello("other.test", shared=1600)
+        sent = self.connected(hello[:1448], hello[1448:])
+        capture = read_parts([looked_up, *sent[:3]], elsewhere=sent[3:])
+        assert capture.noticed == []
+        (connection,) = capture.connections
+        assert connection.hello_unread == "cdn.test"
+        (event,) = net_events.capture_events(capture, verbose=False)
+        assert "its hello is longer than the capture keeps" in event.details[0]
+        assert not layout.went_wrong(event)
+        assert event.fields["hello_unread"] is True
+        # One of a few bytes at a time is flagged, however long it is
+        pieces = [hello[:5], *(hello[at : at + 7] for at in range(5, len(hello), 7))]
+        sent = self.connected(*pieces)
+        capture = read_parts([looked_up, *sent[:3]], elsewhere=sent[3:])
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello could not be read, it was reached as cdn.test"
+        ]
+        assert capture.connections[0].hello_unread == ""
+
+    def test_a_hello_is_waited_for_while_a_capture_grows(self):
+        # The part of all that is sent is read after that of what starts
+        # a connection, and can have a packet the other does not yet
+        looked_up = (1.0, dns_response("cdn.test", self.THERE), False)
+        hello = tcp(self.THERE, 443, 0x18, client_hello("cdn.test"), sequence=101)
+        capture = pcap.Capture()
+
+        def take(packets: list, part: str) -> None:
+            frames = PcapReader().feed(pcap_file(packets, asked=part == "tcp"))
+            pcap.take_frames(capture, frames, part)
+
+        take([looked_up, *self.connected()], "tcp")
+        take([(2.1, hello, True)], "elsewhere")
+        capture.look_at_hellos()
+        take([(2.1, hello, True)], "tcp")
+        capture.look_at_hellos()
+        assert capture.connections[0].hello.name == "cdn.test"
+        assert capture.noticed == []
+
+    def test_a_hello_through_a_tunnel_is_read_however_it_is_cut(self):
+        asked = b"CONNECT cdn.test:443 HTTP/1.1\r\nHost: cdn.test:443\r\n\r\n"
+        hello = client_hello("other.test")
+        pieces = [hello[at : at + 7] for at in range(0, len(hello), 7)]
+        tunnel = self.connected(asked, *pieces, port=3128, to=self.PROXY)
+        # The request in the part of what starts a connection, the hello
+        # in that of all that is sent alone
+        capture = read_parts(tunnel[:3], elsewhere=tunnel[3:])
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello could not be read, it was reached as cdn.test"
+        ]
+        records = self.in_records(hello, 40)
+        capture = read_parts(self.connected(asked, records, port=3128, to=self.PROXY))
+        assert [what for _, what, _ in capture.noticed] == [
+            "its hello asks for other.test, it was reached as cdn.test"
+        ]
+        # Not of one the proxy refused, through which nothing went
+        assert read_parts(tunnel[:3]).noticed == []
+        # Nor of one to an address or to another port, where a hello has
+        # no name to give
+        for target in (b"203.0.113.7:443", b"cdn.test:22"):
+            request = b"CONNECT " + target + b" HTTP/1.1\r\n\r\n"
+            sent = self.connected(request, *pieces, port=3128, to=self.PROXY)
+            assert read_parts(sent[:3], elsewhere=sent[3:]).noticed == [], target
+
+    def test_what_a_proxy_was_asked_for_is_read_however_it_is_cut(self):
+        asked = b"CONNECT good.test:443 HTTP/1.1\r\nHost: good.test:443\r\n\r\n"
+        hello = client_hello("evil.test")
+        for cuts in ([8], [3, 8, 20], [len(asked) - 3]):
+            starts = [0, *cuts]
+            pieces = [asked[a:b] for a, b in zip(starts, [*cuts, None], strict=True)]
+            sent = self.connected(*pieces, hello, port=3128, to=self.PROXY)
+            # The first piece and the hello in the part of what starts a
+            # connection, every piece in that of all that is sent
+            capture = read_parts([*sent[:3], sent[-1]], elsewhere=sent[2:])
+            (tunnel,) = capture.connections
+            assert tunnel.asked == "good.test:443", cuts
+            assert [what for _, what, _ in capture.noticed] == [
+                "its hello asks for evil.test, it was reached as good.test"
+            ], cuts
+        # A target longer than is read, or one whose rest never came
+        long = b"CONNECT " + b"a" * 2000 + b".test:443 HTTP/1.1\r\n\r\n"
+        for sent in ((long[:900], long[900:1800], long[1800:]), (b"CONNECT ",)):
+            capture = read_parts(self.connected(*sent, port=3128, to=self.PROXY))
+            (tunnel,) = capture.connections
+            assert tunnel.asked == ""
+            assert [what for _, what, _ in capture.noticed] == [
+                "what it asked the proxy for could not be read"
+            ]
+        # Not of a request that asks the proxy for a page
+        plain = b"GET http://good.test/ HTTP/1.1\r\nHost: good.test\r\n\r\n"
+        capture = read_parts(self.connected(plain, port=3128, to=self.PROXY))
+        assert capture.noticed == []
+
+    def test_what_the_session_sent_is_counted_by_its_own_packets(self):
+        there = self.THERE
+        sent = [
+            (
+                3.0 + at / 100,
+                tcp(there, 443, 0x18, b"x" * 1000, sequence=101 + at * 1000),
+                True,
+            )
+            for at in range(5)
+        ]
+        # Of a connection whose answer the capture does not have
+        unanswered = [
+            (2.0, tcp(there, 443, sequence=100), True),
+            (9.0, tcp(there, 443, 0x11, b"", 5101), True),
+        ]
+        (went,) = read_parts(unanswered, elsewhere=sent).connections
+        assert (went.sent, went.received) == (5000, None)
+        # A server the session runs says it got some 2 GB more than it was
+        # sent: not taken, the capture has all the session sent
+        lying = answer(there, 443, 0x11, 501, 101 + (1 << 31) - 10)
+        ended = [*self.connected(), (4.0, lying, False)]
+        (went,) = read_parts(ended, elsewhere=sent).connections
+        assert (went.sent, went.received) == (5000, 0)
+        # What the start itself carries (TCP Fast Open) counts in
+        banner = b"SSH-2.0-OpenSSH_9.6\r\n"
+        fast = [
+            (2.0, tcp(there, 22, 0x02, banner, sequence=100), True),
+            (2.0, answer(there, 22, sequence=500, acknowledged=122), False),
+        ]
+        (went,) = read_parts(fast, elsewhere=fast[:1]).connections
+        assert went.so_far == (len(banner), None)
 
     def test_what_a_hello_offers_to_speak_is_read(self):
         hello = payloads.tls_hello(client_hello("sni.test", ("h2", "http/1.1")))
@@ -804,11 +1026,12 @@ class ToldOfConnectionsTest:
         dns = lookups_module.Lookups()
         query = dns_message_of(dns_query("good.test"))
         response = dns_message_of(dns_response("good.test", self.THERE))
-        with unittest.mock.patch.object(lookups_module, "MOST_DNS_READ", 100):
-            # Messages of no length to a server of the session's own, over
-            # TCP, as many as are read: as the parts are read in turn,
+        most = 2 * lookups_module.LEAST_CHARGED
+        with unittest.mock.patch.object(lookups_module, "MOST_DNS_BYTES", most):
+            # Messages of a header alone to a server of the session's own,
+            # over TCP, more than are read: as the parts are read in turn,
             # while a session is followed, ahead of what the resolver said
-            flood = b"\0\0" * 200
+            flood = (b"\0\x0c" + bytes(12)) * 20
             dns.add(
                 pcap.Packet(
                     1.0, True, 6, "172.20.0.5", "9.9.9.9", 40053, 53,
@@ -962,42 +1185,80 @@ class DnsTrustTest:
         found = self.read(packets, asked=False)
         assert found.name_of("198.51.100.7") == "after.test"
         assert found.dns.unread == 0
-        # Past as many as are read, what is left of a packet is counted
-        # as one message that was not, and no longer looked into
-        with unittest.mock.patch.object(lookups_module, "MOST_DNS_READ", 50):
+
+        def packet(frame: bytes) -> pcap.Packet:
+            return pcap.parse_packet(1.0, 276, pcap_file([(1.0, frame, True)])[40:])
+
+        # Past as many bytes as are read, what is left of a packet is
+        # counted as one message that was not, and no longer looked into
+        headers = (b"\0\x0c" + bytes(12)) * 10
+        # Each charged at the least there is, see LEAST_CHARGED
+        most = 50 * lookups_module.LEAST_CHARGED
+        with unittest.mock.patch.object(lookups_module, "MOST_DNS_BYTES", most):
             found = self.read(packets, asked=False)
+            assert found.dns.unread == 0
+            charged = max(len(query), lookups_module.LEAST_CHARGED)
+            with unittest.mock.patch.object(
+                lookups_module, "MOST_DNS_BYTES", charged - 1
+            ):
+                found = self.read(packets, asked=False)
             assert (found.dns.lookups, found.dns.unread) == ([], 2)
-            flood = pcap.parse_packet(
-                1.0, 276, pcap_file([(1.0, over(none), True)])[40:]
-            )
             capture = pcap.Capture()
             with unittest.mock.patch.object(
                 lookups_module, "dns_message", wraps=payloads.dns_message
             ) as read:
                 for _ in range(300):
-                    capture.add(flood)
+                    capture.add(packet(over(headers)))
         assert read.call_count == 50
-        assert capture.dns.unread == 300
+        assert capture.dns.unread == 295
         said = net_events.capture_summary(capture, False)
         assert (
-            "  dns 300 more messages NOT READ, past the 0 lookups that are kept" in said
+            "  dns 295 more messages NOT READ, past the 0 lookups that are kept" in said
+        )
+
+    def test_messages_shorter_than_a_header_use_up_nothing(self):
+        # Hundreds of messages of no length in each packet to the resolver
+        # over TCP, then a lookup: they are no messages, and are not read
+        nothing = segment((40000, 53), 0x18) + b"\0" * 980
+        flood = ipv4(6, "127.0.0.1", "127.0.0.11", nothing)
+        packets = [(1.0 + at / 1000, flood, False) for at in range(1000)]
+        packets.append((3.0, dns_response("after.test", "198.51.100.7"), False))
+        with unittest.mock.patch.object(
+            lookups_module, "dns_message", wraps=payloads.dns_message
+        ) as read:
+            found = self.read(packets)
+        assert read.call_count == 2
+        assert found.name_of("198.51.100.7") == "after.test"
+        assert (found.dns.unread, found.dns.cut) == (0, 0)
+        assert found.dns.whole_by(3.0)
+        # And what is read is counted by its bytes, not by its number, each
+        # at the least LEAST_CHARGED
+        assert found.dns._shares[True].read == sum(
+            max(len(dns_message_of(sent)), lookups_module.LEAST_CHARGED)
+            for sent in (asked_for(packets[-1][1]), packets[-1][1])
         )
 
     def test_the_addresses_of_an_answer_are_read_once_it_is_one_that_was_asked(self):
         response = dns_response("a.test", "6.6.6.6")
-        message = dns_message_of(response)
-        assert payloads.dns_message(1.0, message).lookup.addresses == ("6.6.6.6",)
-        unread = payloads.dns_message(1.0, message, answered=False)
+        unread = payloads.dns_message(1.0, dns_message_of(response))
         assert (unread.lookup.name, unread.lookup.addresses) == ("a.test", ())
-        with unittest.mock.patch.object(
-            lookups_module, "dns_message", wraps=payloads.dns_message
-        ) as read:
+        assert unread.answered().addresses == ("6.6.6.6",)
+        answered = payloads.DnsMessage.answered
+        with (
+            unittest.mock.patch.object(
+                lookups_module, "dns_message", wraps=payloads.dns_message
+            ) as read,
+            unittest.mock.patch.object(
+                payloads.DnsMessage, "answered", autospec=True, side_effect=answered
+            ) as addresses,
+        ):
             # A session can send any number of answers nobody asked for
             self.read([(1.0, response, False)], asked=False)
-            assert [call.kwargs for call in read.call_args_list] == [
-                {"answered": False}
-            ]
+            assert (read.call_count, addresses.call_count) == (1, 0)
+            read.reset_mock()
+            # And one that was asked is read once, its addresses after
             found = self.read([(1.0, response, False)])
+            assert (read.call_count, addresses.call_count) == (2, 1)
         assert found.name_of("6.6.6.6") == "a.test"
 
     def test_an_answer_nobody_asked_for_names_nothing(self):
@@ -1175,6 +1436,10 @@ class DnsTrustTest:
         # And one that ends with its query cut short, said too
         found = self.read([sent(1.0, asked[:5], 0x19, 1)], asked=False)
         assert (found.dns.lookups, found.dns.cut) == ([], 1)
+        # Or whose rest has not come when the capture ends
+        found = self.read([sent(1.0, asked[:5], 0x18, 1)], asked=False)
+        assert (found.dns.lookups, found.dns.cut) == ([], 1)
+        assert (found.dns.whole_by(0.5), found.dns.whole_by(1.0)) == (True, False)
 
     def test_dns_over_tcp_that_cannot_be_read_to_its_end_is_counted(self):
         def over(payload: bytes, ports: tuple[int, int], at: str, to: str) -> bytes:
@@ -1192,7 +1457,7 @@ class DnsTrustTest:
         # A query behind one that is padded past what the capture keeps
         # of a packet: only the first is seen, and that is said
         whole = packet_of(over(first + second, (40053, 53), me, server), True)
-        kept = dataclasses.replace(whole, payload=whole.payload[:950])
+        kept = whole._replace(payload=whole.payload[:950])
         capture = pcap.Capture()
         capture.add(kept)
         capture.dns.finish()
@@ -1218,7 +1483,7 @@ class DnsTrustTest:
         capture = pcap.Capture()
         capture.add(packet_of(dns_over(me, server, query, (40053, 53)), True))
         back = packet_of(over(b"\x20\x00" + b"x" * 990, (53, 40053), server, me), False)
-        capture.add(dataclasses.replace(back, payload=back.payload[:950]))
+        capture.add(back._replace(payload=back.payload[:950]))
         capture.dns.finish()
         assert capture.dns.cut == 0
         assert [(found.name, found.error) for found in capture.dns.lookups] == [
@@ -1378,6 +1643,27 @@ class OtherTrafficTest:
             ("an unusually long name", name)
         ]
 
+    def test_of_a_name_longer_than_names_can_be_its_end_is_kept(self):
+        # Far longer than DNS allows, of bytes each written as four
+        name = ".".join([chr(1) * 60] * 15 + ["evil", "test"])
+        found = self.read([(1.0, dns_failure(name), False)])
+        (lookup,) = found.dns.lookups
+        kept = ".".join(["\\001" * 60] * 4 + ["evil", "test"])
+        assert lookup.name == payloads.CUT_NAME + kept
+        assert [why for why, _ in found.dns.flagged] == [
+            "an unusually long name",
+            "a name with bytes no host name has",
+        ]
+        named = payloads.Name.of([b"\x01" * 60] * 15 + [b"evil", b"test"])
+        assert (named.length, named.longest, named.plain) == (924, 60, False)
+        assert named.labels == ("\\001" * 60,) * 4 + ("evil", "test")
+        # One as long as DNS allows is kept whole
+        longest = [b"x" * 63] * 3 + [b"y" * 61]
+        assert payloads.Name.of(longest).text == ".".join(
+            label.decode() for label in longest
+        )
+        assert payloads.Name.of([b"zz", *longest]).text.startswith("...xxx")
+
     def test_many_names_under_one_domain_are_flagged_whatever_is_between(self):
         count = lookups_module.DNS_MANY_UNDER_DOMAIN
 
@@ -1498,8 +1784,10 @@ class CaptureSessionTest(LauncherTest):
         assert script.count("tcpdump $common") == len(capture_module.PARTS) == 8
         # Of what is sent somewhere the headers alone, and of what comes
         # in no more than says where a packet is in its stream. What the
-        # model sends back comes in many packets, its part takes more
+        # model sends back comes in many packets, its part takes more. Of
+        # what starts a connection, a hello whole as a link carries it
         own = {
+            "tcp": " -s 2048",
             "uploads": " -s 160",
             "elsewhere": " -s 160",
             "answers": " -s 96 -c 200000",
@@ -1939,8 +2227,8 @@ class EgressLogTest(LauncherTest):
         # A byte more than is read is asked for, which tells
         given = self.end_of_log(most + 1).stdout
         with unittest.mock.patch.object(egress_log, "MOST_READ", most):
-            read = egress_log.whole_lines(given)
-            assert egress_log.whole_lines(given[1:]) == given[1:].decode()
+            read = egress_log._whole(given).decode()
+            assert egress_log._whole(given[1:]) == given[1:]
         # From the first line that is all there
         assert read.splitlines(keepends=True) == self.lines[-len(read.splitlines()) :]
         assert 15 < len(read.splitlines()) < 25
@@ -1996,6 +2284,56 @@ class EgressLogTest(LauncherTest):
             read = egress_log.proxy_log()
         assert (len(read.requests), read.shortened, read.begins) == (20, False, None)
 
+    def test_a_line_is_told_apart_by_the_whitespace_of_ascii_alone(self):
+        # A URL the session wrote with what text takes for a space or for
+        # the end of a line: the line says how much was sent all the same
+        logged = b"".join(
+            b"1000.000 50 172.20.0.5 TCP_MISS/200 9 POST http://up.test/a"
+            + odd.encode()
+            + b"b - HIER_DIRECT/192.0.2.1 text/plain 3000059\n"
+            for odd in map(chr, (0xA0, 0x2028, 0x85, 0x1C, 0x3000))
+        )
+        with unittest.mock.patch.object(egress_log, "raw_log", lambda _=None: logged):
+            read = egress_log.proxy_log()
+        assert [(r.method, r.sent) for r in read.requests] == [("POST", 3000059)] * 5
+        with unittest.mock.patch.object(
+            egress_log, "docker_bytes", return_value=b"0\n" + logged
+        ):
+            _, requests = egress_log.logged_since(0)
+        assert [request.sent for request in requests] == [3000059] * 5
+        (first, *_) = logged.split(b"\n")
+        url = f"http://up.test/a{chr(0xA0)}b"
+        assert egress_log.parse_proxy_request(first).url == url
+
+    def test_a_request_is_of_the_session_it_began_in(self):
+        # A tunnel is logged as it closes: one of a session that ended,
+        # logged once the next was given its address, is still the first's
+        address = "172.20.0.5"
+        first = records.TracedSession("one", "/p", 100.0, address, until=200.0)
+        second = records.TracedSession("two", "/p", 200.0, address)
+        logged = [
+            egress_log.parse_proxy_request(
+                f"{ended:.3f} {lasted} {address} TCP_TUNNEL/200 9 CONNECT"
+                f" {name}.test:443 - -".encode()
+            )
+            for ended, lasted, name in (
+                (250, 100_000, "old"),
+                (260, 5000, "new"),
+                # Begun a moment before the first started, by the clock
+                # of the proxy, which is not the launcher's
+                (100.05, 100, "early"),
+            )
+        ]
+        for sessions in ([first, second], [second, first]):
+            made = egress_log.requests_made(logged, sessions, 0.0, 1000.0)
+            assert [(request.host, by.name) for request, by in made] == [
+                ("old.test", "one"),
+                ("new.test", "two"),
+                ("early.test", "one"),
+            ]
+        # And of the time it was open in
+        assert list(egress_log.requests_made(logged[:1], [first], 260.0, 1e3)) == []
+
     def rotations(self) -> list[list[str]]:
         return [call for call in self.calls() if "squid -k rotate" in call[-1]]
 
@@ -2039,7 +2377,7 @@ class EgressLogTest(LauncherTest):
         asked = time.time()
         logged = [
             egress_log.parse_proxy_request(
-                f"{asked:.3f} 0 {caller} TCP_DENIED/403 9 CONNECT {name}.test:443 - -"
+                f"{asked:.3f} 0 {caller} TCP_DENIED/403 9 CONNECT {name}.test:443 - -".encode()
             )
             for caller, name in callers.items()
         ]
