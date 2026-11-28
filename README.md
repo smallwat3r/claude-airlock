@@ -113,6 +113,7 @@ claude-airlock --trace               # what the latest session here did
 claude-airlock --trace list          # this project's sessions, latest first
 claude-airlock --trace 3fa9 --verbose > trace.txt   # one session, in detail
 claude-airlock --trace --json | jq 'select(.what == "net")'   # as JSON Lines
+claude-airlock --trace all --json > all.jsonl   # every session here, for jq or a database
 claude-airlock --trace --only bash,net   # just the commands and the network
 claude-airlock --trace --failed      # just what went wrong
 claude-airlock --trace --follow      # what the sessions here do, as they do it

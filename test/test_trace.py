@@ -962,6 +962,42 @@ class TraceTest(LauncherTest):
         assert missing.status != 0
         assert "matches no session" in missing.stderr
 
+    def test_sessions_are_listed_as_json_and_traced_all_at_once(self):
+        older = self.write_transcript("0d", prompts_at(1_800_000_000))
+        os.utime(older, (1, 1))
+        rows = self.launch("--trace", "list", "--json").stdout.splitlines()
+        listed = {row["session"]: row for row in map(json.loads, rows)}
+        assert listed[self.SESSION] == {
+            "session": self.SESSION,
+            "last": listed[self.SESSION]["last"],
+            "prompts": 1,
+            "calls": 3,
+            "removed": False,
+            "title": "fix the build",
+        }
+        stamp = datetime.fromtimestamp(1_800_000_000).astimezone()
+        assert listed["0d"]["last"] == stamp.isoformat(timespec="milliseconds")
+        # Every session, the one the launcher took in first first, each
+        # with its record ahead of its events
+        objects = list(
+            map(json.loads, self.launch("--trace", "all", "--json").stdout.splitlines())
+        )
+        order = [o["session"] for o in objects if o["what"] == "record"]
+        assert order == ["0d", self.SESSION]
+        assert {o["session"] for o in objects} == {"0d", self.SESSION}
+        assert objects[0]["what"] == "record"
+        # What --only and --failed choose, of each
+        bash = self.launch("--trace", "all", "--json", "--only", "bash").stdout
+        assert {json.loads(line)["what"] for line in bash.splitlines()} == {"bash"}
+        # As text, each with its header
+        shown = self.launch("--trace", "all").stdout
+        assert shown.index("# session     0d") < shown.index(
+            f"# session     {self.SESSION}"
+        )
+        followed = self.launch("--trace", "all", "--follow")
+        assert followed.status != 0
+        assert "usage:" in followed.stderr
+
     def test_a_session_is_picked_by_its_whole_id_whatever_else_starts_with_it(self):
         # Left by a session next to its own, which could not be named
         self.write_transcript(f"{self.SESSION}x", prompts_at(1800000000))

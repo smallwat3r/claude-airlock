@@ -10,7 +10,7 @@ from .entries import sessions_named
 from .stream import Filter
 
 USAGE = (
-    "usage: claude-airlock --trace [list | SESSION] [--follow] [--verbose | --json]"
+    "usage: claude-airlock --trace [list | all | SESSION] [--follow] [--verbose | --json]"
     " [--only KIND,...] [--failed]"
 )
 

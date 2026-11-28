@@ -24,11 +24,14 @@ and that of the SSH agent and Docker socket are the launcher's own."""
 from __future__ import annotations
 
 import functools
+import json
 import os
 import pydoc
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..errors import Fatal
@@ -358,35 +361,94 @@ def render_json(path: Path, host: Host, chosen: Filter = EVERYTHING) -> str:
     return "".join(event_json(path.stem, event) + "\n" for event in told)
 
 
-def session_rows(files: list[Path], host: Host | None = None) -> list[tuple[Path, str]]:
-    """Each session with the line that tells of it: when it last did
-    something, the start of its id (enough to name it to --trace), its
-    size and its title. In the order of that time, the latest first, and
-    one that has no time last."""
+@dataclass(frozen=True)
+class SessionRow:
+    """A session as the list of them tells of it: its transcript, when it
+    last did something, none when it says nowhere, how many prompts and
+    calls it has, whether its transcript was removed, and its title."""
+
+    path: Path
+    last: datetime | None
+    prompts: int
+    calls: int
+    removed: bool
+    title: str
+
+    @property
+    def line(self) -> str:
+        """The line of --trace list: the time, the start of the id
+        (enough to name it to --trace), the size and the title."""
+        when = f"{self.last:%Y-%m-%d %H:%M}" if self.last else ""
+        removed = "REMOVED  " if self.removed else ""
+        return (
+            f"{when:16}  {short_id(self.path)}  {self.prompts:3d} prompts"
+            f"  {self.calls:4d} calls  {removed}{self.title}"
+        )
+
+    def as_json(self) -> str:
+        """The same as a JSON object on a line, with the whole id and the
+        time as an event's, see event_json."""
+        last = self.last.astimezone() if self.last else None
+        return json.dumps(
+            {
+                "session": self.path.stem,
+                "last": last.isoformat(timespec="milliseconds") if last else None,
+                "prompts": self.prompts,
+                "calls": self.calls,
+                "removed": self.removed,
+                "title": self.title,
+            }
+        )
+
+
+def session_rows(files: list[Path], host: Host | None = None) -> list[SessionRow]:
+    """Each session as the list of them tells of it, see SessionRow. In
+    the order of when it last did something, the latest first, and one
+    that has no time last."""
     rows = []
     for path in files:
         entries = read_entries(path)
-        removed = ""
+        removed = False
         if not entries and host is not None:
             # No longer there: as the launcher copied it, and said so
             entries = compare(host, path).gone
-            removed = "REMOVED  " if entries else ""
+            removed = bool(entries)
         times = entry_times(entries)
-        last = max(times) if times else None
-        when = f"{last:%Y-%m-%d %H:%M}" if last else ""
-        line = (
-            f"{when:16}  {short_id(path)}  {len(prompts(entries)):3d} prompts"
-            f"  {len(tool_calls(entries)):4d} calls  {removed}{title(entries)}"
+        rows.append(
+            SessionRow(
+                path,
+                max(times) if times else None,
+                len(prompts(entries)),
+                len(tool_calls(entries)),
+                removed,
+                title(entries),
+            )
         )
-        rows.append((last.timestamp() if last else 0.0, path, line))
     # Stable: the files come the latest first, see copy_rank
-    rows.sort(key=lambda row: row[0], reverse=True)
-    return [(path, line) for _, path, line in rows]
+    rows.sort(key=lambda row: row.last.timestamp() if row.last else 0.0, reverse=True)
+    return rows
 
 
-def _list_sessions(files: list[Path], host: Host | None = None) -> str:
-    """One line per session, see session_rows."""
-    return "".join(line + "\n" for _, line in session_rows(files, host))
+def _list_sessions(files: list[Path], host: Host, as_json: bool) -> str:
+    """One line per session, see SessionRow, or one object."""
+    rows = session_rows(files, host)
+    return "".join((row.as_json() if as_json else row.line) + "\n" for row in rows)
+
+
+def _every_trace(
+    files: list[Path], host: Host, options: set[str], chosen: Filter
+) -> Iterator[str]:
+    """The trace of each session of the project, the earliest first: in
+    the order the launcher copied them, which a session cannot set, see
+    copy_rank. As JSON Lines, each starts with its record and every line
+    names its session. As text, a blank line between two."""
+    layout = Layout.for_output(os.environ)
+    for at, path in enumerate(reversed(files)):
+        if "--json" in options:
+            yield render_json(path, host, chosen)
+            continue
+        verbose = "--verbose" in options
+        yield ("\n" if at else "") + render(path, host, verbose, layout, chosen)
 
 
 def _show(text: str, colour: bool = False) -> None:
@@ -400,15 +462,30 @@ def _show(text: str, colour: bool = False) -> None:
         sys.stdout.write(text)
 
 
+def _show_each(parts: Iterable[str], colour: bool = False) -> None:
+    """Through the pager on a terminal, all at once. Piped, each part as
+    it is made: the traces of every session together can be more than is
+    worth holding."""
+    if sys.stdout.isatty():
+        _show("".join(parts), colour)
+        return
+    for part in parts:
+        sys.stdout.write(part)
+
+
 def trace(host: Host, args: list[str]) -> int:
     """Show what a session of this project did: the latest one, or the one
     whose id starts with the given text, as text or with --json as JSON
-    Lines, all of it or what --only and --failed choose. "list" lists
-    them instead."""
+    Lines, all of it or what --only and --failed choose. "all" shows every
+    session, "list" lists them instead."""
     options, names, chosen = trace_options(args, ("--verbose", "--json"))
     files = _traced_files(host)
     if names == ["list"]:
-        _show(_list_sessions(files, host))
+        _show(_list_sessions(files, host, "--json" in options))
+        return 0
+    if names == ["all"]:
+        colour = "--json" not in options and Layout.for_output(os.environ).colour
+        _show_each(_every_trace(files, host, options, chosen), colour)
         return 0
     path = picked_session(files, names[0]) if names else files[0]
     if "--json" in options:

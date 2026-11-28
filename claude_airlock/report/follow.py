@@ -865,7 +865,7 @@ def follow(host: Host, args: list[str]) -> int:
     --json as JSON Lines, with --only and --failed the events they
     choose."""
     options, names, chosen = trace_options(args, ("--follow", "--verbose", "--json"))
-    if names == ["list"]:
+    if names in (["list"], ["all"]):
         raise Fatal(USAGE)
     as_json = "--json" in options
     only = picked_session(session_files(host), names[0]) if names else None

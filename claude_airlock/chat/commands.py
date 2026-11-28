@@ -132,7 +132,7 @@ class Resume:
         rows = session_rows(files[:RESUME_LISTED])
         self._page.say(
             [labelled("chat", "the latest sessions of this project:")]
-            + [f"  {number}. {line}" for number, (_, line) in enumerate(rows, 1)]
+            + [f"  {number}. {row.line}" for number, row in enumerate(rows, 1)]
         )
         try:
             typed = self._read(WHICH_SESSION)
@@ -143,7 +143,7 @@ class Resume:
         number = (typed or "").strip()
         if not is_number(number) or not 1 <= int(number) <= len(rows):
             return ""
-        return rows[int(number) - 1][0].stem
+        return rows[int(number) - 1].path.stem
 
 
 class Commands:

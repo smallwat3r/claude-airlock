@@ -47,7 +47,8 @@ goes through your pager.
 
 | Option | Shows |
 | --- | --- |
-| `list` | The project's sessions, the latest first |
+| `list` | The project's sessions, the latest first. With `--json`, an object each: its whole id (`session`), when it `last` did something, how many `prompts` and `calls`, whether its transcript was `removed`, and its `title` |
+| `all` | Every session of the project, the one the launcher took in first first, each with its header. With `--json`, all of them in one stream, see [As JSON](#as-json) |
 | `3fa9` | The session whose id starts so, instead of the latest |
 | `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process, what the language server reported. Not with `--json`, which has it all |
 | `--only bash,net` | The events of the kinds named, as the `what` column says them |
@@ -440,7 +441,8 @@ shortened, for `jq` or to load into a database:
 ```
 
 The first object is of the trace itself, with `what` as `record`: its
-`lines` are the header of the text. That is where the launcher says a
+`lines` are the header of the text. With `all`, each session starts with
+its own. That is where the launcher says a
 record is not all there (a transcript `CHANGED` or `NOT ALL COPIED`, a
 capture `STOPPED` or `INCOMPLETE`), which the events alone do not tell.
 `--follow` gives one whenever it has such a line to say. `--only` leaves
