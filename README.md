@@ -1,17 +1,14 @@
 # claude-airlock
 
 > [!NOTE]
-> claude-airlock is still under development. It works today, but expect
-> changes, including breaking ones to settings and behaviour. It is mostly
-> developed on Linux, macOS should work too but sees less daily use.
+> claude-airlock is still under development. It works today, but settings
+> and behaviour may change, sometimes in breaking ways. It is mostly
+> developed on Linux. macOS should work too, but sees less daily use.
 
-Run [Claude Code](https://claude.com/claude-code) inside a hardened Docker
-container, with only the current project mounted, and see everything it
-does there. Every connection and process of a session is recorded from
-outside it, where the session cannot tamper with the record. You see them
-as they happen, under the tool call that made them, and can review them
-later. When the session ends, what it changed is checked. Works from any
-shell, and from editors that can launch a custom `claude` program.
+Run [Claude Code](https://claude.com/claude-code) in a hardened Docker
+container that only has the current project mounted, and see everything
+it does there. It works from any shell, and from editors that can launch
+a custom `claude` program.
 
 ![The launcher on the host starts the session container, a capture sidecar
 and a process sidecar that share one network namespace, and reads their
@@ -22,20 +19,18 @@ opt-in](docs/img/architecture.excalidraw.png)
 What you get:
 
 - **A contained session.** Only the project is mounted, as your user, on a
-  read-only root filesystem with all capabilities dropped. Secrets in
-  `.env` files read as empty, and Claude's own configuration is read-only.
-  On Linux it can run on [gVisor](docs/sandbox.md#gvisor), a kernel of its
-  own, instead of the host's.
+  read-only root filesystem with all capabilities dropped. `.env` files
+  read as empty, and Claude's own configuration is read-only. On Linux it
+  can also run on [gVisor](docs/sandbox.md#gvisor), a kernel of its own.
 - **A record of what it did.** Every connection, DNS lookup and process is
   recorded from outside the session, so the session cannot tamper with
-  it. Its tool calls come from its own transcript, which the launcher
-  copies as it is written and flags when a line is later changed or
-  removed. `--trace` shows it all.
+  it. Its tool calls come from its transcript, which the launcher copies
+  as it is written, and it flags any line changed or removed later.
+  `--trace` shows it all.
 - **A check when it ends.** The launcher warns when a session changed a
-  file that runs commands on the host, a git hook or a Makefile say.
+  file that runs commands on the host, such as a git hook or a Makefile.
 - **Line mode.** Claude Code with a simpler UI that shows more than the
-  native one: a prompt, and above it what the session does as it does it,
-  see [Line mode](#line-mode).
+  native one, see [Line mode](#line-mode).
 - **Opt-in doors.** An egress filter, the SSH agent and the Docker socket,
   each off until you switch it on.
 
@@ -68,8 +63,8 @@ git clone https://github.com/smallwat3r/claude-airlock.git ~/code/claude-airlock
 export PATH="$HOME/code/claude-airlock/bin:$PATH"
 ```
 
-Or leave `PATH` alone and symlink the launcher into a directory already on
-it, it finds the rest of the checkout from where it really is:
+Or symlink the launcher into a directory already on your `PATH`. It
+finds the rest of the checkout through the link:
 
 ```
 ln -s ~/code/claude-airlock/bin/claude-airlock ~/.local/bin/claude-airlock
@@ -83,20 +78,19 @@ claude-airlock                       # builds the image on first use
 claude-airlock -p "summarise this" < notes.txt   # piped, no TTY needed
 ```
 
-Any other argument is forwarded to `claude`.
+Any other argument is passed on to `claude`.
 
-The container is the sandbox, so `claude` is started with
-`--dangerously-skip-permissions` and does not ask before it uses a tool.
-`CLAUDE_AIRLOCK_ASK=1` has it ask, and a `--permission-mode` of your own is
-left as it is. [Known limits](#known-limits) says what a session can reach
-without being asked.
+- **Permissions.** The container is the sandbox, so `claude` runs with
+  `--dangerously-skip-permissions` and does not ask before it uses a
+  tool. `CLAUDE_AIRLOCK_ASK=1` makes it ask, and your own
+  `--permission-mode` is left alone. [Known limits](#known-limits) says
+  what a session can reach without asking.
+- **Model.** It starts on Opus at high effort. `CLAUDE_AIRLOCK_MODEL` and
+  `CLAUDE_AIRLOCK_EFFORT` change that, and your own `--model` or
+  `--effort` wins.
 
-It starts on Opus at high effort, `CLAUDE_AIRLOCK_MODEL` and
-`CLAUDE_AIRLOCK_EFFORT` change both, and a `--model` or `--effort` of your
-own wins.
-
-The launcher's own options, `claude-airlock --help` lists them with the
-settings:
+The launcher's own options (`claude-airlock --help` lists them all, with
+the settings):
 
 ```
 # What a session gets
@@ -123,18 +117,18 @@ claude-airlock --trace --only bash,net   # just the commands and the network
 claude-airlock --trace --failed      # just what went wrong
 claude-airlock --trace --follow      # what the sessions here do, as they do it
 
-# Claude Code's native UI in place of line mode, see "Line mode"
+# Claude Code's native UI instead of line mode, see "Line mode"
 CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock  # or in the config file, for every session
 ```
 
 ### Login
 
-A session uses the login of `claude` on the host. When either of the two
-renews it, the other has the new one a moment later. On macOS that login
-is in the Keychain, where the launcher reads and writes it.
+A session uses the login of `claude` on the host. When either side renews
+it, the other picks up the new one a moment later. On macOS the login is
+in the Keychain, and the launcher reads and writes it there.
 
-So log in with `claude` on the host. Or in a session, with the native UI,
-as [line mode](#line-mode) has no `/login`:
+So log in with `claude` on the host. Or log in from a session with the
+native UI, as [line mode](#line-mode) has no `/login`:
 
 ```
 CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock   # then /login
@@ -144,28 +138,28 @@ CLAUDE_AIRLOCK_LINE_MODE=0 claude-airlock   # then /login
 
 All optional, set in the environment or in [the config file](#the-config-file).
 A switch takes `1` for on and `0` for off. Any other value, such as `true`,
-stops the launcher instead of quietly leaving a restriction off.
+stops the launcher, so a typo never leaves a restriction off.
 
 What a session gets:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `CLAUDE_AIRLOCK_EXTRA_DIRS=a:b` | none | Extra directories to mount, as repeated `--add-dir` |
-| `CLAUDE_AIRLOCK_EXTRA_DIRS_RO=a:b` | none | The same read-only, as repeated `--add-dir-ro` |
+| `CLAUDE_AIRLOCK_EXTRA_DIRS=a:b` | none | Extra directories to mount, like repeated `--add-dir` |
+| `CLAUDE_AIRLOCK_EXTRA_DIRS_RO=a:b` | none | The same read-only, like repeated `--add-dir-ro` |
 | `CLAUDE_AIRLOCK_SHARED_DIR=~/scratch` | `~/claude-shared` if it exists | Scratch directory shared between sessions, empty for none |
 | `CLAUDE_AIRLOCK_SHADOW="*.pem:.npmrc"` | none | More file names to hide, on top of the `.env` family |
 | `CLAUDE_AIRLOCK_PROTECT="~/kit:docs"` | none | Paths that are read-only wherever they are mounted |
 | `CLAUDE_AIRLOCK_RW_CONFIG` | `0` | `1` makes the protected parts of `~/.claude` (`settings.json`, `CLAUDE.md`, `hooks`...) writable |
 | `CLAUDE_AIRLOCK_SHARED_HISTORY` | `0` | `1` lets a session see Claude Code's history of every project, not only its own |
 | `CLAUDE_AIRLOCK_CACHE` | `1` | `~/.cache` persists per project. `0` makes it a tmpfs of at most 2g |
-| `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set, `GH_TOKEN` is how `gh` logs in |
+| `ANTHROPIC_API_KEY`, `GH_TOKEN` | unset | Passed through when set. `GH_TOKEN` is how `gh` logs in |
 
 The doors, all closed by default:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_NET_FILTER` | `0` | `1` allows only the domains in `docker/allowed-domains.txt`, over HTTP, HTTPS and git over SSH |
-| `CLAUDE_AIRLOCK_NET_ASK` | `0` | `1` has the filter ask you in line mode before it refuses a host at a port, a yes lets the request through and holds for that host and port until the session ends |
+| `CLAUDE_AIRLOCK_NET_ASK` | `0` | `1` makes line mode ask you before the filter refuses a host. A yes holds for that host and port until the session ends |
 | `CLAUDE_AIRLOCK_SSH_AGENT` | `0` | `1` forwards your SSH agent, so git over SSH and `ssh` work with your keys |
 | `CLAUDE_AIRLOCK_CONNECTORS` | `0` | `1` loads the connectors of your claude.ai account (Gmail, Google Drive...), with their tools in every request |
 | `CLAUDE_AIRLOCK_DOCKER_SOCKET` | `0` | `1` allows `docker ps` and `docker logs` against the host, `full` adds `inspect`, `stats` and `top` |
@@ -174,19 +168,19 @@ What is recorded, for `--trace`:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `CLAUDE_AIRLOCK_NET_LOG` | `1` | Records every connection the session makes and every one made to it, what is sent by UDP or a ping, every name looked up, and when and how much is sent over each connection, a request to the model as a push, with how long the model's answer took. `0` records nothing |
-| `CLAUDE_AIRLOCK_PROC_LOG` | `1` | Records the processes that run, which of them made each connection, the files of secrets they open, and the memory and CPU the session uses. `0` records nothing |
-| `CLAUDE_AIRLOCK_API_LOG` | `0` | `1` keeps every request Claude Code sends to the model and each answer: the system prompt, the tools and the conversation as they were sent. With the capture on, each request is placed on the connection it was seen to go over, see [docs/trace.md](docs/trace.md#the-requests-to-the-model) |
+| `CLAUDE_AIRLOCK_NET_LOG` | `1` | Records the network: every connection in and out, UDP sends, pings, name lookups, and how much went over each connection and when. `0` turns it off |
+| `CLAUDE_AIRLOCK_PROC_LOG` | `1` | Records the processes that run, which one made each connection, the secret files they open, and the memory and CPU used. `0` turns it off |
+| `CLAUDE_AIRLOCK_API_LOG` | `0` | `1` keeps every request Claude Code sends to the model and each answer, see [docs/trace.md](docs/trace.md#the-requests-to-the-model) |
 
 How Claude Code runs:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_LINE_MODE` | `1` | Sessions run in [line mode](#line-mode). `0` gives Claude Code's native UI |
-| `CLAUDE_AIRLOCK_ASK` | `0` | `1` has Claude Code ask before it uses a tool, as it does outside the sandbox |
-| `CLAUDE_AIRLOCK_MODEL=fable` | `opus` | The model Claude Code starts with, as `--model` takes it. Empty for Claude Code's own, a `--model` of your own wins |
-| `CLAUDE_AIRLOCK_EFFORT=xhigh` | `high` | The effort Claude Code starts with, as `--effort` takes it. Empty for Claude Code's own, an `--effort` of your own wins |
-| `CLAUDE_AIRLOCK_INJECTION_STOP` | `0` | `1` has line mode stop a turn when what it read looks written to pass for the system or the user, see [docs/line-mode.md](docs/line-mode.md#stopping-a-turn-for-what-it-read). `0` flags it and goes on |
+| `CLAUDE_AIRLOCK_ASK` | `0` | `1` makes Claude Code ask before it uses a tool, as it does outside the sandbox |
+| `CLAUDE_AIRLOCK_MODEL=fable` | `opus` | The starting model, as `--model` takes it. Empty leaves it to Claude Code |
+| `CLAUDE_AIRLOCK_EFFORT=xhigh` | `high` | The starting effort, as `--effort` takes it. Empty leaves it to Claude Code |
+| `CLAUDE_AIRLOCK_INJECTION_STOP` | `0` | `1` makes line mode stop a turn when what it read looks forged, see [docs/line-mode.md](docs/line-mode.md#stopping-a-turn-for-what-it-read). `0` only flags it |
 | `CLAUDE_AIRLOCK_TELEMETRY` | `0` | `1` lets Claude Code send usage events and crash reports |
 
 The container and its image:
@@ -196,11 +190,11 @@ The container and its image:
 | `CLAUDE_AIRLOCK_FEATURES="go typst"` | `~/.config/claude-airlock/features.txt`, else every feature | Tools to build into the image, see [The image](#the-image) |
 | `CLAUDE_AIRLOCK_MEMORY=32g` | `16g` | Memory limit. Below about 10g, `/tmp` and the other tmpfs shrink to fit in half of it |
 | `CLAUDE_AIRLOCK_PIDS=1024` | `512` | Process limit |
-| `CLAUDE_AIRLOCK_CPUS=4` | every CPU | CPU limit, a fraction like `1.5` works too. A session at its limit runs slower, nothing is ended |
+| `CLAUDE_AIRLOCK_CPUS=4` | every CPU | CPU limit, fractions like `1.5` work too. At the limit a session runs slower, nothing is killed |
 | `CLAUDE_AIRLOCK_RUNTIME=runsc-hostnet` | Docker's own | Container runtime, as registered in Docker. For gVisor see [docs/sandbox.md](docs/sandbox.md#gvisor) |
 
-The detail of each is in [docs/sandbox.md](docs/sandbox.md), of the
-records in [docs/trace.md](docs/trace.md).
+Each setting is described in detail in [docs/sandbox.md](docs/sandbox.md),
+and the records in [docs/trace.md](docs/trace.md).
 
 ### The config file
 
@@ -214,103 +208,95 @@ CLAUDE_AIRLOCK_NET_FILTER=1
 CLAUDE_AIRLOCK_SHARED_DIR=/home/me/scratch
 ```
 
-- The environment wins, so one session can override the file. A variable
-  that is set but empty counts as not set, and the value of the file is
-  used. The exceptions are `CLAUDE_AIRLOCK_FEATURES` and
-  `CLAUDE_AIRLOCK_SHARED_DIR`, where empty means none, and
-  `CLAUDE_AIRLOCK_MODEL` and `CLAUDE_AIRLOCK_EFFORT`, where empty leaves
-  the choice to Claude Code.
-- Values are taken literally, without quotes. A leading `~` is your home
-  directory in the settings that take a path. A value in quotes, or with
-  blanks around it, stops the launcher: taken as it is, it would hide or
-  protect nothing. So does a comment after a value, a comment is a line
-  of its own.
-- A name given twice stops the launcher, as an unknown one does.
-- The file is only read from your config directory, never from the
-  project, which a session can write to.
+- **The environment wins**, so one session can override the file. A
+  variable set but empty counts as unset, except for
+  `CLAUDE_AIRLOCK_FEATURES` and `CLAUDE_AIRLOCK_SHARED_DIR`, where empty
+  means none, and `CLAUDE_AIRLOCK_MODEL` and `CLAUDE_AIRLOCK_EFFORT`,
+  where empty leaves the choice to Claude Code.
+- **Values are taken literally.** No quotes, no blanks around them, and
+  comments go on a line of their own. A leading `~` is your home in the
+  settings that take a path.
+- **Mistakes stop the launcher**: a quoted value, an unknown name or one
+  given twice. Taken as written, they would quietly hide or protect
+  nothing.
+- **Only your config directory is read**, never the project, which a
+  session can write to.
 - `CLAUDE_AIRLOCK_EXTRA_DIRS` and `CLAUDE_AIRLOCK_EXTRA_DIRS_RO` are not
-  accepted there, extra directories belong to one project.
-- `CLAUDE_AIRLOCK_SHADOW` and `CLAUDE_AIRLOCK_PROTECT` add up: what the file
-  names and what the environment names both count.
+  accepted there, as extra directories belong to one project.
+- `CLAUDE_AIRLOCK_SHADOW` and `CLAUDE_AIRLOCK_PROTECT` add up: what the
+  file and the environment name both count.
 
 ## What the sandbox does
 
-What a session is given and kept from: what is mounted and how, what is
-read-only or hidden, the hardening of the container, the check of the files
-that run code on the host when a session ends, and the opt-in doors (the
-egress filter, the SSH agent, the Docker socket). See
+What is mounted and how, what is read-only or hidden, how the container
+is hardened, the check when a session ends, and the opt-in doors (the
+egress filter, the SSH agent, the Docker socket) are all in
 [docs/sandbox.md](docs/sandbox.md).
 
 ## Known limits
 
-The sandbox contains what a session can reach, it does not make a
-read-write project safe to trust blindly afterwards. A session is not asked
-before it uses a tool unless `CLAUDE_AIRLOCK_ASK=1`, so all of this it can
-do on its own, also when something it read told it to:
+The sandbox limits what a session can reach. It does not make a
+read-write project safe to trust blindly afterwards. Unless
+`CLAUDE_AIRLOCK_ASK=1`, a session does not ask before it uses a tool, so
+it can do all of this on its own, including when something it read told
+it to:
 
-- What it reads is looked at for signs of that, and flagged (see
-  [What it read](docs/trace.md#what-it-read)). The flag knows a few ways
-  of writing: text in other words goes unflagged, and the session had
-  read it either way. With `CLAUDE_AIRLOCK_INJECTION_STOP=1` line mode
-  stops the turn for two of the signs, Claude Code's native UI stops
-  for none.
-- Anything in the project can be changed, including files that run code on
-  the host later. The launcher warns about git's and Claude's own, and
-  about the build files, hook managers and nested `CLAUDE.md` it knows by
-  name (see [the check](docs/sandbox.md#the-check-when-a-session-ends)).
-  It names them, it does not read them for you, and its list is not
-  whole: a script a Makefile calls, what is in `node_modules`, and any
-  build file it has no name for are still yours to review in the diff.
-- With the network open, a session reaches whatever the host listens on,
-  like the rest of your network. Only the egress filter keeps it off.
-- The login is in the sandbox, a session can read it and use it elsewhere.
-  It can replace it too: what a session writes as its login is carried to
-  the host, as a renewal has to be, so a session can log the host's
-  `claude` out, or into another account. Only what does not read as a
-  login is kept from the host.
-- The egress allowlist limits what a session can reach, not what it can
-  send there. GitHub, npm and Anthropic's API, all on the list, take
-  uploads from whoever holds a token, and a session needs none of yours:
-  what it read can come with one of its own, to push to a repository or
-  a gist, or to publish a package. With a forwarded SSH agent or a
-  `GH_TOKEN` it does so as you.
-- Secrets that are not in a shadowed file (hard-coded, or in git history)
-  are readable.
+- **Prompt injection is only flagged.** What a session reads is checked
+  for signs of it (see [What it read](docs/trace.md#what-it-read)), but
+  the check knows only a few ways of writing it, and the session has read
+  the text either way. With `CLAUDE_AIRLOCK_INJECTION_STOP=1` line mode
+  stops the turn for two of the signs. The native UI never stops.
+- **Anything in the project can be changed**, including files that later
+  run code on the host. The launcher warns about the ones it knows by
+  name (see [the check](docs/sandbox.md#the-check-when-a-session-ends)),
+  but it does not read them for you and its list is not complete: a
+  script a Makefile calls, `node_modules`, or a build file it does not
+  know are yours to review in the diff.
+- **With the network open, a session reaches whatever the host listens
+  on**, and the rest of your network. Only the egress filter stops that.
+- **The login is in the sandbox.** A session can read it and use it
+  elsewhere. It can also replace it, since renewals are carried to the
+  host: a session can log the host's `claude` out, or into another
+  account. Only what does not look like a login is kept from the host.
+- **The egress allowlist limits where a session can send, not what.**
+  GitHub, npm and Anthropic's API are on the list and accept uploads from
+  anyone with a token. A session does not need yours: what it read can
+  bring its own, to push to a repository or publish a package. With a
+  forwarded SSH agent or a `GH_TOKEN` it can do so as you.
+- **Secrets outside a shadowed file** (hard-coded, or in git history) are
+  readable.
 
-The narrower ones, on plugins, MCP servers, the history of other
+The narrower limits, on plugins, MCP servers, the history of other
 projects and what the egress filter cannot tell apart, are in
 [docs/sandbox.md](docs/sandbox.md#known-limits).
 
 ## Reviewing a session
 
-`claude-airlock --trace` shows what the latest session of the project did, in
-the order it happened: what it ran and why, what it wrote, and what it
-reached on the network. `--trace --follow` shows it as it happens. See
+`claude-airlock --trace` shows what the latest session of the project did,
+in order: what it ran and why, what it wrote, and what it reached on the
+network. `--trace --follow` shows it live. See
 [docs/trace.md](docs/trace.md).
 
 ## Line mode
 
-A session runs in line mode by default: Claude Code with a simpler UI.
-You get a prompt and, above it, what the session does in the lines of
-`--trace`, as it happens. Why it is the default:
+Sessions run in line mode by default: Claude Code with a simpler UI. You
+get a prompt, and above it what the session does, as it does it, in the
+lines of `--trace`. Why it is the default:
 
 - **You see what a command did, not only that it ran.** Under each
-  command are the connections made while it ran, the process that made
-  each and how it ended, the files it changed, and who allowed it. The native UI shows none of
-  that, a host an install reaches besides the registry goes unseen there.
-- **It is the launcher's word, not the session's.** The network, the
-  resource use and the doors are recorded from outside the sandbox, the
-  session cannot leave them out.
-- **What went wrong stands out.** A refused connection, a denied
-  request, a failed command, a write outside the project, a connection
-  that is not what it looks and a possible prompt injection in what was
-  read are in bold red and in capitals.
-- **The cost is in sight.** Each step says the tokens it wrote and read,
-  each turn its time, its price and what it did on the network, and the
-  sandbox says every so often how much memory and CPU it uses.
+  command are the connections it made, the process behind each, the files
+  it changed and who allowed it. The native UI shows none of that.
+- **It is the launcher's account, not the session's.** The network,
+  resource use and doors are recorded from outside the sandbox, so the
+  session cannot leave anything out.
+- **Problems stand out.** Refused connections, failed commands, writes
+  outside the project and possible prompt injections are in bold red
+  capitals.
+- **You see the cost.** Each step shows its tokens, each turn its time,
+  price and network use, and the sandbox reports its memory and CPU every
+  so often.
 - **It works anywhere.** Lines are only added, never redrawn, so it reads
-  the same in a terminal, an Emacs shell buffer or a file, and scrolls
-  back like any output.
+  the same in a terminal, an Emacs shell buffer or a file.
 
 `CLAUDE_AIRLOCK_LINE_MODE=0` gives the native UI back. See
 [docs/line-mode.md](docs/line-mode.md).
@@ -322,17 +308,16 @@ uses](docs/img/line-mode.png)
 
 ## The image
 
-The image is assembled from `docker/base.Dockerfile`, the features you pick
-and `docker/tail.Dockerfile`. See [docs/image.md](docs/image.md) for the
-features, how to add your own, the language servers and how versions are
+The image is built from `docker/base.Dockerfile`, the features you pick
+and `docker/tail.Dockerfile`. [docs/image.md](docs/image.md) covers the
+features, adding your own, the language servers and how versions are
 pinned.
 
 ## Statusline
 
-With Claude Code's native UI, the statusline of your
-`~/.claude/settings.json` works in the sandbox as on the host: the file
-its command runs is mounted read-only. [Line mode](#line-mode) does not
-run it and shows a status of its own. See
+With the native UI, the statusline of your `~/.claude/settings.json`
+works as it does on the host, its script is mounted read-only. Line mode
+does not run it and shows its own status. See
 [docs/sandbox.md](docs/sandbox.md#statusline).
 
 ## Editor integration
@@ -345,38 +330,35 @@ Point your editor's Claude Code integration at `claude-airlock` instead of
 (setq claude-code-program (executable-find "claude-airlock"))
 ```
 
-- `CLAUDE_BUFFER_NAME`, which claude-code.el exports, gives parallel
-  sessions on the same project distinct container names.
-- That buffer runs in [line mode](#line-mode).
-- No terminal emulator is needed: `claude-airlock` run from `M-x shell`
-  works the same.
+- Each claude-code.el buffer gets its own container name (from
+  `CLAUDE_BUFFER_NAME`), so parallel sessions on one project work.
+- The buffer runs in [line mode](#line-mode).
+- No terminal emulator is needed, `claude-airlock` works the same from
+  `M-x shell`.
 
 ## Tests
 
 ```
 make check          # ruff, shellcheck, mypy and the tests, as CI runs them
 make test K=trace   # the tests with trace in their name
-make smoke          # test/smoke/run.sh
+make smoke          # the end-to-end test against a real Docker daemon
 make upgrade        # refresh the pins, then rebuild the image
 ```
 
-- **The unit tests** (`test/test_*.py`, by topic) are run by pytest, side
-  by side on every core, on fewer inside a sandbox to keep within its
-  process limit. They run the launcher against a fake `docker`
-  that records every call, and check what is mounted, shadowed and
-  switched off by default, the tamper check, the records of a session,
-  `--trace` and line mode.
+- **The unit tests** (`test/test_*.py`) run the launcher against a fake
+  `docker` that records every call. They check the mounts, the shadowed
+  files, the defaults, the tamper check, the records, `--trace` and line
+  mode. pytest runs them in parallel, with fewer workers inside a sandbox
+  to stay under its process limit.
 - **The tools** (pytest, ruff, mypy) are the only dependencies, and only
-  of the checks: `make` runs them through [uv](https://docs.astral.sh/uv/)
-  at the versions and hashes of `uv.lock`, on a Python uv fetches when the
-  machine has none recent enough. `uv run pytest test/test_trace.py` runs
-  one file.
-- **CI** runs them on Python 3.13 and the latest on Linux and on the
-  latest on macOS, with ruff, mypy, shellcheck and a small image build.
-- **The smoke test** (`test/smoke/run.sh`) is run by hand on the host
-  against a real Docker daemon. It starts open, filtered and socket-proxy
-  sessions in a throwaway project and checks the sandbox from the inside.
-  The scripts that run inside a session are in `test/smoke/inside`, and
-  the checks of what a session left on the host in `test/smoke/checks`.
-  Run it after changing the launcher, the Dockerfile parts or the sidecar
-  configuration.
+  for the checks. `make` runs them through [uv](https://docs.astral.sh/uv/)
+  at the versions and hashes in `uv.lock`. `uv run pytest test/test_trace.py`
+  runs one file.
+- **CI** runs the tests on Python 3.13 and the latest on Linux, the
+  latest on macOS, and 3.13 with GNU readline, plus ruff, mypy,
+  shellcheck and a small image build.
+- **The smoke test** (`test/smoke/run.sh`) runs by hand on the host. It
+  starts open, filtered and socket-proxy sessions in a throwaway project
+  and checks the sandbox from the inside (`test/smoke/inside`) and what
+  it left on the host (`test/smoke/checks`). Run it after changing the
+  launcher, the Dockerfile parts or the sidecar configuration.
