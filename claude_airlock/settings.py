@@ -31,10 +31,22 @@ CONTAINER_STATE = f"{CONTAINER_HOME}/.local/state/claude"
 EGRESS_PORT = 3128
 # What Claude follows or runs of ~/.claude, on the host as in a session:
 # its settings and its instructions, single files then whole directories.
-# A session is given them read-only (home.py) and the check of tamper.py
+# With them the prompts Claude Code runs by itself: the task list of /loop
+# when a project has none (loop.md), and the scheduled ones its daemon
+# runs, with the workers it starts (daemon.json). Its output styles, which
+# are its instructions too, the workflows and routines it runs, and the
+# mods it loads as plugins and reloads as they change (dev-mods). A
+# session is given them read-only (home.py) and the check of tamper.py
 # watches them, here so that the two cannot come apart.
-CONFIG_FILES = ("settings.json", "CLAUDE.md")
-CONFIG_TREES = ("hooks", "commands", "skills", "agents", "rules")
+CONFIG_FILES = ("settings.json", "CLAUDE.md", "loop.md", "daemon.json")
+# Of those trees, the ones a project has too, under the same names in its
+# .claude, which the check watches there as well (PROJECT_TREES of
+# fingerprint.py): all of them but the mods, which are of ~/.claude alone
+CLAUDE_TREES = (
+    *("hooks", "commands", "skills", "agents", "rules"),
+    *("output-styles", "workflows", "routines"),
+)
+CONFIG_TREES = (*CLAUDE_TREES, "dev-mods")
 
 SETTING_PREFIX = "CLAUDE_AIRLOCK_"
 # What a value of the config file ends with when a comment was written

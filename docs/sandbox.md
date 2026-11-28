@@ -46,7 +46,10 @@ What a session is given and what it is kept from.
   sessions, not yours. Only parts of your own `~/.claude` are mounted
   into it: the configuration listed below, `plugins` and `projects` (the
   transcripts). The rest (Claude Code's host sessions, jobs, logs) stays
-  on the host.
+  on the host. Where a session left a link in that directory in the
+  place of something mounted there, or a file of another kind, it is
+  removed and made anew before the mounts, and the launch says so: a
+  mount over a link would go where the link leads.
 - The login is shared all the same. The launcher carries it between the
   host and the sandbox while a session runs, so a session starts logged
   in. On macOS, where Claude Code keeps the login in the Keychain, the
@@ -89,7 +92,11 @@ What a session is given and what it is kept from.
 - **Claude's configuration.** `settings.json`, `hooks`, `CLAUDE.md`,
   `commands`, `skills`, `agents` and `rules` of `~/.claude` are
   read-only: they run commands on the host or are followed by every
-  later session. `CLAUDE_AIRLOCK_RW_CONFIG=1` makes them writable.
+  later session. So are `output-styles`, `workflows` and `routines`, the
+  prompts Claude Code runs by itself (`loop.md`, and the scheduled ones
+  of `daemon.json`, with the workers its daemon starts) and the mods it
+  loads as plugins (`dev-mods`). `CLAUDE_AIRLOCK_RW_CONFIG=1` makes them
+  writable.
 - **What you name.** `CLAUDE_AIRLOCK_PROTECT` makes a path read-only in
   whatever mounts it. The directories between the mount and the path
   cannot be renamed or removed in a session, though their content can
@@ -135,8 +142,11 @@ What a session is given and what it is kept from.
   or when it cannot list `~/.claude/projects`. A session can make that
   directory unlistable, so the next one would start with none covered.
   Make it yours to list again (`chmod u+rwx`) to have it back.
-- **The shell snapshots of other sessions.** `~/.claude/shell-snapshots`
-  and `session-env` are each session's own.
+- **What Claude Code keeps of other sessions.** `~/.claude/shell-snapshots`,
+  `session-env`, `sessions` (the sessions that run, each with the token
+  another reaches it by) and `teams` (the mailboxes of the agents of a
+  team, which a team of another project would share by its name) are
+  each session's own, empty and gone with it.
 - **What Claude Code keeps in `~/.local/state/claude`.** A session has
   its own directory there, empty and gone with it. The host's is shared
   by every project, and nothing in it is a session's to read.
@@ -324,9 +334,11 @@ rather than locked: the launcher warns when a session changed one.
   `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`).
   `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, with the files they
   have Claude read (`@docs/style.md`). The prompts Claude Code runs by
-  itself (`.claude/scheduled_tasks.json`, `.claude/loop.md`). And the
-  `hooks`, `commands`, `skills`, `agents`, `rules`, `output-styles`,
-  `workflows` and `routines` of `.claude`.
+  itself (`.claude/scheduled_tasks.json`, `.claude/loop.md`), and the
+  commands the preview of Claude's desktop app starts the project with
+  (`.claude/launch.json`). And the `hooks`, `commands`, `skills`,
+  `agents`, `rules`, `output-styles`, `workflows` and `routines` of
+  `.claude`.
 - In `~/.claude`: the plugins, and what `CLAUDE_AIRLOCK_RW_CONFIG=1` made
   writable.
 - Your own git config, `~/.gitconfig` and `~/.config/git/config`, with
@@ -368,12 +380,23 @@ Listed apart too, to read before the next session here:
   you tell it something to keep, and every later session is given it as
   your own notes. Something a session read could have it leave
   instructions there for the next ones.
-- The MCP servers in the config the sandboxed sessions share (the
-  `.claude.json` of their `~/.claude`), both those for every project and
-  those for each one. A server is a command: one a session added there is
-  started by the next session of another project too, in that project's
-  sandbox. Only the servers are compared, every session rewrites the rest
-  of that file.
+- What the agents remember for every project, in the `agent-memory` of
+  the `~/.claude` the sandboxed sessions share. The same as above, for
+  the sessions of every project: said as a change since the session
+  started, as another sandboxed session running meanwhile writes there
+  too.
+- What steers the sessions in the config the sandboxed sessions share
+  (the `.claude.json` of their `~/.claude`): the MCP servers, both those
+  for every project and those for each one, the environment Claude Code
+  gives itself (`env`, by the names of the variables that changed),
+  whether Remote Control starts with a session
+  (`remoteControlAtStartup`), and the API keys it takes without asking
+  (`customApiKeyResponses`, `primaryApiKey`). A server is a command, and
+  the environment can name another (`BASH_ENV`) or send all that Claude
+  Code says elsewhere (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY`): what a
+  session left there steers the next session of another project too, in
+  that project's sandbox. Only these are compared, every session
+  rewrites the rest of that file.
 - A directory of `~/.claude/projects` that is not the project's own and
   was not there when the session started. A session is kept out of the
   other projects' directories that exist, but can make one for a project
@@ -408,12 +431,18 @@ The check is bounded, as a session can write any number of files of any
 size. It watches at most 5000 files of each watched directory, 1000 of
 what Claude remembers of a project, 5000 build files, the submodules of
 1000 git directories, 200 working trees of each, 100 files a git config
-includes and as many a `CLAUDE.md` has Claude read. It reads at most
-1 GB for what git and Claude follow, and as much again for the build
-files. Beyond that:
+includes and as many a `CLAUDE.md` has Claude read. Those counts
+multiply, a session can give each submodule working trees with hooks, so
+of the git directories and the watched directories together it looks at
+no more than 20 000 files and directories, and runs git no more than
+1000 times to list a config, for what git and Claude follow and again
+for the build files. A directory reached by several paths is listed
+once, and git lists a config once. It reads at most 1 GB for what git and
+Claude follow, and as much again for the build files. Beyond that:
 
 - A git config over 1 MB, or one git lists as more than 4 MB, is compared
-  by its content as a file.
+  by its content as a file, and so is one past the runs of git, without
+  the files it includes.
 - The plugins, thousands of files as they come, are not read: up to
   100 000 of them are compared by when they changed.
 - What is past a count shows as `the rest`, unwatched, when a session
@@ -514,8 +543,11 @@ you use the sandbox. The narrower ones:
   not there.
 - The sandboxed sessions of every project share one `.claude.json`. An
   MCP server a session adds there is started by the next session of
-  another project. The launcher says so when the session ends, it does
-  not prevent it.
+  another project, which also starts with the environment a session put
+  there, with Remote Control if a session turned it on, and with an API
+  key a session approved. The same goes for what the agents remember for
+  every project. The launcher says so when the session ends, it does not
+  prevent it.
 - The filter goes by the name a connection asks the proxy for, and does
   not look into what is then sent over it. A name on the list that is
   served by a network of many sites (npm, PyPI and GitHub's files are)

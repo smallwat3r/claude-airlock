@@ -26,7 +26,7 @@ from .fingerprint import (
     project_names,
 )
 from .history import own_names
-from .home import CONFIG
+from .home import CONFIG, SHARED_AGENT_MEMORY
 from .tampered import (
     planted_projects,
     report_build_changes,
@@ -186,14 +186,17 @@ class PendingCheck:
         """Take the check of a session about to start and keep it, once
         the checks earlier sessions left have run. Written whole: a
         launcher that starts meanwhile reads the checks that are there,
-        and drops one it cannot read."""
+        and drops one it cannot read. What is remembered is of the
+        project, and of its agents, in it and for every project in the
+        ~/.claude of the sandboxed sessions (see _report_memory)."""
         file = Path(host.pending_checks_dir, session + ".json")
         report_unchecked_sessions(file.parent)
         shared_config = os.path.join(host.sandbox_claude_dir, CONFIG)
+        shared_memory = os.path.join(host.sandbox_claude_dir, SHARED_AGENT_MEMORY)
         check = HostCheck.take(
             watched,
             host.claude_dir,
-            memory_dirs(host) + agent_memory_dirs(watched),
+            [*memory_dirs(host), *agent_memory_dirs(watched), shared_memory],
             shared_config,
             sorted(own_names(host)),
             home_git_configs(host),

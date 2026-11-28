@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 
 from ..docker import Tmpfs, env_arg, mount_arg
 from ..errors import Fatal
 from ..files import json_object, private_dir, write_whole
+from ..notice import warn
 from ..settings import (
     CONFIG_FILES,
     CONFIG_TREES,
@@ -48,30 +50,46 @@ from .history import PER_PROJECT_DIRS, PROMPT_HISTORY
 from .login import LOGIN
 
 CONFIG = ".claude.json"
-# What the config seeded from the host's leaves out, see _seed_config
-SEED_LEFT_OUT = ("projects", "mcpServers")
+# What the agents remember for every project (their memory of the user's
+# scope), in the base, which the sandboxed sessions share as they share
+# the config
+SHARED_AGENT_MEMORY = "agent-memory"
+# What the config seeded from the host's leaves out, see _seed_config: what
+# it holds of each project, the paths of each repository of GitHub it was
+# run in, and the servers set up for every project
+SEED_LEFT_OUT = ("projects", "githubRepoPaths", "mcpServers")
 # What Claude Code keeps in ~/.claude for one session and reads back into
 # its shell: a snapshot of the shell's setup, and what its hooks export. A
 # session is given its own of each, empty, see session_state.
 SESSION_STATE = ("shell-snapshots", "session-env")
+# Where Claude Code keeps a record of each of its sessions that runs, with
+# the token another reaches it by, and the mailboxes of the agents of a
+# team, each team by its name ("default" when it has none). Containers
+# have the same process numbers, under gVisor the very same: shared, the
+# sessions would write over each other's records and read each other's
+# tokens, and a session of one project would write to the agents of
+# another's. The agents of a team are all in the container of its
+# session, nothing in either outlives that, so a session is given its
+# own of each, empty, see session_state.
+LIVE_SESSIONS = ("sessions", "teams")
 # What a session cannot change of ~/.claude: all that the check of
 # tamper.py watches there, the two are one list in settings.py
 PROTECTED_CONFIG = (*CONFIG_FILES, *CONFIG_TREES)
 # The directories of the host's ~/.claude that a session can write
 WRITABLE_TREES = ("plugins", "projects")
-# The names of a session's ~/.claude that the launcher has its own way
-# with: a mount, a tmpfs, or a file it keeps in the base
-MANAGED = frozenset(
-    (
-        *PROTECTED_CONFIG,
-        *WRITABLE_TREES,
-        *SESSION_STATE,
-        *PER_PROJECT_DIRS,
-        PROMPT_HISTORY,
-        CONFIG,
-        LOGIN,
-    )
+# What a mount or a tmpfs goes over in the base, the directories and the
+# files, see _put_right
+MOUNTED_TREES = (
+    *CONFIG_TREES,
+    *WRITABLE_TREES,
+    *SESSION_STATE,
+    *LIVE_SESSIONS,
+    *PER_PROJECT_DIRS,
 )
+MOUNTED_FILES = (*CONFIG_FILES, PROMPT_HISTORY)
+# The names of a session's ~/.claude that the launcher has its own way
+# with: those, and the files it keeps in the base
+MANAGED = frozenset((*MOUNTED_TREES, *MOUNTED_FILES, CONFIG, LOGIN))
 
 
 def _read_config(path: Path, left_out: tuple[str, ...] = ()) -> str | None:
@@ -102,8 +120,10 @@ def _seed_config(host: Host) -> None:
     the trust given to each project. That file is left where it is, nothing
     reads it any more. Otherwise from the host's global config. Not what
     that holds of each project (its path, its settings and the servers set
-    up for it alone): a session has no use for those of another project,
-    see history.py. Nor the servers set up for every project: each comes
+    up for it alone), nor where each repository of GitHub was checked out
+    (githubRepoPaths), which names every project of the host it was run
+    in: a session has no use for those of another project, see
+    history.py. Nor the servers set up for every project: each comes
     with what it is started with, a token as often as not, which every
     session could then read, and with a command that the image need not
     have. One wanted in here is added in here (claude mcp add). The config
@@ -147,22 +167,61 @@ def _make_missing(
         write_whole(path, "{}\n" if name.endswith(".json") else "", replace=False)
 
 
+def _put_right(base: str) -> None:
+    """Remove what is in the base where a mount goes and is not what it
+    goes over, a directory or a plain file (see MOUNTED_TREES and
+    MOUNTED_FILES), for _make_missing to make it anew. The base is every
+    sandboxed session's to write. A link there would have the mount land
+    where it leads, settings.json as a link into plugins for one: the
+    host's, read-only, would go under the plugins mounted after it, and
+    every later session of every project would read what a session wrote
+    in its place. Anything else would leave docker nothing to mount over.
+    Said when it is done, by the launcher that does it: what another one
+    removed first is left to it."""
+    for names, kind in ((MOUNTED_TREES, stat.S_ISDIR), (MOUNTED_FILES, stat.S_ISREG)):
+        for name in names:
+            path = os.path.join(base, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue
+            if kind(mode):
+                continue
+            try:
+                if stat.S_ISDIR(mode):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as problem:
+                raise Fatal(
+                    f"{path} is not what Claude Code keeps there, and cannot be"
+                    f" removed ({problem.strerror}): remove it for a session to"
+                    " start"
+                ) from None
+            what = "a link" if stat.S_ISLNK(mode) else "of another kind"
+            warn(
+                f"{path} was {what}, where Claude Code keeps its {name}, a session"
+                " may have left it: it is made anew, empty"
+            )
+
+
 def prepare_home(host: Host) -> None:
     """Make the base, and what the mounts expect to find.
 
-    In the base, what each mount goes over: docker would make a missing
-    one as root, and a directory where a file was meant.
+    In the base, what each mount goes over, in the place of anything
+    else (see _put_right): docker would make a missing one as root, and a
+    directory where a file was meant.
 
     In the host's ~/.claude, what is mounted from it. All of it, so that
     there is something to mount for each: what had no mount would be the
     session's to create in the base, and the sandboxed sessions after it
-    would follow what it put there. Empty, they say nothing."""
+    would follow what it put there. Empty, they say nothing. A link there
+    is the user's, and left as it is."""
     base = private_dir(host.sandbox_claude_dir)
-    _make_missing(
-        base,
-        (*CONFIG_TREES, *WRITABLE_TREES, *SESSION_STATE, *PER_PROJECT_DIRS),
-        (*CONFIG_FILES, PROMPT_HISTORY),
-    )
+    _put_right(base)
+    _make_missing(base, MOUNTED_TREES, MOUNTED_FILES)
     os.makedirs(host.claude_dir, exist_ok=True)
     _make_missing(host.claude_dir, (*CONFIG_TREES, *WRITABLE_TREES), CONFIG_FILES)
     _seed_config(host)
@@ -226,6 +285,12 @@ def session_state() -> list[Tmpfs]:
     the config and this is not config. The session's user's alone: a tmpfs
     is root's unless told otherwise.
 
+    The same for the record of the sessions that run and the mailboxes of
+    a team's agents, see LIVE_SESSIONS. What Claude Code finds in the one
+    is how to reach another session, by a socket in its container that no
+    other container has: none it could reach is lost, nor anything
+    --resume or a trace goes by, which is in the transcripts.
+
     The same for what Claude Code keeps outside ~/.claude, in
     ~/.local/state/claude (its locks). The host's is one directory for
     all that runs there, of every project and of whatever else the user
@@ -238,6 +303,10 @@ def session_state() -> list[Tmpfs]:
         *(
             Tmpfs(f"{CONTAINER_CLAUDE}/{name}", 64, runs=True, owner=user, mode="700")
             for name in SESSION_STATE
+        ),
+        *(
+            Tmpfs(f"{CONTAINER_CLAUDE}/{name}", 64, owner=user, mode="700")
+            for name in LIVE_SESSIONS
         ),
         Tmpfs(CONTAINER_STATE, 64, owner=user, mode="700"),
     ]

@@ -236,6 +236,8 @@ class OptionsTest(LauncherTest):
         config = {
             "theme": "dark",
             "projects": {"/home/me/other": {"mcpServers": {}}},
+            # Every repository of the host, and where it is
+            "githubRepoPaths": {"me/other": ["/home/me/other"]},
             # With what they are started with, a token as often as not
             "mcpServers": {"tracker": {"command": "x", "env": {"TOKEN": "secret"}}},
         }
@@ -278,15 +280,19 @@ class ScratchTest(LauncherTest):
             ".config": "64m",
             ".claude/shell-snapshots": "64m",
             ".claude/session-env": "64m",
+            ".claude/sessions": "64m",
+            ".claude/teams": "64m",
             ".local/state/claude": "64m",
         }
 
     def test_it_takes_no_more_than_half_of_a_small_memory_limit(self):
         sizes = self.sizes(CLAUDE_AIRLOCK_MEMORY="2g", CLAUDE_AIRLOCK_CACHE="0")
-        assert len(sizes) == 6
+        assert len(sizes) == 8
         assert ".cache" in sizes
         # What Claude Code keeps for the session is of them
         assert ".claude/session-env" in sizes
+        assert ".claude/sessions" in sizes
+        assert ".claude/teams" in sizes
         assert ".local/state/claude" in sizes
         total = sum(int(size.rstrip("m")) for size in sizes.values())
         assert total <= 1024

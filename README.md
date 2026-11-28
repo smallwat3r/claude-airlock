@@ -266,8 +266,9 @@ it to:
 - **Secrets outside a shadowed file** (hard-coded, or in git history) are
   readable.
 
-The narrower limits, on plugins, MCP servers, the history of other
-projects and what the egress filter cannot tell apart, are in
+The narrower limits, on plugins, MCP servers and the rest of what the
+sandboxed sessions share, the history of other projects and what the
+egress filter cannot tell apart, are in
 [docs/sandbox.md](docs/sandbox.md#known-limits).
 
 ## Reviewing a session

@@ -5,7 +5,8 @@ any depth, is a session's to make, and the check of what it left behind
 (see tamper.py) must end.
 
 What a bound leaves out is never left unsaid. A look that was cut says so
-in what it gives back (see Bounded), for whoever asked to pass on: into a
+in what it gives back (see Bounded), or in the Look of all the looks of a
+fingerprint (see Look.into), for whoever asked to pass on: into a
 fingerprint, where it shows as a change when a session made it so."""
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from itertools import islice
 from operator import attrgetter
 from typing import NamedTuple
 
-from ..files import is_under, open_plain
+from ..files import GONE, is_under, open_plain
 
 # No more of a file than this is read. Which files are hashed is partly up
 # to the session, and one could be made as large as the disk.
@@ -33,6 +34,17 @@ MOST_TREE_FILES = 5000
 MOST_STAMPED_FILES = 100_000
 # Nor the submodules of more than this many git directories
 MOST_MODULES = 1000
+# No more than this is looked at for one fingerprint, of all of its trees
+# and git directories together: the files found, the directories looked
+# into for them and the git directories whose config and hooks are read.
+# Each of those has a bound of its own, and the bounds multiply: a session
+# can make a thousand submodules with two hundred working trees each, all
+# with hooks, for the check to list for days. See Look.
+MOST_WATCHED = 20_000
+# Nor is git run more than this many times for one fingerprint, to list a
+# config: each run is a process, and a session can have every git
+# directory it makes include a hundred configs
+MOST_GIT_RUNS = 1000
 # What a fingerprint has in the place of a hash for what it does not
 # watch, by a name that says what that is
 UNWATCHED = "unwatched"
@@ -90,6 +102,88 @@ class Bounded:
         for directory in self.closed:
             fingerprint[closed_entry(directory)] = UNWATCHED
         return self.found
+
+
+class _Budget:
+    """How many more of one kind a fingerprint may take, none for no
+    bound, and whether it refused one: what is past the bound is then
+    said, see Look.into."""
+
+    def __init__(self, most: int | None) -> None:
+        self.most = most
+        self._left = most
+        self.refused = False
+
+    @property
+    def spent(self) -> bool:
+        """Whether nothing more may be taken."""
+        return self._left is not None and self._left <= 0
+
+    def any_left(self) -> bool:
+        """Whether more may be taken, without taking any: when not, it is
+        refused as take refuses it."""
+        if self.spent:
+            self.refused = True
+        return not self.spent
+
+    def take(self) -> bool:
+        """Whether one more may be taken, which then it is."""
+        if not self.any_left():
+            return False
+        if self._left is not None:
+            self._left -= 1
+        return True
+
+
+class Look:
+    """What one fingerprint may still look at, and what it looked at
+    already: no more than most of what is watched (see MOST_WATCHED) and
+    runs of git (see MOST_GIT_RUNS), none for no such bound, and what is
+    past either is said at the end, see into. The directories listed, by
+    where each is, so that one reached by several paths, the hooks of
+    every working tree of a repository through a link say, is listed
+    once. And what git said of each config, by its path, so that one is
+    listed once however often it is asked about, but for one that says
+    too much to be kept (see git_listing). Taken anew for each
+    fingerprint, in the same order at the start and at the end of a
+    session: the same are past a bound both times, unless a session
+    changed what comes before them."""
+
+    def __init__(self, most: int | None = None, runs: int | None = None) -> None:
+        self._watched = _Budget(most)
+        self._runs = _Budget(runs)
+        self.listed: set[str] = set()
+        self.said: dict[str, bytes | None] = {}
+
+    @classmethod
+    def of_a_fingerprint(cls) -> Look:
+        return cls(MOST_WATCHED, MOST_GIT_RUNS)
+
+    def take(self) -> bool:
+        """Whether one more may be looked at, which then it is."""
+        return self._watched.take()
+
+    def any_left(self) -> bool:
+        """Whether more may be looked at, without taking any, see
+        _Budget.any_left."""
+        return self._watched.any_left()
+
+    def run(self) -> bool:
+        """Whether git may be run once more, which then it is."""
+        return self._runs.take()
+
+    def into(self, fingerprint: dict[str, str]) -> None:
+        """Say in a fingerprint, as unwatched, what is past the bounds:
+        one entry for what was not looked at, however many trees and git
+        directories that cut, and one for the configs git was not run
+        for, whose includes and the hooks they name are not watched. Each
+        once the look refused one of its kind."""
+        if self._watched.refused:
+            past = f"more than {self._watched.most} files and git directories"
+            fingerprint[past + LEFT_OUT] = UNWATCHED
+        if self._runs.refused:
+            past = f"more than {self._runs.most} git configs, what they include"
+            fingerprint[past + LEFT_OUT] = UNWATCHED
 
 
 def sha256_hex(data: bytes) -> str:
@@ -175,7 +269,10 @@ def _leads_within(link: str, within: Sequence[str]) -> str:
 
 
 def tree_files(
-    root: str, most: int = MOST_TREE_FILES, within: Sequence[str] = ()
+    root: str,
+    most: int = MOST_TREE_FILES,
+    within: Sequence[str] = (),
+    look: Look | None = None,
 ) -> Bounded:
     """The files under a directory, no more than most of them: of a tree
     with more the rest is said to be left out, see Bounded. A link to a
@@ -185,20 +282,24 @@ def tree_files(
     what a link that was there leads to in the project it can change
     with the link as it was (hooks or skills kept in a repository of
     dotfiles). Each directory once, by where it is, however many links
-    lead to it. In the order of their names, the files of a directory
-    ahead of what is below it: the same ones at the start and the end of
-    a session, where there are more than are watched. Without recursion,
-    as module_git_dirs and for the same reason. No more directories are
-    looked into than files are watched, and one that holds more than
-    that is not listed whole: both leave files unseen that are no part
-    of the count, a session can make any number of directories for one
-    file to be lost among, so both have the rest said to be left out as
-    well."""
+    lead to it, in this tree and in the others of the same look. In the
+    order of their names, the files of a directory ahead of what is below
+    it: the same ones at the start and the end of a session, where there
+    are more than are watched. Without recursion, as module_git_dirs and
+    for the same reason. No more directories are looked into than files
+    are watched, and one that holds more than that is not listed whole:
+    both leave files unseen that are no part of the count, a session can
+    make any number of directories for one file to be lost among, so
+    both have the rest said to be left out as well. And each file and
+    directory is one of what the look may still take, past which the
+    rest is said by the look, see Look.into."""
+    look = look or Look()
     roots = [os.path.realpath(directory) for directory in within]
     found: list[str] = []
     closed: list[str] = []
-    seen: set[str] = set()
     if os.path.islink(root):
+        if not look.take():
+            return Bounded(found)
         found.append(root)
         if not _leads_within(root, roots):
             return Bounded(found)
@@ -209,27 +310,45 @@ def tree_files(
         looked += 1
         directory = pending.pop()
         real = os.path.realpath(directory)
-        if real in seen:
+        if real in look.listed:
             continue
-        seen.add(real)
+        if not look.take():
+            return Bounded(found[:most], closed=tuple(closed))
+        look.listed.add(real)
         listing = listed(directory, most)
         cut |= listing.more
         if listing.closed:
             closed.append(directory)
-        below = []
-        for entry in listing.entries:
-            if entry.is_dir(follow_symlinks=False):
-                below.append(entry.path)
-                continue
-            found.append(entry.path)
-            if entry.is_symlink() and _leads_within(entry.path, roots):
-                below.append(entry.path)
+        below = _entries_below(listing, roots, look, found)
+        if below is None:
+            return Bounded(found[:most], closed=tuple(closed))
         # The first by its name is the next looked into
         pending += reversed(below)
     if cut or pending or len(found) > most:
         rest = f"{root}: more than {most} files, the rest"
         return Bounded(found[:most], rest, tuple(closed))
     return Bounded(found, closed=tuple(closed))
+
+
+def _entries_below(
+    listing: Listing, roots: Sequence[str], look: Look, found: list[str]
+) -> list[str] | None:
+    """What of the listing of a directory of tree_files is looked into
+    next, in the order of the names: the directories in it, and the links
+    that lead into one of the roots. Its files and links are added to
+    found, each one of what the look may still take. None once the look
+    takes no more."""
+    below = []
+    for entry in listing.entries:
+        if entry.is_dir(follow_symlinks=False):
+            below.append(entry.path)
+            continue
+        if not look.take():
+            return None
+        found.append(entry.path)
+        if entry.is_symlink() and _leads_within(entry.path, roots):
+            below.append(entry.path)
+    return below
 
 
 class Listing(NamedTuple):
@@ -252,20 +371,21 @@ def listed(directory: str, most: int) -> Listing:
     try:
         with os.scandir(directory) as entries:
             taken = list(islice(entries, most + 1))
-    except (FileNotFoundError, NotADirectoryError):
-        return Listing([])
-    except OSError:
-        return Listing([], closed=True)
+    except OSError as problem:
+        return Listing([], closed=problem.errno not in GONE)
     return Listing(sorted(taken, key=attrgetter("name")), len(taken) > most)
 
 
-def module_git_dirs(directory: str) -> Bounded:
+def module_git_dirs(directory: str, look: Look | None = None) -> Bounded:
     """The git directories of the submodules kept under a directory, and of
     theirs, no more than MOST_MODULES of them and of the directories
     looked into for them: the rest is said to be left out, see Bounded.
-    A submodule's name can hold slashes, so they sit at any
-    depth. Without recursion: a session can nest directories deeper than
-    Python calls, and the check must not be made to fail."""
+    Each directory looked into is one of what the look may still take,
+    past which the rest is said by the look, see Look.into. A
+    submodule's name can hold slashes, so they sit at any depth. Without
+    recursion: a session can nest directories deeper than Python calls,
+    and the check must not be made to fail."""
+    look = look or Look()
     found: list[str] = []
     closed: list[str] = []
     pending = [directory]
@@ -273,6 +393,8 @@ def module_git_dirs(directory: str) -> Bounded:
     cut = False
     while pending and looked <= MOST_MODULES:
         looked += 1
+        if not look.take():
+            return Bounded(found[:MOST_MODULES], closed=tuple(closed))
         looked_into = pending.pop()
         listing = listed(looked_into, MOST_MODULES)
         cut |= listing.more

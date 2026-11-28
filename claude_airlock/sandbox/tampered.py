@@ -13,16 +13,27 @@ from ..settings import CHECKOUT_DIR, NAME
 from .bounded import left_out
 from .fingerprint import (
     CONFIG_WATCHED_TREES,
+    ENVIRONMENT_NAMED,
+    ENVIRONMENT_REST,
     MOST_PROJECTS,
     PROJECTS,
+    SHARED_STEERING,
     WATCHED_TREE_DEPTH,
     is_launcher_file,
     project_names,
+    shared_part,
 )
 from .history import is_own
+from .home import SHARED_AGENT_MEMORY
 
 # The changed ones that are named, the others are counted
 MOST_NAMED = 20
+
+
+def _whose(unchecked: str) -> str:
+    """The session a report is of: this one, or by its name an earlier
+    one that ended without its check (unchecked)."""
+    return f"the session {unchecked}" if unchecked else "this session"
 
 
 def differing(before: dict[str, str], after: dict[str, str]) -> list[str]:
@@ -49,7 +60,7 @@ def report_build_changes(
     """Name the files of build_fingerprint that differ, the first
     MOST_NAMED of them. unchecked as for report_tampering."""
     differ = differing(before, after)
-    whose = f"the session {unchecked} started" if unchecked else "this session started"
+    whose = f"{_whose(unchecked)} started"
     own = [path for path in differ if is_launcher_file(path)]
     if own:
         warn(
@@ -110,36 +121,86 @@ def _named_changes(changed: list[str], claude_dir: str) -> list[str]:
     ]
 
 
-def _report_memory(changed: list[str], unchecked: str = "") -> None:
-    """Name the changed files of what Claude remembers of the project.
-    Said apart from the rest: a session writes there in the ordinary way
-    of things, when it is told something to keep. But what is there is
-    given to every later session as the user's own notes, so what a
-    session read can have it leave instructions for the next ones."""
+def _report_memory(changed: list[str], heading: str) -> None:
+    """Name the changed files of a memory under the heading given, see
+    _report_remembered."""
     if not changed:
         return
-    whose = f"the session {unchecked}" if unchecked else "this session"
     warn(
-        f"{whose} changed what Claude remembers of this project,"
-        " which every later session here is told:",
+        heading,
         *_first_named(changed),
         "Read them, a later session follows what they say.",
     )
 
 
-def _report_servers(config: str, unchecked: str = "") -> None:
-    """Say that the servers of the config the sandboxed sessions share
-    have changed. Said apart from the rest: nothing of it runs on the
-    host, but a server is a command, and one a session of this project
-    added there for every project, or for another one, is started by
-    the next session of that project, in its sandbox and with its
-    files."""
-    whose = f"the session {unchecked}" if unchecked else "this session"
+def _report_remembered(
+    remembered: list[str], shared_memory: str, unchecked: str = ""
+) -> None:
+    """Name the changed files of what Claude remembers of the project,
+    and apart, those of what the agents remember for every project in
+    the ~/.claude of the sandboxed sessions (shared_memory). Said apart
+    from the rest: a session writes there in the ordinary way of things,
+    when it is told something to keep. But what is there is given to
+    every later session as the user's own notes, so what a session read
+    can have it leave instructions for the next ones. What the sandboxed
+    sessions share is written by every one of them, of another project
+    too, that ran meanwhile."""
+    whose = _whose(unchecked)
+    shared = [
+        path for path in remembered if shared_memory and is_within(path, shared_memory)
+    ]
+    _report_memory(
+        [path for path in remembered if path not in shared],
+        f"{whose} changed what Claude remembers of this project,"
+        " which every later session here is told:",
+    )
+    _report_memory(
+        shared,
+        f"since {whose} started, by its doing or that of another sandboxed"
+        " session, what the agents remember for every project has changed,"
+        " which every later sandboxed session is told:",
+    )
+
+
+def _shared_changes(differ: list[str], config: str) -> list[str]:
+    """What steers the sandboxed sessions that changed in the config they
+    share, by the entries of a fingerprint that differ (see
+    shared_config_hashes): the servers, by the config's own, then the
+    environment by the names of its variables, the first MOST_NAMED of
+    them, then the rest of SHARED_STEERING."""
+    parts = {part for path in differ if (part := shared_part(config, path)) is not None}
+    said = ["the MCP servers"] if "" in parts else []
+    names = sorted(
+        part.removeprefix(ENVIRONMENT_NAMED)
+        for part in parts
+        if part.startswith(ENVIRONMENT_NAMED)
+    )
+    variables = names[:MOST_NAMED]
+    if len(names) > MOST_NAMED:
+        variables.append(f"{len(names) - MOST_NAMED} more")
+    if ENVIRONMENT_REST in parts:
+        variables.append("the rest of it")
+    if variables:
+        said.append(f"the environment ({', '.join(variables)})")
+    return said + [part for part, _ in SHARED_STEERING if part in parts]
+
+
+def _report_shared_config(config: str, changed: list[str], unchecked: str = "") -> None:
+    """Say what changed of what the config the sandboxed sessions share
+    has them do, see _shared_changes. Said apart from the rest: nothing
+    of it runs on the host, but every later sandboxed session of every
+    project starts with it, in its sandbox and with its files. A server
+    is a command. The environment can name another, for every shell to
+    run first (BASH_ENV), or send all that Claude Code says to another
+    address (ANTHROPIC_BASE_URL, a proxy). Remote Control has the
+    account the session is logged in with drive it from elsewhere, and
+    an API key approved there is taken without a question."""
     warn(
-        f"{whose} changed the MCP servers that sandboxed sessions"
-        " start, of other projects too:",
-        f"  {config}",
-        "Look at them (claude mcp list in a session) before the next session.",
+        f"{_whose(unchecked)} changed what sandboxed sessions start with, of other"
+        " projects too, in the config they share:",
+        f"  {config}: {', '.join(changed)}",
+        "Look at it before the next session: the servers with claude mcp list"
+        " in a session, the rest in the file.",
     )
 
 
@@ -152,17 +213,28 @@ def report_tampering(
     shared_config: str = "",
 ) -> None:
     """Name the files that differ, see _named_changes for how, those of
-    the memory directories apart (see _report_memory), and the servers of
-    the sandbox's own config (see _report_servers). unchecked is the
-    name of an earlier session that ended without this check, when the
-    report is the late one for it."""
+    the memory directories apart (see _report_remembered), what the
+    agents remember in the ~/.claude of the sandboxed sessions too, next
+    to the config they share, and what steers them of that config, the
+    sandbox's own (see _report_shared_config). unchecked is the name of
+    an earlier session that ended without this check, when the report is
+    the late one for it."""
     differ = differing(before, after)
     remembered = [path for path in differ if any(is_within(path, d) for d in memory)]
-    _report_memory(remembered, unchecked)
-    # Not for a check saved by a version that did not watch them
-    if shared_config and shared_config in differ and shared_config in before:
-        _report_servers(shared_config, unchecked)
-    others = set(differ).difference(remembered, [shared_config])
+    base = os.path.dirname(shared_config)
+    shared_memory = os.path.join(base, SHARED_AGENT_MEMORY) if shared_config else ""
+    _report_remembered(remembered, shared_memory, unchecked)
+    of_config = [
+        path
+        for path in differ
+        if shared_config and shared_part(shared_config, path) is not None
+    ]
+    # Not for a check saved by a version that did not watch the config
+    if of_config and shared_config in before:
+        _report_shared_config(
+            shared_config, _shared_changes(of_config, shared_config), unchecked
+        )
+    others = set(differ).difference(remembered, of_config)
     changed = _named_changes([path for path in differ if path in others], claude_dir)
     if not changed:
         return
@@ -211,7 +283,7 @@ def report_projects(planted: list[str] | None, unchecked: str = "") -> None:
     session ran, see planted_projects. Said apart from the rest: nothing
     of it is the project's own, and it is not always the session's
     doing, a project first used meanwhile has one made for it."""
-    whose = f"the session {unchecked}" if unchecked else "this session"
+    whose = _whose(unchecked)
     if planted is None:
         warn(
             f"where Claude Code keeps what it remembers of each project, more"

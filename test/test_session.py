@@ -84,6 +84,13 @@ class DefaultSessionTest(LauncherTest):
             assert f"--tmpfs=/home/sandbox/.claude/{name}:{options}" in self.flags
             # What it goes over is there, docker would make it as root
             assert (self.base / name).is_dir()
+        # The sessions that run, by a process number every container has,
+        # each with the token another reaches it by, and the mailboxes of
+        # a team, by a name every session's team can have
+        options = f"size=64m,uid={os.getuid()},gid={os.getgid()},mode=700"
+        for name in ("sessions", "teams"):
+            assert f"--tmpfs=/home/sandbox/.claude/{name}:{options}" in self.flags
+            assert (self.base / name).is_dir()
 
     def test_what_claude_keeps_outside_its_directory_is_the_sessions_own_too(self):
         # The host's is one directory for every project, and for whatever
@@ -557,9 +564,9 @@ class HomeTest(LauncherTest):
             if flag.startswith(f"--volume={claude}/")
         )
         assert from_host == sorted(
-            ("settings.json", "CLAUDE.md", "hooks", "commands", "skills")
-            + ("agents", "rules", "plugins", "projects")
+            (*settings.CONFIG_FILES, *settings.CONFIG_TREES, "plugins", "projects")
         )
+        assert {"settings.json", "CLAUDE.md", "hooks", "skills"} <= set(from_host)
         for name in ("plugins", "projects"):
             assert f"--volume={claude / name}:{self.CLAUDE}/{name}:z" in flags
 
@@ -586,6 +593,50 @@ class HomeTest(LauncherTest):
                 assert source.exists(), source
                 # A file where a file goes, docker would make a directory
                 assert over.is_dir() == source.is_dir(), over
+
+    def test_what_a_session_left_where_a_mount_goes_in_the_base_is_made_anew(self):
+        # A mount over a link would land where it leads: the host's
+        # settings under the plugins mounted after them, and every later
+        # session would read what a session wrote in their place
+        assert self.launch().status == 0
+        settings_json = self.base / "settings.json"
+        settings_json.unlink()
+        settings_json.symlink_to("plugins/x/settings.json")
+        hooks = self.base / "hooks"
+        hooks.rmdir()
+        hooks.write_text("echo planted\n")
+        (self.base / "sessions").rmdir()
+        (self.base / "sessions").symlink_to(self.home)
+        (self.base / "history.jsonl").unlink()
+        (self.base / "history.jsonl").mkdir()
+        (self.base / "history.jsonl" / "kept").touch()
+        (self.work / "log").unlink()
+        result = self.launch()
+        assert result.status == 0, result.stderr
+        for name in ("settings.json", "history.jsonl"):
+            assert stat.S_ISREG((self.base / name).lstat().st_mode), name
+        for name in ("hooks", "sessions"):
+            assert stat.S_ISDIR((self.base / name).lstat().st_mode), name
+            assert list((self.base / name).iterdir()) == []
+        assert f"{settings_json} was a link, where Claude Code keeps its" in (
+            result.stderr
+        )
+        assert f"{hooks} was of another kind" in result.stderr
+        # What the link led to is left as it was
+        assert (self.home / ".claude" / "settings.json").read_text() == "{}\n"
+        assert (self.home / "proj").is_dir()
+
+    def test_a_link_of_the_users_own_in_the_hosts_claude_is_theirs(self):
+        # The user's kit of skills kept elsewhere, as it is
+        skills = self.home / ".claude" / "skills"
+        skills.rmdir()
+        kept = self.home / "kit" / "skills"
+        kept.mkdir(parents=True)
+        skills.symlink_to(kept)
+        result = self.launch()
+        assert result.status == 0, result.stderr
+        assert skills.is_symlink()
+        assert "was a link" not in result.stderr
 
     def test_a_file_where_a_directory_of_claude_goes_is_said_in_a_line(self):
         hooks = self.home / ".claude" / "hooks"

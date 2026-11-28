@@ -84,6 +84,15 @@ class SettingsListTest(LauncherTest):
             named = set(NAMED.findall(page.read_text(encoding="utf-8")))
             assert named <= self.variables, page.name
 
+    def test_the_docs_name_all_that_is_read_only_of_claudes_configuration(self):
+        # The one list a session is given read-only and the check
+        # watches, and what the docs say of it
+        page = (ROOT / "docs" / "sandbox.md").read_text(encoding="utf-8")
+        said = page.split("- **Claude's configuration.**", 1)[1].split("\n- ", 1)[0]
+        named = set(re.findall(r"`([^`]+)`", said)) - {"~/.claude"}
+        protected = {*settings.CONFIG_FILES, *settings.CONFIG_TREES}
+        assert named - {"CLAUDE_AIRLOCK_RW_CONFIG=1"} == protected
+
     def test_every_link_between_the_docs_leads_somewhere(self):
         def anchors(page: Path) -> set[str]:
             text = re.sub(
