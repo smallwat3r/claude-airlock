@@ -249,13 +249,20 @@ class PipeTest:
                 piped.close()
 
     def test_an_answer_that_cannot_be_written_is_a_refusal(self, agent: pipe.Agent):
-        # An input given back as claude gave it, nested as deep as could
-        # just be read: claude is not left waiting for an answer
-        deep: list = []
-        for _ in range(100_000):
-            deep = [deep]
-        assert not agent.send({"deep": deep})
-        agent.respond("r1", {"behavior": "allow", "updatedInput": {"x": deep}})
+        # An input given back as claude gave it that cannot be written as
+        # JSON: claude is not left waiting for an answer. One that holds
+        # itself, which no Python writes, and one nested too deep, which
+        # json raises for as deep as the Python it runs on can go: from
+        # 3.14 on that is as deep as the stack it has, so it is raised here
+        held: list = []
+        held.append(held)
+        assert not agent.send({"held": held})
+        too_deep = unittest.mock.Mock(
+            dumps=unittest.mock.Mock(side_effect=RecursionError)
+        )
+        with unittest.mock.patch.object(pipe, "json", too_deep):
+            assert not agent.send({"deep": [[[]]]})
+        agent.respond("r1", {"behavior": "allow", "updatedInput": {"x": held}})
         sent: Any = agent.messages.get(timeout=PATIENCE)
         assert sent["response"]["request_id"] == "r1"
         assert sent["response"]["subtype"] == "error"

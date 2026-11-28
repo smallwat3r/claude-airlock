@@ -390,8 +390,9 @@ class CommandsTest(LauncherTest):
         assert wide - narrow == (HELD_BY_WIDE_BYTE - HELD_BY_BYTE) * 1000
 
     def test_what_is_asked_under_an_id_that_is_none_is_not_answered(self):
-        # No answer could name it: written back it would raise, nested as
-        # deep as could just be read, and the answer would be for nothing
+        # No answer could name it: an id that is no string, nested as deep
+        # as could just be read among them, which json may not write back,
+        # and the answer would be for nothing
         claude = AnsweredClaude()
         chat = a_chat(self.host, claude)
         deep: list = []
