@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..events import LABEL_WIDTH, flat, labelled
-from ..files import is_under
+from ..paths import is_under
 from ..recording.started import (
     ALL_HISTORY,
     DOCKER_FULL,

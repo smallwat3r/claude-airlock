@@ -15,7 +15,7 @@ import unittest.mock
 import pytest
 from harness import LauncherTest
 
-from claude_airlock import background, files
+from claude_airlock import background, files, paths
 
 
 class Pieces(io.BytesIO):
@@ -159,12 +159,12 @@ class FilesTest(LauncherTest):
         inner.mkdir()
         link = self.home / "link"
         link.symlink_to(inner)
-        assert files.leads_under(str(inner / "x"), str(self.project))
-        assert files.leads_under(str(link / "x"), str(self.project))
+        assert paths.leads_under(str(inner / "x"), str(self.project))
+        assert paths.leads_under(str(link / "x"), str(self.project))
         # A directory reached through a link the same
-        assert files.leads_under(str(inner / "x"), str(link))
-        assert not files.leads_under(str(self.project), str(self.project))
-        assert not files.leads_under(str(self.home / "other"), str(self.project))
+        assert paths.leads_under(str(inner / "x"), str(link))
+        assert not paths.leads_under(str(self.project), str(self.project))
+        assert not paths.leads_under(str(self.home / "other"), str(self.project))
 
     def test_the_end_of_a_file_is_read_in_whole_lines(self):
         file = self.work / "lines"

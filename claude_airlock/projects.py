@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 
-from .files import is_within
+from .paths import is_within
 from .settings import CONTAINER_HOME, Host
 
 # The subagents of one session whose transcripts are read
