@@ -225,6 +225,11 @@ reads_proc = pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
 mounts_host_sockets = pytest.mark.skipif(
     sys.platform == "darwin", reason="no socket of the host mounts there"
 )
+# gVisor runs on Linux only, and its sink connects to a Unix socket of
+# SOCK_SEQPACKET, which macOS does not have
+gvisor_socket = pytest.mark.skipif(
+    sys.platform != "linux", reason="no SOCK_SEQPACKET Unix socket"
+)
 
 
 class Terminal:

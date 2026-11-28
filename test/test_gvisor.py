@@ -16,7 +16,7 @@ from unittest import mock
 
 import pytest
 from fakes import gvisor
-from harness import LauncherTest
+from harness import LauncherTest, gvisor_socket
 
 from claude_airlock import settings
 from claude_airlock.recording import gvisor as told
@@ -403,6 +403,7 @@ class FakeRecord:
         self.written.set()
 
 
+@gvisor_socket
 class MonitorTest(LauncherTest):
     def listening(self) -> told.Monitor:
         monitor = told.Monitor.listening(self.host, "claude-proj", session_secrets())
@@ -531,6 +532,7 @@ class SessionMonitoredTest(LauncherTest):
     def monitored(self) -> runtime.Runtime:
         return gvisor(f"--pod-init-config={self.host.pod_init_config}")
 
+    @gvisor_socket
     def test_a_sandbox_that_told_nothing_is_said_once_the_session_is_over(self):
         with (
             mock.patch.object(told, "SOON_OVER", 0),
@@ -546,6 +548,7 @@ class SessionMonitoredTest(LauncherTest):
         assert "did not connect" in said.args[0]
         assert not Path(monitor.path).exists()
 
+    @gvisor_socket
     def test_a_session_whose_record_never_began_is_not_said_to_be_untold(self):
         with (
             mock.patch.object(told, "SOON_OVER", 0),
