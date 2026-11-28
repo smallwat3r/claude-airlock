@@ -293,7 +293,8 @@ class LaunchTest(LauncherTest):
         assert event.details == said.details
         assert event.what == "started"
         assert others.poll() + mine.poll() == []
-        # In the header of a trace by what is made of the events
-        rows, events = noted_events(self.host, 0, time.time())
+        # In the header of a trace by what is made of the events. Up to a
+        # thousandth of a second ahead: rounded, a note can be of the next
+        rows, events = noted_events(self.host, 0, time.time() + 0.001)
         assert rows == []
         assert [found.details for found in events] == [said.details]
