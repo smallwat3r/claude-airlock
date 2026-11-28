@@ -4,6 +4,7 @@ what --trace shows of it."""
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import io
 import json
@@ -35,6 +36,7 @@ from claude_airlock.recording import (
     secrets,
     sidecar,
 )
+from claude_airlock.recording.procwatch import watcher
 from claude_airlock.recording.records import TracedSession
 from claude_airlock.report import follow, net_events, tails, unseen
 
@@ -70,7 +72,7 @@ class WatcherTest:
             # IPv4 inside IPv6, as it goes over the wire
             ("0000000000000000FFFF00000A68A08E", "142.160.104.10"),
         ):
-            assert procwatch.address(encoded) == address
+            assert procwatch.tables.address(encoded) == address
 
     @reads_proc
     def test_a_process_and_the_holder_of_a_connection_are_seen(self):
@@ -82,15 +84,15 @@ class WatcherTest:
                 with socket.create_connection(server.getsockname()) as client:
                     port = client.getsockname()[1]
                     key = (port, "127.0.0.1", server.getsockname()[1])
-                    found, waiting, _ = procwatch.sockets()
+                    found, waiting, _ = procwatch.tables.sockets()
                     # Not one on the session's own loopback, which nothing
                     # asks who made: the one that waits is there
                     assert key not in found
                     inode = waiting[(server.getsockname()[1], "127.0.0.1", 0)]
-                    holders = procwatch.Holders().of({inode}, [os.getpid()])
+                    holders = procwatch.tables.Holders().of({inode}, [os.getpid()])
                     assert holders == {inode: [os.getpid()]}
                 out = io.StringIO()
-                procwatch.Watch(out, aloud=io.StringIO()).look()
+                watcher.Watch(out, aloud=io.StringIO()).look()
                 seen = [json.loads(line) for line in out.getvalue().splitlines()]
                 (slept,) = (line for line in seen if line.get("pid") == sleeper.pid)
                 assert slept["argv"] == ["sleep", "30"]
@@ -104,17 +106,17 @@ class WatcherTest:
 
     def test_the_record_stops_at_its_size_limit(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
-        big = "x" * (procwatch.MOST_BYTES // 4)
+        watch = watcher.Watch(out, aloud=io.StringIO())
+        big = "x" * (procwatch.record.MOST_BYTES // 4)
         for _ in range(6):
             watch.note(note=big)
-        assert len(out.getvalue()) <= procwatch.MOST_BYTES + 100
+        assert len(out.getvalue()) <= procwatch.record.MOST_BYTES + 100
         assert json.loads(out.getvalue().splitlines()[-1])["note"] == "full"
 
     def test_a_record_filled_by_what_is_reserved_says_so_as_its_last_line(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
-        big = "x" * (procwatch.MOST_BYTES // 4)
+        watch = watcher.Watch(out, aloud=io.StringIO())
+        big = "x" * (procwatch.record.MOST_BYTES // 4)
         # Nothing but connections: the part of the processes never fills
         for port in range(6):
             watch.note(reserved=True, port=port, to=big, to_port=443, pids=[7])
@@ -125,7 +127,7 @@ class WatcherTest:
         watch.note(reserved=True, note=procwatch.Note.ALIVE)
         watch.note(pid=2, argv=["late"])
         assert len(out.getvalue().splitlines()) == len(said)
-        assert len(out.getvalue()) <= procwatch.MOST_BYTES
+        assert len(out.getvalue()) <= procwatch.record.MOST_BYTES
 
     def test_a_record_that_could_not_be_written_for_a_while_says_so(self):
         class Full(io.StringIO):
@@ -137,7 +139,7 @@ class WatcherTest:
                 return super().write(line)
 
         out = Full()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
         watch.note(pid=2, ppid=1, exe="/bin/sh", argv=["sh"])
         out.full = True
         # The disk is full for a moment, which the session can see to
@@ -208,18 +210,59 @@ class WatcherTest:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ):
         record = tmp_path / "record.jsonl"
-        assert procwatch._main([str(record), "1000", "1000", "{}"]) == 2
-        assert procwatch.USAGE in capsys.readouterr().err
+        assert watcher.main([str(record), "1000", "1000", "{}"]) == 2
+        assert watcher.USAGE in capsys.readouterr().err
         assert not record.exists()
+
+    def test_the_watcher_runs_from_its_directory_alone(self, tmp_path: Path):
+        # As the sidecar has it: the directory mounted alone, run by a
+        # Python that has nothing of the launcher
+        mounted = tmp_path / "watcher" / "procwatch"
+        shutil.copytree(
+            processes.WATCHER, mounted, ignore=shutil.ignore_patterns("__pycache__")
+        )
+        ran = subprocess.run(
+            [sys.executable, "-I", str(mounted), "record.jsonl"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=60,
+            check=False,
+        )
+        assert (ran.returncode, ran.stderr.strip()) == (2, watcher.USAGE)
+        assert not (tmp_path / "record.jsonl").exists()
+
+    def test_the_watcher_takes_nothing_but_the_standard_library_and_itself(self):
+        for module in Path(processes.WATCHER).glob("*.py"):
+            # Run as its directory, Python looks there first until the
+            # path is set, see __main__.py
+            assert module.stem not in sys.stdlib_module_names, module
+            for node in ast.walk(ast.parse(module.read_text())):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    # Of the package, and no further up
+                    assert node.level == 1, module
+                    continue
+                names = (
+                    [alias.name for alias in node.names]
+                    if isinstance(node, ast.Import)
+                    else [node.module or ""]
+                    if isinstance(node, ast.ImportFrom)
+                    else []
+                )
+                for name in names:
+                    top = name.partition(".")[0]
+                    assert top in sys.stdlib_module_names | {"__future__"}, module
 
     def test_sockets_on_its_own_loopback_leave_room_for_what_others_reach(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
         # As many as fill the record, opened and closed between two looks
         ports = range(20000, 22000)
         line = len(procwatch.stamped(listen=20000, on="127.0.0.1", pids=[]))
         with mock.patch.object(
-            procwatch, "MOST_BYTES", procwatch.RESERVED + 50 * len(ports) * line
+            procwatch.record,
+            "MOST_BYTES",
+            procwatch.record.RESERVED + 50 * len(ports) * line,
         ):
             for _ in range(60):
                 watch._look_at_listeners(
@@ -242,9 +285,9 @@ class WatcherTest:
 
     def test_a_connection_on_its_own_loopback_is_not_noted(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
         local = {(40000, "127.0.0.1", 5432): "1", (40001, "::1", 5432): "2"}
-        for _ in range(procwatch.MOST_TRIES + 1):
+        for _ in range(watcher.MOST_TRIES + 1):
             watch._look_at_connections({**local, (40002, "203.0.113.9", 443): "3"}, [])
         said = [json.loads(line) for line in out.getvalue().splitlines()]
         assert [line["to"] for line in said if "to" in line] == ["203.0.113.9"]
@@ -253,12 +296,12 @@ class WatcherTest:
         long = b"\0".join([b"x" * 5000] * 200) + b"\0"
         kept = procwatch.command_line(long)
         assert kept[-1] == procwatch.CUT
-        assert sum(map(len, kept)) <= procwatch.MOST_COMMAND + 3
+        assert sum(map(len, kept)) <= procwatch.proc.MOST_COMMAND + 3
         # One that fits is left as it is, an empty argument too
         assert procwatch.command_line(b"sh\x00-c\x00\x00") == ["sh", "-c", ""]
         assert procwatch.command_line(b"") == []
         # As many as are kept, and one more
-        most = procwatch.MOST_ARGUMENTS
+        most = procwatch.proc.MOST_ARGUMENTS
         whole = [str(at) for at in range(most)]
         assert procwatch.command_line("\0".join(whole).encode() + b"\0") == whole
         more = "\0".join([*whole, "more"]).encode() + b"\0"
@@ -269,10 +312,10 @@ class WatcherTest:
         deep = "/" + "d" * 4000 + "/x"
         files = {"/proc/812/stat": stat, "/proc/812/cmdline": b"x\0"}
         with (
-            mock.patch.object(procwatch, "read", files.__getitem__),
+            mock.patch.object(procwatch.proc, "read", files.__getitem__),
             mock.patch.object(os, "readlink", return_value=deep),
         ):
-            found = procwatch.process(812)
+            found = procwatch.proc.process(812)
         assert found
         _, parent, program, _ = found
         assert parent == 640
@@ -280,8 +323,8 @@ class WatcherTest:
 
     def test_room_is_kept_for_the_connections_once_the_processes_filled_theirs(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
-        big = "x" * (procwatch.MOST_BYTES // 4)
+        watch = watcher.Watch(out, aloud=io.StringIO())
+        big = "x" * (procwatch.record.MOST_BYTES // 4)
         for _ in range(6):
             watch.note(pid=1, argv=[big])
         watch.note(reserved=True, port=40212, to="203.0.113.9", to_port=443, pids=[7])
@@ -293,21 +336,21 @@ class WatcherTest:
         # Until that room is used up too
         for _ in range(3):
             watch.note(reserved=True, note=big)
-        assert len(out.getvalue()) <= procwatch.MOST_BYTES
+        assert len(out.getvalue()) <= procwatch.record.MOST_BYTES
 
     def test_running_into_the_limit_of_processes_is_noted_when_it_grows(self):
         with tempfile.TemporaryDirectory() as root:
             events = Path(root, "1", "root", "sys", "fs", "cgroup", "pids.events")
             events.parent.mkdir(parents=True)
-            assert procwatch.limit_hits(1, root) is None
+            assert procwatch.cgroup.limit_hits(1, root) is None
             events.write_text("max 3\n")
-            assert procwatch.limit_hits(1, root) == 3
+            assert procwatch.cgroup.limit_hits(1, root) == 3
             events.write_text("nothing of the kind\n")
-            assert procwatch.limit_hits(1, root) is None
+            assert procwatch.cgroup.limit_hits(1, root) is None
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
         for hits in (0, 2, 2, 5, None):
-            with mock.patch.object(procwatch, "limit_hits", return_value=hits):
+            with mock.patch.object(watcher, "limit_hits", return_value=hits):
                 watch._look_at_limits([1, 7])
         said = [json.loads(line) for line in out.getvalue().splitlines()]
         assert [line["hits"] for line in said] == [2, 5]
@@ -315,7 +358,7 @@ class WatcherTest:
 
     def test_looks_that_come_late_are_noted_with_how_late(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
 
         def slow() -> list[dict]:
             lines = map(json.loads, out.getvalue().splitlines())
@@ -323,20 +366,20 @@ class WatcherTest:
 
         # In time twice, then held up by what the session has it read
         now = 1000.0
-        for apart in (0.0, procwatch.INTERVAL, 0.05, 0.5):
+        for apart in (0.0, watcher.INTERVAL, 0.05, 0.5):
             now += apart
             watch._keep_pace(now)
         # Said at once
         assert slow() == [{"looks": 1, "seconds": 0.5, "longest": 0.5}]
         said_at = now
-        for apart in (0.3, procwatch.INTERVAL, 0.9):
+        for apart in (0.3, watcher.INTERVAL, 0.9):
             now += apart
             watch._keep_pace(now)
         assert len(slow()) == 1
         # Then no more often than every so many seconds, with how many
         # came late since, and nothing more once they come in time
-        while now < said_at + 2 * procwatch.SLOW_EVERY:
-            now += procwatch.INTERVAL
+        while now < said_at + 2 * watcher.SLOW_EVERY:
+            now += watcher.INTERVAL
             watch._keep_pace(now)
         assert slow()[1:] == [{"looks": 2, "seconds": 1.2, "longest": 0.9}]
         record = noted(*map(json.loads, out.getvalue().splitlines()))
@@ -347,7 +390,7 @@ class WatcherTest:
 
     @reads_proc
     def test_every_look_is_held_against_the_one_before_it(self):
-        watch = procwatch.Watch(io.StringIO(), aloud=io.StringIO())
+        watch = watcher.Watch(io.StringIO(), aloud=io.StringIO())
         with mock.patch.object(watch, "_keep_pace") as paced:
             before = time.monotonic()
             watch.look()
@@ -368,16 +411,16 @@ class WatcherTest:
         table = tmp_path / "tcp"
         table.write_text("\n".join([heading, *rows, loopback]) + "\n")
         tables = [str(table), str(tmp_path / "none")]
-        found = procwatch.sockets(tables)
-        with mock.patch.object(procwatch, "MOST_SOCKETS", 3):
-            cut = procwatch.sockets(tables)
+        found = procwatch.tables.sockets(tables)
+        with mock.patch.object(procwatch.tables, "MOST_SOCKETS", 3):
+            cut = procwatch.tables.sockets(tables)
         # Not the connection on loopback, kept or not
         assert (len(found.connected), found.passed_over) == (5, False)
         assert (len(cut.connected), cut.passed_over) == (3, True)
         out = io.StringIO()
-        watch = procwatch.Watch(out, aloud=io.StringIO())
+        watch = watcher.Watch(out, aloud=io.StringIO())
         with (
-            mock.patch.object(procwatch, "sockets", lambda: cut),
+            mock.patch.object(watcher, "sockets", lambda: cut),
             mock.patch.object(watch, "_look_at_processes"),
         ):
             watch.look()
@@ -395,11 +438,11 @@ class WatcherTest:
             server.bind(("127.0.0.1", 0))
             server.listen(1)
             port = server.getsockname()[1]
-            connected, waiting, _ = procwatch.sockets()
+            connected, waiting, _ = procwatch.tables.sockets()
             assert (port, "127.0.0.1", 0) in waiting
             assert port not in [key[0] for key in connected]
             out = io.StringIO()
-            watch = procwatch.Watch(out, aloud=io.StringIO())
+            watch = watcher.Watch(out, aloud=io.StringIO())
             watch.look()
             watch.look()
         seen = [json.loads(line) for line in out.getvalue().splitlines()]
@@ -411,11 +454,11 @@ class WatcherTest:
         out: io.StringIO,
         aloud: io.StringIO,
         read_process: Callable[[int], procwatch.ProcessRead | None] = lambda _: None,
-    ) -> procwatch.Watch:
+    ) -> watcher.Watch:
         """A watcher that knows of a shell, of curl started by it, and
         finds curl to hold whatever socket it is asked about. Nothing is
         read of the processes of this machine, but by read_process."""
-        watch = procwatch.Watch(out, read_process, aloud=aloud)
+        watch = watcher.Watch(out, read_process, aloud=aloud)
         watch._processes = {
             640: (("1", "/bin/bash", ["bash"]), 0.0, 0.0),
             812: (("2", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
@@ -529,7 +572,7 @@ class WatcherTest:
     def test_no_more_is_said_aloud_of_connections_than_docker_is_to_keep(self):
         out, aloud = io.StringIO(), io.StringIO()
         watch = self.holding(out, aloud)
-        with mock.patch.object(procwatch, "MOST_ALOUD", 2000):
+        with mock.patch.object(watcher, "MOST_ALOUD", 2000):
             for port in range(40000, 40100):
                 watch._look_at_connections({(port, "203.0.113.9", 443): str(port)}, [])
             # How the session is doing is still said, every so often
@@ -649,6 +692,23 @@ class RecordTest:
         assert (record.processes, record.holders) == ([], {})
         record.take('{"t": 1, "note": "full"}')
         assert record.full
+
+    def test_a_line_whose_numbers_or_processes_cannot_be_taken_is_passed_over(self):
+        record = processes.ProcessRecord()
+        for line in (
+            # A file of secrets held by no process
+            '{"t": 1, "opened": "/home/me/.ssh/id_rsa", "secret": "ssh", "pids": []}',
+            # Numbers no int or float can be
+            '{"t": 1, "limit": "pids", "hits": 1e999}',
+            '{"t": 1, "dropped": 1e999}',
+            '{"t": 1' + "0" * 400 + ', "pid": 2, "ppid": 1, "exe": "", "argv": []}',
+            '{"t": 1, "oom": 1, "gone": [[2, 1e999, "node"]]}',
+        ):
+            record.take(line)
+        assert (record.opened, record.processes, record.ended) == ([], [], [])
+        assert (record.process_limit, record.dropped) == (0, 0)
+        record.take('{"t": 2, "opened": "/a", "secret": "ssh", "pids": [9]}')
+        assert record.opened == [processes.Opened(2.0, "/a", "ssh", 9)]
 
     def test_a_parent_that_names_itself_ends_the_line(self):
         record = noted(ran(1.0, 5, 5, "loop"))
@@ -844,8 +904,8 @@ class HealthWatchTest:
         tmpfs = types.SimpleNamespace(
             f_frsize=block, f_blocks=4 * GIB // block, f_bfree=3 * GIB // block
         )
-        monkeypatch.setattr(procwatch.os, "statvfs", lambda _place: tmpfs)
-        self.watch = procwatch.Watch(self.out, aloud=self.aloud)
+        monkeypatch.setattr(procwatch.cgroup.os, "statvfs", lambda _place: tmpfs)
+        self.watch = watcher.Watch(self.out, aloud=self.aloud)
         self.watch._processes[812] = (
             ("9", "/usr/bin/node", ["node", "build.js"]),
             0,
@@ -856,8 +916,8 @@ class HealthWatchTest:
         self.session.run(812, 900)
         self.pids = [1, 812]
 
-    def reader(self) -> procwatch.Health:
-        return procwatch.Health(
+    def reader(self) -> procwatch.cgroup.Health:
+        return procwatch.cgroup.Health(
             self.watch.say, self.watch.name_of, str(self.session.proc)
         )
 
@@ -928,7 +988,7 @@ class HealthWatchTest:
         self.session.use(memory=15.0)
         self.health.look(self.pids, 103.0)
         assert len(self.said()) == 2
-        self.health.look(self.pids, 102.0 + procwatch.OUT_OF_TURN_EVERY)
+        self.health.look(self.pids, 102.0 + procwatch.cgroup.OUT_OF_TURN_EVERY)
         assert self.said()[-1]["health"]["rose"] == ["memory"]
         assert len(self.said()) == 3
 

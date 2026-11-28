@@ -22,6 +22,7 @@ from ..sandbox.networks import session_addresses
 from ..sandbox.socket_proxy import has_socket_proxy, socket_proxy_name
 from ..settings import Host, Settings
 from .doors import Door, SessionUses
+from .procwatch import unmapped
 
 # A line of the socket proxy's log (HAProxy's httplog): the address and
 # port it came from, then further on the status and, quoted, the request
@@ -45,10 +46,8 @@ def parse_proxy_call(line: str) -> tuple[str, str, str, int] | None:
         return None
     # The proxy listens on IPv4 and IPv6 with one socket, so it logs an
     # IPv4 caller as ::ffff:172.20.0.5. session_addresses gives 172.20.0.5.
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
     return (
-        str(address),
+        unmapped(address),
         found["method"],
         found["path"],
         int(found["status"]),

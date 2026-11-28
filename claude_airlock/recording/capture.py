@@ -49,9 +49,9 @@ from ..sandbox.network import namespace_args
 from ..settings import Host, Settings
 from .answers import ANSWERS_PART, DOWNLOADS_PART
 from .model_api import MODEL_API
-from .packets import RESOLVER
 from .payloads import HTTP_METHODS, TLS_CLIENT_HELLO, TLS_HANDSHAKE, TLS_MAJOR
 from .pcap import Capture, read_capture
+from .procwatch import RESOLVER
 from .records import TracedSession
 from .sidecar import Sidecar
 from .uploads import ELSEWHERE_PART, UPLOADS_PART

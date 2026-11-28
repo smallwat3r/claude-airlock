@@ -31,6 +31,7 @@ from ..sandbox.egress_proxy import (
     SQUID_IMAGE,
 )
 from ..sandbox.networks import EGRESS_PROXY
+from .procwatch import unmapped
 from .records import TracedSession
 
 # The fields of a line that says how much the session sent, the last of them
@@ -97,10 +98,9 @@ def _as_recorded(address: str) -> str:
     if ":" not in address:
         return address
     try:
-        found = ipaddress.ip_address(address)
+        return unmapped(ipaddress.ip_address(address))
     except ValueError:
         return address
-    return str(getattr(found, "ipv4_mapped", None) or found)
 
 
 def parse_proxy_request(line: bytes) -> ProxyRequest | None:

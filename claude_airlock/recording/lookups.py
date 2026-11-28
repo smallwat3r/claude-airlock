@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from ..reader import NotThis
-from .packets import RESOLVER, Packet, Protocol, TcpFlag, is_loopback
+from .packets import Packet, Protocol, TcpFlag
 from .payloads import DNS_HEADER, Lookup, Name, dns_message, unanswered
+from .procwatch import RESOLVER, is_loopback
 
 # What a lookup is flagged for: a name or one label of it longer than
 # names are, or this many different names under one parent. Data can be

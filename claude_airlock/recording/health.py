@@ -2,7 +2,7 @@
 processes and tmpfs, how long it was stalled for want of them, and which
 of its processes was ended for want of memory.
 
-Read from what the watcher of its processes notes of that (procwatch.py):
+Read from what the watcher of its processes notes of that (procwatch):
 every so often, when the session comes near a limit and when the kernel
 ends a process of it. The figures are the watcher's own, taken from the
 cgroup of the session's container. The name of a process is the session's

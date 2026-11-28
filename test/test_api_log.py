@@ -6,6 +6,7 @@ notes, and how line mode and --trace show a request."""
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import sys
@@ -19,7 +20,7 @@ from harness import LauncherTest, prompts_at
 from claude_airlock import errors, files, settings
 from claude_airlock.events import Kind, Who
 from claude_airlock.files import try_lock_file
-from claude_airlock.recording import api_calls, api_log, started
+from claude_airlock.recording import api_calls, api_log, records, started
 from claude_airlock.report import api_events, follow
 from claude_airlock.report.layout import Layout
 from claude_airlock.sandbox.runtime import DOCKERS_OWN
@@ -941,6 +942,14 @@ class ApiLogTest(LauncherTest):
         # What says nothing has no place in a line
         assert api_calls.Call().as_note() == {"answered": False}
         assert api_calls.Call.from_note({}) == api_calls.Call()
+
+    def test_a_time_a_line_gives_is_taken_where_it_can_be_shown_as_a_date(self):
+        # The same of a request as of the line of a recorded session
+        assert records.moment(1767344531) == 1767344531.0
+        assert api_calls.Call.from_note({"asked": 1767344531.5}).asked == 1767344531.5
+        for given in (True, "1767344531", 0, -5, math.inf, math.nan, 1e300, None):
+            assert records.moment(given) is None, given
+            assert api_calls.Call.from_note({"asked": given}).asked is None, given
 
     def test_what_a_request_was_made_for_is_told_by_its_name(self):
         origin = api_events.Origin

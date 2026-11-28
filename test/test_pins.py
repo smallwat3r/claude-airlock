@@ -158,6 +158,9 @@ def test_the_python_of_the_image_is_the_one_its_python_code_is_written_for():
     target = "py" + "".join(python.split(".")[:2])
     script = "docker/features/excalidraw/excalidraw-export"
     assert f'"{script}" = "{target}"' in pyproject
+    # The watcher of the processes, which its sidecar runs on that Python
+    watcher = "claude_airlock/recording/procwatch/*.py"
+    assert f'"{watcher}" = "{target}"' in pyproject
 
 
 FEATURES = ROOT / "docker" / "features"

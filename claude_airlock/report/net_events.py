@@ -13,6 +13,7 @@ from collections import Counter, OrderedDict
 from datetime import datetime
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat, labelled
+from ..oldest import forget_oldest
 from ..recording.capture import parts_cut_short
 from ..recording.egress_log import ProxyRequest
 from ..recording.health import health_summary
@@ -505,6 +506,18 @@ def capture_events(
         _request_event(request)
         for request in capture.requests[was.requests : now.requests]
     ]
+    if now.unkept_requests and not was.unkept_requests:
+        # Once, by when the first was sent: of a capture read as it grows,
+        # how many there will be is not known yet
+        unkept = "more" if live else f"{now.unkept_requests} more"
+        detail = (
+            f"http {unkept} requests in the clear NOT KEPT,"
+            f" past the first {now.requests}"
+        )
+        fields = {"protocol": "http", "unkept": now.unkept_requests}
+        events.append(
+            Event(capture.unkept_since, Who.SANDBOX, Kind.NET, [detail], fields)
+        )
     events += [
         _flow_event(capture, flow, live)
         for flow in capture.flows[was.flows : now.flows]
@@ -604,8 +617,7 @@ class RepeatedHolders:
                 continue
             self._said[key] = holders[0]
             self._said.move_to_end(key)
-            while len(self._said) > self.MOST_CONNECTIONS:
-                self._said.popitem(last=False)
+            forget_oldest(self._said, self.MOST_CONNECTIONS)
 
 
 def _process_fields(lineage: list[Process]) -> dict:

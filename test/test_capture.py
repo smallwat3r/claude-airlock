@@ -355,6 +355,36 @@ class CaptureFileTest:
         assert request.url == "http://plain.test/a?b=1"
         assert (request.method, request.address) == ("GET", "198.51.100.7")
 
+    def test_no_more_plain_http_requests_are_kept_than_the_most(self):
+        there = "198.51.100.7"
+        long = b"/" + b"a" * 1900
+        asked = b"GET " + long + b" HTTP/1.1\r\nHost: " + b"h" * 400 + b"\r\n\r\n"
+        with unittest.mock.patch.object(pcap, "MOST_REQUESTS", 2):
+            found = self.read(
+                pcap_file(
+                    [(1.0 + n, tcp(there, 80, 0x18, asked), True) for n in range(5)]
+                )
+            )
+        assert [request.when for request in found.requests] == [1.0, 2.0]
+        assert (found.unkept_requests, found.unkept_since) == (3, 3.0)
+        (request, _) = found.requests
+        assert request.target == long.decode()[: pcap.ASKED_LENGTH] + "..."
+        assert request.host == "h" * pcap.ASKED_LENGTH
+        assert found.marks().unkept_requests == 3
+        *_, unkept = net_events.capture_events(found, verbose=False)
+        assert unkept.when == 3.0
+        assert unkept.details == [
+            "http 3 more requests in the clear NOT KEPT, past the first 2"
+        ]
+        assert unkept.fields == {"protocol": "http", "unkept": 3}
+        # Of a capture read as it grows, once, when the first is
+        past = found.marks()._replace(unkept_requests=0)
+        (again,) = net_events.capture_events(found, False, past)
+        assert again.details == [
+            "http more requests in the clear NOT KEPT, past the first 2"
+        ]
+        assert net_events.capture_events(found, False, found.marks()) == []
+
     def test_what_a_packet_carries_is_read_whatever_else_the_packet_is(self):
         there, fast = "198.51.100.7", "203.0.113.9"
         asked = b"POST /upload?x=1 HTTP/1.1\r\nHost: plain.test\r\n\r\n"

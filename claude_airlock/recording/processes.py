@@ -6,7 +6,7 @@ The transcript says which tool calls were issued, not what a command went
 on to start, and a connection is known by its container: which command
 opened it is a guess by the clock. So a sidecar joins the session's process
 and network namespaces once it is up and notes, from /proc, each process
-it sees and the processes that hold each TCP connection (procwatch.py).
+it sees and the processes that hold each TCP connection (see procwatch).
 A connection of the capture is then tied to its process by its ports.
 
 While the session runs the record stays in the sidecar. What its watcher
@@ -48,7 +48,7 @@ import os
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,15 +60,18 @@ from ..files import private_dir, whole_lines, write_whole
 from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
-from .packets import is_loopback
-from .procwatch import Note, Secrets, started_last
+from .procwatch import Note, Secrets, is_loopback, started_last
 from .records import TracedSession
 from .sidecar import Sidecar
 
 PROCESSES_SUFFIX = "procs"
 PROCESSES_LABEL = "claude-airlock.processes"
 RECORD_FILE = "/processes.jsonl"
-WATCHER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "procwatch.py")
+# The watcher, a package that stands alone (see procwatch), and where in
+# the sidecar it is mounted: in a directory of its own, which Python takes
+# it from, see __main__.py of it
+WATCHER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "procwatch")
+WATCHER_IN_SIDECAR = "/watcher/procwatch"
 # The records are a few hundred kB each as a rule, the oldest go once
 # there are more
 KEPT_RECORDS = 100
@@ -105,7 +108,7 @@ class Watcher(Sidecar):
     KEPT: ClassVar[int] = KEPT_RECORDS
     STOP_SECONDS: ClassVar[int | None] = 1
     MEMORY: ClassVar[str] = "128m"
-    # To read as the session's user, see procwatch.py
+    # To read as the session's user, see watcher.py of procwatch
     CAPABILITIES: ClassVar[tuple[str, ...]] = ("SETUID", "SETGID")
 
     def directory(self, host: Host) -> str:
@@ -133,7 +136,7 @@ class Watcher(Sidecar):
 
 
 def aloud_path(host: Host, watcher: str) -> str:
-    """The file the watcher of that name says aloud to, see procwatch.py:
+    """The file the watcher of that name says aloud to, see procwatch:
     among the records, where no session is given anything. Its name is
     docker's, which has no slash."""
     directory = private_dir(os.path.join(host.process_records_dir, ALOUD_DIR))
@@ -161,11 +164,11 @@ def _start_watcher(
         *watcher.run_args(),
         f"--pid=container:{session}",
         f"--network=container:{owner}",
-        mount_arg(WATCHER, "/procwatch.py", "ro,z"),
+        mount_arg(WATCHER, WATCHER_IN_SIDECAR, "ro,z"),
         mount_arg(aloud, ALOUD_FILE, "z"),
         "--entrypoint=python3",
         image_tag,
-        *("-I", "/procwatch.py", RECORD_FILE, str(os.getuid()), str(os.getgid())),
+        *("-I", WATCHER_IN_SIDECAR, RECORD_FILE, str(os.getuid()), str(os.getgid())),
         secrets.as_json(),
         ALOUD_FILE,
         stdout=subprocess.DEVNULL,
@@ -183,9 +186,9 @@ def said_since(path: str, offset: int) -> tuple[list[str], int]:
     record stays in the sidecar until the session is over, and a command
     run there to read it would be noted as one of the session's. Nothing
     when the file cannot be read. How much a watcher says aloud is
-    bounded, see MOST_ALOUD of procwatch.py, and so is a record, see
-    MOST_BYTES there: no more than ALOUD_READ of either is read at a
-    time, see whole_lines."""
+    bounded, see MOST_ALOUD of watcher.py of procwatch, and so is a
+    record, see MOST_BYTES of record.py there: no more than ALOUD_READ
+    of either is read at a time, see whole_lines."""
     try:
         with open(path, "rb") as file:
             file.seek(offset)
@@ -194,22 +197,6 @@ def said_since(path: str, offset: int) -> tuple[list[str], int]:
         return [], offset
     lines, taken = whole_lines(read, ALOUD_READ)
     return [line.decode("utf-8", "replace") for line in lines], offset + taken
-
-
-def health_said(lines: Iterable[str], since: float) -> list[Sample | Ended]:
-    """The health readings in the lines of a record that are later than
-    the given time. Lines that are not valid are skipped."""
-    found = []
-    for line in lines:
-        try:
-            said = json.loads(line)
-            when = float(said["t"])
-            health = read_health(when, said) if when > since else None
-        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
-            continue
-        if health:
-            found.append(health)
-    return found
 
 
 def watcher_started(record: Path) -> bool:
@@ -344,14 +331,14 @@ class Listener:
     @property
     def holder(self) -> int:
         """Of the processes that held it, the one started last, see
-        started_last of procwatch.py. 0 when none was found."""
+        started_last of procwatch. 0 when none was found."""
         return started_last(self.pids) if self.pids else 0
 
 
 @dataclass(frozen=True)
 class Opened:
     """A file of secrets a process was noted to hold open, see Secrets
-    of procwatch.py: when, its path as the process held it, the kind of
+    of procwatch: when, its path as the process held it, the kind of
     secrets it holds (see secrets.py) and the process."""
 
     when: float
@@ -426,7 +413,7 @@ class ProcessRecord:
     unwritten: list[Unwritten] = field(default_factory=list)
     # When it said it would say no more aloud of connections and their
     # processes, none for one that did not: of what is read while a
-    # session runs, see procwatch.py
+    # session runs, see procwatch
     hushed_at: float | None = None
     # Every how many seconds the watcher said it was there, none for one
     # that did not say it would, and the time of the last line it wrote
@@ -460,7 +447,14 @@ class ProcessRecord:
                     taken(self, when, said)
                     return
             self._process(when, said)
-        except (ValueError, KeyError, TypeError, RecursionError):
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            IndexError,
+            OverflowError,
+            RecursionError,
+        ):
             return
 
     @property
@@ -567,7 +561,7 @@ class ProcessRecord:
 
     # What a line of the record tells of, by the key only such a line
     # has, in the order they are looked for. A line with none of them is
-    # a process. See procwatch.py for the lines.
+    # a process. See procwatch for the lines.
     _KINDS: ClassVar[
         tuple[tuple[str, Callable[[ProcessRecord, float, dict], None]], ...]
     ] = (
@@ -610,7 +604,7 @@ class ProcessRecord:
         """The process that held a connection made at a time and those it
         comes from, none when no process was noted to hold it. Of several
         that hold it the one started last, the last of them as the watcher
-        lists them (see started_last of procwatch.py): a socket is handed
+        lists them (see started_last of procwatch): a socket is handed
         down, the one that made it is as a rule the last of the line."""
         noted = self._held(source_port, address, port, when)
         if not noted:
@@ -623,7 +617,7 @@ class ProcessRecord:
     ) -> bool:
         """Whether a connection made at a time was only ever noted
         without a process that holds it: the watcher saw it and could
-        look into none that did, see procwatch.py."""
+        look into none that did, see procwatch."""
         noted = [pids for _, pids in self._held(source_port, address, port, when)]
         return bool(noted) and not any(noted)
 

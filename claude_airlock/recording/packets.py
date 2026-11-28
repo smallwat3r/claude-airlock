@@ -14,8 +14,6 @@ from typing import NamedTuple
 
 from ..reader import Cursor, NotThis
 
-# Where docker's own resolver waits, in every container
-RESOLVER = "127.0.0.11"
 # In a cooked frame, the packet type of one the machine sent
 COOKED_SENT = 4
 
@@ -168,10 +166,6 @@ class Packet(NamedTuple):
         """Where what the next packet of the stream carries starts, as
         far as this one tells: past what it carried."""
         return (self.carried_from + self.length) % SEQUENCE_SPACE
-
-
-def is_loopback(address: str) -> bool:
-    return address.startswith("127.") or address == "::1"
 
 
 # The headers that are read, by where their fields are, each read in one

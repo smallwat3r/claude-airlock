@@ -26,13 +26,14 @@ from ..settings import Host
 KEPT_SESSIONS = 1000
 
 
-def _moment(value: object) -> float | None:
-    """A time as seconds since the epoch, none for anything else or for
-    one that could not be shown as a date."""
+def moment(value: object) -> float | None:
+    """A time as a record or a session gives it, as seconds since the
+    epoch: none for anything else, for one at or before the epoch, and
+    for one that could not be shown as a date."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
-        if not math.isfinite(value):
+        if not math.isfinite(value) or value <= 0:
             return None
         datetime.fromtimestamp(value)
     except (ValueError, OverflowError, OSError):
@@ -96,7 +97,7 @@ class TracedSession:
         name, project = said.get("name"), said.get("project")
         ip, capture = said.get("ip", ""), said.get("capture", "")
         processes = said.get("processes", "")
-        start, end = _moment(said.get("start")), _moment(said.get("end"))
+        start, end = moment(said.get("start")), moment(said.get("end"))
         if start is None or not (
             isinstance(name, str)
             and isinstance(project, str)

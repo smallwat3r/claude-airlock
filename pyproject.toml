@@ -24,7 +24,7 @@ extend-include = ["bin/claude-airlock", "docker/features/excalidraw/excalidraw-e
 # the launcher's first file is read by any Python, to say it is too old.
 [tool.ruff.per-file-target-version]
 "bin/claude-airlock" = "py39"
-"claude_airlock/recording/procwatch.py" = "py311"
+"claude_airlock/recording/procwatch/*.py" = "py311"
 "docker/features/excalidraw/excalidraw-export" = "py311"
 
 [tool.ruff.lint]

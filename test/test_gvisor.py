@@ -20,7 +20,8 @@ from harness import LauncherTest, gvisor_socket
 
 from claude_airlock import settings
 from claude_airlock.recording import gvisor as told
-from claude_airlock.recording import procwatch, secrets
+from claude_airlock.recording import processes, procwatch, secrets
+from claude_airlock.report import net_events
 from claude_airlock.sandbox import runtime
 
 CONTAINER = "a" * 64
@@ -116,6 +117,26 @@ def connected(pid: int, to: bytes, errno: int = 0) -> bytes:
     """Connect of syscall.proto."""
     return message(
         context(pid), exited(0, errno), field(3, 42), field(4, 5), field(6, to)
+    )
+
+
+def listened(
+    pid: int,
+    at: bytes,
+    family: int = told.AF_INET,
+    kind: int = told.SOCK_STREAM,
+    errno: int = 0,
+) -> bytes:
+    """Listen of syscall.proto, with the address the socket has then."""
+    return message(
+        context(pid),
+        exited(0, errno),
+        field(3, 50),
+        field(4, 3),
+        field(6, 128),
+        field(7, at),
+        field(8, family),
+        field(9, kind),
     )
 
 
@@ -222,6 +243,38 @@ class ToldTest:
         (line,) = said(self.told().take(told.SENTRY_EXEC, execed(9, "/bin/x", *argv)))
         assert line["argv"] == procwatch.command_line("\0".join(argv).encode())
 
+    def test_a_long_program_is_cut_as_the_watcher_cuts_one(self):
+        deep = "/" + "d/" * 400 + "x"
+        (line,) = said(self.told().take(told.SENTRY_EXEC, execed(9, deep, "x")))
+        assert line["exe"] == deep[: procwatch.MOST_ARGUMENT] + procwatch.CUT
+        assert line["exe"] == procwatch.kept_path(deep)
+
+    def test_an_exec_cut_short_is_told_as_far_as_it_came(self):
+        whole = execed(9, "/usr/bin/curl", "curl", "-d", "x" * 5000, "end")
+        # In the last argument, which is passed over, then in the one before
+        for cut, argv in (
+            (len(whole) - 2, ["curl", "-d", "x" * 5000]),
+            (len(whole) - 4000, ["curl", "-d"]),
+        ):
+            (line,) = said(self.told().take(told.SENTRY_EXEC, whole[:cut], cut=True))
+            assert line["exe"] == "/usr/bin/curl"
+            raw = "\0".join(argv).encode()
+            assert line["argv"] == procwatch.command_line(raw, cut=True)
+            assert line["argv"][-1] == procwatch.CUT
+        assert procwatch.command_line(b"curl\0-d", cut=True) == ["curl", "-d", "..."]
+        # Not one cut before its program, nor another kind of message
+        cut = whole[: len(context(9)) + 3]
+        with pytest.raises(told.NotThis):
+            self.told().take(told.SENTRY_EXEC, cut, cut=True)
+        login = opened(40, f"{HOME}/.claude/.credentials.json")
+        with pytest.raises(told.NotThis):
+            self.told().take(told.SYSCALL_OPEN, login[:-3], cut=True)
+        # Cut between two fields, what came after is not known either
+        (line,) = said(self.told().take(told.SENTRY_EXEC, whole, cut=True))
+        assert line["argv"][-1] == procwatch.CUT
+        (line,) = said(self.told().take(told.SENTRY_EXEC, execed(9, "/bin/x", "x")))
+        assert line["argv"] == ["x"]
+
     def test_a_connection_is_told_by_where_it_went(self):
         sandbox = self.told()
         lines = [
@@ -246,6 +299,57 @@ class ToldTest:
             connected(40, b"\x01\x00/tmp/ssh-agent.sock"),
         ):
             assert sandbox.take(told.SYSCALL_CONNECT, passed) == []
+
+    def test_a_socket_that_waits_for_connections_is_told_as_the_watcher_notes_it(
+        self,
+    ):
+        sandbox = self.told()
+        lines = [
+            *sandbox.take(told.SYSCALL_LISTEN, listened(40, sockaddr("0.0.0.0", 8080))),
+            *sandbox.take(
+                told.SYSCALL_LISTEN,
+                listened(41, sockaddr("::", 9000), family=told.AF_INET6),
+            ),
+            *sandbox.take(
+                told.SYSCALL_LISTEN, listened(42, sockaddr("127.0.0.1", 9229))
+            ),
+            *sandbox.take(
+                told.SYSCALL_LISTEN,
+                listened(43, sockaddr("::ffff:127.0.0.1", 3000), family=10),
+            ),
+        ]
+        assert said(lines) == [
+            {"listen": 8080, "on": "0.0.0.0", "pids": [40]},
+            {"listen": 9000, "on": "::", "pids": [41]},
+            {"listen": 9229, "on": "127.0.0.1", "pids": [42]},
+            {"listen": 3000, "on": "127.0.0.1", "pids": [43]},
+        ]
+        # Of the part kept for connections where others can reach it
+        assert [reserved for _, reserved, _ in lines] == [True, True, False, False]
+        for passed in (
+            listened(40, sockaddr("0.0.0.0", 8080), errno=98),
+            # Not of TCP, not of the network
+            listened(40, sockaddr("0.0.0.0", 8080), kind=2),
+            listened(40, b"\x01\x00/tmp/s.sock", family=1),
+            listened(40, b"", family=told.AF_INET),
+        ):
+            assert sandbox.take(told.SYSCALL_LISTEN, passed) == []
+
+    def test_what_is_told_of_a_socket_that_waits_is_what_a_trace_reads(self):
+        sandbox = self.told()
+        record = processes.ProcessRecord()
+        for kind, payload in (
+            (told.SENTRY_EXEC, execed(40, "/usr/bin/node", "node", "server.js")),
+            (told.SYSCALL_LISTEN, listened(40, sockaddr("0.0.0.0", 8080))),
+            (told.SYSCALL_LISTEN, listened(40, sockaddr("127.0.0.1", 9229))),
+        ):
+            for when, _, line in sandbox.take(kind, payload):
+                record.take(json.dumps({"t": when, **line}))
+        opened, loopback = net_events.listener_events(record)
+        assert opened.details == [
+            "tcp 0.0.0.0:8080  OPEN to its network  by: [40] node server.js"
+        ]
+        assert loopback.details == ["tcp 127.0.0.1:9229  by: [40] node server.js"]
 
     def test_a_file_of_secrets_is_told_once_for_each_process(self):
         sandbox = self.told()
@@ -273,6 +377,18 @@ class ToldTest:
         sandbox.take(told.SENTRY_EXEC, execed(40, "/bin/cat", "cat"))
         assert said(sandbox.take(told.SYSCALL_OPEN, opened(40, login))) == [
             {"opened": login, "secret": "claude", "pids": [40]}
+        ]
+
+    def test_a_file_named_with_more_than_one_slash_first_is_told(self):
+        sandbox = self.told()
+        # Two of them, which normpath keeps
+        login = f"/{HOME}/.claude/.credentials.json"
+        assert said(sandbox.take(told.SYSCALL_OPEN, opened(40, login))) == [
+            {"opened": login, "secret": "claude", "pids": [40]}
+        ]
+        hosts = "//home/me/.config/gh/hosts.yml"
+        assert said(sandbox.take(told.SYSCALL_OPEN, opened(41, hosts))) == [
+            {"opened": hosts, "secret": "gh", "pids": [41]}
         ]
 
     def test_a_file_opened_through_a_link_is_told_as_it_is_closed(self):
@@ -303,7 +419,7 @@ class ToldTest:
 
     def test_no_more_files_are_told_than_are_kept(self):
         sandbox = self.told()
-        with mock.patch.object(procwatch, "MOST_OPENED", 2):
+        with mock.patch.object(procwatch.rules, "MOST_OPENED", 2):
             lines = [
                 line
                 for pid in range(4)
@@ -315,7 +431,7 @@ class ToldTest:
         assert len(lines) == 3
         # Of processes that become others too, which are told of again
         sandbox = self.told()
-        with mock.patch.object(procwatch, "MOST_OPENED", 2):
+        with mock.patch.object(procwatch.rules, "MOST_OPENED", 2):
             for _ in range(4):
                 sandbox.take(told.SENTRY_EXEC, execed(9, "/bin/cat", "cat"))
                 lines = sandbox.take(
@@ -334,6 +450,7 @@ class PodInitConfigTest:
             "sentry/execve",
             "sentry/task_exit",
             "syscall/connect/exit",
+            "syscall/listen/exit",
             "syscall/open/exit",
             "syscall/openat/exit",
             "syscall/close/exit",
@@ -485,6 +602,26 @@ class MonitorTest(LauncherTest):
         sink.close()
         lines = self.wait_for(record, 5)
         assert lines[-1] == {"dropped": 9}
+
+    def test_a_program_started_with_more_than_is_read_is_told(self):
+        record = FakeRecord()
+        with mock.patch.object(told, "MOST_MESSAGE", 4096):
+            monitor = self.listening()
+            monitor.attach(record, CONTAINER)
+            sink = self.connect(monitor)
+            sink.recv(64)
+            sink.send(framed(told.CONTAINER_START, started("/sbin/docker-init")))
+            long = execed(9, "/usr/bin/curl", "curl", *["x" * 100] * 80, parent=1)
+            sink.send(framed(told.SENTRY_EXEC, long))
+            # Nor is one of another kind, which is counted instead
+            sink.send(framed(told.SYSCALL_CONNECT, b"\x0a" + b"x" * 8192))
+            sink.close()
+            lines = self.wait_for(record, 4)
+        exec_line = lines[2]
+        assert (exec_line["pid"], exec_line["exe"]) == (9, "/usr/bin/curl")
+        assert exec_line["argv"][0] == "curl"
+        assert exec_line["argv"][-1] == procwatch.CUT
+        assert lines[-1] == {"dropped": 1}
 
     def test_a_sandbox_of_an_older_protocol_is_refused(self):
         monitor = self.listening()

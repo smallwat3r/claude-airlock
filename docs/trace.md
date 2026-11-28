@@ -662,6 +662,14 @@ own (`answers` 200,000, the model answers in many small ones):
   resolver and port 53 elsewhere each have these bounds of their own:
   whatever a session sends to a server of its own, the lookups it has
   the resolver make are still read, with `--follow` too.
+- A request of plain HTTP is a line of its own (`http GET
+  http://plain.example/a`), but for one to the egress proxy, whose log
+  has it. No more than 10,000 of a capture are kept, each with the first
+  255 bytes of its target, `...` in the place of the rest, and of its
+  `Host`: those past them are counted on one line, by when the first was
+  sent (`http 90000 more requests in the clear NOT KEPT, past the first
+  10000`, `unkept` in `--json`). `--follow` says it once, without the
+  count.
 - What is sent to a resolver over TCP and cannot be read to its end is
   counted and shown (`NOT READ to its end`): a packet longer than the
   capture keeps (1024 bytes), which hides whatever follows its first
@@ -928,7 +936,14 @@ sandbox  secret  /home/me/.config/gh/hosts.yml, the login of gh, OPENED  by: [81
   `opened by Claude Code itself`.
 - The sidecar sees a file when it looks at a process, so one opened and
   closed between two looks, by `cat` say, is missed. The file is named as
-  the kernel names it, so a link to it is seen through.
+  the kernel names it, so a symbolic link to it is seen through. One held
+  by another name of the same file, a hard link (`ln ~/.ssh/id_ed25519
+  x`), is named as the file of secrets it is: the sidecar knows those by
+  what the kernel knows a file by too, its device and inode, found again
+  every 5 seconds and kept after for one that had a link to it then. Of
+  each directory of them (`~/.ssh`), the first 256 of what is in it.
+  Nothing links to a file of a name hidden from the session, it is a
+  file mounted over the one of that name.
 - Each file is noted once per process, and no more than 1000 in all: the
   header says when there were more (`NOT NOTED`). The header counts them
   (`files of secrets OPENED`), the launcher names them when the session
@@ -1101,8 +1116,18 @@ told`). What differs:
 
 - Every program started is told, and every file opened or closed, so
   what lives a moment is there, and a file of secrets read at once too.
-  A file opened through a link is told by the link, then by the file
-  itself once it is closed.
+  A file opened through a symbolic link is told by the link, then by the
+  file itself once it is closed. One opened by another name of the same
+  file, a hard link, is not told: gVisor names the file by that name
+  alone, which is no file of secrets.
+- A socket of TCP that starts to wait for connections is told as it
+  does, with runsc release-20260727.0 and later: an older one has no
+  such point, its sessions have no `listen` lines. One that waits a
+  moment is there too.
+- Of a program started with more than 1 MB of arguments, what came
+  within that is read, its command line cut as any long one is (`...`).
+  Any other message as long is not read, and counted with what could not
+  be told.
 - A new process is shown as its parent's program until it becomes
   another, and its parent is the one that made it.
 - A connection is told by where it went, not by the port it was made
@@ -1440,7 +1465,7 @@ log:
 | What | Holds | How much |
 | --- | --- | --- |
 | `claude-egress-log`, a Docker volume | The proxy's log | About 20 MB, more by what a session logs within 10 seconds |
-| `captures` | The capture of each session | A few kB, plus the headers of what the session sent and got back: some hundred kB each as a rule. At most 104 MB each for the connections, the resolver's lookups, the other DNS servers and what is not TCP, 18 MB for what went to the model and as much for the rest, 22 MB for what the model sent back and 11 MB for the sample of what came in from elsewhere: near 0.5 GB for one capture. The latest 100 |
+| `captures` | The capture of each session | A few kB, plus the headers of what the session sent and got back: some hundred kB each as a rule. At most 206 MB for the connections, 104 MB each for the resolver's lookups, the other DNS servers and what is not TCP, 18 MB for what went to the model and as much for the rest, 22 MB for what the model sent back and 11 MB for the sample of what came in from elsewhere: near 0.6 GB for one capture. The latest 100 |
 | `processes` | What ran in each session, 20 MB each at most, of which 4 MB are kept for its connections | A few hundred kB each as a rule, the latest 100 |
 | `transcripts` | The launcher's copy of each transcript | For 30 days, 2 GB a session at most |
 | `net-sessions.jsonl` | A line per recorded session | The latest 1000 |

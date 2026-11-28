@@ -17,6 +17,7 @@ from harness import LauncherTest
 from claude_airlock import settings
 from claude_airlock.events import Kind, Wrong
 from claude_airlock.recording import host_health, processes, procwatch, secrets
+from claude_airlock.recording.procwatch import linked, watcher
 from claude_airlock.report import net_events
 
 HOME = "/home/sandbox"
@@ -53,6 +54,20 @@ class SecretsTest:
         assert rules.of("/mnt/lib/.netrc") == "hidden"
         # Taken as the kernel names it, a link of /proc too
         assert rules.of(f"{HOME}/.ssh/../.ssh/id_rsa (deleted)") == "ssh"
+
+    def test_a_path_that_starts_with_more_than_one_slash_is_the_same_file(self):
+        # Linux reads them as one, which normpath leaves two of
+        rules = session_secrets()
+        assert rules.of(f"/{HOME}/.ssh/id_ed25519") == "ssh"
+        assert rules.of(f"//{HOME}/.claude/.credentials.json") == "claude"
+        assert rules.of("//home/me/proj/.env") == "hidden"
+        assert rules.of(f"/{HOME}/.ssh/known_hosts") is None
+        # Of rules given so too, and as the watcher is given them
+        given = procwatch.Secrets({"//a/key": "x"}, {"//b": "y"}, roots=["//c"])
+        assert (given.of("/a/key"), given.of("/b/k")) == ("x", "y")
+        again = procwatch.Secrets.read(given.as_json())
+        assert (again.of("//a/key"), again.of("//b/k")) == ("x", "y")
+        assert procwatch.normal("//") == procwatch.normal("/") == "/"
 
     def test_what_holds_nothing_secret_is_not_one(self):
         rules = session_secrets()
@@ -150,7 +165,7 @@ class OpenedOnceTest:
 
     def test_past_the_most_it_is_said_once_and_nothing_after(self):
         opened = procwatch.OpenedOnce()
-        with mock.patch.object(procwatch, "MOST_OPENED", 2):
+        with mock.patch.object(procwatch.rules, "MOST_OPENED", 2):
             told = [opened.take(pid, "/a") for pid in range(5)]
         assert told == [
             procwatch.Telling.NEW,
@@ -175,11 +190,11 @@ class WatcherTest(LauncherTest):
 
     def watch(
         self, proc: Path, out: io.StringIO, aloud: io.StringIO | None = None
-    ) -> procwatch.Watch:
+    ) -> watcher.Watch:
         def read(pid: int) -> procwatch.ProcessRead:
             return "100", 7, "/usr/bin/cat", ["cat", "x"]
 
-        return procwatch.Watch(
+        return watcher.Watch(
             out,
             read_process=read,
             secrets=session_secrets(),
@@ -210,9 +225,9 @@ class WatcherTest(LauncherTest):
         proc = self.holding(812, login)
         given = self.work / "aloud.jsonl"
         given.touch(mode=0o600)
-        aloud = procwatch._aloud_to(str(given))
+        aloud = watcher._aloud_to(str(given))
         self.cleanup.callback(aloud.close)
-        watch = procwatch.Watch(
+        watch = watcher.Watch(
             io.StringIO(),
             read_process=lambda pid: ("100", 7, "/usr/bin/cat", ["cat", "x"]),
             secrets=session_secrets(),
@@ -227,10 +242,10 @@ class WatcherTest(LauncherTest):
         assert [list(line)[1] for line in said] == ["pid", "opened"]
         # Never made by the watcher, nor through a link
         with pytest.raises(FileNotFoundError):
-            procwatch._aloud_to(str(self.work / "none.jsonl"))
+            watcher._aloud_to(str(self.work / "none.jsonl"))
         (self.work / "link.jsonl").symlink_to(given)
         with pytest.raises(OSError, match="Too many levels of symbolic links"):
-            procwatch._aloud_to(str(self.work / "link.jsonl"))
+            watcher._aloud_to(str(self.work / "link.jsonl"))
 
     def test_a_file_held_across_an_exec_is_noted_again_with_the_program(self):
         key = f"{HOME}/.ssh/id_rsa"
@@ -239,7 +254,7 @@ class WatcherTest(LauncherTest):
         programs = iter(
             [("100", 7, "/bin/bash", ["bash"]), ("100", 7, "/usr/bin/scp", ["scp"])]
         )
-        watch = procwatch.Watch(
+        watch = watcher.Watch(
             out,
             read_process=lambda pid: next(programs),
             secrets=session_secrets(),
@@ -257,17 +272,98 @@ class WatcherTest(LauncherTest):
         proc = self.holding(812, *(f"{PROJECT}/{n}/.env" for n in range(5)))
         out = io.StringIO()
         watch = self.watch(proc, out)
-        with mock.patch.object(procwatch, "MOST_OPENED", 2):
+        with mock.patch.object(procwatch.rules, "MOST_OPENED", 2):
             watch._look_at_processes([812], 0.0)
         said = [json.loads(line) for line in out.getvalue().splitlines()]
         assert len([line for line in said if "opened" in line]) == 2
         assert said[-1]["note"] == procwatch.Note.TOO_MANY_OPENED
         assert noted(*said).too_many_opened
 
+    def session_root(self) -> Path:
+        """The root of the session's first process as /proc has it, with
+        its logins, and the host's home a link to the container's."""
+        root = self.work / "root"
+        for path in (".claude/.credentials.json", ".ssh/id_ed25519", ".ssh/config"):
+            file = root / HOME.lstrip("/") / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("secret")
+        (root / "home/me").symlink_to(HOME)
+        (root / "tmp").mkdir()
+        return root
+
+    def test_a_file_of_secrets_held_through_a_hard_link_is_noted_as_it(self):
+        root = self.session_root()
+        key = root / HOME.lstrip("/") / ".ssh/id_ed25519"
+        os.link(key, root / "tmp/x")
+        os.link(root / HOME.lstrip("/") / ".ssh/config", root / "tmp/y")
+        # As the kernel names what each descriptor holds: the link
+        proc = self.holding(812, str(root / "tmp/x"), str(root / "tmp/y"))
+        (proc / "1").mkdir()
+        (proc / "1/root").symlink_to(root)
+        out = io.StringIO()
+        watch = self.watch(proc, out)
+        watch._look_for_links([1, 812], 0.0)
+        watch._look_at_processes([812], 0.0)
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert [line for line in said if "opened" in line] == [
+            {
+                "t": said[-1]["t"],
+                "opened": f"{HOME}/.ssh/id_ed25519",
+                "secret": "ssh",
+                "pids": [812],
+            }
+        ]
+
+    def test_files_of_secrets_are_known_by_inode_as_the_session_reaches_them(self):
+        root = self.session_root()
+        login = root / HOME.lstrip("/") / ".claude/.credentials.json"
+        inodes = linked.Linked(session_secrets())
+        inodes.look(str(root), 0.0)
+        # By the path of the container's home, as the kernel names it
+        found = inodes.of(linked.identity(login.stat()))
+        assert found == (f"{HOME}/.claude/.credentials.json", "claude")
+        config = root / HOME.lstrip("/") / ".ssh/config"
+        assert inodes.of(linked.identity(config.stat())) is None
+        # Linked to, then written anew: the link is to the one it was
+        os.link(login, root / "tmp/x")
+        inodes.look(str(root), linked.LINKED_EVERY)
+        renewed = login.with_name("new")
+        renewed.write_text("renewed")
+        renewed.replace(login)
+        # Not found before it is time to look again
+        inodes.look(str(root), linked.LINKED_EVERY + 1)
+        assert inodes.of(linked.identity(login.stat())) is None
+        inodes.look(str(root), 2 * linked.LINKED_EVERY)
+        assert inodes.of(linked.identity(login.stat())) == found
+        assert inodes.of(linked.identity((root / "tmp/x").stat())) == found
+
+    def test_a_path_of_the_session_is_followed_within_its_root(self):
+        root = self.session_root()
+        inside = str(root / HOME.lstrip("/"))
+        assert linked.within(str(root), "/home/me") == inside
+        assert linked.within(str(root), "/../home/./me/") == inside
+        # A link that leads out leads to the root of the session
+        (root / "tmp/up").symlink_to("../../../../../../..")
+        assert linked.within(str(root), "/tmp/up/home/me") == inside
+        (root / "tmp/loop").symlink_to("/tmp/loop")
+        assert linked.within(str(root), "/tmp/loop/x") is None
+        assert linked.within(str(root), "/none/x") is None
+
+    def test_no_more_of_a_directory_of_secrets_is_looked_at_than_the_most(self):
+        root = self.session_root()
+        keys = root / HOME.lstrip("/") / ".ssh"
+        for n in range(20):
+            (keys / f"k{n}").write_text("secret")
+        inodes = linked.Linked(session_secrets())
+        with mock.patch.object(linked, "MOST_IN_DIRECTORY", 5):
+            inodes.look(str(root), 0.0)
+        known = [inodes.of(linked.identity(key.stat())) for key in keys.iterdir()]
+        assert 0 < len([one for one in known if one]) <= 5
+
     def test_without_rules_no_descriptor_is_read(self):
         proc = self.holding(812, f"{HOME}/.ssh/id_rsa")
         out = io.StringIO()
-        watch = procwatch.Watch(
+        watch = watcher.Watch(
             out,
             read_process=lambda pid: ("1", 7, "/bin/cat", ["cat"]),
             proc=str(proc),
@@ -401,8 +497,8 @@ class HostRecordTest(LauncherTest):
         line = {"pid": 1, "ppid": 0, "exe": "/x", "argv": ["x" * 100]}
         size = len(procwatch.lined(1.0, line))
         connection = {"port": 0, "to": "203.0.113.9", "to_port": 443, "pids": [1]}
-        most = procwatch.RESERVED + 5 * size
-        with mock.patch.object(procwatch, "MOST_BYTES", most):
+        most = procwatch.record.RESERVED + 5 * size
+        with mock.patch.object(procwatch.record, "MOST_BYTES", most):
             for _ in range(10):
                 record.note_at(1.0, False, line)
             record.note_at(2.0, True, connection)
@@ -417,8 +513,8 @@ class HostRecordTest(LauncherTest):
         record = host_health.HealthRecord.begin(self.host, "claude-proj", "gVisor (gv)")
         connection = {"port": 0, "to": "203.0.113.9", "to_port": 443, "pids": [1]}
         size = len(procwatch.lined(2.0, connection))
-        most = procwatch.LAST_WORD + 20 * size
-        with mock.patch.object(procwatch, "MOST_BYTES", most):
+        most = procwatch.record.LAST_WORD + 20 * size
+        with mock.patch.object(procwatch.record, "MOST_BYTES", most):
             for _ in range(40):
                 record.note_at(2.0, True, connection)
         last = record.path.read_text(encoding="utf-8").splitlines()[-1]

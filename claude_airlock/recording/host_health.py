@@ -23,7 +23,7 @@ and reads it at once (see watch_process_limit).
 What runs in the session is not in the cgroup. gVisor can tell it, and
 what it tells goes to the same record, see gvisor.py.
 
-The readings come from CgroupHealth in procwatch.py and are written in the
+The readings come from CgroupHealth of procwatch and are written in the
 watcher's line format, to a file in the same directory, so --trace reads
 both kinds of record the same way. While the session runs, the file name
 ends in .part. This is how --trace --follow finds it, and how the next
@@ -168,13 +168,13 @@ class HealthRecord:
 
     def note(self, **said: object) -> None:
         """Add a line to the record, in the format the watcher of
-        procwatch.py uses, of the part of it kept for what the launcher
+        procwatch uses, of the part of it kept for what the launcher
         notes itself. Lines past the size limit are dropped."""
         self.note_at(None, reserved=True, said=said)
 
     def note_at(self, when: float | None, reserved: bool, said: dict) -> None:
         """Add a line to the record that tells of a time, none for now,
-        while there is room for it, as procwatch.py's watcher does (see
+        while there is room for it, as the watcher of procwatch does (see
         Room): what is not reserved, the processes gVisor told of (see
         gvisor.py), leaves room for what is, a session that starts
         processes without end must not be rid of its connections and of

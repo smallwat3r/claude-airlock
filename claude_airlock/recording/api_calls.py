@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import enum
-import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -20,6 +19,7 @@ from dataclasses import dataclass, field
 from ..events import flat
 from ..settings import Host
 from .notes import Notes
+from .records import moment
 
 # The lines the record keeps, the oldest go once there are more, and how
 # many of them one session can have: the record is of all the sessions,
@@ -75,14 +75,6 @@ def count(value: object) -> int | None:
     if type(value) is not int or not 0 <= value <= MOST_COUNTED:
         return None
     return value
-
-
-def moment(value: object) -> float | None:
-    """A time a session gives, as seconds since the epoch, none for what
-    is not one."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value) if math.isfinite(value) and value > 0 else None
 
 
 def shown_text(said: Mapping, key: str) -> str:

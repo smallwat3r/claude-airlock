@@ -18,22 +18,21 @@ from __future__ import annotations
 import base64
 import enum
 import hashlib
-import os
 import socket
 import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 
 from ..docker import env_arg, mount_arg
 from ..errors import Fatal
-from ..files import private_dir
 from ..notice import warn
 from ..reader import Cursor, NotThis
 from ..sandbox.runtime import Runtime
 from ..settings import Host, Settings, variable
 from .doors import BY_LAUNCHER, AgentUse, Door, SessionUses
+from .unix_socket import PrivateSocket
 
 # The connections a session can have to the agent at once, and the seconds
 # one can stay open with nothing asked. Each takes a thread and two
@@ -169,29 +168,14 @@ class AgentDoor:
         # Why a request could not be noted and was refused for it, the
         # last of them, empty when they all were
         self._unnoted = ""
-        directory = private_dir(host.agent_sockets_dir)
-        # A short name: the path of a socket cannot be long
-        name = hashlib.sha256(session.encode()).hexdigest()[:12]
-        self.path = os.path.join(directory, f"{name}-{os.getpid()}.sock")
-        with suppress(FileNotFoundError):
-            os.unlink(self.path)
-        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            self._listener.bind(self.path)
-            os.chmod(self.path, 0o600)
-            self._listener.listen(8)
-        except OSError:
-            self._listener.close()
-            raise
+        self._listener = PrivateSocket(
+            host.agent_sockets_dir, session, socket.SOCK_STREAM, 8
+        )
+        self.path = self._listener.path
         threading.Thread(target=self._serve, daemon=True).start()
 
     def close(self) -> None:
-        # Shut first: closing alone leaves _serve waiting in accept
-        with suppress(OSError):
-            self._listener.shutdown(socket.SHUT_RDWR)
         self._listener.close()
-        with suppress(OSError):
-            os.unlink(self.path)
         self._uses.close()
         if self._unnoted:
             warn(
@@ -201,12 +185,8 @@ class AgentDoor:
             )
 
     def _serve(self) -> None:
-        while True:
-            try:
-                client, _ = self._listener.accept()
-            except OSError:
-                # Closed, the session has ended
-                return
+        # Until it is closed, the session has ended
+        while (client := self._listener.accept()) is not None:
             if not self._free.acquire(blocking=False):
                 # Too many at once, see AGENT_CONNECTIONS: ssh takes this
                 # for an agent that is not there

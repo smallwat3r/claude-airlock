@@ -66,7 +66,7 @@ class FakeSession:
     def run(self, pid: int, megabytes: int) -> None:
         directory = self.proc / str(pid)
         directory.mkdir(exist_ok=True)
-        pages = megabytes * 2**20 // procwatch.PAGE
+        pages = megabytes * 2**20 // procwatch.cgroup.PAGE
         (directory / "statm").write_text(f"{pages * 2} {pages} 10 1 0 5 0\n")
 
 

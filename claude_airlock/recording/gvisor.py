@@ -6,12 +6,13 @@ tell what they do though, to a program outside the sandbox (its runtime
 monitoring): it sends each point it is asked for, as a protobuf message
 behind a header, over a Unix socket of kind SOCK_SEQPACKET it connects to
 as a sandbox starts. The launcher listens on one for each session, and
-writes what it is told in the lines of procwatch.py, to the record of
+writes what it is told in the lines of procwatch, to the record of
 host_health.py: each program a process becomes and each process made,
-each connection, and each file of secrets opened (see secrets.py). Every
-start of a program is told, not looked for, so what lives a moment is
-not missed, and every file opened, which a look at what a process holds
-misses unless it is still open then.
+each connection, each socket of TCP that starts to wait for them, and
+each file of secrets opened (see secrets.py). Every start of a program
+is told, not looked for, so what lives a moment is not missed, and every
+file opened, which a look at what a process holds misses unless it is
+still open then.
 
 A runtime of gVisor reads what to send and where from the file it is
 registered with (--pod-init-config), when a sandbox is made, and that
@@ -30,9 +31,10 @@ not told why a point was dropped, nor which.
 Not told: a file opened by openat2 or by a handle, which have no point
 of their own, unless it is closed again (close is told with the file's
 path, as gVisor finds it); a connection's own port, a connection of the
-record is then found by where it went and when, see ProcessRecord.holder.
-A process's parent is the one that made it, not the one that took it in
-once that one was gone.
+record is then found by where it went and when, see ProcessRecord.holder;
+a socket that waits for connections, under a runsc older than the point
+of listen (release-20260727.0). A process's parent is the one that made
+it, not the one that took it in once that one was gone.
 
 The record is written on the host, where only the user and root reach,
 as gVisor's sinks write: a session can neither stop it nor reach it. The
@@ -42,7 +44,6 @@ as root."""
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import ipaddress
 import json
 import os
@@ -61,13 +62,16 @@ from ..notice import warn
 from ..settings import Host
 from .processes import SOON_OVER
 from .procwatch import (
-    MOST_ARGUMENT,
     Note,
     OpenedOnce,
     Secrets,
     Telling,
     command_line,
+    is_loopback,
+    kept_path,
+    unmapped,
 )
+from .unix_socket import PrivateSocket
 
 if TYPE_CHECKING:
     from ..sandbox.runtime import Runtime
@@ -78,15 +82,13 @@ VERSION = 1
 # points gVisor dropped so far, in the machine's own order, then the
 # message
 HEADER = struct.Struct("=HHI")
-# The most a message can be: what is told of a program started with more
-# arguments than that is passed over, as dropped
+# The most of a message that is read: of a program started with more
+# arguments than that, what came before the cut, see Told.take, and of
+# any other message longer than that nothing, it is counted as dropped
 MOST_MESSAGE = 1024 * 1024
 # How long to wait for the file of the runtime to be the launcher's to
 # write, while another launcher starts its session
 LOCK_WAIT = 60.0
-# The path of a Unix socket has room for so many bytes on Linux, the
-# only host gVisor runs on
-SOCKET_PATH = 107
 # What the sink is told of retrying a point it could not send at once:
 # so many times, waiting longer each time from the first wait to the
 # last, a session that has it tell more than is read is slowed that long
@@ -106,10 +108,11 @@ DROPPED_EVERY = 5.0
 # kernel, the same whatever the host is, not those of errno and socket
 # here: what openat is given for a path from the directory the process
 # is in, what connect says of a socket that does not wait, the families
-# of addresses
+# of addresses, and the type of socket TCP is of
 AT_FDCWD = -100
 EINPROGRESS = 115
 AF_INET, AF_INET6 = 2, 10
+SOCK_STREAM = 1
 
 # The messages read, by their type (MessageType of gVisor's common.proto)
 CONTAINER_START = 1
@@ -119,6 +122,7 @@ SENTRY_TASK_EXIT = 5
 SYSCALL_OPEN = 7
 SYSCALL_CLOSE = 8
 SYSCALL_CONNECT = 10
+SYSCALL_LISTEN = 37
 
 # What each point is to say of the task it happened in (ContextData)
 CONTEXT = ["time", "thread_id", "group_id", "container_id", "parent_thread_group_id"]
@@ -130,6 +134,9 @@ POINTS = [
     {"name": "sentry/execve", "context_fields": CONTEXT},
     {"name": "sentry/task_exit", "context_fields": CONTEXT},
     {"name": "syscall/connect/exit", "context_fields": CONTEXT},
+    # Of runsc release-20260727.0 and later, an older one passes over it
+    # (ignore_missing, see pod_init_config)
+    {"name": "syscall/listen/exit", "context_fields": CONTEXT},
     {"name": "syscall/open/exit", "context_fields": WITH_CWD},
     {
         "name": "syscall/openat/exit",
@@ -148,18 +155,45 @@ class NotThis(ValueError):
     """What was read is not a message of the kind it was read as."""
 
 
+class _CutShort(NotThis):
+    """What was read ends in the middle of a field."""
+
+
 def _varint(data: bytes | memoryview, at: int) -> tuple[int, int]:
     """A number as protobuf writes it, and where what follows it is."""
     found = 0
     for shift in range(0, 70, 7):
         if at >= len(data):
-            raise NotThis("a number is cut short")
+            raise _CutShort("a number is cut short")
         byte = data[at]
         at += 1
         found |= (byte & 0x7F) << shift
         if not byte & 0x80:
             return found, at
     raise NotThis("a number is too long")
+
+
+def _field(data: bytes | memoryview, at: int) -> tuple[int, int | bytes, int]:
+    """The field of a message that starts at a place: its number, its
+    value, and where what follows it is."""
+    key, at = _varint(data, at)
+    number, kind = key >> 3, key & 7
+    value: int | bytes
+    if kind == 0:
+        value, at = _varint(data, at)
+    elif kind in (1, 5):
+        width = 8 if kind == 1 else 4
+        value = int.from_bytes(data[at : at + width], "little")
+        at += width
+    elif kind == 2:
+        length, at = _varint(data, at)
+        value = bytes(data[at : at + length])
+        at += length
+    else:
+        raise NotThis(f"a field of kind {kind}")
+    if at > len(data):
+        raise _CutShort("a field is cut short")
+    return number, value, at
 
 
 def _signed(number: int) -> int:
@@ -171,35 +205,27 @@ def _signed(number: int) -> int:
 class Message:
     """The fields of a protobuf message by their number, each as often
     as it came: a number, or the bytes of a text or of a message. The
-    schema is gVisor's, the fields are read by their numbers there."""
+    schema is gVisor's, the fields are read by their numbers there. And
+    whether it was cut short, the start of a longer one, see read."""
 
     fields: dict[int, list[int | bytes]]
+    cut: bool = False
 
     @classmethod
-    def read(cls, data: bytes | memoryview) -> Message:
-        """Raises NotThis for what is not a message."""
+    def read(cls, data: bytes | memoryview, cut: bool = False) -> Message:
+        """Raises NotThis for what is not a message. Of the start of one
+        (cut), its fields up to the one the cut is in, which is passed
+        over: what ends in the middle of a field is no message else."""
         fields: dict[int, list[int | bytes]] = {}
         at = 0
-        while at < len(data):
-            key, at = _varint(data, at)
-            number, kind = key >> 3, key & 7
-            value: int | bytes
-            if kind == 0:
-                value, at = _varint(data, at)
-            elif kind in (1, 5):
-                width = 8 if kind == 1 else 4
-                value = int.from_bytes(data[at : at + width], "little")
-                at += width
-            elif kind == 2:
-                length, at = _varint(data, at)
-                value = bytes(data[at : at + length])
-                at += length
-            else:
-                raise NotThis(f"a field of kind {kind}")
-            if at > len(data):
-                raise NotThis("a field is cut short")
-            fields.setdefault(number, []).append(value)
-        return cls(fields)
+        try:
+            while at < len(data):
+                number, value, at = _field(data, at)
+                fields.setdefault(number, []).append(value)
+        except _CutShort:
+            if not cut:
+                raise
+        return cls(fields, cut)
 
     def number(self, field: int) -> int:
         """The last of a number field, 0 for one not there, as protobuf
@@ -268,8 +294,7 @@ def address(sockaddr: bytes) -> tuple[str, int] | None:
             return None
     except ValueError:
         return None
-    mapped = getattr(found, "ipv4_mapped", None)
-    return str(mapped or found), int.from_bytes(sockaddr[2:4], "big")
+    return unmapped(found), int.from_bytes(sockaddr[2:4], "big")
 
 
 def opened_path(pathname: str, fd: int, cwd: str, fd_path: str) -> str:
@@ -312,15 +337,25 @@ class Told:
         """Whether more files of secrets were opened than are told of."""
         return self._opened.too_many
 
-    def take(self, kind: int, payload: bytes) -> list[Line]:
+    def take(self, kind: int, payload: bytes, cut: bool = False) -> list[Line]:
         """What a message of a kind tells, as lines. Raises NotThis for
-        one that is not what its kind says."""
+        one that is not what its kind says. Of one that was cut short,
+        longer than the most that is read (cut, see MOST_MESSAGE), what
+        came before the cut, where that is all that is needed of it, see
+        _CUT_NEEDS: a program started with more arguments than that is
+        told with those that came, as a command line the watcher cuts.
+        Raises NotThis for any other."""
+        needs = self._CUT_NEEDS.get(kind) if cut else ()
+        if needs is None:
+            raise NotThis("cut short")
         if kind in (SYSCALL_OPEN, SYSCALL_CLOSE) and self._unread(payload):
             return []
         taken = self._TAKEN.get(kind)
         if taken is None:
             return []
-        message = Message.read(payload)
+        message = Message.read(payload, cut)
+        if not set(needs) <= message.fields.keys():
+            raise NotThis("cut short of what is needed of it")
         context = Context.of(message)
         if context.container and not self.container:
             self.container = context.container
@@ -352,16 +387,14 @@ class Told:
         return [self._process(context.when, made, context.process, program, argv)]
 
     def _execed(self, message: Message, context: Context) -> list[Line]:
-        """A process became another program."""
+        """A process became another program: of a message cut short, its
+        command line as far as it came, cut."""
         raw = b"\0".join(message.texts(3))
-        program = message.text(2)[:MOST_ARGUMENT]
+        program = kept_path(message.text(2))
         known = self._known.get(context.process)
         parent = known[2] if known else context.parent
-        return [
-            self._process(
-                context.when, context.process, parent, program, command_line(raw)
-            )
-        ]
+        argv = command_line(raw, cut=message.cut)
+        return [self._process(context.when, context.process, parent, program, argv)]
 
     def _exited(self, _message: Message, context: Context) -> list[Line]:
         """A task ended: of a process, its last, whose id is the
@@ -387,10 +420,28 @@ class Told:
         if went.number(2) not in (0, EINPROGRESS):
             return []
         to = address(message.raw(6))
-        if to is None or not to[1] or to[0].startswith("127.") or to[0] == "::1":
+        if to is None or not to[1] or is_loopback(to[0]):
             return []
         said = {"port": 0, "to": to[0], "to_port": to[1], "pids": [context.process]}
         return [(context.when, True, said)]
+
+    def _listened(self, message: Message, context: Context) -> list[Line]:
+        """A socket of TCP started to wait for connections (Listen of
+        syscall.proto): by the address and port gVisor finds it has once
+        it does, which it was given where it was bound to none. As the
+        watcher notes one: of the part of the record kept for connections
+        where it waits on more than the session's own loopback, and not
+        where it waits on that alone, which a session opens as fast as it
+        likes."""
+        went = message.message(2)
+        stream = message.number(9) == SOCK_STREAM
+        if went.number(2) or message.number(8) not in (AF_INET, AF_INET6) or not stream:
+            return []
+        on = address(message.raw(7))
+        if on is None:
+            return []
+        said = {"listen": on[1], "on": on[0], "pids": [context.process]}
+        return [(context.when, not is_loopback(on[0]), said)]
 
     def _opened_file(self, message: Message, context: Context) -> list[Line]:
         """A file was opened, by the path the process gave. Not one that
@@ -418,11 +469,16 @@ class Told:
         if telling is Telling.KNOWN:
             return []
         said = {
-            "opened": path[:MOST_ARGUMENT],
+            "opened": kept_path(path),
             "secret": kind,
             "pids": [context.process],
         }
         return [(context.when, True, said)]
+
+    # Of the messages that are read when cut short, the fields that have
+    # to come before the cut: those come in the order of their numbers,
+    # and of an exec its context and program before its arguments
+    _CUT_NEEDS: ClassVar[dict[int, tuple[int, ...]]] = {SENTRY_EXEC: (1, 2)}
 
     _TAKEN: ClassVar[dict[int, Callable[[Told, Message, Context], list[Line]]]] = {
         CONTAINER_START: _started,
@@ -432,6 +488,7 @@ class Told:
         SYSCALL_OPEN: _opened_file,
         SYSCALL_CLOSE: _closed,
         SYSCALL_CONNECT: _connected,
+        SYSCALL_LISTEN: _listened,
     }
 
 
@@ -491,8 +548,8 @@ class Monitor:
     attach). Of the first sandbox that says it is of the session's
     container: another is let go of."""
 
-    def __init__(self, path: str, secrets: Secrets, listener: socket.socket) -> None:
-        self.path = path
+    def __init__(self, secrets: Secrets, listener: PrivateSocket) -> None:
+        self.path = listener.path
         self.secrets = secrets
         self._listener = listener
         # The file of the runtime, held until the session's sandbox is
@@ -517,23 +574,8 @@ class Monitor:
     def listening(cls, host: Host, session: str, secrets: Secrets) -> Monitor:
         """A socket for the session, waited on in the background. Raises
         OSError when it cannot be made."""
-        directory = private_dir(host.gvisor_dir)
-        # A short name: the path of a socket cannot be long
-        name = hashlib.sha256(session.encode()).hexdigest()[:12]
-        path = os.path.join(directory, f"{name}-{os.getpid()}.sock")
-        if len(path.encode()) > SOCKET_PATH:
-            raise OSError(f"the path of its socket is too long: {path}")
-        with suppress(FileNotFoundError):
-            os.unlink(path)
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        try:
-            listener.bind(path)
-            os.chmod(path, 0o600)
-            listener.listen(4)
-        except OSError:
-            listener.close()
-            raise
-        monitor = cls(path, secrets, listener)
+        listener = PrivateSocket(host.gvisor_dir, session, socket.SOCK_SEQPACKET, 4)
+        monitor = cls(secrets, listener)
         threading.Thread(target=monitor._serve, daemon=True).start()
         return monitor
 
@@ -570,20 +612,11 @@ class Monitor:
 
     def close(self) -> None:
         self.sandbox_made()
-        # Shut first: closing alone leaves _serve waiting in accept
-        with suppress(OSError):
-            self._listener.shutdown(socket.SHUT_RDWR)
         self._listener.close()
-        with suppress(OSError):
-            os.unlink(self.path)
 
     def _serve(self) -> None:
-        while True:
-            try:
-                sandbox, _ = self._listener.accept()
-            except OSError:
-                # Closed, the session has ended
-                return
+        # Until it is closed, the session has ended
+        while (sandbox := self._listener.accept()) is not None:
             threading.Thread(target=self._read, args=(sandbox,), daemon=True).start()
 
     def _read(self, sandbox: socket.socket) -> None:
@@ -608,13 +641,16 @@ class Monitor:
                     break
                 if not size:
                     break
-                if flags & socket.MSG_TRUNC or size < HEADER.size:
+                if size < HEADER.size:
                     self._pass_over(1)
                     continue
                 length, kind, dropped = HEADER.unpack_from(buffer)
+                cut = bool(flags & socket.MSG_TRUNC)
                 try:
-                    lines = told.take(kind, bytes(view[length:size]))
+                    lines = told.take(kind, bytes(view[length:size]), cut)
                 except NotThis:
+                    # Of one cut short, what is not told is counted
+                    self._pass_over(int(cut))
                     lines = []
                 whose = self._whose(told.container)
                 if whose is False:
