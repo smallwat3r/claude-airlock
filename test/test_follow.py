@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 from harness import LAUNCHER, LauncherTest
 from packets import (
+    UNNAMED,
     answer,
     dns_response,
     knock,
@@ -852,7 +853,8 @@ class FollowNetworkTest(LauncherTest):
         then = time.time() - 5
         captured = self.work / "capture.pcap"
         # One connection opened, used and closed, one of Claude Code's own
-        # and one of a claude a command started
+        # and one of a claude a command started, the two to a port without a
+        # name: which ports have one is the host's services file to say
         captured.write_bytes(
             pcap_file(
                 [
@@ -865,8 +867,8 @@ class FollowNetworkTest(LauncherTest):
                     ),
                     (then + 1, tcp("198.51.100.7", 443, 0x11, b"", 501, 1), True),
                     (then + 1, answer("198.51.100.7", 443, 0x11, 1, 502), False),
-                    (then + 2, tcp("198.51.100.8", 444), True),
-                    (then + 3, tcp("198.51.100.9", 445), True),
+                    (then + 2, tcp("198.51.100.8", UNNAMED), True),
+                    (then + 3, tcp("198.51.100.9", UNNAMED), True),
                 ]
             )
         )
@@ -905,16 +907,16 @@ class FollowNetworkTest(LauncherTest):
             },
             {
                 "t": then,
-                "port": 40444,
+                "port": 40000 + UNNAMED,
                 "to": "198.51.100.8",
-                "to_port": 444,
+                "to_port": UNNAMED,
                 "pids": [2],
             },
             {
                 "t": then,
-                "port": 40445,
+                "port": 40000 + UNNAMED,
                 "to": "198.51.100.9",
-                "to_port": 445,
+                "to_port": UNNAMED,
                 "pids": [813],
             },
         )
@@ -927,8 +929,8 @@ class FollowNetworkTest(LauncherTest):
         assert f"[n1] tcp/https 198.51.100.7:443  {curl} < Claude Code" in shown
         (closed,) = [line for line in shown.splitlines() if "closed after" in line]
         assert "by: " not in closed
-        assert "[n2] tcp 198.51.100.8:444  by: [2] Claude Code" in shown
-        assert f"[n3] tcp 198.51.100.9:445  {nested}" in shown
+        assert f"[n2] tcp 198.51.100.8:{UNNAMED}  by: [2] Claude Code" in shown
+        assert f"[n3] tcp 198.51.100.9:{UNNAMED}  {nested}" in shown
         # Verbose, all of it is said
         verbose = Following(
             self, "--verbose", FAKE_PS=both, FAKE_CAPTURE=str(captured)
