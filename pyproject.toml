@@ -51,12 +51,12 @@ ignore = [
 # The limits below are the worst of the code as it is, not a goal: they
 # keep it from growing, lower them as it is brought down.
 [tool.ruff.lint.mccabe]
-max-complexity = 14
+max-complexity = 12
 
 [tool.ruff.lint.pylint]
 max-args = 9
 max-positional-args = 9
-max-branches = 14
+max-branches = 10
 max-returns = 8
 
 [tool.mypy]
