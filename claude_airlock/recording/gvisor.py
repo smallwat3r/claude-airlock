@@ -48,7 +48,6 @@ import json
 import os
 import socket
 import struct
-import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -85,8 +84,9 @@ MOST_MESSAGE = 1024 * 1024
 # How long to wait for the file of the runtime to be the launcher's to
 # write, while another launcher starts its session
 LOCK_WAIT = 60.0
-# The path of a Unix socket has room for so many bytes, fewer on macOS
-SOCKET_PATH = 103 if sys.platform == "darwin" else 107
+# The path of a Unix socket has room for so many bytes on Linux, the
+# only host gVisor runs on
+SOCKET_PATH = 107
 # What the sink is told of retrying a point it could not send at once:
 # so many times, waiting longer each time from the first wait to the
 # last, a session that has it tell more than is read is slowed that long
