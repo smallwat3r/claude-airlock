@@ -109,7 +109,7 @@ from .tails import (
     WatcherTail,
 )
 from .trace import traced_secrets
-from .trace_args import USAGE, picked_session, trace_options
+from .trace_args import ALL, LIST, STATS, USAGE, picked_session, trace_options
 from .transcript import WalkOptions
 
 # Seconds between two looks at what is followed
@@ -864,11 +864,11 @@ def follow(host: Host, args: list[str]) -> int:
     interrupted. With the start of a session id only that session, with
     --json as JSON Lines, with --only and --failed the events they
     choose."""
-    options, names, chosen = trace_options(args, ("--follow", "--verbose", "--json"))
-    if names in (["list"], ["all"]):
+    options, name, chosen, _ = trace_options(args, ("--follow", "--verbose", "--json"))
+    if name in (LIST, ALL, STATS):
         raise Fatal(USAGE)
     as_json = "--json" in options
-    only = picked_session(session_files(host), names[0]) if names else None
+    only = picked_session(session_files(host), name) if name else None
     verbose = as_json or "--verbose" in options
     follower = Follower(host, verbose, only, chosen, lines=not as_json)
     output = Output(follower, None if as_json else Layout.for_output(os.environ))

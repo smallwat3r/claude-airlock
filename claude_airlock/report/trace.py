@@ -29,7 +29,7 @@ import os
 import pydoc
 import sys
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +47,7 @@ from ..recording.recorder import (
     Compared,
     compare,
     copy_rank,
+    last_written,
     removed_subagents,
     removed_transcripts,
 )
@@ -69,6 +70,9 @@ from .net_events import network
 from .noted import noted_events
 from .planted import INJECTION, read_said
 from .recorded import ReadTranscript, Recorded
+from .session_trace import SessionTrace
+from .stats import session_stats
+from .stats_shown import stats_json, stats_lines
 from .stream import (
     EVERYTHING,
     Filter,
@@ -78,7 +82,14 @@ from .stream import (
     wants_record,
 )
 from .summary import Flagged, flagged_shown, planted_shown, summary
-from .trace_args import picked_session, trace_options
+from .trace_args import (
+    ALL,
+    LIST,
+    STATS,
+    TraceArgs,
+    picked_session,
+    trace_options,
+)
 from .transcript import WalkOptions, left_events, taken_out_events
 from .unseen import mark_unseen, unseen_summary
 from .wire import on_the_wire
@@ -266,6 +277,18 @@ def session_events(
     chosen: Filter = EVERYTHING,
     lines: bool = True,
 ) -> tuple[list[str], list[Event]]:
+    """The header lines of a session and its events, see traced_session."""
+    traced = traced_session(path, host, verbose, chosen, lines)
+    return traced.header, traced.events
+
+
+def traced_session(
+    path: Path,
+    host: Host,
+    verbose: bool,
+    chosen: Filter = EVERYTHING,
+    lines: bool = True,
+) -> SessionTrace:
     """The header lines of a session and its events, those of the
     transcript and of the network record together, in the order they
     happened. The header is of the whole session, the events are the
@@ -335,7 +358,9 @@ def session_events(
         *chosen.header(),
     ]
     found = [*told, *net_events, *noted]
-    return header, ordered(found, lambda event: event, Timeline(), chosen)
+    events = ordered(found, lambda event: event, Timeline(), chosen)
+    entries = own.known + theirs
+    return SessionTrace(header, events, entries, project_dir, planted, flagged)
 
 
 def render(
@@ -473,24 +498,61 @@ def _show_each(parts: Iterable[str], colour: bool = False) -> None:
         sys.stdout.write(part)
 
 
+def _show_list(files: list[Path], host: Host, given: TraceArgs) -> None:
+    """The sessions, a line each, or with --json an object each."""
+    _show(_list_sessions(files, host, "--json" in given.options))
+
+
+def _show_all(files: list[Path], host: Host, given: TraceArgs) -> None:
+    """The trace of every session, see _every_trace."""
+    colour = "--json" not in given.options and Layout.for_output(os.environ).colour
+    _show_each(_every_trace(files, host, given.options, given.chosen), colour)
+
+
+def _show_stats(files: list[Path], host: Host, given: TraceArgs) -> None:
+    """The sessions summed up (see stats.py), from the trace of each with
+    every event: as the lines of a header, with --json as one object."""
+    stats = session_stats(
+        host.project_dir,
+        files,
+        given.since,
+        lambda path: traced_session(path, host, verbose=True, lines=False),
+    )
+    if "--json" in given.options:
+        _show(stats_json(stats))
+        return
+    layout = Layout.for_output(os.environ)
+    _show("\n".join(layout.header(stats_lines(stats))) + "\n")
+
+
+# What is shown of the sessions for each name --trace takes in the place
+# of one, see trace_args.py
+OF_EVERY_SESSION: dict[str, Callable[[list[Path], Host, TraceArgs], None]] = {
+    LIST: _show_list,
+    ALL: _show_all,
+    STATS: _show_stats,
+}
+
+
 def trace(host: Host, args: list[str]) -> int:
     """Show what a session of this project did: the latest one, or the one
     whose id starts with the given text, as text or with --json as JSON
-    Lines, all of it or what --only and --failed choose. "all" shows every
-    session, "list" lists them instead."""
-    options, names, chosen = trace_options(args, ("--verbose", "--json"))
+    Lines, all of it or what --only and --failed choose. Or what is shown
+    of every session by the name given instead, see OF_EVERY_SESSION,
+    with --since of those last written since then."""
+    given = trace_options(args, ("--verbose", "--json"))
     files = _traced_files(host)
-    if names == ["list"]:
-        _show(_list_sessions(files, host, "--json" in options))
+    if given.since is not None:
+        files = [path for path in files if last_written(host, path) >= given.since]
+    of_every = OF_EVERY_SESSION.get(given.name or "")
+    if of_every is not None:
+        of_every(files, host, given)
         return 0
-    if names == ["all"]:
-        colour = "--json" not in options and Layout.for_output(os.environ).colour
-        _show_each(_every_trace(files, host, options, chosen), colour)
-        return 0
-    path = picked_session(files, names[0]) if names else files[0]
-    if "--json" in options:
-        _show(render_json(path, host, chosen))
+    path = picked_session(files, given.name) if given.name else files[0]
+    if "--json" in given.options:
+        _show(render_json(path, host, given.chosen))
     else:
         layout = Layout.for_output(os.environ)
-        _show(render(path, host, "--verbose" in options, layout, chosen), layout.colour)
+        verbose = "--verbose" in given.options
+        _show(render(path, host, verbose, layout, given.chosen), layout.colour)
     return 0

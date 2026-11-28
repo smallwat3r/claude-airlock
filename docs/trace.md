@@ -49,7 +49,9 @@ goes through your pager.
 | --- | --- |
 | `list` | The project's sessions, the latest first. With `--json`, an object each: its whole id (`session`), when it `last` did something, how many `prompts` and `calls`, whether its transcript was `removed`, and its `title` |
 | `all` | Every session of the project, the one the launcher took in first first, each with its header. With `--json`, all of them in one stream, see [As JSON](#as-json) |
+| `stats` | The project's sessions summed up, see [Stats](#stats) |
 | `3fa9` | The session whose id starts so, instead of the latest |
+| `--since 7d` | Of `list`, `all` and `stats`, the sessions last written since then: so many minutes, hours, days or weeks ago (`30m`, `12h`, `7d`, `2w`), or a day or a time of it (`2026-11-20`, `2026-11-20T10:00`) |
 | `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process, what the language server reported. Not with `--json`, which has it all |
 | `--only bash,net` | The events of the kinds named, as the `what` column says them |
 | `--failed` | What went wrong or stands out: a call that failed or was refused, a write outside the project, a call that acted outside the sandbox, a possible injection, a prompt that did not come from you, a hook that blocked, stopped or failed, Remote Control, a refused request or connection, a request the API did not answer, a lookup or connection that stands out, a file of secrets opened, what was taken out of the transcript, a line of it that cannot be read |
@@ -483,6 +485,54 @@ their names: what a use of the SSH agent signed or asked for is
   call no more than 4096 characters of its tool's name and of what it
   reads: a session can write thousands of each, as long as it likes. A
   result whose call was named so has the id it was written with.
+
+## Stats
+
+`claude-airlock --trace stats` sums up the project's sessions, with
+`--since` those of a span of time:
+
+```
+# stats       12 sessions of /home/me/code/api, 2026-11-20 10:02 to 2026-11-28 16:18
+# prompts     84
+# tool calls  1204 (Bash 640, Read 300, Edit 180, Write 40, Grep 30, and 3 more)
+# failed      37
+# tokens      1.20M out, 98.40M in (95.10M from the cache), over 2310 steps of the model
+# cost        $41.20
+# flagged     2 of what it read may be written to instruct it, see --trace SESSION --failed
+# commands    by the programs they run, of 640 calls of Bash
+#   npm x120, 3 of them FAILED
+#   git x80
+# files written
+#   src/main.go x14
+# network     3410 connections to 41 destinations, 1.2 GB out, 3.0 GB in
+#   tcp/https api.anthropic.com:443 x1200, 800 MB out, 2.0 GB in
+#   1180 requests to the model seen on the wire
+# sessions    the latest first
+#   2026-11-28 16:18  3fa9c0de   12 prompts   140 calls    2 failed     $3.10  fix the build
+```
+
+- What the transcripts give (prompts, calls, failures, tokens, cost,
+  files written, pages fetched, what was flagged) is counted as the
+  header of each session's trace counts it, and the cost is what Claude
+  Code says of each session that says it.
+- A command is counted by the programs it runs: the first word of each
+  command of its line, past the variables set for it and the words of the
+  shell (`if`, `then`, `time`, `env`). What its here-documents hold is not
+  read.
+- What the launcher recorded (connections, requests to the model, uploads,
+  processes, files of secrets opened, uses of the doors) is in the trace
+  of every session that ran at the time, as a transcript does not say
+  which container wrote it. Each is counted once. A filtered session's
+  destinations are what it asked the egress proxy for.
+- Each list names the 10 counted most, then how many more there are,
+  with the files written outside the project first. `--json` gives one
+  object with every name and its counts, `reached` with the totals of
+  the network, and `per_session`, the line of each session. Of each kind,
+  no more than 10,000 names are kept: what is counted past those is in
+  the totals, and `left_out` says how much.
+- `--since` goes by when the launcher last copied each transcript, or by
+  the time of its file when that is later: a session can set the time
+  of its file back, not that of the launcher's copy.
 
 ## The network
 

@@ -114,6 +114,7 @@ claude-airlock --trace list          # this project's sessions, latest first
 claude-airlock --trace 3fa9 --verbose > trace.txt   # one session, in detail
 claude-airlock --trace --json | jq 'select(.what == "net")'   # as JSON Lines
 claude-airlock --trace all --json > all.jsonl   # every session here, for jq or a database
+claude-airlock --trace stats --since 7d   # this week's sessions here, summed up
 claude-airlock --trace --only bash,net   # just the commands and the network
 claude-airlock --trace --failed      # just what went wrong
 claude-airlock --trace --follow      # what the sessions here do, as they do it
@@ -276,8 +277,8 @@ egress filter cannot tell apart, are in
 
 `claude-airlock --trace` shows what the latest session of the project did,
 in order: what it ran and why, what it wrote, and what it reached on the
-network. `--trace --follow` shows it live. See
-[docs/trace.md](docs/trace.md).
+network. `--trace --follow` shows it live, and `--trace stats` sums up
+all the sessions of the project. See [docs/trace.md](docs/trace.md).
 
 ## Line mode
 
