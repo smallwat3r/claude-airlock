@@ -5,11 +5,13 @@ files of secrets hidden from it."""
 from __future__ import annotations
 
 import enum
+import errno
 import fnmatch
 import os
 import stat
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from ..docker import (
     NO_COLON,
@@ -21,8 +23,12 @@ from ..docker import (
     volume_takes,
 )
 from ..errors import Fatal
+from ..events import flat
 from ..files import (
+    CLOSED,
+    GONE,
     expand_home,
+    file_id,
     is_under,
     is_within,
     leads_under,
@@ -40,13 +46,20 @@ SHADOW_PRUNED_DIRS = ("node_modules", ".git")
 # one as deep as a path goes
 MOST_HIDDEN = 1000
 MOST_HELD = 2000
+# The errors of where a link named as a file of secrets leads, when it
+# leads nowhere: to what is gone (GONE of files.py, nothing is there to
+# hide) or closed to the launcher (CLOSED, see openable), or round in a
+# loop
+LEADS_NOWHERE = GONE | CLOSED | {errno.ELOOP}
 
 
 def refuse_past_most(count: int, most: int, what: str) -> None:
     """Fatal for more of a kind of mount than most: each is an argument
     of docker run, which the system takes only so many of, and what each
     is for is a session's to make any number of. Said with what they are
-    for, and where."""
+    for, and where: whoever asks gives the paths in what flat, a session
+    names them, and a line break in a name would start a line of its own
+    (see flat)."""
     if count > most:
         raise Fatal(
             f"more than {most} {what}: more than can each be mounted, a"
@@ -321,16 +334,22 @@ def refuse_withheld_dirs(
     write, or could at an earlier launch (written_before), and leads out
     of there. A session could have left the link for this, to be given
     the next time what it points to, named from there or from anywhere
-    else. One the user keeps such a link to is named by where it is."""
+    else. One the user keeps such a link to is named by where it is. The
+    project too, started from such a link: a session of the project it is
+    in could have left it, for ~/.aws to be the next project mounted."""
     written = Written.of([*writable_dirs(dirs, host), *written_before])
-    for extra in dirs:
-        refused = withheld(extra.path, host, written)
+    for path in mounted_dirs(dirs, host):
+        refused = withheld(path, host, written)
         if refused is None:
             continue
         said = refused.said
         if refused.rule is Rule.LINK_OUT:
-            said += ". Name the directory it leads to"
-        raise Fatal(f"refusing to mount {extra.path}: {said}")
+            said += (
+                ". Start from the directory it leads to"
+                if path == host.project_dir
+                else ". Name the directory it leads to"
+            )
+        raise Fatal(f"refusing to mount {flat(path)}: {said}")
 
 
 def _absolute_path(raw: str, host: Host) -> str:
@@ -395,6 +414,17 @@ def configured_extra_dirs(settings: Settings, host: Host) -> list[ExtraDir]:
     return dirs
 
 
+def _nearest(
+    path: str,
+    roots: Iterable[str],
+    within: Callable[[str, str], bool] = is_under,
+) -> str | None:
+    """Of some directories, the one nearest above a path, by within (under
+    it, by default), none when the path is in none of them. As they are
+    written, whoever asks resolves them first where a link counts."""
+    return max((root for root in roots if within(path, root)), key=len, default=None)
+
+
 def _within(path: str, root: str) -> str | None:
     """Where a path is under a directory as that directory is mounted,
     none when it is not under it. By where the two lead, either can be
@@ -412,18 +442,24 @@ def _refuse_protected_link(
     a session can write: the read-only mount is where the link leads, and
     nothing holds the link, which no mount can. A session would replace
     it with what it likes, which the host reads at the path protected.
-    By the mounted directory the path is in as it is written, the one
-    nearest to it, whether the link leads out of it or not."""
-    roots = mounted_dirs(dirs, host)
-    root = max((r for r in roots if is_under(path, r)), key=len, default=None)
-    if root is None or root not in writable_dirs(dirs, host):
-        return
+    Each link on the way by the mounted directory it is in, the one
+    nearest to it by where they lead, whether the link leads out of it or
+    not: wherever the path is named from, ~/kit as a link into the shared
+    directory too, which is in none of them as it is written."""
+    writable = writable_dirs(dirs, host)
+    # Each by where it leads, the first of those that lead to the same
+    by_real: dict[str, str] = {}
+    for root in mounted_dirs(dirs, host):
+        by_real.setdefault(os.path.realpath(root), root)
     links, _ = _links_on_the_way(path)
-    if _through_link_in(links, os.path.realpath(root)):
-        raise Fatal(
-            f"cannot protect {raw}: it is, or goes through, a link in {root},"
-            " which a session could replace. Name the path it leads to"
-        )
+    for link in links:
+        real = _nearest(link, by_real)
+        root = by_real[real] if real else ""
+        if root in writable:
+            raise Fatal(
+                f"cannot protect {raw}: it is, or goes through, a link in {root},"
+                " which a session could replace. Name the path it leads to"
+            )
 
 
 def protected_dirs(
@@ -500,8 +536,7 @@ def _held_in_place(
     read_only = [*(d.path for d in dirs if d.read_only), *inside]
     held: dict[str, None] = {}
     for path in (*inside, *hidden.files, *hidden.covered, *mounted_dirs(dirs, host)):
-        above = [root for root in (*writable, *read_only) if is_under(path, root)]
-        root = max(above, key=len, default=None)
+        root = _nearest(path, (*writable, *read_only))
         if root is None or root in read_only:
             continue
         directory = os.path.dirname(path)
@@ -512,22 +547,239 @@ def _held_in_place(
             len(held),
             MOST_HELD,
             "directories to hold in place above the files hidden and the paths"
-            f" protected, {path} among them",
+            f" protected, {flat(path)} among them",
         )
     return sorted(path for path in held if not hidden.hides(path))
+
+
+class _MountPoints(NamedTuple):
+    """Where the mounts of protect_args go: the directories held in place,
+    and the protected paths mounted read-only."""
+
+    held: list[str]
+    protected: list[str]
+
+
+def _mount_points(
+    inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Hidden
+) -> _MountPoints:
+    """Where the mounts of protect_args go, for it and for Placed: the
+    paths of protected_dirs, but for one that is hidden, or covered,
+    which is read-only there already, one mount at a place (see
+    Hidden.hides), and the directories that keep them, the directories
+    mounted inside another and the hidden files where they are, see
+    _held_in_place."""
+    protected = [path for path in inside if not hidden.hides(path)]
+    return _MountPoints(_held_in_place(protected, host, dirs, hidden), protected)
 
 
 def protect_args(
     inside: list[str], host: Host, dirs: list[ExtraDir], hidden: Hidden = NO_SECRETS
 ) -> list[str]:
     """The read-only mounts of protected_dirs, on top of what they are
-    in, and the mounts that keep them, the directories mounted inside
-    another and the hidden files where they are, see _held_in_place. Not
-    of a protected path that is hidden, or covered: it is read-only
-    there already, and one mount at a place, see Hidden.hides."""
-    inside = [path for path in inside if not hidden.hides(path)]
-    held = [held_arg(path) for path in _held_in_place(inside, host, dirs, hidden)]
-    return held + [mount_arg(path, path, "ro,z") for path in inside]
+    in, and the mounts that keep them, see _mount_points."""
+    points = _mount_points(inside, host, dirs, hidden)
+    held = [held_arg(path) for path in points.held]
+    return held + [mount_arg(path, path, "ro,z") for path in points.protected]
+
+
+# What a file is to the system, whatever it is named and whatever leads to
+# it: the device it is on and its number there
+type Identity = tuple[int, int]
+
+
+def _moved(path: str, said: str) -> Fatal:
+    """What is said of a path a mount goes from or to that is not as it
+    has to be to be mounted: gone, a link, or another than was planned."""
+    return Fatal(
+        f"cannot mount at {flat(path)}: {said}, a session that runs meanwhile"
+        " may have made it so. Launch again once it is as it was"
+    )
+
+
+def _about(path: str, *, links: bool = False) -> os.stat_result | None:
+    """What lstat says of a path, or stat through the links on the way
+    when told. None for one in a directory closed to the launcher. Fatal
+    for one that is not there, see _moved."""
+    try:
+        return os.stat(path) if links else os.lstat(path)
+    except OSError as problem:
+        if problem.errno in CLOSED:
+            return None
+        raise _moved(path, f"{problem.strerror}") from None
+
+
+def _identity(about: os.stat_result | None) -> Identity:
+    """What a path is by what lstat or stat says of it, and what no file
+    is for one in a directory closed to the launcher, see _about."""
+    return file_id(about) if about else (-1, -1)
+
+
+def _root_identity(root: str) -> Identity:
+    """What a mounted directory leads to, through the links on the way."""
+    return _identity(_about(root, links=True))
+
+
+def _parts_below(root: str, path: str) -> tuple[tuple[Identity, ...], str]:
+    """What each part of a path below a mounted directory is, from the
+    one under it down to the path, none for the directory itself. With
+    the first that is a link, empty when none is, after which no part is
+    looked at: a mount at the path would go where the link leads, which
+    a session that can write there could have pointed anywhere. Nor any
+    after one in a directory closed to the launcher, which cannot be
+    told: a file hidden there as it was, see _hidden_again. That
+    directory is held in place where a session can write, as every one
+    above a hidden file, see _held_in_place."""
+    if path == root:
+        return (), ""
+    parts: list[Identity] = []
+    here = root
+    for name in os.path.relpath(path, root).split(os.sep):
+        here = os.path.join(here, name)
+        about = _about(here)
+        if about and stat.S_ISLNK(about.st_mode):
+            return tuple(parts), here
+        parts.append(_identity(about))
+        if about is None:
+            break
+    return tuple(parts), ""
+
+
+class _Below(NamedTuple):
+    """A path below a directory a mount goes from or to, by what each
+    part of it is from the one under the directory down, see
+    _parts_below."""
+
+    root: str
+    path: str
+    parts: tuple[Identity, ...]
+
+    @classmethod
+    def of(cls, root: str, path: str) -> _Below:
+        """The path as it is now. Fatal for one that goes through a link:
+        the walk for files to hide follows none, a session can have made
+        one since, or the user named a directory to mount inside another
+        through one."""
+        parts, link = _parts_below(root, path)
+        if link:
+            raise Fatal(
+                f"cannot mount at {flat(path)}: it goes through {flat(link)},"
+                " a link, which a session that can write there could point"
+                " anywhere. Name the path it leads to"
+            )
+        return cls(root, path, parts)
+
+    def refuse_moved(self) -> None:
+        """Fatal when a part of the path is a link now, or another than
+        it was."""
+        parts, link = _parts_below(self.root, self.path)
+        if link:
+            raise _moved(self.path, f"it goes through {flat(link)}, a link now")
+        if parts != self.parts:
+            raise _moved(self.path, "it is another than was planned")
+
+
+class _Led(NamedTuple):
+    """A file of the host that is mounted alone, by where it leads, which
+    is below a directory a session can write, or could at an earlier
+    launch (see _led_into)."""
+
+    path: str
+    below: _Below
+
+
+def _led_into(files: Iterable[str], written: Written) -> list[_Led]:
+    """Of the files of the host mounted alone, those that lead into a
+    directory a session can write, or could at an earlier launch
+    (written), each by where it leads in the one nearest above that:
+    ~/.gitconfig kept as a link into a repository of dotfiles that a
+    session of its own has. Not those that lead elsewhere, which are out
+    of a session's reach. Fatal for one that goes through a link below
+    there, see _Below.of."""
+    roots = [root for _, root in written.places]
+    led = []
+    for path in dict.fromkeys(files):
+        real = os.path.realpath(path)
+        root = _nearest(real, roots)
+        if root is not None:
+            led.append(_Led(path, _Below.of(root, real)))
+    return led
+
+
+@dataclass(frozen=True)
+class Placed:
+    """What a session's mounts go from and to of the directories it is
+    given, as it was when they were planned, for refuse_moved: each of
+    those directories by what it leads to, and each path below one, the
+    directories held in place, the paths protected, the files hidden and
+    the directories covered (see _Below). The files of the host mounted
+    alone that lead into a directory a session can write, by where they
+    lead (see _led_into). With what refuse_withheld_dirs asks of the
+    directories again."""
+
+    host: Host
+    dirs: tuple[ExtraDir, ...]
+    written_before: tuple[str, ...]
+    roots: tuple[tuple[str, Identity], ...]
+    below: tuple[_Below, ...]
+    led: tuple[_Led, ...]
+
+    @classmethod
+    def of(
+        cls,
+        inside: list[str],
+        host: Host,
+        dirs: list[ExtraDir],
+        hidden: Hidden = NO_SECRETS,
+        written_before: Sequence[str] = (),
+        files: Sequence[str] = (),
+    ) -> Placed:
+        """Where the mounts of protect_args and hidden.args go, and the
+        directories they are in, as they are now, and where the files of
+        the host mounted alone (files) lead. Fatal for a path below one
+        of those directories that goes through a link, see _Below.of."""
+        roots = mounted_dirs(dirs, host)
+        points = _mount_points(inside, host, dirs, hidden)
+        paths = (*points.held, *points.protected, *hidden.files, *hidden.covered)
+        below = [
+            _Below.of(root, path)
+            for path in dict.fromkeys(paths)
+            if (root := _nearest(path, roots, within=is_within)) is not None
+        ]
+        written = Written.of([*writable_dirs(dirs, host), *written_before])
+        return cls(
+            host,
+            tuple(dirs),
+            tuple(written_before),
+            tuple((root, _root_identity(root)) for root in roots),
+            tuple(below),
+            tuple(_led_into(files, written)),
+        )
+
+    def refuse_moved(self) -> None:
+        """Fatal when what the mounts go from or to is not as it was
+        planned. The directories they are in, and those mounted inside
+        them, are what a session that runs meanwhile can write, and what
+        was planned to be held in place there it can swap for a link to
+        the home, for docker to mount that, writable, where the
+        directory was. So each directory mounted is asked again what
+        refuse_withheld_dirs asks of it, and has to lead to what it did,
+        and no part of a path below one may be a link now, or another
+        than it was. The same of a file of the host that leads into such
+        a directory, which has to lead where it did: a session can swap
+        it there for a link to a key, for docker to mount that in its
+        place. For right before docker run: docker resolves each path
+        itself once it has them, so a moment is left in which one can
+        still be moved, this keeps it to that."""
+        refuse_withheld_dirs(list(self.dirs), self.host, self.written_before)
+        for root, was in self.roots:
+            if _root_identity(root) != was:
+                raise _moved(root, "it is another directory than was checked")
+        for led in self.led:
+            if os.path.realpath(led.path) != led.below.path:
+                raise _moved(led.path, "it leads elsewhere than was planned")
+        for below in (*self.below, *(led.below for led in self.led)):
+            below.refuse_moved()
 
 
 def extra_dir_args(dirs: list[ExtraDir]) -> list[str]:
@@ -579,15 +831,32 @@ def _led_to(link: str, roots: Sequence[str]) -> list[str]:
     readable under a name of its own that says nothing, and is hidden in
     its place. By each mounted directory it is in. None for what is no
     plain file, and for what is in no mounted directory, which a session
-    does not have."""
+    does not have. Fatal for what cannot be told to be either, see
+    _not_looked_into."""
     real = os.path.realpath(link)
+    found = [each for root in roots if (each := _within(real, root))]
+    if not found:
+        return []
     try:
         plain = stat.S_ISREG(os.lstat(real).st_mode)
-    except OSError:
-        return []
-    if not plain:
-        return []
-    return [found for root in roots if (found := _within(real, root))]
+    except OSError as problem:
+        if problem.errno in LEADS_NOWHERE:
+            return []
+        raise _not_looked_into(problem) from None
+    return found if plain else []
+
+
+def _not_looked_into(problem: OSError) -> Fatal:
+    """What is said of a path that cannot be looked at for files of
+    secrets, for another reason than that it is gone or closed: a path
+    deeper than the system takes, for one, which a session can make, and
+    which docker could not mount anything at either. Neither hidden nor
+    covered, it would be the session's to read."""
+    return Fatal(
+        f"cannot tell what to hide in {flat(problem.filename)}"
+        f" ({problem.strerror}), a session may have made it so: move or remove"
+        " it for a session to start"
+    )
 
 
 def _secrets_in(
@@ -596,11 +865,16 @@ def _secrets_in(
     """The files of secrets in a mounted directory, as hidden_files has
     them, one at a time, and those links named as one lead to in any of
     the roots, each with whether it was found through a link. What
-    cannot be looked into is added to closed."""
+    cannot be looked into is added to closed. Fatal for a directory that
+    cannot be listed for another reason than that it is closed or gone,
+    see _not_looked_into."""
 
     def not_listed(problem: OSError) -> None:
-        if isinstance(problem.filename, str):
-            closed[problem.filename] = None
+        if problem.errno in GONE:
+            return
+        if problem.errno not in CLOSED or not isinstance(problem.filename, str):
+            raise _not_looked_into(problem)
+        closed[problem.filename] = None
 
     for directory, subdirs, files in os.walk(root, onerror=not_listed):
         if not os.access(directory, os.X_OK):
@@ -614,7 +888,15 @@ def _secrets_in(
             if not names_secrets(name, patterns):
                 continue
             path = os.path.join(directory, name)
-            found, through_a_link = _to_hide(path, roots)
+            try:
+                found, through_a_link = _to_hide(path, roots)
+            except OSError as problem:
+                if problem.errno not in CLOSED:
+                    raise _not_looked_into(problem) from None
+                # Closed since it was listed, as above
+                closed[directory] = None
+                subdirs[:] = []
+                break
             yield from ((each, through_a_link) for each in found)
 
 
@@ -622,11 +904,14 @@ def _to_hide(path: str, roots: Sequence[str]) -> tuple[list[str], bool]:
     """What hiding the secrets at a path takes, and whether they are
     reached through a link: the file itself, or what a link there leads
     to, see _led_to. Nothing for what is neither, or gone since it was
-    listed, by a build or another session."""
+    listed, by a build or another session. OSError for what cannot be
+    told, whoever asks says what that makes of it."""
     try:
         mode = os.lstat(path).st_mode
-    except OSError:
-        return [], False
+    except OSError as problem:
+        if problem.errno in GONE:
+            return [], False
+        raise
     if stat.S_ISREG(mode):
         return [path], False
     if stat.S_ISLNK(mode):
@@ -637,8 +922,18 @@ def _to_hide(path: str, roots: Sequence[str]) -> tuple[list[str], bool]:
 def _hidden_again(path: str, roots: Sequence[str]) -> list[str]:
     """Where a file that was hidden through a link at an earlier launch
     is in the roots, as long as it is there, see _to_hide: it can be in
-    none of them at this launch."""
-    found, _ = _to_hide(path, roots)
+    none of them at this launch. One in a directory closed to the
+    launcher is hidden where it was, it cannot be told to be gone. Fatal
+    for one in reach that cannot be looked at otherwise, see
+    _not_looked_into."""
+    if not any(_within(path, root) for root in roots):
+        return []
+    try:
+        found, _ = _to_hide(path, roots)
+    except OSError as problem:
+        if problem.errno not in CLOSED:
+            raise _not_looked_into(problem) from None
+        found = [path]
     return [
         inside for each in found for root in roots if (inside := _within(each, root))
     ]
@@ -656,7 +951,7 @@ def _refuse_past_most_hidden(
         len(hidden) + len(closed),
         MOST_HIDDEN,
         "files of secrets to hide and directories that cannot be looked into,"
-        f" in {root}, {last} among them",
+        f" in {flat(root)}, {flat(last)} among them",
     )
 
 
@@ -683,7 +978,9 @@ def hidden_files(
     A directory that cannot be looked into is not passed over: a session
     can take the right to list one away, for the file in it to go
     unhidden at the next launch, and give it back then. One a session
-    could open is hidden whole instead, and said.
+    could open is hidden whole instead, and said. One that cannot be
+    looked into for another reason ends the launch, a path deeper than
+    the system takes for one, see _not_looked_into.
 
     Fatal past MOST_HIDDEN of them, files and directories together: they
     could not all be hidden, and a session started with them in reach

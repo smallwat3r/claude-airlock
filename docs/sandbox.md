@@ -17,7 +17,24 @@ What a session is given and what it is kept from.
   the project too). A session could have left that link there, to be
   given what it points to next time. The same goes for a directory a
   session could write at an earlier launch but cannot now: the launcher
-  remembers the latest 1000 such directories, across all projects.
+  remembers the latest 1000 such directories, across all projects. And
+  for the project: a launch started in such a link (`cd ~/code/app/docs`,
+  where a session of `app` made `docs` a link to `~/.aws`) is refused.
+  Start from the directory it leads to.
+- What the mounts go from and to is checked again right before
+  `docker run`: each directory mounted against the rules above and
+  against what it was when the mounts were planned, and each directory
+  held in place, protected path, hidden file and hidden directory below
+  one, a part at a time, for a link or another directory in its place.
+  So is each file of the host mounted on its own (the git config, the
+  files it includes, a statusline) that leads into a directory a session
+  can write, or could at an earlier launch: it has to lead where it did.
+  A session that runs meanwhile and can write there could otherwise
+  swap a directory to be held in place for a link to your home, for
+  docker to mount that writable, or `~/.gitconfig` kept in a dotfiles
+  repository for a link to a key. Such a change ends the launch, with the
+  path named. Docker resolves the paths itself after that, so a moment
+  remains in which one can still be moved.
 - Read-only wins. A directory asked for both ways, by `--add-dir` and
   `--add-dir-ro` or their settings, the shared directory too, is mounted
   read-only, whichever came first. The project itself is always
@@ -81,8 +98,10 @@ What a session is given and what it is kept from.
   inside a protected path is read-only too, however it was asked for, and
   the launch says so. A path that is, or goes through, a link in a
   directory a session can write is refused, as a mount does not hold a
-  link and a session could put another in its place. Name the path it
-  leads to instead. A path both protected and hidden is hidden.
+  link and a session could put another in its place. That goes wherever
+  the path is named from, `~/kit` as a link into the shared directory
+  too. Name the path it leads to instead. A path both protected and
+  hidden is hidden.
 - **Secrets.** `.env`, `.env.*`, `.envrc`, `.netrc` and `.pypirc` files
   read as empty. Templates such as `.env.example` stay readable.
   `CLAUDE_AIRLOCK_SHADOW` hides more, by file name globs (`*.pem:.npmrc`).
@@ -100,7 +119,9 @@ What a session is given and what it is kept from.
     session could open, is hidden whole: it is empty and read-only in the
     session, and the launch names it. A session can take away the right
     to list a directory and give it back later. Make it yours to read
-    again (`chmod u+rx`) to have it back.
+    again (`chmod u+rx`) to have it back. One it cannot look into for
+    another reason, a path deeper than the system takes for one, ends the
+    launch, with it named: docker could not mount anything there either.
   - More than 1000 such files and directories, or more than 2000
     directories held above them, end the launch, with one of them named.
     Each is a mount of its own, and docker takes only so many.

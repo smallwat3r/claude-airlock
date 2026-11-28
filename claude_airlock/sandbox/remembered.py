@@ -21,7 +21,15 @@ import os
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from ..files import NotRead, json_object, locked, private_dir, read_plain, write_whole
+from ..files import (
+    GONE,
+    NotRead,
+    json_object,
+    locked,
+    private_dir,
+    read_plain,
+    write_whole,
+)
 from ..notice import warn
 from ..settings import Host
 
@@ -39,6 +47,17 @@ def _paths(value: object) -> tuple[str, ...]:
     return tuple(
         path for path in value if isinstance(path, str) and os.path.isabs(path)
     )
+
+
+def _not_gone(path: str) -> bool:
+    """Whether a file can be there: not when nothing is, but when what
+    it is in is closed to the launcher, which a session can make it, for
+    the file to be forgotten and readable once it is opened again."""
+    try:
+        os.lstat(path)
+    except OSError as problem:
+        return problem.errno not in GONE
+    return True
 
 
 def _latest(
@@ -86,10 +105,10 @@ class Remembered:
         self, hidden_through_links: Iterable[str], written: Iterable[str]
     ) -> Remembered:
         """What is kept with this added, see _latest: of what was hidden
-        through a link what is still there, of the directories those that
-        still are."""
+        through a link what can still be there (see _not_gone), of the
+        directories those that still are."""
         return Remembered(
-            _latest(self.hidden_through_links, hidden_through_links, os.path.lexists),
+            _latest(self.hidden_through_links, hidden_through_links, _not_gone),
             _latest(self.written, written, os.path.isdir),
         )
 

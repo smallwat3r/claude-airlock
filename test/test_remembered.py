@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest import mock
 
 import pytest
@@ -32,6 +33,20 @@ class RememberedTest(LauncherTest):
             str(files[1]),
             str(files[0]),
         )
+
+    @pytest.mark.skipif(os.getuid() == 0, reason="no directory is closed to root")
+    def test_a_file_in_a_directory_closed_to_the_launcher_is_not_forgotten(self):
+        # A session can close it at a launch, for the file to be readable
+        # once it is opened again, with nothing to say it holds secrets
+        closed = self.project / "config"
+        closed.mkdir()
+        (closed / "dev.secrets").touch()
+        remember(self.host, hidden_through_links=[str(closed / "dev.secrets")])
+        closed.chmod(0)
+        self.cleanup.callback(closed.chmod, 0o700)
+        remember(self.host, written=[str(self.project)])
+        kept = Remembered.load(self.host).hidden_through_links
+        assert kept == (str(closed / "dev.secrets"),)
 
     def test_a_record_that_cannot_be_read_is_said(
         self, capsys: pytest.CaptureFixture[str]

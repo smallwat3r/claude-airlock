@@ -12,10 +12,13 @@ from typing import Any
 import pytest
 from harness import CHOSEN, LauncherTest, Result
 
-from claude_airlock import settings
+from claude_airlock import cli, notice, settings
+from claude_airlock.action import Action
 from claude_airlock.docker import covered_arg, mount_arg
 from claude_airlock.errors import Fatal
-from claude_airlock.sandbox import mounts, remembered
+from claude_airlock.sandbox import home, mounts, remembered
+from claude_airlock.sandbox.ending import Ending
+from claude_airlock.sandbox.runtime import DOCKERS_OWN
 
 # Root lists and enters a directory whatever its mode says
 closed_to_its_owner = pytest.mark.skipif(
@@ -206,6 +209,37 @@ class ExtraDirsTest(LauncherTest):
             assert not mounts.openable(str(closed))
         assert not mounts.openable(str(self.project / "none"))
         assert not mounts.openable(str(self.project / ".env"))
+
+    def test_a_protected_path_named_through_a_link_elsewhere_is_refused_too(self):
+        # A link of the user's into the shared directory, which is in no
+        # mounted directory as it is written, and one in there that a
+        # session could replace
+        kit = self.shared / "kit"
+        (kit / "real").mkdir(parents=True)
+        (kit / "docs").symlink_to("real")
+        (self.home / "kitlink").symlink_to(kit)
+        result = self.launch(CLAUDE_AIRLOCK_PROTECT="~/kitlink/docs")
+        self.assert_refused(
+            result,
+            "cannot protect ~/kitlink/docs: it is, or goes through, a link in"
+            f" {self.shared}",
+        )
+        # Through the user's link alone, it is protected where it leads
+        result = self.launch_anew(CLAUDE_AIRLOCK_PROTECT="~/kitlink/real")
+        assert result.status == 0, result.stderr
+        assert f"--volume={kit / 'real'}:{kit / 'real'}:ro,z" in result.flags
+
+    def test_a_directory_to_hold_in_place_that_is_a_link_is_refused(self):
+        # A mount over it would go where it leads, and hold nothing
+        (self.project / "vendor" / "lib").mkdir(parents=True)
+        (self.project / "v").symlink_to("vendor")
+        result = self.launch("--add-dir", "v/lib")
+        self.assert_refused(
+            result,
+            f"cannot mount at {self.project}/v: it goes through {self.project}/v,"
+            " a link",
+        )
+        assert self.launch_anew("--add-dir", "vendor/lib").status == 0
 
     def test_a_protected_path_that_could_be_made_inside_is_refused(self):
         result = self.launch(CLAUDE_AIRLOCK_PROTECT="docs")
@@ -467,8 +501,158 @@ class TooManyMountsTest(LauncherTest):
         ):
             mounts._held_in_place([], self.host, [], mounts.Hidden(hidden))
 
+    def test_a_directory_deeper_than_a_path_goes_ends_the_launch(self):
+        # Neither hidden nor covered, a session would read what is in it,
+        # and docker could not mount anything there either
+        deep = os.open(self.project, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _ in range(18):
+                os.mkdir("d" * 250, dir_fd=deep)
+                below = os.open("d" * 250, os.O_RDONLY | os.O_DIRECTORY, dir_fd=deep)
+                os.close(deep)
+                deep = below
+            os.close(os.open(".env", os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=deep))
+        finally:
+            os.close(deep)
+        with pytest.raises(
+            Fatal, match=f"cannot tell what to hide in {self.project}/d+/.*File name"
+        ):
+            mounts.hidden_files(self.launch_settings(), self.host, [])
+
+    def test_a_name_with_a_line_break_is_said_on_the_line_it_is_in(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # What a session names a directory must not pass for a line of the
+        # launcher's when the launch ends on it
+        forged = self.project / "x\nclaude-airlock: all is well" / "deeper"
+        forged.mkdir(parents=True)
+        hidden = mounts.Hidden([str(forged / ".env")])
+        with (
+            unittest.mock.patch.object(mounts, "MOST_HELD", 1),
+            pytest.raises(Fatal) as refused,
+        ):
+            mounts._held_in_place([], self.host, [], hidden)
+        said = str(refused.value)
+        assert "\n" not in said
+        assert "x\\nclaude-airlock: all is well" in said
+        # Nor through what says what ended it, a line under its name
+        notice.warn("cannot go on: x\nclaude-airlock: all is well")
+        assert capsys.readouterr().err.count("\n") == 1
+
     def launch_settings(self) -> settings.Settings:
         return settings.load_settings({}, os.devnull)
+
+
+class MovedMeanwhileTest(LauncherTest):
+    """What a session that runs meanwhile can move of what the mounts of
+    another launch go from and to, between their plan and docker run."""
+
+    @pytest.fixture(autouse=True)
+    def planned(self, sandbox: None) -> None:
+        self.deep = self.project / "a" / "b"
+        self.deep.mkdir(parents=True)
+        (self.deep / ".env").touch()
+
+    def placed(self, dirs: list[mounts.ExtraDir] | None = None) -> mounts.Placed:
+        dirs = dirs or []
+        hidden = mounts.hidden_files(
+            settings.load_settings({}, os.devnull), self.host, dirs
+        )
+        return mounts.Placed.of([], self.host, dirs, hidden)
+
+    def test_a_directory_held_in_place_swapped_for_a_link_ends_the_launch(self):
+        placed = self.placed()
+        placed.refuse_moved()
+        # For docker to mount the home writable where a was to be held
+        (self.project / "a").rename(self.project / "moved")
+        (self.project / "a").symlink_to(self.home)
+        with pytest.raises(
+            Fatal, match=f"cannot mount at {self.project}/a: it goes through"
+        ):
+            placed.refuse_moved()
+
+    def test_another_directory_in_the_place_of_one_planned_ends_it_too(self):
+        placed = self.placed()
+        (self.project / "a").rename(self.project / "moved")
+        self.deep.mkdir(parents=True)
+        (self.deep / ".env").touch()
+        with pytest.raises(Fatal, match="it is another than was planned"):
+            placed.refuse_moved()
+
+    def test_a_directory_mounted_that_leads_elsewhere_now_ends_it(self):
+        vendor = self.project / "vendor"
+        kit = self.home / "kit"
+        for directory in (vendor, kit):
+            directory.mkdir()
+        placed = self.placed([mounts.ExtraDir(str(kit)), mounts.ExtraDir(str(vendor))])
+        kit.rename(self.home / "old-kit")
+        kit.symlink_to(self.home / "ref")
+        with pytest.raises(Fatal, match=f"cannot mount at {kit}: it is another"):
+            placed.refuse_moved()
+        # And the rules it was mounted by asked again, of a link out of
+        # the project in the place of a directory in it
+        kit.unlink()
+        (self.home / "old-kit").rename(kit)
+        vendor.rmdir()
+        vendor.symlink_to(self.home / "ref")
+        with pytest.raises(Fatal, match=f"a link out of {self.project}"):
+            placed.refuse_moved()
+
+    def test_a_git_config_swapped_for_a_link_between_plan_and_run_ends_it(self):
+        # ~/.gitconfig kept as a link into a repository of dotfiles, which
+        # a session that runs meanwhile writes: swapped there for a link
+        # to a key, docker would mount the key where the config was
+        dotfiles = self.project / "dotfiles"
+        dotfiles.mkdir()
+        (dotfiles / "gitconfig").write_text("[user]\n\tname = me\n")
+        gitconfig = self.home / ".gitconfig"
+        gitconfig.symlink_to(dotfiles / "gitconfig")
+        key = self.home / ".ssh" / "id_ed25519"
+        key.parent.mkdir(exist_ok=True)
+        key.write_text("secret\n")
+        launch = settings.load_settings({}, os.devnull)
+        image = unittest.mock.Mock(tag="img", language_servers=())
+        plan = cli.Plan(launch, self.host, image, Action.RUN, [], [], [])
+        home.prepare_home(self.host)
+        planned = cli.session_run_args(plan, "claude-proj", DOCKERS_OWN, "")
+        assert mount_arg(str(gitconfig), "/home/sandbox/.gitconfig", "ro,z") in (
+            planned.args
+        )
+        planned.placed.refuse_moved()
+        (dotfiles / "gitconfig").rename(dotfiles / "moved")
+        (dotfiles / "gitconfig").symlink_to(key)
+        with pytest.raises(Fatal, match="it leads elsewhere than was planned"):
+            planned.placed.refuse_moved()
+        # Nor another file in its place, as with what is held in place
+        (dotfiles / "gitconfig").unlink()
+        (dotfiles / "gitconfig").write_text("[user]\n\tname = me\n")
+        with pytest.raises(Fatal, match="it is another than was planned"):
+            planned.placed.refuse_moved()
+
+    def test_what_moves_between_the_plan_and_docker_run_ends_the_launch(self):
+        planned = cli.session_run_args
+
+        def then_moved(*args: Any) -> cli.RunArgs:
+            run_args = planned(*args)
+            (self.project / "a").rename(self.project / "moved")
+            (self.project / "a").symlink_to(self.home)
+            return run_args
+
+        off = ("NET_LOG", "PROC_LOG", "LINE_MODE")
+        launch = settings.load_settings(
+            {f"CLAUDE_AIRLOCK_{name}": "0" for name in off}, os.devnull
+        )
+        image = unittest.mock.Mock(tag="img", language_servers=())
+        plan = cli.Plan(launch, self.host, image, Action.RUN, [], [], [])
+        home.prepare_home(self.host)
+        with (
+            unittest.mock.patch.object(cli, "session_run_args", then_moved),
+            pytest.raises(Fatal, match="it goes through"),
+        ):
+            cli.recorded_session(
+                plan, "claude-proj", Ending("claude-proj"), DOCKERS_OWN, ""
+            )
+        assert [call for call in self.calls() if call[0] == "run"] == []
 
 
 def targets(flags: list[str]) -> list[str]:
@@ -570,12 +754,53 @@ class AcrossLaunchesTest(LauncherTest):
         (self.project / ".env").unlink()
         assert f"--volume=/dev/null:{closed / 'secret'}:ro" in self.launch().flags
 
+    @closed_to_its_owner
+    def test_a_file_hidden_before_where_nothing_looks_stays_hidden(self):
+        # Under node_modules, which is not looked into, in a directory a
+        # session closed to the launcher, for the file to be forgotten and
+        # readable once it opens it again
+        closed = self.project / "node_modules" / "kept"
+        closed.mkdir(parents=True)
+        secrets = closed / "dev.secrets"
+        secrets.write_text("KEY=1\n")
+        (self.project / ".env").unlink()
+        (self.project / ".env").symlink_to(secrets)
+        hidden = f"--volume=/dev/null:{secrets}:ro"
+        assert hidden in self.launch().flags
+        (self.project / ".env").unlink()
+        closed.chmod(0)
+        self.cleanup.callback(closed.chmod, 0o700)
+        result = self.launch()
+        assert result.status == 0, result.stderr
+        assert hidden in result.flags
+        closed.chmod(0o700)
+        assert hidden in self.launch().flags
+
     def test_a_protected_path_that_is_hidden_is_mounted_once(self):
         result = self.launch(CLAUDE_AIRLOCK_PROTECT=".env")
         assert result.status == 0, result.stderr
         found = targets(result.flags)
         assert found.count(str(self.project / ".env")) == 1
         assert f"--volume=/dev/null:{self.project / '.env'}:ro" in result.flags
+
+    def test_a_project_started_in_a_link_a_session_left_is_refused(self):
+        # A session of the project made docs a link out of it, for the
+        # next launch started there to mount what it leads to, writable
+        assert self.launch().status == 0
+        docs = self.project / "docs"
+        docs.symlink_to(self.outside)
+        result = self.launch(cwd=docs, PWD=str(docs))
+        self.assert_refused(
+            result,
+            f"refusing to mount {docs}: it is, or goes through, a link out of"
+            f" {self.project}",
+        )
+        assert "Start from the directory it leads to" in result.stderr
+        # Nor remembered as a directory a session can write
+        assert str(docs) not in remembered.Remembered.load(self.host).written
+        # Started from where it leads, it is a project like any other
+        result = self.launch(cwd=self.outside)
+        assert result.status == 0, result.stderr
 
     def test_a_link_left_where_a_session_could_write_is_refused_later(self):
         # Writable at one launch, read-only at the next: the link is the

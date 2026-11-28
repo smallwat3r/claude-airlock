@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from ..action import Action
 from ..docker import (
@@ -317,12 +317,22 @@ def _configured_statusline(host: Host) -> list[str]:
     return [os.path.normpath(path) for path in named if os.path.isabs(path)]
 
 
+class HostFiles(NamedTuple):
+    """The mounts of files of the host, as options of docker run, with the
+    files they mount, for Placed of mounts.py to look at again right
+    before docker run: one that leads into a directory a session can
+    write is the session's to swap for a link meanwhile."""
+
+    args: list[str]
+    files: list[str]
+
+
 def own_statusline_args(
     settings: Settings,
     host: Host,
     mounted: Sequence[str],
     written: Written = NOTHING_WRITTEN,
-) -> list[str]:
+) -> HostFiles:
     """A statusline of the user's own, for Claude Code's native UI: the
     file ~/.claude/settings.json runs as one is mounted alone, read-only,
     where the settings name it. Claude Code runs it in the container,
@@ -361,8 +371,8 @@ def own_statusline_args(
             # There already with what the launcher mounts of ~/.claude,
             # or no place for it could be made
             continue
-        return [mount_arg(path, f"{CONTAINER_HOME}/{inner}", "ro,z")]
-    return []
+        return HostFiles([mount_arg(path, f"{CONTAINER_HOME}/{inner}", "ro,z")], [path])
+    return HostFiles([], [])
 
 
 # What a session can write to outside its mounts. /tmp is where builds and
@@ -503,7 +513,7 @@ def git_config_args(
     host: Host,
     mounted: Sequence[str],
     written: Written = NOTHING_WRITTEN,
-) -> list[str]:
+) -> HostFiles:
     """Forward the git config, read-only, and no credentials with it (see
     XDG_GIT_FORWARDED). Not what withheld of mounts.py keeps back: a
     file that is, or goes through, a link out of a directory a session
@@ -514,11 +524,11 @@ def git_config_args(
     and not what a config a session can write names, see
     _include_mounted."""
     args = []
-    forwarded: set[str] = set()
+    forwarded: dict[str, None] = {}
     for path, target in _git_files(host):
         if _git_file_mountable(path, "git reads", settings, host, written):
             args.append(mount_arg(path, target, "ro,z"))
-            forwarded.add(path)
+            forwarded[path] = None
 
     # Files pulled in with include/includeIf (e.g. a work identity under
     # "gitdir:~/work/") live outside the mounts, so without this they
@@ -534,8 +544,8 @@ def git_config_args(
     for path in included_configs(configs, host.home, included):
         if path not in forwarded:
             args.append(mount_arg(path, path, "ro,z"))
-            forwarded.add(path)
-    return args
+            forwarded[path] = None
+    return HostFiles(args, list(forwarded))
 
 
 class Through(Protocol):

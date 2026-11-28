@@ -50,6 +50,7 @@ from .sandbox.login import login_shared
 from .sandbox.mounts import (
     ExtraDir,
     Hidden,
+    Placed,
     Written,
     add_extra_dir,
     configured_extra_dirs,
@@ -180,7 +181,9 @@ def _main(argv: list[str], usage: str = "") -> int:
 
     # Before anything is remembered of it: a project that is refused is
     # no directory a session could write, and remembered as one it would
-    # have every later launch hold back what leads into it
+    # have every later launch hold back what leads into it. Nor one that
+    # goes through a link a session could have made, see
+    # refuse_withheld_dirs, which asks it of the project too.
     refuse_unsafe_dir(host.project_dir, host)
     dirs = configured_extra_dirs(settings, host)
     for raw, read_only in added:
@@ -297,9 +300,15 @@ def _hidden(plan: Plan, remembered: Remembered) -> Hidden:
     return hidden
 
 
-def session_run_args(
-    plan: Plan, name: str, runtime: Runtime, capture: str
-) -> list[str]:
+class RunArgs(NamedTuple):
+    """The options of docker run for a session, and what its mounts go
+    from and to as it was when they were planned, see Placed."""
+
+    args: list[str]
+    placed: Placed
+
+
+def session_run_args(plan: Plan, name: str, runtime: Runtime, capture: str) -> RunArgs:
     """The options of docker run for the session of a plan, but for what
     is only known once its recorders run. capture names the sidecar whose
     network namespace the session is in, if any."""
@@ -314,7 +323,9 @@ def session_run_args(
     mounted = mounted_dirs(dirs, host)
     # Resolved once, for every file of the host asked about
     written = Written.of(remembered.written)
-    return [
+    git = git_config_args(settings, host, mounted, written)
+    statusline = own_statusline_args(settings, host, mounted, written)
+    args = [
         *base_args(settings, host, name, runtime),
         *session_args(plan.action, os.environ),
         *protect_config_args(settings, host),
@@ -324,10 +335,13 @@ def session_run_args(
         *protect_env_args(protected),
         *network_args(settings, capture, plan.is_chat),
         *socket_proxy_args(settings),
-        *git_config_args(settings, host, mounted, written),
-        *own_statusline_args(settings, host, mounted, written),
+        *git.args,
+        *statusline.args,
         *hidden.args(host),
     ]
+    files = (*git.files, *statusline.files)
+    placed = Placed.of(protected, host, dirs, hidden, remembered.written, files)
+    return RunArgs(args, placed)
 
 
 def _command_args(plan: Plan) -> list[str]:
@@ -368,17 +382,14 @@ class Ran(NamedTuple):
 
 
 def recorded_session(
-    plan: Plan,
-    name: str,
-    ending: Ending,
-    runtime: Runtime,
-    run_args: list[str],
-    owner: str,
+    plan: Plan, name: str, ending: Ending, runtime: Runtime, capture: str
 ) -> Ran:
     """Run the session of a plan with its recorders around it, and its
-    doors open. owner is the container whose network namespace the
-    session is in. Returns how it went, see Ran."""
+    doors open. capture names the sidecar whose network namespace the
+    session is in, if any. Returns how it went, see Ran."""
     settings, host, image = plan.settings, plan.host, plan.image
+    # The container whose network namespace the session is in
+    owner = capture or name
     with contextlib.ExitStack() as running:
         # What is done once the recorders are, see where the start is
         # noted
@@ -403,6 +414,11 @@ def recorded_session(
         # Where Claude Code writes what it sends to the model, when that
         # is kept
         api_args = running.enter_context(api_logged(settings, host, name))
+        # The mounts, as late as they can be planned: what they go from
+        # and to is in directories a session that runs meanwhile can
+        # write, and the longer it is to docker run, the longer it has to
+        # move it. Checked again right before, see Placed.refuse_moved.
+        planned = session_run_args(plan, name, runtime, capture)
         # How the sandbox is started, noted for a trace and what
         # follows the sessions, and for a chat to say first
         start = Start.of(
@@ -435,8 +451,9 @@ def recorded_session(
                 guarded=settings.injection_stop,
                 hosts=hosts,
             )
-        run_args = run_args + agent_args + api_args
+        run_args = planned.args + agent_args + api_args
         try:
+            planned.placed.refuse_moved()
             status = run_session(run_args, image, _command_args(plan), ending, through)
         finally:
             # Gone before its recorders are, and before what it left
@@ -456,7 +473,6 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     settings, host = plan.settings, plan.host
     # With a capture, the session's network namespace is its sidecar's
     capture = CaptureSidecar.name_for(name) if settings.net_log else ""
-    run_args = session_run_args(plan, name, runtime, capture)
     watched = mounted_dirs(plan.dirs, host)
     written = writable_dirs(plan.dirs, host)
     if reaches_launcher(written):
@@ -475,7 +491,7 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
     with interrupts_held():
         try:
             status, limits, lengths = recorded_session(
-                plan, name, ending, runtime, run_args, capture or name
+                plan, name, ending, runtime, capture
             )
         except Fatal:
             # Of a session that never started there is nothing to check.
@@ -485,7 +501,10 @@ def named_session(plan: Plan, name: str, ending: Ending, runtime: Runtime) -> in
                 check.drop()
             raise
         try:
-            report_session(host, name, started, limits, lengths)
+            # Of the session's own files of secrets, as the recorder has
+            # them, see session_secrets
+            secrets = session_secrets(settings, host, watched)
+            report_session(host, name, started, secrets, limits, lengths)
         finally:
             # Whatever became of the digest: this check matters more.
             # Of a session that is over: one whose container is still
