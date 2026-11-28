@@ -74,6 +74,8 @@ WATCHER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "procwatch.p
 KEPT_RECORDS = 100
 # Of a command line as shown next to a connection
 SHOWN_WIDTH = 60
+# How many of those a process comes from are named next to it
+SHOWN_PARENTS = 3
 # A session shorter than this may be over before its watcher is up, which
 # is then not worth a word
 SOON_OVER = 5.0
@@ -695,7 +697,7 @@ def shown_lineage(lineage: list[Process]) -> str:
     command = first.command
     if len(command) > SHOWN_WIDTH:
         command = command[: SHOWN_WIDTH - 3] + "..."
-    parents = "".join(f" < {parent.name}" for parent in lineage[1:4])
+    parents = "".join(f" < {parent.name}" for parent in lineage[1 : SHOWN_PARENTS + 1])
     return f"[{first.pid}] {command}{parents}"
 
 

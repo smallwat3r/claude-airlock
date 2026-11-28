@@ -931,7 +931,13 @@ the processes it comes from, to a file of the launcher's that no session
 is given, not to docker's log of it, which `CLAUDE_AIRLOCK_DOCKER_SOCKET`
 lets any session read. `--trace --follow` and line mode read that:
 `by:` is on the line of a connection as it is made, and `listen` is a
-line when a socket starts to wait. The sidecar says no more than 2 MB of
+line when a socket starts to wait. Without `--verbose`, the later lines
+of a connection do not say its process again, and Claude Code itself is
+named `Claude Code`, with nothing above it: `by: [2] Claude Code`, or
+`by: [812] curl -sS https://example.com < bash < Claude Code`. That is
+the program of the image, which the session cannot replace, started by
+the container's init. A `claude` that a command started is named in
+full. The sidecar says no more than 2 MB of
 it in one session. Past that a line says so (`which process makes a
 connection is no longer said`), and the trace of the finished session
 has them all.

@@ -100,7 +100,9 @@ and CPU the sandbox uses](img/line-mode.png)
   how it ended: closed after how long and how much it carried, or what
   went wrong (`REFUSED`, `NO ANSWER`). Each line of a connection starts
   with its number (`[n2]`), and so does what is sent and received over it
-  (`[n2.8]`). A destination the project has not reached before is marked
+  (`[n2.8]`). The process is said once, on the first of those lines that
+  knows it, and Claude Code itself is named `Claude Code`, see
+  [What ran](trace.md#what-ran). A destination the project has not reached before is marked
   `NEW for this project`. A connection through a proxy says what it asked
   the proxy for. One that is not what it looks like is `FLAGGED`, such as
   a hello for another name than the one it was reached by, or a port that

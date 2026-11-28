@@ -303,9 +303,9 @@ lines of `--trace`. Why it is the default:
 [docs/line-mode.md](docs/line-mode.md).
 
 ![Two turns in line mode at a terminal: how the sandbox was started, then
-under each command the connections it made and the files it changed, an
-edit with its diff, and the memory and CPU the sandbox
-uses](docs/img/line-mode.png)
+under each command the connections it made, with the process behind
+each, and the files it changed, an edit with its diff, and the memory
+and CPU the sandbox uses](docs/img/line-mode.png)
 
 ## The image
 

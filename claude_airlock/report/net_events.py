@@ -9,7 +9,7 @@ themselves are the launcher's own."""
 from __future__ import annotations
 
 import math
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat, labelled
@@ -28,6 +28,7 @@ from ..recording.pcap import (
     Went,
 )
 from ..recording.processes import (
+    SHOWN_PARENTS,
     UNREADABLE_PROGRAM,
     Opened,
     Process,
@@ -35,7 +36,7 @@ from ..recording.processes import (
     shown_lineage,
 )
 from ..recording.records import TracedSession
-from ..recording.secrets import own_login, said
+from ..recording.secrets import CLAUDE_PROGRAM, own_login, said
 from ..recording.uploads import LEAST
 from .links import Links, links_of
 from .recorded import Recorded, Traced
@@ -56,6 +57,11 @@ from .shown import (
 PROCESS_WIDTH = 200
 # What is said of a connection the watcher saw and found no process for
 HIDDEN_HOLDER = "a process that cannot be looked into"
+# The process of a container that started its command: docker run --init
+# has it, see session.py of sandbox
+INIT_PID = 1
+# How the session's own Claude Code is named next to its connections
+SESSIONS_CLAUDE = "Claude Code"
 
 
 def _proxy_summary(
@@ -484,9 +490,13 @@ def capture_events(
     return events
 
 
-def name_processes(events: list[Event], record: ProcessRecord) -> None:
+def name_processes(
+    events: list[Event], record: ProcessRecord, *, brief: bool = False
+) -> None:
     """Say of each connection which process made it, where one was noted
-    to hold it: by its ports, so this is not a guess by the clock."""
+    to hold it: by its ports, so this is not a guess by the clock. Brief,
+    the session's own Claude Code is named as that alone, see
+    shown_holder."""
     for event in events:
         fields = event.fields
         if event.kind is not Kind.NET or "process" in fields:
@@ -507,7 +517,64 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
                 event.notes.append(f"by: {HIDDEN_HOLDER}")
             continue
         fields["process"] = _process_fields(lineage)
-        event.notes.append(f"by: {flat(shown_lineage(lineage))}")
+        event.notes.append(f"by: {shown_holder(lineage, brief)}")
+
+
+def shown_holder(lineage: list[Process], brief: bool) -> str:
+    """The process that holds a connection and those it comes from, as
+    said after it. Brief, the session's own Claude Code is said to be
+    that, and nothing above it: its command line and the init it comes
+    from are the same on every request to the model and every command,
+    and would make most of what is said of them."""
+    if brief:
+        for at, process in enumerate(lineage[: SHOWN_PARENTS + 1]):
+            if not is_sessions_claude(process):
+                continue
+            if at == 0:
+                return f"[{process.pid}] {SESSIONS_CLAUDE}"
+            return f"{flat(shown_lineage(lineage[:at]))} < {SESSIONS_CLAUDE}"
+    return flat(shown_lineage(lineage))
+
+
+def is_sessions_claude(process: Process) -> bool:
+    """Whether a process is the Claude Code the session runs: the program
+    of the image, on its read-only root where the session cannot put
+    one, started by the container's init. One a command started is not,
+    as its parents say. One that left them for the init passes, being
+    Claude Code all the same, under a number of its own."""
+    return process.program == CLAUDE_PROGRAM and process.parent == INIT_PID
+
+
+class RepeatedHolders:
+    """Leaves out what was said of the process behind a connection when
+    one of its earlier lines said the same: how it ended, how far it got
+    and each thing sent over it are tied to it by its number. Of the
+    latest MOST_CONNECTIONS connections of all the sessions followed, by
+    their sessions and those numbers."""
+
+    MOST_CONNECTIONS = 4096
+
+    def __init__(self) -> None:
+        self._said: OrderedDict[tuple[str, str], str] = OrderedDict()
+
+    def drop(self, session: str, events: list[Event]) -> None:
+        """Take out of the notes of those events of a session the process
+        already said of their connection."""
+        for event in events:
+            if event.kind is not Kind.NET or not event.link:
+                continue
+            key = (session, event.link.split(".", 1)[0])
+            holders = [note for note in event.notes if note.startswith("by: ")]
+            if not holders:
+                continue
+            if self._said.get(key) == holders[0]:
+                event.notes.remove(holders[0])
+                self._said.move_to_end(key)
+                continue
+            self._said[key] = holders[0]
+            self._said.move_to_end(key)
+            while len(self._said) > self.MOST_CONNECTIONS:
+                self._said.popitem(last=False)
 
 
 def _process_fields(lineage: list[Process]) -> dict:

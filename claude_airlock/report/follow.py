@@ -80,6 +80,7 @@ from .digest import known_destinations
 from .entries import session_files
 from .layout import Layout, event_json
 from .net_events import (
+    RepeatedHolders,
     name_container,
     name_processes,
 )
@@ -198,6 +199,9 @@ class Follower:
         # and that more transcripts of sessions or of subagents are written
         # to than are followed (see MOST_FOLLOWED), by what they are of
         self._said_unfollowed: set[Path | str] = set()
+        # What was said of the process behind each connection, not said
+        # again of its later lines unless verbose
+        self._holders = RepeatedHolders()
         self._captures: dict[Started, CaptureTail] = {}
         # Those whose session ended, until when the copy of each is waited
         # for, see _last_looks
@@ -714,8 +718,11 @@ class Follower:
                 # Stopped, its copy is waited for
                 continue
             events = capture.poll()
+            brief = not self._verbose
             if capture.session in records:
-                name_processes(events, records[capture.session])
+                name_processes(events, records[capture.session], brief=brief)
+            if brief:
+                self._holders.drop(capture.session, events)
             name_container(events, capture.session, several)
             found.events += [(None, event) for event in events]
             dead = capture.newly_died()

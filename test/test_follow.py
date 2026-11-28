@@ -39,7 +39,7 @@ from claude_airlock.events import Event, Kind, Stage, Who
 from claude_airlock.recording import capture as capture_module
 from claude_airlock.recording import changes, notes, pcap, processes, recorder
 from claude_airlock.recording.pcap_file import PcapReader
-from claude_airlock.report import follow, noted, stream, tails, transcript
+from claude_airlock.report import follow, net_events, noted, stream, tails, transcript
 from claude_airlock.report.layout import Layout
 from claude_airlock.report.transcript import WalkOptions
 
@@ -847,6 +847,95 @@ class FollowNetworkTest(LauncherTest):
         assert [
             c[:2] for c in self.calls() if c[:1] == ["exec"] and "sh" not in c
         ] == []
+
+    def test_the_process_of_a_connection_is_said_once_and_claude_briefly(self):
+        then = time.time() - 5
+        captured = self.work / "capture.pcap"
+        # One connection opened, used and closed, one of Claude Code's own
+        # and one of a claude a command started
+        captured.write_bytes(
+            pcap_file(
+                [
+                    (then, tcp("198.51.100.7", 443), True),
+                    (then, answer("198.51.100.7", 443), False),
+                    (
+                        then + 0.1,
+                        tcp("198.51.100.7", 443, 0x18, b"x" * 500, 1, 1),
+                        True,
+                    ),
+                    (then + 1, tcp("198.51.100.7", 443, 0x11, b"", 501, 1), True),
+                    (then + 1, answer("198.51.100.7", 443, 0x11, 1, 502), False),
+                    (then + 2, tcp("198.51.100.8", 444), True),
+                    (then + 3, tcp("198.51.100.9", 445), True),
+                ]
+            )
+        )
+        claude = "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+        init = ["/sbin/docker-init", "--", "claude"]
+        both = self.watched(
+            {"t": then - 9, "pid": 1, "ppid": 0, "exe": init[0], "argv": init},
+            {
+                "t": then - 9,
+                "pid": 2,
+                "ppid": 1,
+                "exe": claude,
+                "argv": ["claude", "-p"],
+            },
+            {"t": then - 1, "pid": 640, "ppid": 2, "exe": "/bin/bash", "argv": ["sh"]},
+            {
+                "t": then,
+                "pid": 812,
+                "ppid": 640,
+                "exe": "/usr/bin/curl",
+                "argv": ["curl", "-sS", "https://good.test"],
+            },
+            {
+                "t": then,
+                "pid": 813,
+                "ppid": 640,
+                "exe": claude,
+                "argv": ["claude", "-p"],
+            },
+            {
+                "t": then,
+                "port": 40443,
+                "to": "198.51.100.7",
+                "to_port": 443,
+                "pids": [812],
+            },
+            {
+                "t": then,
+                "port": 40444,
+                "to": "198.51.100.8",
+                "to_port": 444,
+                "pids": [2],
+            },
+            {
+                "t": then,
+                "port": 40445,
+                "to": "198.51.100.9",
+                "to_port": 445,
+                "pids": [813],
+            },
+        )
+        curl = "by: [812] curl -sS https://good.test < bash"
+        nested = "by: [813] claude.exe -p < bash < Claude Code"
+        following = Following(self, FAKE_PS=both, FAKE_CAPTURE=str(captured))
+        add(self.file, self.last)
+        shown = following.until(DONE)
+        # Up to the session's Claude Code
+        assert f"[n1] tcp/https 198.51.100.7:443  {curl} < Claude Code" in shown
+        (closed,) = [line for line in shown.splitlines() if "closed after" in line]
+        assert "by: " not in closed
+        assert "[n2] tcp 198.51.100.8:444  by: [2] Claude Code" in shown
+        assert f"[n3] tcp 198.51.100.9:445  {nested}" in shown
+        # Verbose, all of it is said
+        verbose = Following(
+            self, "--verbose", FAKE_PS=both, FAKE_CAPTURE=str(captured)
+        ).until(DONE)
+        (closed,) = [line for line in verbose.splitlines() if "closed after" in line]
+        assert f"{curl} < claude.exe < docker-init" in closed
+        assert "by: [2] claude.exe -p < docker-init" in verbose
 
     def test_a_watcher_that_says_no_more_aloud_is_said_once(self):
         captured = self.work / "capture.pcap"
@@ -1739,3 +1828,34 @@ class PcapReaderTest:
         reader = PcapReader()
         assert list(reader.feed(b"not a capture at all, really")) == []
         assert list(reader.feed(sample_capture(1000.0))) == []
+
+
+class RepeatedHoldersTest:
+    @staticmethod
+    def net(link: str, holder: str) -> Event:
+        return Event(0.0, Who.SANDBOX, Kind.NET, ["tcp"], {}, link, notes=[holder])
+
+    def test_a_process_is_said_again_of_another_connection_or_session_alone(self):
+        holders = net_events.RepeatedHolders()
+        first, later, other, theirs, changed = (
+            self.net("n1", "by: [8] curl"),
+            self.net("n1.4", "by: [8] curl"),
+            self.net("n2", "by: [8] curl"),
+            self.net("n1", "by: [8] curl"),
+            self.net("n1", "by: [9] wget"),
+        )
+        holders.drop("claude-proj", [first, later, other])
+        holders.drop("claude-other", [theirs])
+        holders.drop("claude-proj", [changed])
+        assert first.notes == other.notes == theirs.notes == ["by: [8] curl"]
+        assert later.notes == []
+        # A connection whose number is given anew says its own process
+        assert changed.notes == ["by: [9] wget"]
+
+    def test_only_the_latest_connections_are_remembered(self, monkeypatch):
+        monkeypatch.setattr(net_events.RepeatedHolders, "MOST_CONNECTIONS", 2)
+        holders = net_events.RepeatedHolders()
+        holders.drop("s", [self.net(f"n{n}", "by: [8] curl") for n in (1, 2, 3)])
+        again = [self.net(f"n{n}.1", "by: [8] curl") for n in (1, 3)]
+        holders.drop("s", again)
+        assert [event.notes for event in again] == [["by: [8] curl"], []]
