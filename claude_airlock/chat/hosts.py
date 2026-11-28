@@ -18,6 +18,7 @@ refused."""
 from __future__ import annotations
 
 import functools
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
@@ -70,13 +71,18 @@ class HostQuestions:
         # Whether somebody is there to answer
         self._interactive = interactive
         self._before = before
-        # The hosts that are being asked about, or will be
+        # The hosts that are being asked about, or will be. Taken from on
+        # the thread of the questions once one is answered
         self._put: set[Destination] = set()
+        self._putting = threading.Lock()
 
     def look(self) -> None:
         """Have the user asked about each host that waits since the
-        last look."""
-        new = [host for host in self._hosts.waiting() if host not in self._put]
+        last look. New is not asked about as the list is made: one that
+        is answered meanwhile is still on it, and is no new request."""
+        with self._putting:
+            put = set(self._put)
+        new = [host for host in self._hosts.waiting() if host not in put]
         if not new:
             return
         self._before()
@@ -86,7 +92,8 @@ class HostQuestions:
                 refused = f"REFUSED {reached(host)}: not allowed, nobody to ask"
                 self._page.note(LABEL, refused)
                 continue
-            self._put.add(host)
+            with self._putting:
+                self._put.add(host)
             self._asked.then(functools.partial(self._ask, host))
 
     def _ask(self, host: Destination) -> None:
@@ -110,4 +117,5 @@ class HostQuestions:
             self._page.note(LABEL, said)
         finally:
             # Asked about again when a request waits for it again
-            self._put.discard(host)
+            with self._putting:
+                self._put.discard(host)

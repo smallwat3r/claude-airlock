@@ -12,14 +12,16 @@ import threading
 import time
 import unittest.mock
 
-from chat_harness import PATIENCE, before_the_user, page, written
+from chat_harness import PATIENCE, WaitingHosts, before_the_user, page, written
 
 from claude_airlock.chat import asking, console
 from claude_airlock.chat import said as saying
 from claude_airlock.chat import screen as screens
+from claude_airlock.chat.hosts import HostQuestions
 from claude_airlock.events import labelled
 from claude_airlock.report.calls import call_details
 from claude_airlock.report.layout import Layout
+from claude_airlock.sandbox.asked_hosts import Destination
 
 
 def an_asker(
@@ -584,3 +586,27 @@ class AskingTest:
         assert call_details("AskUserQuestion", request["input"], None, "/p", False) == [
             "question: Where should the check of what a session reads live?"
         ]
+
+
+class HostQuestionsTest:
+    def test_a_host_answered_as_those_that_wait_are_listed_is_not_asked_again(self):
+        com = Destination("example.com", 443)
+        hosts = WaitingHosts(com)
+        asked, asker = unittest.mock.Mock(), unittest.mock.Mock()
+        asker.ask.return_value = "y"
+        questions = HostQuestions(hosts, page(), asker, asked, True, lambda: None)
+        questions.look()
+        ((ask,), _) = asked.then.call_args
+        listed = hosts.waiting
+
+        def answered_meanwhile() -> list[Destination]:
+            # Listed while its request still waits, then answered on the
+            # thread of the questions before the list is gone through
+            found = listed()
+            ask()
+            return found
+
+        with unittest.mock.patch.object(hosts, "waiting", answered_meanwhile):
+            questions.look()
+        assert hosts.answers == [(com, True)]
+        assert asked.then.call_count == 1
