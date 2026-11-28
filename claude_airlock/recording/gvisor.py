@@ -599,13 +599,15 @@ class Monitor:
             buffer = bytearray(MOST_MESSAGE)
             view = memoryview(buffer)
             pending: list[Line] = []
+            dropped = 0
+            whose: bool | None = None
             while True:
                 try:
                     size, _, flags, _ = sandbox.recvmsg_into([buffer])
                 except OSError:
-                    return
+                    break
                 if not size:
-                    return
+                    break
                 if flags & socket.MSG_TRUNC or size < HEADER.size:
                     self._pass_over(1)
                     continue
@@ -622,6 +624,10 @@ class Monitor:
                 self._pass_over(max(len(lines) - room, 0))
                 if whose and self._write(pending, dropped):
                     pending = []
+            # What was dropped since it was last said, which would wait
+            # otherwise for a message that does not come
+            if whose:
+                self._write(pending, dropped, at_end=True)
 
     @staticmethod
     def _shake_hands(sandbox: socket.socket) -> None:
@@ -645,11 +651,12 @@ class Monitor:
             with self._lock:
                 self._passed_over += lines
 
-    def _write(self, lines: list[Line], dropped: int) -> bool:
+    def _write(self, lines: list[Line], dropped: int, at_end: bool = False) -> bool:
         """Write the lines of the session's sandbox to the record, with a
         word first the first time, and every DROPPED_EVERY seconds at most
-        how many points were dropped, by gVisor (dropped) or here: false
-        while the record has not begun."""
+        how many points were dropped, by gVisor (dropped) or here, at the
+        end of what the sandbox tells whenever that changed: false while
+        the record has not begun."""
         with self._lock:
             record = self._record
             if record is None:
@@ -659,7 +666,8 @@ class Monitor:
                 lines = [(time.time(), True, {"note": Note.MONITORED}), *lines]
             now = time.monotonic()
             gone = dropped + self._passed_over
-            if gone > self._dropped and now - self._said_dropped >= DROPPED_EVERY:
+            due = at_end or now - self._said_dropped >= DROPPED_EVERY
+            if gone > self._dropped and due:
                 self._dropped, self._said_dropped = gone, now
                 lines = [*lines, (time.time(), True, {"dropped": gone})]
         for when, reserved, said in lines:

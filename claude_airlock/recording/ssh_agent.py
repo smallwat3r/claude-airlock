@@ -22,6 +22,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 
@@ -229,7 +230,7 @@ class AgentDoor:
             try:
                 agent.connect(self._agent)
                 while True:
-                    request = read_message(client)
+                    request = read_message(client, AGENT_IDLE)
                     if request is None:
                         return
                     refused_by = "" if _passed_on(request) else BY_LAUNCHER
@@ -308,27 +309,45 @@ def _framed(message: bytes) -> bytes:
     return len(message).to_bytes(4, "big") + message
 
 
-def read_message(connection: socket.socket) -> bytes | None:
+def read_message(
+    connection: socket.socket, within: float | None = None
+) -> bytes | None:
     """The next message of the agent protocol on a connection, without
     its length, none when the other end is done or sends what is not
-    one."""
-    header = _read_exactly(connection, 4)
-    if header is None:
-        return None
-    length = int.from_bytes(header, "big")
-    if not 0 < length <= AGENT_LONGEST:
-        return None
-    return _read_exactly(connection, length)
+    one. Within that many seconds when given, from the first byte to the
+    last, else TimeoutError: a time for each read alone would keep a
+    connection that sends a byte now and then open for good."""
+    until = None if within is None else time.monotonic() + within
+    before = connection.gettimeout() if until is not None else None
+    try:
+        header = _read_exactly(connection, 4, until)
+        if header is None:
+            return None
+        length = int.from_bytes(header, "big")
+        if not 0 < length <= AGENT_LONGEST:
+            return None
+        return _read_exactly(connection, length, until)
+    finally:
+        if until is not None:
+            connection.settimeout(before)
 
 
-def _read_exactly(connection: socket.socket, count: int) -> bytes | None:
-    """So many bytes of a connection, none when it ends first. Into one
-    buffer as they come: a session that sends a byte at a time would
-    otherwise have each copied again with every one after it."""
+def _read_exactly(
+    connection: socket.socket, count: int, until: float | None
+) -> bytes | None:
+    """So many bytes of a connection, none when it ends first, before the
+    time on the monotonic clock that until says, if any. Into one buffer
+    as they come: a session that sends a byte at a time would otherwise
+    have each copied again with every one after it."""
     data = bytearray(count)
     view = memoryview(data)
     got = 0
     while got < count:
+        if until is not None:
+            left = until - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("the message took too long to come")
+            connection.settimeout(left)
         more = connection.recv_into(view[got:])
         if not more:
             return None

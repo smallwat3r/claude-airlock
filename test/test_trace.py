@@ -54,6 +54,11 @@ RUN_BY_BASH = (
     "cat <<XX >/dev/null\n: <<Y\nX\\\nX\necho RAN\nY",
     "cat <<X >/dev/null\n$(echo RAN >&2)\nX",
     "cat <<X >/dev/null\n`echo RAN >&2`\nX",
+    # And arithmetic, of a subscript or a $[ ], runs the $( ) a value
+    # holds, as a prompt's expansion does
+    "i='y[$(echo R''AN >&2)]'; a=(x); cat <<X >/dev/null\n${a[i]} RAN\nX",
+    "i='y[$(echo R''AN >&2)]'; cat <<X >/dev/null\n$[i] RAN\nX",
+    "x='$(echo R''AN >&2)'; cat <<X >/dev/null\n${x@P} RAN\nX",
     # In a $( ), the word and a ) after it end the two
     "x=$(cat <<X\nheld\nX)\necho RAN\nX",
     "cat <(cat <<X\nheld\nX ) >/dev/null; echo RAN\nX",
@@ -913,6 +918,42 @@ class TraceTest(LauncherTest):
             in self.launch("--trace", "list").stdout
         )
 
+    def test_the_latest_session_is_the_one_the_launcher_copied_last(self):
+        # The time of a transcript is the session's to set, ahead too: one
+        # set years ahead does not pass for the latest
+        real = self.write_transcript("0a", prompts_at(1_800_000_000))
+        decoy = self.write_transcript("0b", prompts_at(1_800_000_000))
+        for file, copied in ((real, 2_000), (decoy, 1_000)):
+            copy = recorder.copy_path(self.host, file)
+            recorder.catch_up(file, copy)
+            os.utime(copy, (copied, copied))
+        os.utime(decoy, (1_900_000_000, 1_900_000_000))
+        # One with no copy comes after those, by the time of its file
+        early = self.write_transcript("0c", prompts_at(1_800_000_000))
+        os.utime(early, (1, 1))
+        ranked = [path.stem[:2] for path in trace._traced_files(self.host)]
+        assert ranked == ["0a", "0b", "3f", "0c"]
+        # And so they are for what line mode's /resume lists
+        listed = entries_module.session_files(self.host)
+        assert [path.stem[:2] for path in listed] == ranked
+
+    def test_a_removed_transcript_says_what_of_its_copy_cannot_be_read(self):
+        # Of what it is known to hold, the launcher's copy, as its subagents
+        file = self.write_transcript("0a", prompts_at(1_800_000_000))
+        with open(file, "a") as transcript:
+            transcript.write('{"x":"\n')
+        recorder.catch_up(file, recorder.copy_path(self.host, file))
+        file.unlink()
+        header, _ = trace.session_events(file, self.host, verbose=False)
+        assert (
+            labelled(
+                "transcript",
+                "1 lines CANNOT BE READ, shown as UNREADABLE: what was done there is"
+                " not told",
+            )
+            in header
+        )
+
     def test_sessions_are_listed_and_picked_by_id_prefix(self):
         listed = self.launch("--trace", "list").stdout
         assert "3fa9c0de    1 prompts     3 calls  fix the build" in listed
@@ -1496,19 +1537,19 @@ class NetworkTraceTest(LauncherTest):
     def test_a_request_says_how_much_the_session_sent_where_the_log_does(self):
         # As a squid of 5.7 wrote them with the format of docker/squid.conf
         tunnel = egress_log.parse_proxy_request(
-            "1794956804.916    501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT"
-            " up.test:443 - HIER_DIRECT/127.0.0.1 - 3000059"
+            b"1794956804.916    501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT"
+            b" up.test:443 - HIER_DIRECT/127.0.0.1 - 3000059"
         )
         assert (tunnel.size, tunnel.sent) == (1039, 3000059)
         assert (tunnel.host, tunnel.port) == ("up.test", 443)
         denied = egress_log.parse_proxy_request(
-            "1794956804.917      0 127.0.0.1 TCP_DENIED/403 1607 CONNECT"
-            " example.org:443 - HIER_NONE/- text/html 59"
+            b"1794956804.917      0 127.0.0.1 TCP_DENIED/403 1607 CONNECT"
+            b" example.org:443 - HIER_NONE/- text/html 59"
         )
         assert (denied.denied, denied.sent) == (True, 59)
         # One of a proxy from before, which did not say
         earlier = egress_log.parse_proxy_request(
-            "1794956804.916 501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT up.test:443 - -"
+            b"1794956804.916 501 127.0.0.1 TCP_TUNNEL/200 1039 CONNECT up.test:443 - -"
         )
         assert earlier.sent is None
         with open(self.access_log, "a") as log:

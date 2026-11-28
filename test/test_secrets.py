@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from harness import LauncherTest
 
 from claude_airlock import settings
@@ -87,6 +88,18 @@ class SecretsTest:
         # The root of all, should one be given
         assert procwatch.Secrets(names={".env": "hidden"}, roots=["/"]).of("/a/.env")
 
+    def test_a_hidden_name_is_found_as_the_session_names_its_place(self):
+        # The image links the host's home to the container's, and the
+        # kernel names a file a process holds by where the link leads: a
+        # project under the home is under /home/sandbox in the session
+        rules = procwatch.Secrets.read(session_secrets().as_json())
+        assert rules.of(f"{HOME}/proj/.env") == "hidden"
+        assert rules.of(f"{PROJECT}/.env") == "hidden"
+        # Not a directory outside the home, which is where it is
+        assert rules.of("/mnt/lib/.env") == "hidden"
+        assert rules.of(f"{HOME}/lib/.env") is None
+        assert rules.of(f"{HOME}/.env") is None
+
     def test_the_names_hidden_from_a_session_are_files_of_secrets(self):
         rules = session_secrets(shadow=("*.pem",))
         assert rules.of("/home/me/proj/certs/server.pem") == "hidden"
@@ -160,22 +173,27 @@ class WatcherTest(LauncherTest):
             os.symlink(path, descriptors / str(number))
         return proc
 
-    def watch(self, proc: Path, out: io.StringIO) -> procwatch.Watch:
+    def watch(
+        self, proc: Path, out: io.StringIO, aloud: io.StringIO | None = None
+    ) -> procwatch.Watch:
         def read(pid: int) -> procwatch.ProcessRead:
             return "100", 7, "/usr/bin/cat", ["cat", "x"]
 
         return procwatch.Watch(
-            out, read_process=read, secrets=session_secrets(), proc=str(proc)
+            out,
+            read_process=read,
+            secrets=session_secrets(),
+            proc=str(proc),
+            aloud=aloud or io.StringIO(),
         )
 
     def test_a_file_of_secrets_held_open_is_noted_once_and_said_aloud(self):
         login = f"{HOME}/.claude/.credentials.json"
         proc = self.holding(812, login, "socket:[4]", "/usr/lib/libc.so.6")
         out, aloud = io.StringIO(), io.StringIO()
-        watch = self.watch(proc, out)
-        with redirect_stdout(aloud):
-            watch._look_at_processes([812], 0.0)
-            watch._look_at_processes([812], 0.1)
+        watch = self.watch(proc, out, aloud)
+        watch._look_at_processes([812], 0.0)
+        watch._look_at_processes([812], 0.1)
         said = [json.loads(line) for line in out.getvalue().splitlines()]
         assert [line for line in said if "opened" in line] == [
             {"t": said[-1]["t"], "opened": login, "secret": "claude", "pids": [812]}
@@ -187,14 +205,59 @@ class WatcherTest(LauncherTest):
         (opened,) = record.opened
         assert (opened.path, opened.kind, opened.pid) == (login, "claude", 812)
 
+    def test_what_is_said_aloud_goes_to_the_file_given_and_not_the_output(self):
+        login = f"{HOME}/.claude/.credentials.json"
+        proc = self.holding(812, login)
+        given = self.work / "aloud.jsonl"
+        given.touch(mode=0o600)
+        aloud = procwatch._aloud_to(str(given))
+        self.cleanup.callback(aloud.close)
+        watch = procwatch.Watch(
+            io.StringIO(),
+            read_process=lambda pid: ("100", 7, "/usr/bin/cat", ["cat", "x"]),
+            secrets=session_secrets(),
+            proc=str(proc),
+            aloud=aloud,
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            watch._look_at_processes([812], 0.0)
+        assert output.getvalue() == ""
+        said = [json.loads(line) for line in given.read_text().splitlines()]
+        assert [list(line)[1] for line in said] == ["pid", "opened"]
+        # Never made by the watcher, nor through a link
+        with pytest.raises(FileNotFoundError):
+            procwatch._aloud_to(str(self.work / "none.jsonl"))
+        (self.work / "link.jsonl").symlink_to(given)
+        with pytest.raises(OSError, match="Too many levels of symbolic links"):
+            procwatch._aloud_to(str(self.work / "link.jsonl"))
+
+    def test_a_file_held_across_an_exec_is_noted_again_with_the_program(self):
+        key = f"{HOME}/.ssh/id_rsa"
+        proc = self.holding(812, key)
+        out = io.StringIO()
+        programs = iter(
+            [("100", 7, "/bin/bash", ["bash"]), ("100", 7, "/usr/bin/scp", ["scp"])]
+        )
+        watch = procwatch.Watch(
+            out,
+            read_process=lambda pid: next(programs),
+            secrets=session_secrets(),
+            proc=str(proc),
+            aloud=io.StringIO(),
+        )
+        watch._look_at_processes([812], 0.0)
+        # Looked at again while young, by then it is scp
+        watch._look_at_processes([812], 0.1)
+        said = [json.loads(line) for line in out.getvalue().splitlines()]
+        kept = [line.get("exe") or line.get("opened") for line in said]
+        assert kept[-4:] == ["/bin/bash", key, "/usr/bin/scp", key]
+
     def test_no_more_files_are_noted_than_are_kept(self):
         proc = self.holding(812, *(f"{PROJECT}/{n}/.env" for n in range(5)))
         out = io.StringIO()
         watch = self.watch(proc, out)
-        with (
-            mock.patch.object(procwatch, "MOST_OPENED", 2),
-            redirect_stdout(io.StringIO()),
-        ):
+        with mock.patch.object(procwatch, "MOST_OPENED", 2):
             watch._look_at_processes([812], 0.0)
         said = [json.loads(line) for line in out.getvalue().splitlines()]
         assert len([line for line in said if "opened" in line]) == 2
@@ -205,7 +268,10 @@ class WatcherTest(LauncherTest):
         proc = self.holding(812, f"{HOME}/.ssh/id_rsa")
         out = io.StringIO()
         watch = procwatch.Watch(
-            out, read_process=lambda pid: ("1", 7, "/bin/cat", ["cat"]), proc=str(proc)
+            out,
+            read_process=lambda pid: ("1", 7, "/bin/cat", ["cat"]),
+            proc=str(proc),
+            aloud=io.StringIO(),
         )
         watch._look_at_processes([812], 0.0)
         assert "opened" not in out.getvalue()
@@ -335,8 +401,8 @@ class HostRecordTest(LauncherTest):
         line = {"pid": 1, "ppid": 0, "exe": "/x", "argv": ["x" * 100]}
         size = len(procwatch.lined(1.0, line))
         connection = {"port": 0, "to": "203.0.113.9", "to_port": 443, "pids": [1]}
-        most = host_health.RESERVED + 5 * size
-        with mock.patch.object(host_health, "MOST_BYTES", most):
+        most = procwatch.RESERVED + 5 * size
+        with mock.patch.object(procwatch, "MOST_BYTES", most):
             for _ in range(10):
                 record.note_at(1.0, False, line)
             record.note_at(2.0, True, connection)
@@ -346,3 +412,41 @@ class HostRecordTest(LauncherTest):
         assert read.holders
         # Each when it was so, not when it was written
         assert read.processes[0].when == 1.0
+
+    def test_a_full_reserved_part_ends_with_a_word(self):
+        record = host_health.HealthRecord.begin(self.host, "claude-proj", "gVisor (gv)")
+        connection = {"port": 0, "to": "203.0.113.9", "to_port": 443, "pids": [1]}
+        size = len(procwatch.lined(2.0, connection))
+        most = procwatch.LAST_WORD + 20 * size
+        with mock.patch.object(procwatch, "MOST_BYTES", most):
+            for _ in range(40):
+                record.note_at(2.0, True, connection)
+        last = record.path.read_text(encoding="utf-8").splitlines()[-1]
+        assert json.loads(last)["note"] == procwatch.Note.FULL
+        assert record.path.stat().st_size <= most
+
+    def test_a_line_cut_short_by_a_full_disk_is_ended_by_the_next(self):
+        record = host_health.HealthRecord.begin(self.host, "claude-proj", "gVisor (gv)")
+        written = os.write
+
+        def cut(file: int, data: bytes) -> int:
+            if len(data) > 10:
+                return written(file, data[:10])
+            raise OSError(28, "No space left on device")
+
+        ran = {"ppid": 1, "exe": "/bin/sh", "argv": ["sh"]}
+        with mock.patch.object(os, "write", cut):
+            record.note_at(1.0, False, {"pid": 2, **ran})
+        record.note_at(2.0, False, {"pid": 3, **ran})
+        read = processes.read_record(record.path)
+        assert [process.pid for process in read.processes] == [3]
+
+    def test_what_is_told_once_the_record_is_kept_is_not_written(self):
+        record = host_health.HealthRecord.begin(self.host, "claude-proj", "gVisor (gv)")
+        record.keep(self.host, 3.0)
+        kept = record.path.with_name(record.path.name.removesuffix(host_health.PART))
+        before = kept.read_bytes()
+        # As a thread still reading what gVisor told would
+        record.note_at(4.0, True, {"port": 0, "to": "203.0.113.9", "to_port": 443})
+        assert not record.path.exists()
+        assert kept.read_bytes() == before

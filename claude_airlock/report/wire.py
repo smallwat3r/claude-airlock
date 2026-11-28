@@ -38,6 +38,7 @@ keeps no more of them than their headers."""
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -46,7 +47,7 @@ from ..recording.answers import Answer
 from ..recording.capture import parts_cut_short
 from ..recording.model_api import is_model_host
 from ..recording.pcap import Capture
-from ..recording.uploads import ELSEWHERE_PART, UPLOADS_PART, Upload
+from ..recording.uploads import ELSEWHERE_PART, UPLOADS_PART, Upload, began_between
 from ..settings import EGRESS_PORT
 from .links import Links, links_of
 from .net_events import name_container, name_processes
@@ -124,12 +125,20 @@ class Sent:
     def to_model(self, upload: Upload) -> bool:
         return self.filtered and _tunnelled_to_model(self.capture, upload)
 
+    @functools.cached_property
+    def _tunnelled(self) -> list[Upload]:
+        """Of a session behind the egress filter, what went to the model,
+        in the order it began: told apart once, as the capture is now,
+        and not again for each request placed. It sends everything to
+        the proxy, as many uploads as it likes."""
+        return [
+            upload for upload in self.capture.elsewhere.all if self.to_model(upload)
+        ]
+
     def model_between(self, start: float, end: float) -> list[Upload]:
         """What began to go to the model between two times."""
-        if not self.filtered:
-            return self.capture.uploads.between(start, end)
-        tunnelled = self.capture.elsewhere.between(start, end)
-        return [upload for upload in tunnelled if self.to_model(upload)]
+        to_model = self._tunnelled if self.filtered else self.capture.uploads.all
+        return began_between(to_model, start, end)
 
     @property
     def model(self) -> list[Upload]:
@@ -178,14 +187,21 @@ class Wire:
     def place(self, event: Event, seen: Sent) -> None:
         """Say of a request where the capture of its session saw it go.
         Nothing of one that does not say when it was written out, nor
-        when the capture did not take what is sent to the model."""
+        when the capture did not take what is sent to the model. Nor of
+        one whose length is not known, its body withheld or not found,
+        which is marked unmeasured instead, see _summary: any upload
+        would have room for it, and one written out by the session would
+        pass for seen."""
         asked = event.fields.get("asked")
         if event.kind is not Kind.REQUEST or not isinstance(asked, float):
             return
         if not seen.taken:
             return
+        sent = event.fields.get("sent")
+        if not isinstance(sent, int) or isinstance(sent, bool) or sent <= 0:
+            event.fields["unmeasured"] = True
+            return
         capture = seen.capture
-        sent = event.fields.get("sent") or 0
         upload = self._found(seen, asked, sent)
         if upload is None:
             # Not of a part that stopped: what came later is missing
@@ -194,7 +210,7 @@ class Wire:
                 event.fields["wire"] = None
             return
         shared = id(upload) in self._taken
-        self._taken[id(upload)] = self._taken.get(id(upload), 0) + (sent or upload.sent)
+        self._taken[id(upload)] = self._taken.get(id(upload), 0) + sent
         connection = capture.connection_of(upload.key, upload.began)
         among = "with another request in " if shared else ""
         # By the number of the upload, which its answer has too, and
@@ -369,17 +385,21 @@ def on_the_wire(
 
 def _summary(requests: list[Event], others: list[Event]) -> list[tuple[str, str]]:
     """The rows that sum up what was seen on the wire: of the requests
-    that are noted how many were seen there, the uploads to the model's
-    API that are no request of those, and what was sent anywhere else,
-    each when there is any."""
+    that are noted how many were seen there, and how many were not looked
+    for there, those of no length that is known, the uploads to the
+    model's API that are no request of those, and what was sent anywhere
+    else, each when there is any."""
     rows = []
     seen = sum(bool(event.fields.get("wire")) for event in requests)
     unseen = sum(event.fields.get("wire", 0) is None for event in requests)
+    unmeasured = sum(bool(event.fields.get("unmeasured")) for event in requests)
     unnoted = sum(bool(event.fields.get("unnoted")) for event in others)
     if requests:
         said = f"{seen} seen on the wire"
         if unseen:
             said += f", {unseen} NOT SEEN there"
+        if unmeasured:
+            said += f", {unmeasured} not looked for (their length is not known)"
         if unnoted:
             said += f", {unnoted} uploads to the model's API with no request noted"
         rows.append(("requests", said))

@@ -9,17 +9,17 @@ for what puts them together."""
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import os
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NamedTuple, Self
 
 from ..events import Event, Kind, Stage, Who, flat
-from ..files import LINE_LIMIT, line_entry, open_plain
+from ..files import LINE_LIMIT, file_id, line_entry, open_plain
 from ..recording.answers import OVER, Answer
 from ..recording.capture import (
     PARTS,
@@ -35,11 +35,10 @@ from ..recording.model_api import is_model_api
 from ..recording.pcap import Capture, Connection, Marks, take_frames
 from ..recording.pcap_file import PcapReader
 from ..recording.processes import (
-    SAID_AGAIN,
     SILENT_BEATS,
     ProcessRecord,
     Watcher,
-    said_lines,
+    said_since,
 )
 from ..recording.procwatch import HEALTH_EVERY as SAID_EVERY
 from ..recording.uploads import PAUSE, Upload
@@ -57,8 +56,6 @@ from .shown import over, reached, size
 from .transcript import Walk, WalkOptions
 from .wire import Sent, Wire, answer_event, tunnel_to_model, upload_event
 
-# The most read of the record of a session at once, see RecordTail
-RECORD_READ = 4 * 1024 * 1024
 # Seconds between two questions to a watcher on how its session is doing:
 # it says so every 30 seconds, and at once when a limit is near
 HEALTH_EVERY = 10.0
@@ -92,12 +89,12 @@ READ_SIZE = 1 << 20
 # there again: one emptied and written to past where it was read to has a
 # size that says nothing, what is before that place does
 KEPT_END = 64
-# How much of a transcript one look takes in, once what it held when the
-# following began is read: a session can write to it as fast as it is
-# read, and whoever looks has more to do than that (a chat listens to
-# claude and to Ctrl-C between two looks). What is left is read by the
-# next look. A megabyte of the shortest entries is a quarter of a second
-# to take in
+# How much of the transcripts one look takes in, all of them together,
+# once what they held when the following began is read: a session can
+# write to as many as are followed as fast as they are read, and whoever
+# looks has more to do than that (a chat listens to claude and to Ctrl-C
+# between two looks). What is left is read by the next look. A megabyte
+# of the shortest entries is a quarter of a second to take in
 MOST_POLLED = 1 << 20
 # The looks in a row that leave some of a transcript unread before it is
 # said to be late: a result with a picture in it takes a few
@@ -112,8 +109,41 @@ UNREAD_AFTER = 3
 # second and a dozen megabytes to hold: all of it would keep whoever
 # starts to follow waiting, a chat that resumes a session too.
 MOST_HISTORY = 4 << 20
+# What a line says that is of a transcript
+LAST_OF_HISTORY = f"its last {MOST_HISTORY >> 20} MB"
 # And of its start for a title, when nothing that was followed gave one
 TITLE_BYTES = 1 << 20
+
+
+def _replaced(known: tuple[int, int] | None, found: tuple[int, int] | None) -> bool:
+    """Whether the file found at a path is another than the one known
+    there, by its device and inode (see file_id): none is known of one
+    that was not there, and whichever is found is then the one."""
+    return known not in (None, found)
+
+
+class Seen(NamedTuple):
+    """How long a transcript that is not followed yet was when it was
+    looked at, and which file it was: another put in its place since,
+    however long, is not read on from there. None for one that was not
+    there. What a TranscriptTail of it starts from."""
+
+    size: int
+    file: tuple[int, int] | None
+
+    @classmethod
+    def of(cls, about: os.stat_result) -> Seen:
+        return cls(about.st_size, file_id(about))
+
+    def changed(self, now: Seen) -> bool:
+        """Whether the transcript is not as it was seen, by how it is
+        now: of another length, or another file."""
+        return now.size != self.size or _replaced(self.file, now.file)
+
+
+# What is seen of a transcript that was not there: it is read from its
+# start, whatever file it is
+UNSEEN = Seen(0, None)
 
 
 class Streak:
@@ -148,35 +178,52 @@ class TranscriptTail:
         options: WalkOptions,
         offset: int = 0,
         agents: Iterator[int] | None = None,
+        file: tuple[int, int] | None = None,
     ):
         self.path = path
-        # From the byte before a place within it: what is read first is
-        # let go of up to the end of its line, as the rest of one too long
-        # to hold is, and a line that starts right there is whole. A
-        # length taken while a line was being written ends within it.
+        # How what it holds is walked, and anew once it is written anew:
+        # with agents, of a subagent, what it does says which it is of
+        self._new_walk = functools.partial(Walk, project_dir, options, agents=agents)
+        self._walk = self._new_walk()
+        self._title: str | None = None
+        # The looks that left some of it unread, see newly_behind, and
+        # those that found it no file that can be read, see newly_unread
+        self._behind = Streak(LATE_AFTER)
+        self._unread = Streak(UNREAD_AFTER)
+        # The file it is, by its device and inode: with file, the one it
+        # was when offset was taken, else the one first opened. And
+        # whether it was found written anew since that was said, see
+        # newly_rewritten
+        self._file = file
+        self._rewritten = False
+        self._read_from(offset)
+        # Whether it is read from within and not from its start, see
+        # latest: what it holds before is not looked at
+        self.cut = False
+        # How many bytes of it the last look took in
+        self.polled = 0
+
+    def _read_from(self, offset: int) -> None:
+        """Read it from a place on. From the byte before: what is read
+        first is let go of up to the end of its line, as the rest of one
+        too long to hold is, and a line that starts right there is whole.
+        A length taken while a line was being written ends within it."""
         self._offset = max(offset - 1, 0)
         # The start of a line whose end is not written yet
         self._partial = b""
         # Whether what is read is the rest of a line that is not taken
         # in: one too long, or one it is read from within
         self._dropping = offset > 0
-        # With agents, of a subagent: what it does says which it is of
-        self._walk = Walk(project_dir, options, agents=agents)
-        self._title: str | None = None
-        # The looks that left some of it unread, see newly_behind, and
-        # those that found it no file that can be read, see newly_unread
-        self._behind = Streak(LATE_AFTER)
-        self._unread = Streak(UNREAD_AFTER)
-        # The file it is, by its device and inode, once it was opened, and
-        # whether it was found written anew since that was said, see
-        # newly_rewritten
-        self._file: tuple[int, int] | None = None
-        self._rewritten = False
         # The last bytes read of it, up to where it was read to
         self._read_end = b""
-        # Whether it is read from within and not from its start, see
-        # latest: what it holds before is not looked at
-        self.cut = False
+
+    def _from_history(self, size: int) -> None:
+        """Read it, size bytes long, from where its last MOST_HISTORY
+        bytes begin: what it holds before that is not looked at, see
+        cut."""
+        start = max(size - MOST_HISTORY, 0)
+        self._read_from(start)
+        self.cut = start > 0
 
     @classmethod
     def latest(cls, path: Path, project_dir: str, options: WalkOptions) -> Self:
@@ -185,11 +232,11 @@ class TranscriptTail:
         before that is not known: its result is not shown when it comes,
         as of a transcript that is followed from where it ends."""
         try:
-            start = max(path.lstat().st_size - MOST_HISTORY, 0)
+            size = path.lstat().st_size
         except OSError:
-            start = 0
-        tail = cls(path, project_dir, options, start)
-        tail.cut = start > 0
+            size = 0
+        tail = cls(path, project_dir, options)
+        tail._from_history(size)
         return tail
 
     @property
@@ -221,10 +268,12 @@ class TranscriptTail:
     def newly_rewritten(self) -> bool:
         """Whether it was found written anew since the last time it was
         asked: emptied or cut short, written to past where it was read to
-        too, or another file put in its place. A session can do that to its own transcript, to have
-        what it did taken out, and what is written after would be read
-        from where the one before was read to. It is read again from its
-        start, and that is not to pass for what it always held."""
+        too, or another file put in its place. A session can do that to
+        its own transcript, to have what it did taken out, and what is
+        written after would be read from where the one before was read
+        to. It is read again as a transcript of its own, from where its
+        last MOST_HISTORY bytes begin (cut says whether that is its
+        start), and that is not to pass for what it always held."""
         said, self._rewritten = self._rewritten, False
         return said
 
@@ -245,17 +294,16 @@ class TranscriptTail:
         to hold. No further than the file went when it was opened, and
         than most bytes when there is a most: what is written meanwhile
         does not keep the look going."""
+        self.polled = 0
         file = open_plain(self.path)
         self._unread.look(file is None)
         if file is None:
             return
         with file:
             about = os.fstat(file.fileno())
-            size, this = about.st_size, (about.st_dev, about.st_ino)
+            size, this = about.st_size, file_id(about)
             if self._written_anew(file, size, this):
-                # From its start, and said, see newly_rewritten
-                self._offset, self._partial, self._dropping = 0, b"", False
-                self._rewritten, self.cut, self._read_end = True, False, b""
+                self._anew(size)
             self._file = this
             end = size if most is None else min(size, self._offset + most)
             self._behind.look(end < size)
@@ -265,6 +313,7 @@ class TranscriptTail:
                 if not data:
                     return
                 self._offset += len(data)
+                self.polled += len(data)
                 self._read_end = (self._read_end + data)[-KEPT_END:]
                 if self._dropping:
                     # The rest of a line that is not taken in, to its end:
@@ -277,11 +326,21 @@ class TranscriptTail:
                     self._partial, self._dropping = b"", True
                     yield None
 
+    def _anew(self, size: int) -> None:
+        """Read it again as a transcript of its own, as one that begins
+        to be followed is (see latest), and say so, see newly_rewritten.
+        By a walk of its own: the calls read before are none of what it
+        holds now, nor is a call it has again under the same id another
+        one of theirs."""
+        self._from_history(size)
+        self._walk = self._new_walk()
+        self._rewritten = True
+
     def _written_anew(self, file: BinaryIO, size: int, this: tuple[int, int]) -> bool:
         """Whether the file at its path is not the one read so far: another
         one, one shorter than what was read of it, or one that no longer
         has what was read last where it was read."""
-        if size < self._offset or self._file not in (None, this):
+        if size < self._offset or _replaced(self._file, this):
             return True
         if not self._read_end:
             return False
@@ -424,6 +483,8 @@ class CaptureTail:
         # what they are
         self.links = Links(numbers)
         self.wire = Wire()
+        # What it saw go, told apart, until it takes in more, see seen
+        self._seen: Sent | None = None
         # How much of it was shown, and how much it held at the last
         # look: what was there then has had its moment, see SETTLE
         self._shown = Marks()
@@ -443,8 +504,17 @@ class CaptureTail:
 
     @property
     def seen(self) -> Sent:
-        """What it saw the session send, told apart, see wire.py."""
-        return Sent(self.capture, self.filtered, self.links)
+        """What it saw the session send, told apart, see wire.py: once
+        for all that is placed in it and shown of it until it takes in
+        more, or its session is found to be behind the egress filter."""
+        seen = self._seen
+        if (
+            seen is None
+            or seen.capture is not self.capture
+            or seen.filtered != self.filtered
+        ):
+            seen = self._seen = Sent(self.capture, self.filtered, self.links)
+        return seen
 
     def poll(self) -> list[Event]:
         """What the capture has since the last time: the connections that
@@ -470,25 +540,30 @@ class CaptureTail:
                 else copied.with_name(copied.name + part.suffix)
             )
             read[part.file] = _read_from(file, self._offsets[part.name])
-        self._take(read, whole=True)
-        self.capture.dns.finish()
+        self._take(read, whole=True, over=True)
         return self._events(over=True)
 
-    def _take(self, read: Mapping[str, bytes], whole: bool) -> None:
-        """Take in what was read past where each part was read to."""
+    def _take(self, read: Mapping[str, bytes], whole: bool, over: bool = False) -> None:
+        """Take in what was read past where each part was read to. Of a
+        capture that is over, what is still held of its lookups is cut,
+        and a hello that does not say all it could is not waited for any
+        more: nothing more comes."""
+        self._seen = None
         for part in PARTS:
             data = read[part.file]
             if data:
                 self._offsets[part.name] += len(data)
                 frames = self._readers[part.name].feed(data)
                 take_frames(self.capture, frames, part.name)
+        if over:
+            self.capture.dns.finish()
         if whole:
             # Once every part is read as far as it goes, and not against
             # lookups that are known to be missing
             self.capture.lookups_whole = not self._said_died and lookups_whole(
                 self.capture
             )
-            self.capture.look_at_hellos()
+            self.capture.look_at_hellos(over=over)
 
     def _events(self, over: bool) -> list[Event]:
         """What is to be shown of what was taken in: of a capture that is
@@ -715,15 +790,19 @@ def _progress_event(
     return Event(time.time(), Who.SANDBOX, Kind.NET, [detail], fields, tied)
 
 
-class ProcessTail(ABC):
+class ProcessTail:
     """What is said of the processes of a running session, read as it is
-    said: how the session is doing, each connection and each socket that
-    waits for them with the processes that hold it, the files of secrets
-    they open, and those processes (see procwatch.py). Where it is read
-    from is the subclass's, see _said."""
+    said from the file it is said to, path: how the session is doing,
+    each connection and each socket that waits for them with the
+    processes that hold it, the files of secrets they open, and those
+    processes (see procwatch.py). A line still being written is taken
+    once it is whole, see said_since of processes.py."""
 
-    def __init__(self, session: str) -> None:
+    def __init__(self, session: str, path: str) -> None:
         self.session = session
+        self.path = path
+        # Where it was read to
+        self._offset = 0
         # What was said so far, as a record of the session's processes
         self.record = ProcessRecord()
         self._listeners = 0
@@ -742,12 +821,11 @@ class ProcessTail(ABC):
         return events
 
     def _take(self) -> None:
-        for line in self._said():
+        """Take in the lines said since the last time, none of them
+        twice."""
+        lines, self._offset = said_since(self.path, self._offset)
+        for line in lines:
             self.record.take(line)
-
-    @abstractmethod
-    def _said(self) -> list[str]:
-        """The lines said since the last time, none of them twice."""
 
     def health_since(self, since: float) -> list[Sample | Ended]:
         """How the session was doing later than a time, as far as read."""
@@ -766,29 +844,14 @@ class ProcessTail(ABC):
 
 
 class WatcherTail(ProcessTail):
-    """What the watcher of a running session says aloud, as docker gives
-    it: of the processes, only those that hold a socket or a file of
+    """What the watcher of a running session says aloud, read as it grows
+    from the file it says it to, path (see aloud_path of processes.py):
+    of the processes, only those that hold a socket or a file of
     secrets. Not the record of all that ran, which stays in the
     sidecar."""
 
-    def __init__(self, watcher: str) -> None:
-        super().__init__(Watcher.session_of(watcher))
-        self.watcher = watcher
-        # The lines of the last look: what it said then is asked for
-        # again in part, see SAID_AGAIN
-        self._last: set[str] = set()
-
-    def _said(self) -> list[str]:
-        """From a little before the last of it, see SAID_AGAIN, without
-        what was taken then."""
-        since = max(self.record.last_line - SAID_AGAIN, 0.0)
-        lines = said_lines(self.watcher, since)
-        fresh = [line for line in lines if line not in self._last]
-        if lines:
-            # Not after a look that gave nothing, it may not have been
-            # answered: what it said before would be taken again
-            self._last = set(lines)
-        return fresh
+    def __init__(self, watcher: str, path: str) -> None:
+        super().__init__(Watcher.session_of(watcher), path)
 
 
 class RecordTail(ProcessTail):
@@ -798,25 +861,7 @@ class RecordTail(ProcessTail):
     file is the launcher's, on the host, all of it is read."""
 
     def __init__(self, path: str, session: str) -> None:
-        super().__init__(session)
-        self.path = path
-        self._offset = 0
-
-    def _said(self) -> list[str]:
-        """The lines written whole since the last time, no more than
-        RECORD_READ of them at once: one still being written is taken
-        once it is whole."""
-        try:
-            with open(self.path, "rb") as file:
-                file.seek(self._offset)
-                read = file.read(RECORD_READ)
-        except OSError:
-            return []
-        whole, ended, _ = read.rpartition(b"\n")
-        if not ended:
-            return []
-        self._offset += len(whole) + 1
-        return whole.decode("utf-8", "replace").splitlines()
+        super().__init__(session, path)
 
     def health_since(self, since: float) -> list[Sample | Ended]:
         """As far as written, not only as far as polled: the file is the

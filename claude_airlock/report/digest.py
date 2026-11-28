@@ -1,8 +1,10 @@
 """What a session did that is worth a look, said when it ends, next to the
 check of tamper.py: where it went that no session of the project had gone
 before, what it sent a lot to, what the egress filter refused it, the
-lookups that stand out, what it wrote outside the project, what it took
-out of its transcript, and its use of the SSH agent and the Docker socket.
+lookups that stand out, what it wrote outside the project, what it did
+outside the sandbox through Anthropic, the files of secrets Claude Code's
+own tools were on, what it took out of its transcript, and its use of the
+SSH agent and the Docker socket.
 
 Nothing new is recorded for it but one thing: the destinations each
 project is known to reach, to tell a new one by. All of the rest is what
@@ -38,16 +40,18 @@ from ..projects import (
 from ..recording.capture import parts_cut_short
 from ..recording.model_api import is_model_api, is_model_host
 from ..recording.pcap import Capture
-from ..recording.recorder import copied_at, last_written, removed_transcripts
+from ..recording.processes import ProcessRecord
+from ..recording.procwatch import Secrets
+from ..recording.recorder import Compared, copied_at, last_written, removed_transcripts
 from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
-from .calls import written_paths
+from .calls import outside_sandbox_calls, secrets_called, secrets_said, written_paths
 from .entries import read_entries, short_id, unreadable_lines
 from .net_events import opened_files, reached_from, slowed
 from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
-from .recorded import ReadTranscript, Recorded
+from .recorded import ReadTranscript, Recorded, Traced
 from .shown import DROPPED, LOG_SHORT, SILENT, STOPPED, reached, size
 from .summary import planted_reads
 
@@ -108,8 +112,14 @@ def _uploads(capture: Capture, filtered: bool) -> list[str]:
             where = reached(
                 capture, connection.address, connection.port, "tcp", connection.when
             )
-            # None of one left open, or reset by the other end: not known
-            sent[where] += connection.sent or 0
+            # None of one left open, or reset by the other end: what its
+            # packets told by then, which a session that never closes the
+            # socket it uploads over would otherwise have counted as none
+            sent[where] += (
+                connection.sent
+                if connection.sent is not None
+                else connection.so_far[0] or 0
+            )
     for flow in capture.flows:
         if not is_model_api(flow.address):
             where = reached(capture, flow.address, flow.port, flow.transport, flow.when)
@@ -162,75 +172,90 @@ def _headed(heading: str, items: list[str]) -> list[str]:
     ]
 
 
+def _record_lines(record: ProcessRecord, until: float) -> list[str]:
+    """What the record of the processes of a session's container gives,
+    of a session that was over by until."""
+    lines: list[str] = []
+    if record.full:
+        lines.append("the record of its processes stopped at its size limit")
+    silent = record.silent_from(until)
+    if silent is not None:
+        lines.append(SILENT.format(datetime.fromtimestamp(silent)))
+    if slowed(record):
+        lines.append(slowed(record))
+    # Each place once, however often a server was started there
+    waited = dict.fromkeys(
+        flat(listener.at) for listener in record.listeners if listener.open
+    )
+    lines += _headed(
+        "waited for connections, open to the other sessions on its network:",
+        list(waited),
+    )
+    lines += _headed("opened files of secrets:", opened_files(record))
+    if record.process_limit:
+        then = (
+            f"which under {flat(record.outside)} ends the session as a whole"
+            if record.limit_ends_session
+            else "what it tried to start then did not"
+        )
+        lines.append(
+            f"ran into its limit of processes {record.process_limit} times,"
+            f" {then}: CLAUDE_AIRLOCK_PIDS sets the limit"
+        )
+    return lines
+
+
+def _capture_lines(kept: Traced, capture: Capture, filtered: bool) -> list[str]:
+    """What the capture of a session's container gives, but for where it
+    went: what it sent a lot to, who connected to it, the connections and
+    lookups that stand out, and what of it the capture does not hold."""
+    lines = _uploads(capture, filtered)
+    # Each once, however often they connected
+    made = dict.fromkeys(reached_from(capture, made) for made in capture.inbound)
+    lines += _headed("connected to from outside the session:", list(made))
+    lines += _headed(
+        "connections that stand out:",
+        [
+            f"{reached(capture, c.address, c.port, 'tcp', c.when)}: {flat(what)}"
+            for _, what, c in capture.noticed
+        ],
+    )
+    lines += _headed(
+        "lookups that stand out:",
+        [flat(f"{lookup.name}: {why}") for why, lookup in capture.dns.flagged],
+    )
+    if capture.dns.unread:
+        unread = f"{capture.dns.unread} DNS messages of its capture were not read"
+        lines.append(f"{unread}, more than are kept")
+    if capture.dns.cut:
+        lines.append(
+            f"{capture.dns.cut} times what it sent to a resolver over TCP"
+            " was too long for its capture to read: a lookup may be"
+            " missing each time"
+        )
+    cut = ", ".join(parts_cut_short(capture))
+    if cut:
+        lines.append(f"its capture stopped at its packet limit ({cut})")
+    if kept.session.stopped:
+        lines.append(STOPPED.format(flat(kept.session.stopped)))
+    if kept.session.dropped:
+        lines.append(DROPPED.format(kept.session.dropped))
+    return lines
+
+
 def _network_lines(host: Host, recorded: Recorded) -> list[str]:
     """What the captures and the process records of a session's
-    containers give."""
+    containers give, ahead of them where it went that no session of the
+    project had gone before."""
     lines: list[str] = []
     found: dict[str, str] = {}
     filtered = bool(recorded.filtered)
     for kept in recorded.traced:
-        record, capture = kept.processes, kept.capture
-        if record and record.full:
-            lines.append("the record of its processes stopped at its size limit")
-        silent = record.silent_from(kept.session.until) if record else None
-        if silent is not None:
-            lines.append(SILENT.format(datetime.fromtimestamp(silent)))
-        if record and slowed(record):
-            lines.append(slowed(record))
-        if record:
-            # Each place once, however often a server was started there
-            waited = dict.fromkeys(
-                flat(listener.at) for listener in record.listeners if listener.open
-            )
-            lines += _headed(
-                "waited for connections, open to the other sessions on its network:",
-                list(waited),
-            )
-            lines += _headed("opened files of secrets:", opened_files(record))
-        if record and record.process_limit:
-            then = (
-                f"which under {flat(record.outside)} ends the session as a whole"
-                if record.limit_ends_session
-                else "what it tried to start then did not"
-            )
-            lines.append(
-                f"ran into its limit of processes {record.process_limit} times,"
-                f" {then}: CLAUDE_AIRLOCK_PIDS sets the limit"
-            )
-        if capture is None:
-            continue
-        found.update(_destinations(capture))
-        lines += _uploads(capture, filtered)
-        # Each once, however often they connected
-        made = dict.fromkeys(reached_from(capture, made) for made in capture.inbound)
-        lines += _headed("connected to from outside the session:", list(made))
-        lines += _headed(
-            "connections that stand out:",
-            [
-                f"{reached(capture, c.address, c.port, 'tcp', c.when)}: {flat(what)}"
-                for _, what, c in capture.noticed
-            ],
-        )
-        lines += _headed(
-            "lookups that stand out:",
-            [flat(f"{lookup.name}: {why}") for why, lookup in capture.dns.flagged],
-        )
-        if capture.dns.unread:
-            unread = f"{capture.dns.unread} DNS messages of its capture were not read"
-            lines.append(f"{unread}, more than are kept")
-        if capture.dns.cut:
-            lines.append(
-                f"{capture.dns.cut} times what it sent to a resolver over TCP"
-                " was too long for its capture to read: a lookup may be"
-                " missing each time"
-            )
-        cut = ", ".join(parts_cut_short(capture))
-        if cut:
-            lines.append(f"its capture stopped at its packet limit ({cut})")
-        if kept.session.stopped:
-            lines.append(STOPPED.format(flat(kept.session.stopped)))
-        if kept.session.dropped:
-            lines.append(DROPPED.format(kept.session.dropped))
+        if kept.processes:
+            lines += _record_lines(kept.processes, kept.session.until)
+        if kept.capture is not None:
+            found.update(_destinations(kept.capture))
+            lines += _capture_lines(kept, kept.capture, filtered)
     new = newly_reached(host, found) if recorded.captured else []
     return [*_headed("reached for the first time from this project:", new), *lines]
 
@@ -278,17 +303,74 @@ def _added_since(read: ReadTranscript, length: int) -> list[dict]:
     return read.entries[len(read_entries(read.path, most=length)) :]
 
 
+def _compared_lines(named: str, compared: Compared) -> list[str]:
+    """What a transcript compared with the launcher's copy of it says, see
+    Compared: that lines the launcher copied are gone or altered, that it
+    was not all copied, or is too long to compare, and that it was
+    rewritten more often than the launcher keeps all it had copied."""
+    lines = []
+    if compared.gone or compared.rewritten:
+        lines.append(
+            f"{named} was changed:"
+            f" {compared.missing} lines the launcher copied are gone or altered"
+        )
+    if compared.cut_short:
+        lines.append(f"{named} was not all copied, it is past the launcher's limit")
+    if compared.uncompared:
+        lines.append(f"{named} has too many lines to compare with its copy")
+    if compared.dropped:
+        lines.append(
+            f"{named} was rewritten {compared.rewritten} times, more often"
+            " than the launcher keeps all it had copied"
+        )
+    return lines
+
+
+def _read_lines(path: Path, read: ReadTranscript, added: list[dict]) -> list[str]:
+    """What a transcript of a session says of itself, of the entries it
+    gained since it began (added): how many of the session's subagents
+    have theirs go unread, how much of what was read shows signs of
+    being written to instruct the session, how it compares with the
+    launcher's copy of it, and the lines of it that cannot be read."""
+    lines = []
+    # A subagent's is named by its session
+    session = subagent_session(path)
+    whose = "a subagent of " if session else ""
+    named = f"the transcript of {whose}{short_id(session or path)}"
+    unread = 0 if session else subagents_unread(path)
+    if unread:
+        lines.append(
+            f"{unread} transcripts of subagents of {short_id(path)} were"
+            f" neither copied nor read, past the first {MOST_SUBAGENTS}:"
+            " what those subagents did is not told"
+        )
+    signs = planted_reads(added)
+    if signs:
+        said = f"{FLAG} in {named}: {read_said(signs)}"
+        lines.append(f"{said}, see --trace --failed")
+    lines += _compared_lines(named, read.compared)
+    unreadable = unreadable_lines(added)
+    if unreadable:
+        lines.append(f"{named} has {unreadable} lines that cannot be read")
+    return lines
+
+
 def _transcript_lines(
-    host: Host, start: float, lengths: Mapping[Path, int] | None = None
+    host: Host,
+    start: float,
+    secrets: Secrets,
+    lengths: Mapping[Path, int] | None = None,
 ) -> list[str]:
     """What the transcripts written to since a time say: the files
-    written outside the project, how much of what was read shows signs of
-    being written to instruct the session, what was taken out of them,
-    and how many of a session's subagents have theirs go unread. With
-    lengths, how long each was at that time, of what each has gained
-    since (see _added_since)."""
+    written outside the project, the calls that acted outside the sandbox
+    through Anthropic, the files of secrets Claude Code's own tools were
+    on (of the session's secrets), and what each says of itself, see
+    _read_lines. With lengths, how long each was at that time, of what
+    each has gained since (see _added_since)."""
     lines: list[str] = []
     written: list[str] = []
+    away: list[str] = []
+    taken: list[str] = []
     # Those of the subagents too, what one wrote is in its own
     for path in session_transcripts(host):
         if last_written(host, path) < start:
@@ -301,39 +383,12 @@ def _transcript_lines(
             for file, cwd in written_paths(added)
             if outside(file, project_dir, cwd)
         )
-        compared = read.compared
-        # A subagent's is named by its session
-        session = subagent_session(path)
-        whose = "a subagent of " if session else ""
-        named = f"the transcript of {whose}{short_id(session or path)}"
-        unread = 0 if session else subagents_unread(path)
-        if unread:
-            lines.append(
-                f"{unread} transcripts of subagents of {short_id(path)} were"
-                f" neither copied nor read, past the first {MOST_SUBAGENTS}:"
-                " what those subagents did is not told"
-            )
-        signs = planted_reads(added)
-        if signs:
-            said = f"{FLAG} in {named}: {read_said(signs)}"
-            lines.append(f"{said}, see --trace --failed")
-        if compared.gone or compared.rewritten:
-            lines.append(
-                f"{named} was changed:"
-                f" {compared.missing} lines the launcher copied are gone or altered"
-            )
-        unreadable = unreadable_lines(added)
-        if unreadable:
-            lines.append(f"{named} has {unreadable} lines that cannot be read")
-        if compared.cut_short:
-            lines.append(f"{named} was not all copied, it is past the launcher's limit")
-        if compared.uncompared:
-            lines.append(f"{named} has too many lines to compare with its copy")
-        if compared.dropped:
-            lines.append(
-                f"{named} was rewritten {compared.rewritten} times, more often"
-                " than the launcher keeps all it had copied"
-            )
+        away.extend(
+            f"{flat(tool)}: {what}" for tool, what in outside_sandbox_calls(added)
+        )
+        found = secrets_called(added, project_dir, secrets)
+        taken.extend(secrets_said(*one) for one in found)
+        lines += _read_lines(path, read, added)
     for path in removed_transcripts(host):
         if copied_at(host, path) >= start:
             lines.append(
@@ -342,17 +397,29 @@ def _transcript_lines(
             )
     return [
         *_headed("written outside the project:", list(dict.fromkeys(written))),
+        *_headed(
+            "acted OUTSIDE SANDBOX, through Anthropic:", list(dict.fromkeys(away))
+        ),
+        *_headed(
+            "files of secrets that Claude Code's own tools were called on:",
+            list(dict.fromkeys(taken)),
+        ),
         *lines,
     ]
 
 
 def _session_digest(
-    host: Host, session: str, start: float, lengths: Mapping[Path, int] | None = None
+    host: Host,
+    session: str,
+    start: float,
+    secrets: Secrets,
+    lengths: Mapping[Path, int] | None = None,
 ) -> list[str]:
     """The lines about a session of this project that has just ended:
-    the container of that name, started at that time. lengths as for
-    _transcript_lines. A part that cannot be read, or whose record cannot
-    be written (a full disk), says so and leaves the others as they are."""
+    the container of that name, started at that time. secrets and
+    lengths as for _transcript_lines. A part that cannot be read, or
+    whose record cannot be written (a full disk), says so and leaves the
+    others as they are."""
     end = time.time()
 
     def network() -> list[str]:
@@ -369,7 +436,7 @@ def _session_digest(
         return [f"{about} {said}" for about, said in rows]
 
     def transcript() -> list[str]:
-        return _transcript_lines(host, start, lengths)
+        return _transcript_lines(host, start, secrets, lengths)
 
     lines = []
     for about, part in (
@@ -388,17 +455,19 @@ def report_session(
     host: Host,
     session: str,
     start: float,
+    secrets: Secrets,
     heard: list[str] | None = None,
     lengths: Mapping[Path, int] | None = None,
 ) -> None:
-    """Say what is worth a look about a session that has just ended, with
+    """Say what is worth a look about a session that has just ended, of
+    the files of secrets it had (see session_secrets of secrets.py), with
     what the launcher heard of it while it ran (see limits.py), and how
     long each transcript was when it started, for what is said to be of
     what came since. What cannot be read is passed over: this runs as a
     session ends, and what is left to do then (the check of tamper.py)
     matters more."""
     try:
-        lines = _session_digest(host, session, start, lengths)
+        lines = _session_digest(host, session, start, secrets, lengths)
     except Exception as problem:  # noqa: BLE001
         # What it reads is a session's to write. Said, and the check that
         # follows is still made.

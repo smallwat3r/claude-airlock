@@ -25,7 +25,7 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass, field
 
-from .packets import SEQUENCE_SPACE, Packet
+from .packets import SEQUENCE_SPACE, Key, Packet
 
 # The names of the parts of a capture these packets are in, see
 # capture.py: what is sent to the model's API, and what is sent anywhere
@@ -49,10 +49,6 @@ MOST_MISSED = 1 << 24
 # limit, and an upload is a packet at least
 MOST_UPLOADS = 100_000
 
-# What a connection is known by: the session's port, and the address and
-# the port of the other end
-type Key = tuple[int, str, int]
-
 
 @dataclass
 class Upload:
@@ -73,6 +69,19 @@ class Upload:
     def sized(self) -> bool:
         """Whether it is long enough to be worth a line."""
         return self.sent >= LEAST
+
+
+def _began(upload: Upload) -> float:
+    """What uploads are in the order of."""
+    return upload.began
+
+
+def began_between(uploads: list[Upload], start: float, end: float) -> list[Upload]:
+    """Of some uploads in the order they began, those that began between
+    two times, the first first."""
+    first = bisect.bisect_left(uploads, start, key=_began)
+    last = bisect.bisect_right(uploads, end, key=_began)
+    return uploads[first:last]
 
 
 class Reached:
@@ -118,7 +127,7 @@ class Uploads:
         """Take in a packet a session sent that carries something."""
         if not packet.sent or not packet.length:
             return
-        key = (packet.source_port, packet.destination, packet.port)
+        key = packet.key
         ahead, another = self._reached.adds(key, packet)
         if not ahead:
             return
@@ -155,17 +164,13 @@ class Uploads:
         connection was made. None of them is 0, one that is too short
         or is of another part of the capture."""
         sized = self._sized.get(upload.key, [])
-        first = bisect.bisect_left(sized, since, key=lambda sent: sent.began)
-        at = bisect.bisect_left(sized, upload.began, key=lambda sent: sent.began)
+        first = bisect.bisect_left(sized, since, key=_began)
+        at = bisect.bisect_left(sized, upload.began, key=_began)
         found = at < len(sized) and sized[at] is upload
         return at - first + 1 if found and at >= first else 0
 
-    def between(self, start: float, end: float) -> list[Upload]:
-        """Those that began between two times, the first first."""
-        first = bisect.bisect_left(self.all, start, key=lambda upload: upload.began)
-        last = bisect.bisect_right(self.all, end, key=lambda upload: upload.began)
-        return self.all[first:last]
-
-    def on(self, key: Key, start: float, end: float) -> list[Upload]:
-        """Those of one connection, by when it was opened and ended."""
-        return [upload for upload in self.between(start, end) if upload.key == key]
+    def sized_on(self, key: Key, start: float, end: float) -> int:
+        """How many of one connection were long enough to be worth a
+        line, by when it was opened and ended: of those it sent alone,
+        however many others there are."""
+        return len(began_between(self._sized.get(key, []), start, end))

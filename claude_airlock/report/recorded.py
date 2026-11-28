@@ -184,5 +184,6 @@ class ReadTranscript:
 
     @property
     def unreadable(self) -> int:
-        """How many of its lines cannot be read."""
-        return unreadable_lines(self.entries)
+        """How many of its lines cannot be read, of what it is known to
+        hold: of one that is no longer there, as the launcher copied it."""
+        return unreadable_lines(self.known)

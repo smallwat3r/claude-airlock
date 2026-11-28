@@ -28,15 +28,15 @@ when the session comes near a limit: how much of its memory, CPUs,
 processes and tmpfs it uses, how long it was stalled for want of them and
 its largest processes, as its cgroup says (version 2, of version 1 only
 what /proc gives). The sixth when a process of it was ended for want of
-memory, with the large ones that are gone since. Those two are written to
-the watcher's output as well, for what follows a session as it runs: the
-record stays in the sidecar until the session is over. So are the second
-and the third, of what is not on the session's own loopback, each after
-the first of the process that holds the socket and of those it comes
-from: which process made a connection is then known while the session
-runs, without all its processes being said aloud. No more of that than
-MOST_ALOUD, the output of a sidecar is kept by docker until the session
-is over. The seventh when
+memory, with the large ones that are gone since. Those two are said
+aloud as well, for what follows a session as it runs: the record stays in
+the sidecar until the session is over. So are the second and the third,
+of what is not on the session's own loopback, each after the first of the
+process that holds the socket and of those it comes from: which process
+made a connection is then known while the session runs, without all its
+processes being said aloud. No more of that than MOST_ALOUD, what is said
+aloud is kept until the session is over. It is said to a file of the
+launcher's, which no session has. The seventh when
 looks came much later than they are meant to, which is the session's
 doing: how many did since it was last said, how long after the look before
 them in all, and the longest of those. What lived shorter than that, then,
@@ -57,13 +57,14 @@ from __future__ import annotations
 import ctypes
 import enum
 import fnmatch
+import functools
 import ipaddress
 import json
 import os
 import sys
 import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
-from typing import NamedTuple
+from typing import NamedTuple, TextIO
 
 # Seconds between two looks
 INTERVAL = 0.04
@@ -139,7 +140,7 @@ MOST_HOLDERS = 8
 SAID_PARENTS = 3
 # What is said aloud of the connections, of the sockets that wait and of
 # their processes stops at this size, with a last word that it did. The
-# record goes on, it is the output alone that docker keeps.
+# record goes on, it is what is said aloud that is kept on the host.
 MOST_ALOUD = 2 * 1024 * 1024
 MOST_TMPFS = 16
 NAME_LENGTH = 64
@@ -256,10 +257,17 @@ def command_line(raw: bytes) -> list[str]:
     return [*argv, CUT] if cut else argv
 
 
+# How many addresses are known as text at a time: every look reads the same
+# few again, and a session that reaches many has them worked out again
+MOST_ADDRESSES_KNOWN = 4096
+
+
+@functools.lru_cache(maxsize=MOST_ADDRESSES_KNOWN)
 def address(encoded: str) -> str:
     """An address as /proc/net/tcp and tcp6 write it: each four bytes of
     it as one number in the machine's own byte order. One of IPv4 inside
-    IPv6 as the IPv4 address it is, as it goes over the wire."""
+    IPv6 as the IPv4 address it is, as it goes over the wire. Remembered,
+    every look reads the same few again."""
     words = [encoded[at : at + 8] for at in range(0, len(encoded), 8)]
     packed = b"".join(int(word, 16).to_bytes(4, sys.byteorder) for word in words)
     found = ipaddress.ip_address(packed)
@@ -288,10 +296,19 @@ def _socket(line: str) -> tuple[tuple[int, str, int], str, bool] | None:
     port, the address and the port at the other end, or for one that
     waits for connections its port and the address it waits on, then its
     inode and whether it waits. None for a line that says none, or one
-    that was let go of."""
-    parts = line.split()
+    that was let go of, which is told before any address is read: a
+    session can leave as many of those in the table as it likes, every
+    connection it closes waits there a while."""
+    # The inode is the tenth field, what follows it is not read
+    parts = line.split(None, 10)
     try:
         local, remote, state, inode = parts[1], parts[2], parts[3], parts[9]
+    except IndexError:
+        return None
+    if inode == "0":
+        # Let go of
+        return None
+    try:
         on, port = local.rsplit(":", 1)
         to, to_port = remote.rsplit(":", 1)
         waits = state == TCP_LISTEN
@@ -299,10 +316,7 @@ def _socket(line: str) -> tuple[tuple[int, str, int], str, bool] | None:
             key = (int(port, 16), address(on), 0)
         else:
             key = (int(port, 16), address(to), int(to_port, 16))
-    except (IndexError, ValueError):
-        return None
-    if inode == "0":
-        # Let go of
+    except ValueError:
         return None
     return key, inode, waits
 
@@ -885,6 +899,44 @@ def started_last(pids: Sequence[int]) -> int:
     return pids[-1]
 
 
+class Room:
+    """The room a record has, see MOST_BYTES, in two parts: what is not
+    reserved (a process, how the session is doing, what is on the
+    session's own loopback) leaves RESERVED for what is (a connection, a
+    socket others can reach, a word of the watcher's own), a session must
+    not be rid of those by what it makes the others fill. The record says
+    that it is full when the first part is, and again as its last line
+    when the reserved part is too, which a session can fill as well: one
+    that ends without a word reads as a session with nothing more to
+    note. The launcher's records from outside a session are kept the same
+    way, see host_health.py."""
+
+    def __init__(self) -> None:
+        self._written = 0
+        # Whether the part of what is not reserved is full, and whether
+        # all of it is: nothing more is written then
+        self._full = False
+        self._ended = False
+
+    def fitted(self, line: str, reserved: bool) -> str | None:
+        """What to write of a line of a part: the line while there is
+        room for it, the word that the record is full in its place once
+        that part has filled, and nothing after that."""
+        if self._ended or (self._full and not reserved):
+            return None
+        if reserved and self._written + len(line) > MOST_BYTES - LAST_WORD:
+            self._ended = True
+            return stamped(note=Note.FULL)
+        if not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
+            self._full = True
+            return stamped(note=Note.FULL)
+        return line
+
+    def took(self, line: str) -> None:
+        """Count a line that was written."""
+        self._written += len(line)
+
+
 class Watch:
     def __init__(
         self,
@@ -892,17 +944,17 @@ class Watch:
         read_process: Callable[[int], ProcessRead | None] = process,
         secrets: Secrets | None = None,
         proc: str = "/proc",
+        *,
+        aloud: TextIO,
     ) -> None:
         self._out = out
+        # Where it says aloud what follows a session reads, see _speak
+        self._aloud = aloud
         self._proc = proc
-        self._written = 0
+        self._room = Room()
         # Of the lines that could not be written since the last that was,
         # how many, and the times of the first and of the last of them
         self._unwritten: tuple[int, float, float] | None = None
-        # Whether the processes have used up their part of the record,
-        # and whether all of it is: nothing more is written then
-        self._full = False
-        self._ended = False
         # Not itself, nor what started it
         self._own = {os.getpid(), os.getppid()}
         # What reads a process, see process
@@ -961,30 +1013,18 @@ class Watch:
         counted: bool = False,
         **said: object,
     ) -> None:
-        """Add a line to the record, while there is room for it: what is
-        not reserved (a process, how the session is doing, what is on the
-        session's own loopback) leaves RESERVED for what is (a connection,
-        a socket others can reach, a word of the watcher's own), a session
-        must not be rid of those by what it makes the others fill. The
-        record says that it is full when the first part is, and again as
-        its last line when the reserved part is too, which a session can
-        fill as well: one that ends without a word reads as a session
-        with nothing more to note. A line said aloud goes to the
-        watcher's output too, no more of them than to the record, and of
-        those that are counted no more than MOST_ALOUD, see _speak."""
-        if self._ended or (self._full and not reserved):
-            return
+        """Add a line to the record, of the part that is reserved or of
+        the other, while there is room for it, see Room. A line said
+        aloud goes to the file to say aloud to too, no more of them than
+        to the record, and of those that are counted no more than
+        MOST_ALOUD, see _speak. The word that the record is full is the
+        record's alone."""
         line = stamped(**said)
-        if reserved and self._written + len(line) > MOST_BYTES - LAST_WORD:
-            self._ended = True
-            aloud = False
-            line = stamped(note=Note.FULL)
-        elif not reserved and self._written + len(line) > MOST_BYTES - RESERVED:
-            self._full = True
-            aloud = False
-            line = stamped(note=Note.FULL)
-        self._write(line)
-        if aloud:
+        fitted = self._room.fitted(line, reserved)
+        if fitted is None:
+            return
+        self._write(fitted)
+        if aloud and fitted is line:
             self._speak(line, counted)
 
     def _write(self, line: str) -> None:
@@ -1003,7 +1043,7 @@ class Watch:
                 )
                 self._out.write(gap)
                 self._out.flush()
-                self._written += len(gap)
+                self._room.took(gap)
                 self._unwritten = None
             self._out.write(line)
             self._out.flush()
@@ -1012,15 +1052,15 @@ class Watch:
             lines, since, _ = self._unwritten or (0, now, now)
             self._unwritten = (lines + 1, since, now)
             return
-        self._written += len(line)
+        self._room.took(line)
 
     def _speak(self, line: str, counted: bool = False) -> None:
-        """Write a line to the watcher's output, for what follows the
-        session as it runs. One that is counted, a connection or a
+        """Say a line aloud, for what follows the session as it runs: to
+        the file it was given. One that is counted, a connection or a
         process next to it, only while less than MOST_ALOUD of them was
-        said: how many there are is the session's to choose, and docker
-        keeps the output until the session is over. Past that a last
-        word says so, and no more of them come."""
+        said: how many there are is the session's to choose, and what is
+        said is kept until the session is over. Past that a last word
+        says so, and no more of them come."""
         if counted:
             if self._hushed:
                 return
@@ -1029,8 +1069,8 @@ class Watch:
                 line = stamped(note=Note.HUSHED)
             self._spoken += len(line)
         try:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            self._aloud.write(line)
+            self._aloud.flush()
         except (OSError, ValueError):
             # Nobody listens, the record has it
             pass
@@ -1073,8 +1113,8 @@ class Watch:
         return sorted(pids, key=started)[-MOST_HOLDERS:]
 
     def say(self, **said: object) -> None:
-        """Write a line to the record and to the watcher's output, see
-        note. The line does not use the reserved part of the record."""
+        """Write a line to the record and say it aloud, see note. The
+        line does not use the reserved part of the record."""
         self.note(reserved=False, aloud=True, counted=False, **said)
 
     def look(self) -> None:
@@ -1194,6 +1234,10 @@ class Watch:
         if not known or known[0] != what:
             self.note(pid=pid, ppid=parent, exe=program, argv=argv)
             known = (what, now, now)
+            # The files of secrets it holds are noted again, as held by
+            # what it is now: a shell that opens a key and becomes the
+            # program that reads it is otherwise all the record names
+            self._opened.forget((pid, started))
         self._processes[pid] = (what, known[1], now)
         self._parents[pid] = parent
 
@@ -1297,11 +1341,12 @@ class LineFile:
     OSError, and what of it did go in is ended by the next line that is
     written, which starts with an end of line of its own: the part reads
     as a line that does not hold up, which the reader passes over, and
-    the one after it is whole."""
+    the one after it is whole. Made with the given mode, and when new is
+    set, only where there is no file yet: raises OSError otherwise."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, mode: int = 0o644, new: bool = False) -> None:
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC
-        self._file = os.open(path, flags, 0o644)
+        self._file = os.open(path, flags | (os.O_EXCL if new else 0), mode)
         # Whether a line was cut short in the file, see write
         self._cut = False
 
@@ -1322,14 +1367,29 @@ class LineFile:
         os.close(self._file)
 
 
+def _aloud_to(path: str) -> TextIO:
+    """The file to say aloud to, which the launcher made and mounted:
+    opened as the session's user, see _take_identity, and never made
+    here, a file that is not there is not to be written."""
+    made = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+    return os.fdopen(made, "w", encoding="utf-8")
+
+
+# What the watcher is given, see _start_watcher of processes.py
+USAGE = "usage: procwatch.py RECORD UID GID SECRETS ALOUD"
+
+
 def _main(args: list[str]) -> int:
-    path = args[0]
+    if len(args) != 5:
+        print(USAGE, file=sys.stderr)
+        return 2
+    path, uid, gid, rules, aloud_path = args
     out = LineFile(path)
     try:
-        if len(args) > 1:
-            _take_identity(int(args[1]), int(args[2]))
-        secrets = Secrets.read(args[3]) if len(args) > 3 else None
-        watch = Watch(out, secrets=secrets)
+        _take_identity(int(uid), int(gid))
+        secrets = Secrets.read(rules)
+        aloud = _aloud_to(aloud_path)
+        watch = Watch(out, secrets=secrets, aloud=aloud)
         watch.note(reserved=True, note=Note.STARTED, beat=HEARTBEAT_EVERY)
         while True:
             watch.look()

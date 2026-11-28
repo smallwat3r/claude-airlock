@@ -39,15 +39,17 @@ from ..projects import (
     subagent_files,
     subagents_unread,
 )
+from ..recording.procwatch import Secrets
 from ..recording.recorder import (
     Compared,
     compare,
-    last_written,
+    copy_rank,
     removed_subagents,
     removed_transcripts,
 )
-from ..recording.started import start_summary
-from ..settings import Host
+from ..recording.secrets import session_secrets
+from ..recording.started import Start, start_summary
+from ..settings import Host, Settings, load_settings
 from .api_events import place_calls
 from .entries import (
     entry_times,
@@ -58,7 +60,6 @@ from .entries import (
     step_of,
     title,
     tool_calls,
-    unreadable_lines,
 )
 from .layout import Layout, event_json
 from .net_events import network
@@ -73,7 +74,7 @@ from .stream import (
     record_event,
     wants_record,
 )
-from .summary import planted_shown, summary
+from .summary import Flagged, flagged_shown, planted_shown, summary
 from .trace_args import picked_session, trace_options
 from .transcript import WalkOptions, left_events, taken_out_events
 from .unseen import mark_unseen, unseen_summary
@@ -87,6 +88,9 @@ NO_TIME = (
     "NOT LOOKED AT, nor what was noted of the session: its transcript"
     " says nowhere when it ran"
 )
+# What follows a directory mounted read-only, as the start of a session
+# notes it, see Start.of
+READ_ONLY_NOTED = " (ro)"
 
 
 def removed_events(
@@ -105,10 +109,11 @@ def removed_events(
 
 
 def _traced_files(host: Host) -> list[Path]:
-    """The transcripts a trace can be of, the latest session first: the
-    project's, and those the launcher has a copy of that are no longer
-    there, each by where it was. A session that removed its transcript is
-    then still the session it was, with what the launcher copied of it."""
+    """The transcripts a trace can be of, the latest session first (see
+    copy_rank): the project's, and those the launcher has a copy of
+    that are no longer there, each by where it was. A session that
+    removed its transcript is then still the session it was, with what
+    the launcher copied of it."""
     removed = removed_transcripts(host)
     try:
         files = session_files(host)
@@ -118,7 +123,7 @@ def _traced_files(host: Host) -> list[Path]:
         files = []
 
     return sorted(
-        [*files, *removed], key=functools.partial(last_written, host), reverse=True
+        [*files, *removed], key=functools.partial(copy_rank, host), reverse=True
     )
 
 
@@ -163,6 +168,7 @@ def _session_header(
     subagents: list[ReadTranscript],
     project_dir: str,
     planted: int,
+    flagged: Flagged,
     unread: int = 0,
     taken: Sequence[Event] = (),
 ) -> list[str]:
@@ -170,13 +176,12 @@ def _session_header(
     its subagents give: which session it is, how far they are to be
     believed, and what to know of it before reading on. planted is how
     many of what they read show signs of being written to instruct the
-    session, as their events tell (see planted_shown), unread how many
+    session, and flagged how many of their calls were, as their events
+    tell (see planted_shown and flagged_shown), unread how many
     transcripts of subagents there are past those given, and taken the
     events of what was taken out of those that are still there."""
     theirs = [entry for of_one in subagents for entry in of_one.known]
-    unreadable = own.unreadable + sum(
-        unreadable_lines(of_one.known) for of_one in subagents
-    )
+    unreadable = sum(one.unreadable for one in (own, *subagents))
     cannot_be_read = labelled(
         "transcript",
         f"{unreadable} lines CANNOT BE READ, shown as UNREADABLE:"
@@ -189,7 +194,7 @@ def _session_header(
         *_unread_header(unread),
         *_taken_out_header(taken),
         *([cannot_be_read] if unreadable else []),
-        *summary(own.known + theirs, project_dir, planted),
+        *summary(own.known + theirs, project_dir, planted, flagged),
     ]
 
 
@@ -223,6 +228,34 @@ def _steps_told(read: Sequence[ReadTranscript], unread: int) -> set[str] | None:
     return steps
 
 
+def traced_secrets(host: Host, mounted: Sequence[str] = ()) -> Secrets:
+    """The files of secrets a call of a session that is traced or
+    followed is flagged on (see secrets_of): the logins and keys under
+    its home, the container's and the host's, and the files of a name
+    hidden from it in the project and in the directories mounted next to
+    it, each as the host and the session name it (see session_secrets),
+    by the names the settings hide now. Made once for a trace, and for what is
+    followed, of the settings as they are: settings that cannot be read
+    hide no more than the defaults, and the trace is not stopped for
+    them."""
+    try:
+        settings = load_settings(os.environ, os.path.join(host.user_conf, "config"))
+    except Fatal:
+        settings = Settings()
+    return session_secrets(settings, host, [host.project_dir, *mounted])
+
+
+def _mounted(noted: Sequence[Event]) -> list[str]:
+    """The directories mounted next to the project of the sessions whose
+    start the launcher noted, each by its path, see Start."""
+    return [
+        mounted.removesuffix(READ_ONLY_NOTED)
+        for event in noted
+        if event.kind is Kind.STARTED
+        for mounted in Start.from_note(event.fields).dirs
+    ]
+
+
 def session_events(
     path: Path,
     host: Host,
@@ -254,23 +287,28 @@ def session_events(
     # in what Claude Code says
     noted_rows: list[tuple[str, str]] = []
     noted: list[Event] = []
-    walked = WalkOptions(verbose, lines=lines)
+    recorded = Recorded.between(host, min(times), max(times)) if times else None
+    if recorded is not None:
+        # Over all of the sessions' stay, as the network is, see stay.
+        # Ahead of the walk, which flags calls on files of secrets in
+        # the directories they were started with.
+        noted_rows, noted = noted_events(host, *recorded.stay)
+    secrets = traced_secrets(host, _mounted(noted))
+    walked = WalkOptions(verbose, lines=lines, secrets=secrets)
     sides = [_transcript_side(read, project_dir, walked) for read in (own, *subagents)]
     told = [event for events, _ in sides for event in events]
-    # Counted from the events: what was read is looked through once
-    planted = planted_shown(event for _, known in sides for event in known)
+    # Counted from the events: what was read and called is looked
+    # through once
+    about = [event for _, known in sides for event in known]
+    planted, flagged = planted_shown(about), flagged_shown(about)
     # What was taken out of a transcript that is still there comes after
     # what it is known to hold, see _transcript_side
     taken = [event for events, known in sides for event in events[len(known) :]]
     unread = subagents_unread(path)
-    if times:
-        start, end = min(times), max(times)
-        recorded = Recorded.between(host, start, end)
+    if recorded is not None:
         net_lines, net_events = network(recorded, verbose)
         # The commands the record of the processes has nothing of
         net_lines += unseen_summary(mark_unseen(told, recorded.watched))
-        # Over all of the sessions' stay, as the network is, see stay
-        noted_rows, noted = noted_events(host, *recorded.stay)
         # Each request to the model next to the steps the transcripts have,
         # and where the capture of its session saw it go
         place_calls(noted, path.stem, _steps_told([own, *subagents], unread))
@@ -283,7 +321,7 @@ def session_events(
         # session had done nothing there
         net_lines = [labelled("network", NO_TIME)]
     header = [
-        *_session_header(own, subagents, project_dir, planted, unread, taken),
+        *_session_header(own, subagents, project_dir, planted, flagged, unread, taken),
         *(
             labelled("sandbox", start_summary(event))
             for event in noted
@@ -341,7 +379,7 @@ def session_rows(files: list[Path], host: Host | None = None) -> list[tuple[Path
             f"  {len(tool_calls(entries)):4d} calls  {removed}{title(entries)}"
         )
         rows.append((last.timestamp() if last else 0.0, path, line))
-    # Stable: the files come the last written first
+    # Stable: the files come the latest first, see copy_rank
     rows.sort(key=lambda row: row[0], reverse=True)
     return [(path, line) for _, path, line in rows]
 

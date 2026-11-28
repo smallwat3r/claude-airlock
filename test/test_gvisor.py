@@ -472,6 +472,20 @@ class MonitorTest(LauncherTest):
         lines = self.wait_for(record, 3)
         assert {"dropped": 7} in lines
 
+    def test_what_was_dropped_last_is_counted_when_the_sandbox_is_done(self):
+        monitor = self.listening()
+        record = FakeRecord()
+        monitor.attach(record, CONTAINER)
+        sink = self.connect(monitor)
+        sink.recv(64)
+        sink.send(framed(told.SENTRY_EXEC, execed(2, CLAUDE, "claude"), dropped=7))
+        self.wait_for(record, 3)
+        # Too soon after the first count to be said with its message
+        sink.send(framed(told.SENTRY_EXEC, execed(3, CLAUDE, "claude"), dropped=9))
+        sink.close()
+        lines = self.wait_for(record, 5)
+        assert lines[-1] == {"dropped": 9}
+
     def test_a_sandbox_of_an_older_protocol_is_refused(self):
         monitor = self.listening()
         sink = self.connect(monitor, version=0)

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,9 +37,9 @@ from transcribed import at, call, prompt, result
 from claude_airlock import projects
 from claude_airlock.events import Event, Kind, Stage, Who
 from claude_airlock.recording import capture as capture_module
-from claude_airlock.recording import pcap
+from claude_airlock.recording import changes, notes, pcap, processes, recorder
 from claude_airlock.recording.pcap_file import PcapReader
-from claude_airlock.report import follow, stream, tails, transcript
+from claude_airlock.report import follow, noted, stream, tails, transcript
 from claude_airlock.report.layout import Layout
 from claude_airlock.report.transcript import WalkOptions
 
@@ -52,6 +53,14 @@ PATIENCE = 30.0
 def add(file: Path, *entries: dict) -> None:
     with open(file, "a") as transcript:
         transcript.write("".join(json.dumps(entry) + "\n" for entry in entries))
+
+
+@pytest.fixture
+def no_secrets() -> Iterator[None]:
+    """For a follower of a host that is a mock, which has no files of
+    secrets to be found, see traced_secrets."""
+    with mock.patch.object(follow, "traced_secrets", return_value=None):
+        yield
 
 
 class Following:
@@ -187,6 +196,21 @@ class FollowTest(LauncherTest):
         assert "# session     0a  long ago" in shown
         assert "prompt      long ago" not in shown
 
+    def test_a_transcript_dated_ahead_is_not_what_is_shown_first(self):
+        # The time of a transcript is the session's to set: one set years
+        # ahead is not the latest session, the launcher copied another last
+        decoy = self.write_transcript("0b", [prompt("the decoy")])
+        for file, copied in ((self.file, 2_000), (decoy, 1_000)):
+            copy = recorder.copy_path(self.host, file)
+            recorder.catch_up(file, copy)
+            os.utime(copy, (copied, copied))
+        os.utime(decoy, (4_000_000_000, 4_000_000_000))
+        follower = follow.Follower(self.host, verbose=False)
+        with mock.patch.object(tails.CaptureSidecar, "running", return_value=[]):
+            first = follower.poll()
+        assert [event.details[0] for _, event in first.events] == ["fix the build"]
+        assert {path for path, _ in first.events} == {self.file}
+
     def test_what_a_subagent_did_before_is_not_shown_as_done_now(self):
         earlier = self.write_transcript("0e" + self.SESSION[2:], [prompt("earlier")])
         os.utime(earlier, (1, 1))
@@ -297,6 +321,37 @@ class FollowTest(LauncherTest):
         timeline.take(late)
         assert "during" in late.fields
 
+    def test_what_a_connection_is_made_during_is_bounded(self):
+        # A session can leave any number of calls running without a
+        # result, and every connection is looked at
+        timeline = stream.Timeline()
+        now = time.time()
+
+        def issued(number: int, ago: float) -> Event:
+            fields = {"id": f"c{number}", "tool": "Bash", "stage": Stage.CALL}
+            ran = [f"$ make {number}"]
+            return Event(now - ago, Who.CLAUDE, "bash", ran, fields, call=True)
+
+        for number in range(30):
+            timeline.take(issued(number, 100 - number))
+        # Noted again under its id, it is among the latest noted
+        timeline.take(issued(0, 50))
+        made = Event(now, Who.SANDBOX, Kind.NET, ["tcp"], {})
+        with (
+            mock.patch.object(stream, "MOST_LOOKED_AT", 20),
+            mock.patch.object(stream, "MOST_DURING", 5),
+        ):
+            timeline.take(made)
+        # Looked for among the latest noted, the latest started named and
+        # the others counted
+        assert made.fields["during"] == ["c26", "c27", "c28", "c29", "c0"]
+        assert made.fields["during_more"] == 15
+        assert made.notes == ["during: $ make 0 (+19 more)"]
+        alone = Event(now, Who.SANDBOX, Kind.NET, ["tcp"], {})
+        timeline.take(alone)
+        assert len(alone.fields["during"]) == 30
+        assert "during_more" not in alone.fields
+
     def test_a_call_the_session_went_on_without_does_not_run_for_ever(self):
         now = time.time()
         walk = transcript.Walk("/p", WalkOptions(live=True))
@@ -373,6 +428,41 @@ class FollowTest(LauncherTest):
         assert reached("claude-proj-2") == ["(no call running)"]
         timeline.take(issued(3, 86400))
         assert reached("claude-proj") == ["(no call running)"]
+
+    def test_what_is_noted_is_read_when_its_record_changed(self):
+        # Asked every second, of records of thousands of lines
+        new = noted.NewlyNoted(self.host)
+        # A note is of the thousandth of a second it was added in
+        time.sleep(0.002)
+        changes.note_change(self.host, "claude-proj", "the model is another")
+        with (
+            mock.patch.object(
+                notes.Notes, "read", autospec=True, side_effect=notes.Notes.read
+            ) as read,
+            mock.patch.object(notes, "stamp_settled", return_value=True) as settled,
+        ):
+            # Of the records, only that of the changes is there to read
+            (first,) = new.poll()
+            assert first.fields["change"] == "the model is another"
+            assert read.call_count == 1
+            assert new.poll() == []
+            assert read.call_count == 1
+            changes.note_change(self.host, "claude-proj", "and the tools")
+            (second,) = new.poll()
+            assert second.fields["change"] == "and the tools"
+            assert read.call_count == 2
+            # One that changed within the tick of a clock is read at every
+            # look until it settles: two writes then can leave one stamp
+            settled.return_value = False
+            changes.note_change(self.host, "claude-proj", "and the hooks")
+            (third,) = new.poll()
+            assert third.fields["change"] == "and the hooks"
+            assert new.poll() == []
+            assert read.call_count == 4
+            settled.return_value = True
+            assert new.poll() == []
+            assert new.poll() == []
+            assert read.call_count == 5
 
     def test_a_named_session_is_followed_alone(self):
         other = self.write_transcript("0a", [prompt("the other one")])
@@ -566,7 +656,8 @@ class FollowNetworkTest(LauncherTest):
 
     def test_how_a_session_is_doing_shows_as_its_watcher_says_it(self):
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
-        said = self.work / "said"
+        # Where the watcher says it, a file of the launcher's
+        said = Path(processes.aloud_path(self.host, "claude-proj.procs"))
         lines = [
             # From before the following began, and not about its health
             {"t": self.now - 60, "health": {"mem": [1, 2**34]}},
@@ -576,25 +667,18 @@ class FollowNetworkTest(LauncherTest):
             "not a line of it",
         ]
         said.write_text("".join(json.dumps(line) + "\n" for line in lines))
-        following = Following(
-            self,
-            FAKE_PS=f"claude-proj.procs\t{json.dumps(about)}",
-            FAKE_PROXY_LOG=str(said),
-        )
+        following = Following(self, FAKE_PS=f"claude-proj.procs\t{json.dumps(about)}")
         shown = following.until("OUT OF MEMORY")
         assert shown.count("sandbox  health") == 2
         assert "sandbox  health      mem 2g of 16g (12%)  cpu 12%" in shown
         assert "gone since: [812] node 8g" in shown
-        # Asked of the watcher from outside, nothing is run next to the session
-        # All it said at first, then its last lines from a little before
-        # the last one that was read, none of which is shown again
+        # Read on from where it was, nothing of it is shown again
         add(self.file, self.last)
         assert "health" not in following.until(DONE)
-        asked = [c for c in self.calls() if c[:1] == ["logs"]]
-        assert asked[0] == ["logs", "claude-proj.procs"]
-        assert asked[-1][2:] == ["claude-proj.procs"]
-        assert re.search(r"^--since=\d+\.\d{3}$", asked[-1][1])
-        assert [c for c in self.calls() if c[:1] == ["exec"]] == []
+        # Read on the host: neither docker's log of the watcher, which a
+        # session given the docker socket can read too, nor anything run
+        # next to the session
+        assert [c for c in self.calls() if c[:1] in (["logs"], ["exec"])] == []
 
     def test_what_becomes_of_a_connection_shows_when_it_does(self):
         captured = self.work / "capture.pcap"
@@ -724,11 +808,11 @@ class FollowNetworkTest(LauncherTest):
 
     def watched(self, *lines: dict) -> str:
         """The watcher of the session next to its capture, which says
-        these lines aloud: what docker lists of the two."""
+        these lines aloud, to the file of the launcher's it is given:
+        what docker lists of the two."""
         about = {"project": str(self.project), "start": self.now, "pid": os.getpid()}
-        said = self.work / "said"
+        said = Path(processes.aloud_path(self.host, "claude-proj.procs"))
         said.write_text("".join(json.dumps(line) + "\n" for line in lines))
-        self.said = said
         return f"{self.ps}\nclaude-proj.procs\t{json.dumps(about)}"
 
     def test_a_connection_says_which_process_made_it_as_it_is_made(self):
@@ -753,12 +837,7 @@ class FollowNetworkTest(LauncherTest):
             },
             {"t": then, "listen": 8080, "on": "0.0.0.0", "pids": [812]},
         )
-        following = Following(
-            self,
-            FAKE_PS=both,
-            FAKE_CAPTURE=str(captured),
-            FAKE_PROXY_LOG=str(self.said),
-        )
+        following = Following(self, FAKE_PS=both, FAKE_CAPTURE=str(captured))
         add(self.file, self.last)
         shown = following.until(DONE)
         who = "by: [812] curl -sS https://good.test < bash"
@@ -773,12 +852,7 @@ class FollowNetworkTest(LauncherTest):
         captured = self.work / "capture.pcap"
         captured.write_bytes(pcap_file([]))
         both = self.watched({"t": time.time() - 5, "note": "hushed"})
-        following = Following(
-            self,
-            FAKE_PS=both,
-            FAKE_CAPTURE=str(captured),
-            FAKE_PROXY_LOG=str(self.said),
-        )
+        following = Following(self, FAKE_PS=both, FAKE_CAPTURE=str(captured))
         shown = following.until("no longer said")
         assert (
             "# processes   which process makes a connection is no longer said as"
@@ -827,6 +901,7 @@ class FollowNetworkTest(LauncherTest):
         )
 
 
+@pytest.mark.usefixtures("no_secrets")
 class CaptureTailTest:
     """The capture of a running session as it is read, without docker:
     what it holds is given."""
@@ -1072,27 +1147,29 @@ class CaptureTailTest:
         assert "asked for big.test:443  still open after" in event.details[0]
         assert event.fields["asked"] == "big.test:443"
 
-    def test_what_a_watcher_said_is_not_taken_twice_after_a_look_that_gave_nothing(
-        self,
+    def test_what_a_watcher_said_is_taken_once_and_a_line_once_it_is_whole(
+        self, tmp_path: Path
     ):
-        said = [
-            json.dumps({"t": 100.0, "listen": 8080, "on": "0.0.0.0", "pids": []}),
-            json.dumps({"t": 100.5, "health": {"mem": [1, 2]}}),
-        ]
-        heard = [said, [], said, [*said, json.dumps({"t": 101.0, "note": "hushed"})]]
-        tail = tails.WatcherTail("claude-proj.procs")
-        with mock.patch.object(tails, "said_lines", side_effect=heard) as asked:
-            listening = [len(tail.poll()) for _ in heard]
-        assert listening == [1, 0, 0, 0]
+        said = tmp_path / "aloud.jsonl"
+        listening = json.dumps(
+            {"t": 100.0, "listen": 8080, "on": "0.0.0.0", "pids": []}
+        )
+        health = json.dumps({"t": 100.5, "health": {"mem": [1, 2]}})
+        hushed = json.dumps({"t": 101.0, "note": "hushed"})
+        tail = tails.WatcherTail("claude-proj.procs", str(said))
+        # Nothing while the file is not there
+        assert tail.poll() == []
+        said.write_text(listening + "\n" + health[:10])
+        assert len(tail.poll()) == 1
+        assert tail.record.samples == []
+        with said.open("a") as more:
+            more.write(health[10:] + "\n")
+        assert tail.poll() == []
+        with said.open("a") as more:
+            more.write(hushed + "\n")
+        tail.poll()
         assert len(tail.record.listeners) == len(tail.record.samples) == 1
         assert tail.newly_hushed()
-        # All of it at first, then from a little before the last of it
-        assert [call.args[1] for call in asked.call_args_list] == [
-            0.0,
-            98.5,
-            98.5,
-            98.5,
-        ]
 
     def test_what_is_known_of_a_session_is_asked_again_as_it_comes_up(self):
         host = mock.Mock(project_dir="/proj")
@@ -1212,11 +1289,15 @@ class CaptureTailTest:
         assert "the capture of claude-proj ended" in said
 
 
+@pytest.mark.usefixtures("no_secrets")
 class TranscriptTailTest:
     @pytest.fixture(autouse=True)
     def transcript(self, tmp_path: Path) -> None:
         self.file = tmp_path / "0a.jsonl"
         self.file.touch()
+        # Where the launcher's copies of the transcripts would be, none
+        # are made here
+        self.copies = tmp_path / "copies"
 
     def said(self, tail) -> list[str]:
         return [event.details[0] for event in tail.poll()]
@@ -1321,6 +1402,38 @@ class TranscriptTailTest:
             )
         ]
 
+    def test_a_look_takes_in_no_more_of_all_the_transcripts_than_it_is_to(self):
+        # A session can write to as many as are followed, as fast as they
+        # are read: the one followed is read first, the others in turn
+        host = mock.Mock(project_dir="/proj")
+        follower = follow.Follower(host, False, only=self.file)
+        follower._docker = False
+        agents = [self.file.with_name(f"agent-a{number}.jsonl") for number in range(3)]
+        for path in agents:
+            path.touch()
+        line = len(json.dumps(prompt("followed 00"))) + 1
+        with (
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=agents),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+            mock.patch.object(follow, "MOST_POLLED", 5 * line),
+        ):
+            follower.poll()
+            for path in agents:
+                add(
+                    path, *(prompt(f"{path.stem} {number:02d}") for number in range(20))
+                )
+            add(self.file, prompt("followed 00"))
+            rounds = [follower.poll() for _ in range(4)]
+        assert [
+            [event.details[0] for _, event in found.events] for found in rounds
+        ] == [
+            ["followed 00", *(f"agent-a0 {number:02d}" for number in range(4))],
+            [f"agent-a1 {number:02d}" for number in range(5)],
+            [f"agent-a2 {number:02d}" for number in range(5)],
+            [f"agent-a0 {number:02d}" for number in range(4, 9)],
+        ]
+
     def test_a_follower_says_when_a_transcript_was_written_anew(self):
         host = mock.Mock(project_dir="/proj")
         follower = follow.Follower(host, False, only=self.file)
@@ -1423,7 +1536,6 @@ class TranscriptTailTest:
             mock.patch.object(follow, "subagent_files", return_value=[]),
             mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
             mock.patch.object(tails, "MOST_HISTORY", 3 << 10),
-            mock.patch.object(follow, "MOST_HISTORY", 3 << 10),
         ):
             follower = follow.Follower(host, False, only=self.file)
             follower._docker = False
@@ -1433,7 +1545,7 @@ class TranscriptTailTest:
         (note,) = first.notes
         assert re.search(
             r"^\d\d earlier events and what the transcript holds before its last"
-            r" 0 MB, see claude-airlock --trace$",
+            r" 4 MB, see claude-airlock --trace$",
             note,
         )
 
@@ -1474,7 +1586,8 @@ class TranscriptTailTest:
         many = [self.file.with_name(f"{n}.jsonl") for n in range(5)]
         for path in many:
             path.touch()
-        follower = follow.Follower(mock.Mock(project_dir="/proj"), verbose=False)
+        host = mock.Mock(project_dir="/proj", transcript_copies_dir=str(self.copies))
+        follower = follow.Follower(host, verbose=False)
         found = mock.patch.object(follow, "transcript_files", return_value=many)
         with (
             found,
@@ -1532,6 +1645,73 @@ class TranscriptTailTest:
         other.replace(self.file)
         assert self.said(tail) == ["other"]
         assert tail.newly_rewritten()
+
+    def test_a_transcript_written_anew_is_walked_as_one_of_its_own(self):
+        # The calls read before are no part of what it holds now: none
+        # is left without a result, and one it has again is no other
+        tail = tails.TranscriptTail(self.file, "/proj", WalkOptions(live=True))
+        add(self.file, call("t1", "Bash", command="make"))
+        assert self.said(tail) == ["$ make"]
+        self.file.write_text("")
+        add(self.file, call("t1", "Bash", command="make all"), result("t1", "ok", 3))
+        assert [(event.link, event.details) for event in tail.poll()] == [
+            ("1", ["$ make all"]),
+            ("1", ["result: ok, 2.0s, 1 line out"]),
+        ]
+        assert tail.newly_rewritten()
+        assert not tail.cut
+        # Of one longer than is looked at for what came before, its end
+        texts = [f"line {number}" for number in range(100)]
+        whole = "".join(json.dumps(prompt(text)) + "\n" for text in texts)
+        within = sum(map(len, whole.splitlines(keepends=True)[-7:])) + 20
+        self.file.write_text(whole)
+        with mock.patch.object(tails, "MOST_HISTORY", within):
+            assert self.said(tail) == texts[-7:]
+        assert tail.newly_rewritten()
+        assert tail.cut
+
+    def test_a_transcript_replaced_before_it_is_followed_is_read_anew(self):
+        # Known by its length until it is written to, another file put in
+        # its place is not read on from there, whatever its length
+        longer, alike = (self.file.with_name(f"{name}.jsonl") for name in ("0b", "0c"))
+        add(longer, prompt("before 1"))
+        add(alike, prompt("before 2"))
+        for path in (longer, alike):
+            os.utime(path, (1, 1))
+        host = mock.Mock(project_dir="/proj", transcript_copies_dir=str(self.copies))
+        follower = follow.Follower(host, verbose=False)
+        follower._docker = False
+        listed = [self.file, longer, alike]
+        with (
+            mock.patch.object(follow, "transcript_files", return_value=listed),
+            mock.patch.object(follow, "project_root", return_value="/proj"),
+            mock.patch.object(follow, "subagent_files", return_value=[]),
+            mock.patch.object(follow.NewlyNoted, "poll", return_value=[]),
+        ):
+            follower.poll()
+            for path, texts in (
+                (longer, ["put back", "before 1", "after"]),
+                (alike, ["altered!"]),
+            ):
+                other = path.with_name("other")
+                add(other, *map(prompt, texts))
+                other.replace(path)
+            rounds = [follower.poll() for _ in range(follow.LOOK_EVERY)]
+        shown = [(path.stem, event.details[0]) for path, event in rounds[-1].events]
+        assert sorted(shown) == [
+            ("0b", "after"),
+            ("0b", "before 1"),
+            ("0b", "put back"),
+            ("0c", "altered!"),
+        ]
+        assert sorted(rounds[-1].notes) == [
+            (
+                f"transcript  {name} was WRITTEN ANEW (emptied, cut short or"
+                " replaced): it is read again from its start, --trace says what"
+                " was taken out of it"
+            )
+            for name in ("0b.jsonl", "0c.jsonl")
+        ]
 
     def test_a_link_or_a_pipe_in_its_place_is_not_read(self):
         secret = self.file.with_name("secret")

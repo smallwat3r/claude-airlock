@@ -52,15 +52,7 @@ from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..settings import Host
 from .processes import KEPT_RECORDS, SOON_OVER, Watcher
-from .procwatch import (
-    LIMITS_EVERY,
-    MOST_BYTES,
-    RESERVED,
-    CgroupHealth,
-    Note,
-    lined,
-    stamped,
-)
+from .procwatch import LIMITS_EVERY, CgroupHealth, LineFile, Note, Room, lined, stamped
 from .records import TracedSession, record_traced_session
 from .sidecar import keep_latest
 
@@ -128,11 +120,15 @@ class HealthRecord:
     project: str
     start: float
     launcher: Launcher
-    _written: int = 0
-    # Whether the part of it for the processes is full, see note_at
-    _full: bool = False
-    # Lines come from the thread that reads the health and from the one
-    # that waits on the process limit
+    # The room it has, of the part kept for what is reserved and of the
+    # other, see note_at
+    _room: Room = field(default_factory=Room, repr=False, compare=False)
+    # The file, held open for writing from the first line on until it is
+    # kept, see keep: no line is written after that
+    _file: LineFile | None = field(default=None, repr=False, compare=False)
+    # Lines come from the thread that reads the health, from the one
+    # that waits on the process limit and from those that read what
+    # gVisor tells
     _writing: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -145,9 +141,9 @@ class HealthRecord:
         start = time.time()
         name = f"{Watcher.name_for(session)}-{int(start)}.{EXTENSION}{PART}"
         path = Path(private_dir(host.process_records_dir), name)
-        made = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-        os.close(made)
+        made = LineFile(str(path), 0o600, new=True)
         record = cls(path, session, host.project_dir, start, Launcher.current())
+        record._file = made
         about = {"session": session, "project": record.project, "start": start}
         fields = {**about, **record.launcher.as_fields()}
         record.note(note=Note.STARTED, outside=runtime, **fields)
@@ -176,32 +172,38 @@ class HealthRecord:
         self.note_at(None, reserved=True, said=said)
 
     def note_at(self, when: float | None, reserved: bool, said: dict) -> None:
-        """Add a line to the record that tells of a time, none for now.
-        What is not reserved, the processes gVisor told of (see gvisor.py),
-        leaves RESERVED of the record for what is: a session that starts
+        """Add a line to the record that tells of a time, none for now,
+        while there is room for it, as procwatch.py's watcher does (see
+        Room): what is not reserved, the processes gVisor told of (see
+        gvisor.py), leaves room for what is, a session that starts
         processes without end must not be rid of its connections and of
-        how it was doing that way. The record says that it is full when
-        that part is."""
+        how it was doing that way. A line that cannot be written is
+        dropped, one written in part is ended by the next, see LineFile.
+        Not through the path: a line that comes once the record is kept
+        would make the file again, see keep."""
         line = stamped(**said) if when is None else lined(when, said)
         with self._writing:
-            room = MOST_BYTES if reserved else MOST_BYTES - RESERVED
-            if self._written + len(line) > room:
-                if not reserved and not self._full:
-                    self._full = True
-                    self._write(stamped(note=Note.FULL))
+            if self._file is None:
                 return
-            self._write(line)
-
-    def _write(self, line: str) -> None:
-        with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
-            file.write(line)
-            self._written += len(line)
+            fitted = self._room.fitted(line, reserved)
+            if fitted is None:
+                return
+            with suppress(OSError):
+                self._file.write(fitted)
+                self._room.took(fitted)
 
     def keep(self, host: Host, end: float) -> None:
         """Finish the record: remove the .part suffix, add the session
         to the list --trace reads, and delete the oldest records beyond
         the number kept. Does nothing when another launcher has already
-        finished this record."""
+        finished this record. What comes later is not written: a thread
+        still reading what gVisor told, which may be behind, would add it
+        to a record that is over."""
+        with self._writing:
+            if self._file is not None:
+                with suppress(OSError):
+                    self._file.close()
+                self._file = None
         kept = self.path.with_name(self.path.name.removesuffix(PART))
         try:
             os.rename(self.path, kept)

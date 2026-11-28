@@ -90,7 +90,7 @@ class WatcherTest:
                     holders = procwatch.Holders().of({inode}, [os.getpid()])
                     assert holders == {inode: [os.getpid()]}
                 out = io.StringIO()
-                procwatch.Watch(out).look()
+                procwatch.Watch(out, aloud=io.StringIO()).look()
                 seen = [json.loads(line) for line in out.getvalue().splitlines()]
                 (slept,) = (line for line in seen if line.get("pid") == sleeper.pid)
                 assert slept["argv"] == ["sleep", "30"]
@@ -104,7 +104,7 @@ class WatcherTest:
 
     def test_the_record_stops_at_its_size_limit(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         big = "x" * (procwatch.MOST_BYTES // 4)
         for _ in range(6):
             watch.note(note=big)
@@ -113,7 +113,7 @@ class WatcherTest:
 
     def test_a_record_filled_by_what_is_reserved_says_so_as_its_last_line(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         big = "x" * (procwatch.MOST_BYTES // 4)
         # Nothing but connections: the part of the processes never fills
         for port in range(6):
@@ -137,7 +137,7 @@ class WatcherTest:
                 return super().write(line)
 
         out = Full()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         watch.note(pid=2, ppid=1, exe="/bin/sh", argv=["sh"])
         out.full = True
         # The disk is full for a moment, which the session can see to
@@ -204,9 +204,17 @@ class WatcherTest:
             record.take(line)
         assert [process.pid for process in record.processes] == [2, 4]
 
+    def test_the_watcher_does_not_start_without_a_file_to_say_aloud_to(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        record = tmp_path / "record.jsonl"
+        assert procwatch._main([str(record), "1000", "1000", "{}"]) == 2
+        assert procwatch.USAGE in capsys.readouterr().err
+        assert not record.exists()
+
     def test_sockets_on_its_own_loopback_leave_room_for_what_others_reach(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         # As many as fill the record, opened and closed between two looks
         ports = range(20000, 22000)
         line = len(procwatch.stamped(listen=20000, on="127.0.0.1", pids=[]))
@@ -234,7 +242,7 @@ class WatcherTest:
 
     def test_a_connection_on_its_own_loopback_is_not_noted(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         local = {(40000, "127.0.0.1", 5432): "1", (40001, "::1", 5432): "2"}
         for _ in range(procwatch.MOST_TRIES + 1):
             watch._look_at_connections({**local, (40002, "203.0.113.9", 443): "3"}, [])
@@ -272,7 +280,7 @@ class WatcherTest:
 
     def test_room_is_kept_for_the_connections_once_the_processes_filled_theirs(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         big = "x" * (procwatch.MOST_BYTES // 4)
         for _ in range(6):
             watch.note(pid=1, argv=[big])
@@ -297,7 +305,7 @@ class WatcherTest:
             events.write_text("nothing of the kind\n")
             assert procwatch.limit_hits(1, root) is None
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         for hits in (0, 2, 2, 5, None):
             with mock.patch.object(procwatch, "limit_hits", return_value=hits):
                 watch._look_at_limits([1, 7])
@@ -307,7 +315,7 @@ class WatcherTest:
 
     def test_looks_that_come_late_are_noted_with_how_late(self):
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
 
         def slow() -> list[dict]:
             lines = map(json.loads, out.getvalue().splitlines())
@@ -339,7 +347,7 @@ class WatcherTest:
 
     @reads_proc
     def test_every_look_is_held_against_the_one_before_it(self):
-        watch = procwatch.Watch(io.StringIO())
+        watch = procwatch.Watch(io.StringIO(), aloud=io.StringIO())
         with mock.patch.object(watch, "_keep_pace") as paced:
             before = time.monotonic()
             watch.look()
@@ -367,7 +375,7 @@ class WatcherTest:
         assert (len(found.connected), found.passed_over) == (5, False)
         assert (len(cut.connected), cut.passed_over) == (3, True)
         out = io.StringIO()
-        watch = procwatch.Watch(out)
+        watch = procwatch.Watch(out, aloud=io.StringIO())
         with (
             mock.patch.object(procwatch, "sockets", lambda: cut),
             mock.patch.object(watch, "_look_at_processes"),
@@ -391,7 +399,7 @@ class WatcherTest:
             assert (port, "127.0.0.1", 0) in waiting
             assert port not in [key[0] for key in connected]
             out = io.StringIO()
-            watch = procwatch.Watch(out)
+            watch = procwatch.Watch(out, aloud=io.StringIO())
             watch.look()
             watch.look()
         seen = [json.loads(line) for line in out.getvalue().splitlines()]
@@ -401,12 +409,13 @@ class WatcherTest:
     def holding(
         self,
         out: io.StringIO,
+        aloud: io.StringIO,
         read_process: Callable[[int], procwatch.ProcessRead | None] = lambda _: None,
     ) -> procwatch.Watch:
         """A watcher that knows of a shell, of curl started by it, and
         finds curl to hold whatever socket it is asked about. Nothing is
         read of the processes of this machine, but by read_process."""
-        watch = procwatch.Watch(out, read_process)
+        watch = procwatch.Watch(out, read_process, aloud=aloud)
         watch._processes = {
             640: (("1", "/bin/bash", ["bash"]), 0.0, 0.0),
             812: (("2", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
@@ -420,13 +429,12 @@ class WatcherTest:
         # connects before the next one: the connection is put on curl
         out, aloud = io.StringIO(), io.StringIO()
         became = ("2", 640, "/usr/bin/curl", ["curl", "-T", "secrets.tar"])
-        watch = self.holding(out, lambda pid: became if pid == 812 else None)
+        watch = self.holding(out, aloud, lambda pid: became if pid == 812 else None)
         waiting = ("2", "/bin/sh", ["sh", "-c", "sleep 3; exec curl"])
         watch._processes[812] = (waiting, 0.0, time.monotonic())
-        with mock.patch.object(sys, "stdout", aloud):
-            watch._look_at_processes([812], time.monotonic())
-            assert out.getvalue() == ""
-            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+        watch._look_at_processes([812], time.monotonic())
+        assert out.getvalue() == ""
+        watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
         noted = [json.loads(line) for line in out.getvalue().splitlines()]
         assert [line.get("exe") or line.get("port") for line in noted][:2] == [
             "/usr/bin/curl",
@@ -437,16 +445,15 @@ class WatcherTest:
 
     def test_who_holds_a_connection_is_said_aloud_with_those_it_comes_from(self):
         out, aloud = io.StringIO(), io.StringIO()
-        watch = self.holding(out)
-        with mock.patch.object(sys, "stdout", aloud):
-            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
-            watch._look_at_connections(
-                {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 443): "8"},
-                [812],
-            )
-            # On the session's own loopback, which nothing else reaches
-            watch._look_at_listeners({(8000, "127.0.0.1", 0): "9"}, [812])
-            watch._look_at_listeners({(8080, "0.0.0.0", 0): "10"}, [812])
+        watch = self.holding(out, aloud)
+        watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+        watch._look_at_connections(
+            {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 443): "8"},
+            [812],
+        )
+        # On the session's own loopback, which nothing else reaches
+        watch._look_at_listeners({(8000, "127.0.0.1", 0): "9"}, [812])
+        watch._look_at_listeners({(8080, "0.0.0.0", 0): "10"}, [812])
         said = [json.loads(line) for line in aloud.getvalue().splitlines()]
         # The process and where it comes from, once, then each socket
         assert [(line.get("pid"), line.get("ppid")) for line in said[:2]] == [
@@ -473,16 +480,15 @@ class WatcherTest:
         # Ids start over in a long session: curl, which the shell started
         # and handed the socket to, has the lower one
         out, aloud = io.StringIO(), io.StringIO()
-        watch = self.holding(out)
+        watch = self.holding(out, aloud)
         watch._processes = {
             30000: (("500", "/bin/bash", ["bash"]), 0.0, 0.0),
             150: (("900", "/usr/bin/curl", ["curl", "-sS"]), 0.0, 0.0),
         }
         watch._parents = {30000: 1, 150: 30000}
         watch._holders.of = lambda inodes, pids: {i: [150, 30000] for i in inodes}
-        with mock.patch.object(sys, "stdout", aloud):
-            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [])
-            watch._look_at_listeners({(8080, "0.0.0.0", 0): "8"}, [])
+        watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [])
+        watch._look_at_listeners({(8080, "0.0.0.0", 0): "8"}, [])
         kept = [json.loads(line) for line in out.getvalue().splitlines()]
         kept = [line for line in kept if "pids" in line]
         assert [line["pids"] for line in kept] == [[30000, 150], [30000, 150]]
@@ -506,14 +512,13 @@ class WatcherTest:
 
     def test_a_process_that_became_another_program_is_said_again(self):
         out, aloud = io.StringIO(), io.StringIO()
-        watch = self.holding(out)
-        with mock.patch.object(sys, "stdout", aloud):
-            watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
-            watch._processes[812] = (("2", "/usr/bin/ssh", ["ssh"]), 0.0, 0.0)
-            watch._look_at_connections(
-                {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 22): "8"},
-                [812],
-            )
+        watch = self.holding(out, aloud)
+        watch._look_at_connections({(40212, "203.0.113.9", 443): "7"}, [812])
+        watch._processes[812] = (("2", "/usr/bin/ssh", ["ssh"]), 0.0, 0.0)
+        watch._look_at_connections(
+            {(40212, "203.0.113.9", 443): "7", (40213, "203.0.113.9", 22): "8"},
+            [812],
+        )
         said = [json.loads(line) for line in aloud.getvalue().splitlines()]
         assert [line["exe"] for line in said if "exe" in line] == [
             "/usr/bin/curl",
@@ -523,11 +528,8 @@ class WatcherTest:
 
     def test_no_more_is_said_aloud_of_connections_than_docker_is_to_keep(self):
         out, aloud = io.StringIO(), io.StringIO()
-        watch = self.holding(out)
-        with (
-            mock.patch.object(sys, "stdout", aloud),
-            mock.patch.object(procwatch, "MOST_ALOUD", 2000),
-        ):
+        watch = self.holding(out, aloud)
+        with mock.patch.object(procwatch, "MOST_ALOUD", 2000):
             for port in range(40000, 40100):
                 watch._look_at_connections({(port, "203.0.113.9", 443): str(port)}, [])
             # How the session is doing is still said, every so often
@@ -585,6 +587,28 @@ class RecordTest:
         assert self.record.holder(40443, "198.51.100.7", 80, 20.3) == []
         # The same ports long after are another connection
         assert self.record.holder(40443, "198.51.100.7", 443, 900.0) == []
+
+    def test_what_held_a_connection_is_found_by_its_time_among_many(self):
+        api = "160.79.104.10"
+
+        def held(when: float, pid: int) -> dict:
+            # As the runtime tells of it under gVisor, without the port of
+            # the session: one address has as many as there were
+            return {"t": when, "port": 0, "to": api, "to_port": 443, "pids": [pid]}
+
+        record = noted(
+            ran(1.0, 40, 1, "claude"),
+            ran(1.0, 41, 1, "curl"),
+            *(held(float(when), 40) for when in range(10, 1010, 10)),
+            # Noted after those of later times, by a clock that was set back
+            held(503.0, 41),
+            held(float("nan"), 41),
+        )
+        assert [p.pid for p in record.holder(40000, api, 443, 504.0)] == [41]
+        assert [p.pid for p in record.holder(40001, api, 443, 1005.0)] == [40]
+        assert record.holder(40002, api, 443, 1005.5) == []
+        assert record.holder(40003, api, 443, 4.0) == []
+        assert [len(found) for found in record.holders.values()] == [101]
 
     def test_a_process_is_named_by_its_program_not_by_what_it_says(self):
         record = noted(
@@ -813,9 +837,7 @@ class HealthWatchTest:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self.session = FakeSession(tmp_path)
-        self.out = io.StringIO()
-        # What it says aloud is not for the output of the tests
-        monkeypatch.setattr(sys, "stdout", io.StringIO())
+        self.out, self.aloud = io.StringIO(), io.StringIO()
         # Its tmpfs is a directory of this machine, whose disk is as full
         # as it is: a quarter of the 4 GiB the session's is said to have
         block = 4096
@@ -823,7 +845,7 @@ class HealthWatchTest:
             f_frsize=block, f_blocks=4 * GIB // block, f_bfree=3 * GIB // block
         )
         monkeypatch.setattr(procwatch.os, "statvfs", lambda _place: tmpfs)
-        self.watch = procwatch.Watch(self.out)
+        self.watch = procwatch.Watch(self.out, aloud=self.aloud)
         self.watch._processes[812] = (
             ("9", "/usr/bin/node", ["node", "build.js"]),
             0,
@@ -936,11 +958,9 @@ class HealthWatchTest:
         ]
 
     def test_it_is_said_aloud_too_for_who_follows_the_session(self):
-        aloud = io.StringIO()
-        with mock.patch.object(sys, "stdout", aloud):
-            self.watch.note(aloud=True, health={"cpu": 1.0})
-            self.watch.note(pid=5, argv=["quiet"])
-        assert aloud.getvalue() == self.out.getvalue().splitlines(True)[0]
+        self.watch.note(aloud=True, health={"cpu": 1.0})
+        self.watch.note(pid=5, argv=["quiet"])
+        assert self.aloud.getvalue() == self.out.getvalue().splitlines(True)[0]
 
 
 class HealthShownTest:
@@ -1109,9 +1129,9 @@ class SidecarTest(LauncherTest):
             "--cap-add=SETUID",
             "--cap-add=SETGID",
         ]
-        assert sidecar[-3:-1] == [str(os.getuid()), str(os.getgid())]
+        assert sidecar[-4:-2] == [str(os.getuid()), str(os.getgid())]
         # Told which files hold secrets, the session's login among them
-        secrets = procwatch.Secrets.read(sidecar[-1])
+        secrets = procwatch.Secrets.read(sidecar[-2])
         assert secrets.of("/home/sandbox/.claude/.credentials.json") == "claude"
         # A hidden name, in the session's project alone
         assert secrets.of(f"{self.project}/.env") == "hidden"
@@ -1119,6 +1139,27 @@ class SidecarTest(LauncherTest):
         assert secrets.of("/tmp/fixture/.env") is None
         # The session is not made to wait for it, nor to depend on it
         assert SIDECAR not in " ".join(result.flags)
+        # It says aloud to a file of the launcher's, not to docker's log of
+        # it, which the docker socket a session can be given reads
+        aloud = Path(processes.aloud_path(self.host, SIDECAR))
+        assert sidecar[-1] == processes.ALOUD_FILE
+        assert f"--volume={aloud}:{processes.ALOUD_FILE}:z" in sidecar
+        assert aloud.parent.stat().st_mode & 0o777 == 0o700
+        # Let go of with the sidecar, the record has what it said
+        assert not aloud.exists()
+
+    def test_the_file_said_aloud_to_is_the_users_alone_and_empty(self):
+        aloud = Path(processes.aloud_path(self.host, SIDECAR))
+        aloud.write_text("left by a session before\n")
+        aloud.chmod(0o644)
+        secrets = procwatch.Secrets(names={}, roots=[])
+        with mock.patch.object(processes, "docker") as started:
+            processes._start_watcher(
+                self.host, "claude-proj", "claude-proj", "image", secrets
+            )
+        assert started.call_args.args[-1] == processes.ALOUD_FILE
+        assert aloud.read_bytes() == b""
+        assert aloud.stat().st_mode & 0o777 == 0o600
 
     def test_it_joins_the_network_of_the_capture(self):
         result = self.watched(

@@ -191,9 +191,8 @@ def _uploads_on(capture: Capture, connection: Connection) -> int:
     over a connection, as far as the capture took that, see uploads.py."""
     ended = math.inf if connection.ended is None else connection.ended
     return sum(
-        upload.sized
+        part.sized_on(connection.key, connection.when, ended)
         for part in (capture.uploads, capture.elsewhere)
-        for upload in part.on(connection.key, connection.when, ended)
     )
 
 
@@ -245,9 +244,15 @@ def _connection_event(
         detail = reached_from(capture, connection)
     else:
         detail = reached(capture, address, port, "tcp", connection.when)
+    unread = (
+        "its hello is longer than the capture keeps, what name it asks for is not known"
+        if connection.hello_unread
+        else ""
+    )
     said = [
         f"asked for {flat(connection.asked)}" if connection.asked else "",
         _spoken_there(connection),
+        unread,
         went,
     ]
     detail = "  ".join(filter(None, [detail, *said]))
@@ -271,6 +276,8 @@ def _told_of(connection: Connection) -> dict:
     if connection.hello:
         told["hello"] = connection.hello.name
         told["offered"] = list(connection.hello.offered)
+    if connection.hello_unread:
+        told["hello_unread"] = True
     return told
 
 

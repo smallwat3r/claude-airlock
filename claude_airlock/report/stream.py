@@ -5,6 +5,7 @@ that ran then, and those that were asked for chosen."""
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -21,6 +22,12 @@ TIMELINE_SLACK = 30.0
 # No more calls than this are remembered, the ones started first go: a
 # call whose result never comes is never known to have ended
 MOST_CALLS = 10_000
+# How many of those, the latest noted, the calls running when something
+# happened on the network are looked for among, and how many of the
+# running ones its during names, the latest started, the others counted:
+# a session can leave thousands running, and every connection is marked
+MOST_LOOKED_AT = 1000
+MOST_DURING = 100
 
 # What an event comes with, where it is not alone: the transcript it is
 # from, for what follows several sessions
@@ -139,6 +146,9 @@ class Timeline:
         # As its line has it: one taken out of the transcript says so
         # here too
         named = "  ".join([call_label(event) or fields["tool"], *event.notes])
+        # Among the latest noted, as a call of its own, also under the id
+        # of one noted before
+        self._calls.pop(call, None)
         self._calls[call] = RunningCall(event.when, ended, named[:DURING_WIDTH])
         self._forget()
 
@@ -162,18 +172,25 @@ class Timeline:
             return
         container = event.fields.get("container")
         since = self._began.get(container, 0.0) if isinstance(container, str) else 0.0
-        running = {
-            call: ran
-            for call, ran in self._calls.items()
+        latest_noted = itertools.islice(reversed(self._calls.items()), MOST_LOOKED_AT)
+        running = [
+            (call, ran)
+            for call, ran in latest_noted
             if since <= ran.started <= event.when <= ran.ended
-        }
-        event.fields["during"] = list(running)
+        ]
+        # In the order they were noted
+        running.reverse()
+        named = running
+        if len(running) > MOST_DURING:
+            named = sorted(running, key=lambda found: found[1].started)[-MOST_DURING:]
+            event.fields["during_more"] = len(running) - MOST_DURING
+        event.fields["during"] = [call for call, _ in named]
         if not running:
             event.notes.append("(no call running)")
             return
         # The one started last: the others are what it runs within, a
         # subagent for one
-        latest = max(running.values(), key=lambda ran: ran.started)
+        _, latest = max(running, key=lambda found: found[1].started)
         more = f" (+{len(running) - 1} more)" if len(running) > 1 else ""
         event.notes.append(f"during: {latest.label}{more}")
 

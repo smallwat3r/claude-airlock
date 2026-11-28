@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import itertools
 import os
 import sys
@@ -70,7 +71,9 @@ from ..recording.host_health import running_health
 from ..recording.processes import (
     ProcessRecord,
     Watcher,
+    aloud_path,
 )
+from ..recording.recorder import copy_rank
 from ..recording.records import read_traced_sessions, recorded_sessions
 from ..settings import Host
 from .digest import known_destinations
@@ -90,18 +93,21 @@ from .stream import (
     wants_record,
 )
 from .tails import (
-    MOST_HISTORY,
+    LAST_OF_HISTORY,
     MOST_POLLED,
+    UNSEEN,
     CaptureTail,
     HealthTail,
     ProcessTail,
     ProxyTail,
     RecordTail,
     SaidSince,
+    Seen,
     Traffic,
     TranscriptTail,
     WatcherTail,
 )
+from .trace import traced_secrets
 from .trace_args import USAGE, picked_session, trace_options
 from .transcript import WalkOptions
 
@@ -124,6 +130,12 @@ NOT_ALL_FOLLOWED = "NOT ALL FOLLOWED"
 # its sidecar, for a last look at what the sidecar no longer gives: its
 # tcpdump is given 10 seconds to stop, then the copy is made
 LAST_LOOK_WAIT = 30.0
+
+# A transcript that is followed, with that of the session it is of
+type Followed = tuple[Path, TranscriptTail]
+# What a running session is followed by on the network: the name of its
+# sidecar, of its watcher or of the record of it, and when that started
+type Started = tuple[str, float]
 
 
 @dataclass
@@ -156,9 +168,17 @@ class Follower:
         self._host = host
         self._verbose = verbose
         # How the transcripts are walked. With events left out a result
-        # may come without its call, so it names it.
+        # may come without its call, so it names it. The files of secrets
+        # are made once for every transcript followed, those of the
+        # project alone: which directories a session has next to it is
+        # not known when its transcript is first read.
         self._walked = WalkOptions(
-            verbose, live=True, name_results=bool(chosen), steps=steps, lines=lines
+            verbose,
+            live=True,
+            name_results=bool(chosen),
+            steps=steps,
+            lines=lines,
+            secrets=traced_secrets(host),
         )
         self._only = only
         self._chosen = chosen
@@ -168,26 +188,26 @@ class Follower:
         self._tails: dict[Path, TranscriptTail] = {}
         # The transcript of each subagent that is followed, with that of
         # the session it is of
-        self._subagents: dict[Path, tuple[Path, TranscriptTail]] = {}
+        self._subagents: dict[Path, Followed] = {}
         # How long each transcript without a tail was when last looked at,
         # and each of the subagents of one when the following began
-        self._sizes: dict[Path, int] = {}
-        self._subagent_sizes: dict[Path, int] = {}
+        self._seen: dict[Path, Seen] = {}
+        self._subagents_seen: dict[Path, Seen] = {}
         # What was said not to be followed, each once: of a session that
         # has more subagents than are followed, the path of its transcript,
         # and that more transcripts of sessions or of subagents are written
         # to than are followed (see MOST_FOLLOWED), by what they are of
         self._said_unfollowed: set[Path | str] = set()
-        self._captures: dict[tuple[str, float], CaptureTail] = {}
+        self._captures: dict[Started, CaptureTail] = {}
         # Those whose session ended, until when the copy of each is waited
         # for, see _last_looks
-        self._ending: dict[tuple[str, float], float] = {}
-        self._health: dict[tuple[str, float], HealthTail] = {}
+        self._ending: dict[Started, float] = {}
+        self._health: dict[Started, HealthTail] = {}
         # What the watcher of each session says aloud
-        self._watchers: dict[tuple[str, float], WatcherTail] = {}
+        self._watchers: dict[Started, WatcherTail] = {}
         # The records the launchers write of the sessions they record from
         # outside, by their path and start time, see host_health.py
-        self._records: dict[tuple[str, float], RecordTail] = {}
+        self._records: dict[Started, RecordTail] = {}
         # The destinations the project was noted to reach before, for
         # those that are new to be said: as they were when the capture
         # of a session was last begun to be followed, a session notes
@@ -203,6 +223,9 @@ class Follower:
         self._docker = True
         self._timeline = Timeline()
         self._rounds = 0
+        # Of the transcripts followed but the first, the one the next look
+        # starts with, see _in_turn
+        self._turn = 0
         # What the launchers note of the sessions, shown from now: how
         # the sandbox of one was started, the uses of the SSH agent and
         # the Docker socket, and what a chat found changed in what Claude
@@ -239,16 +262,7 @@ class Follower:
             self._look_for_transcripts(found)
             self._look_for_subagents(found)
             self._look_for_sessions(found)
-        # At first all that the end of the latest transcript holds, for
-        # the events before now (see TranscriptTail.latest): later no
-        # more of any than a look is to take
-        most = None if self._rounds == 0 else MOST_POLLED
-        for tail in self._tails.values():
-            found.events += [(tail.path, event) for event in tail.poll(most)]
-            self._note_behind(tail, found)
-        for session, tail in self._subagents.values():
-            found.events += [(session, event) for event in tail.poll(most)]
-            self._note_behind(tail, found)
+        self._poll_transcripts(found)
         self._poll_network(found)
         self._poll_notes(found)
         found.events = ordered(
@@ -258,6 +272,53 @@ class Follower:
             self._keep_latest(found)
         self._rounds += 1
         return found
+
+    def _poll_transcripts(self, found: Round) -> None:
+        """What the transcripts followed gained since the last look. At
+        first all that the end of the latest one holds, for the events
+        before now (see TranscriptTail.latest). Later no more of all of
+        them together than a look is to take, in turn (see _in_turn): a
+        session can write to as many as are followed, and one that is
+        left some of is said to be late."""
+        most = None if self._rounds == 0 else MOST_POLLED
+        first, others, turn = self._in_turn()
+        for session, tail in first:
+            most = self._poll_one(session, tail, most, found)
+        # The next look starts with the one after that which had the last
+        # of it, unless that was the first: what that one left waits for
+        # its turn
+        self._turn = turn
+        for place, (session, tail) in enumerate(others, 1):
+            left = self._poll_one(session, tail, most, found)
+            if most and not left:
+                self._turn = turn + place
+            most = left
+
+    def _poll_one(
+        self, session: Path, tail: TranscriptTail, most: int | None, found: Round
+    ) -> int | None:
+        """What a transcript followed gained since the last look, of no
+        more than most bytes, and what is to be said of how it is read,
+        see _note_behind. What is left of most for the others, none when
+        there is no most."""
+        found.events += [(session, event) for event in tail.poll(most)]
+        self._note_behind(tail, found)
+        return None if most is None else max(most - tail.polled, 0)
+
+    def _in_turn(self) -> tuple[list[Followed], list[Followed], int]:
+        """The transcripts followed, each with that of the session it is
+        of, in the order a look reads them: first that of the session
+        followed alone, or else of the session begun to be followed last.
+        Then the others, from the one after that which the look before
+        ran out of what it is to take with, so that each has its turn.
+        And where that one is among them, in the order they were begun
+        to be followed."""
+        sessions = list(self._tails.values())
+        first = [(tail.path, tail) for tail in sessions[-1:]]
+        others = [(tail.path, tail) for tail in sessions[:-1]]
+        others += self._subagents.values()
+        turn = self._turn % len(others) if others else 0
+        return first, others[turn:] + others[:turn], turn
 
     @staticmethod
     def _note_behind(tail: TranscriptTail, found: Round) -> None:
@@ -272,10 +333,11 @@ class Follower:
             )
             found.notes.append(labelled("transcript", late))
         if tail.newly_rewritten():
+            start = f"where {LAST_OF_HISTORY} begin" if tail.cut else "its start"
             anew = (
                 f"{flat(tail.path.name)} was WRITTEN ANEW (emptied, cut short or"
-                " replaced): it is read again from its start, --trace says what"
-                " was taken out of it"
+                f" replaced): it is read again from {start},"
+                " --trace says what was taken out of it"
             )
             found.notes.append(labelled("transcript", anew))
         if tail.newly_unread():
@@ -286,53 +348,69 @@ class Follower:
             )
             found.notes.append(labelled("transcript", gone))
 
-    def _tail(self, path: Path, offset: int | None = None) -> None:
-        """Start to follow a transcript from a place in it, without one
-        from where its latest events are, see TranscriptTail.latest."""
+    def _tail(self, path: Path, seen: Seen | None = None) -> None:
+        """Start to follow a transcript from where it ended when it was
+        seen, as the file it was then, without that from where its latest
+        events are, see TranscriptTail.latest."""
         project_dir = project_root(path, self._host)
-        if offset is None:
+        if seen is None:
             tail = TranscriptTail.latest(path, project_dir, self._walked)
         else:
-            tail = TranscriptTail(path, project_dir, self._walked, offset)
+            tail = TranscriptTail(
+                path, project_dir, self._walked, offset=seen.size, file=seen.file
+            )
         self._tails[path] = tail
-        self._sizes.pop(path, None)
+        self._seen.pop(path, None)
 
     def _look_for_transcripts(self, found: Round) -> None:
         """Start to follow the transcripts that were written to. At first
         the latest one from where its latest events are, for those
-        before now, the others from where they end."""
+        before now, the others from where they end, see _begin_with."""
         if self._only:
             if not self._tails:
                 self._tail(self._only)
             return
-        first = self._rounds == 0
-        sizes = {}
+        there = self._transcripts_there()
+        if self._rounds == 0:
+            self._begin_with(there, found)
+            return
+        for path, about in there.items():
+            seen = self._seen.get(path, UNSEEN)
+            if path in self._tails or not seen.changed(Seen.of(about)):
+                continue
+            if len(self._tails) >= MOST_FOLLOWED:
+                said = (
+                    f"more than {MOST_FOLLOWED} were written to, what the"
+                    " sessions of the others do is not shown"
+                )
+                self._note_once(found, "transcripts", "transcripts", said)
+                continue
+            # Grown, or another file put in its place, which is said to be
+            # written anew, or new and so read from its start
+            self._tail(path, seen)
+
+    def _transcripts_there(self) -> dict[Path, os.stat_result]:
+        """The project's transcripts, each as it is now, but those that
+        are gone since they were listed."""
+        there = {}
         for path in transcript_files(self._host):
-            try:
-                sizes[path] = path.stat()
-            except OSError:
-                continue
-        if first and sizes:
-            self._tail(max(sizes, key=lambda path: sizes[path].st_mtime))
-        elif first:
+            with contextlib.suppress(OSError):
+                there[path] = path.stat()
+        return there
+
+    def _begin_with(self, there: dict[Path, os.stat_result], found: Round) -> None:
+        """At the first look, follow the transcript of the latest session
+        (see copy_rank of recorder.py), and note how long each of the
+        others is and those of their subagents: each is followed from
+        there once it is written to."""
+        if not there:
             found.notes.append("no session of this project yet, waiting for one")
-        for path, about in sizes.items():
-            size = about.st_size
-            if path in self._tails:
-                continue
-            if first:
-                self._sizes[path] = size
+            return
+        self._tail(max(there, key=functools.partial(copy_rank, self._host)))
+        for path, about in there.items():
+            if path not in self._tails:
+                self._seen[path] = Seen.of(about)
                 self._note_subagents(path)
-            elif size != self._sizes.get(path, 0):
-                if len(self._tails) >= MOST_FOLLOWED:
-                    said = (
-                        f"more than {MOST_FOLLOWED} were written to, what the"
-                        " sessions of the others do is not shown"
-                    )
-                    self._note_once(found, "transcripts", "transcripts", said)
-                    continue
-                # Grown, or new and so read from its start
-                self._tail(path, self._sizes.get(path, 0))
 
     def _note_once(self, found: Round, key: Path | str, about: str, said: str) -> None:
         """Say that some transcripts are not followed, once for what key
@@ -346,11 +424,12 @@ class Follower:
         do. Claude Code keeps a transcript of each next to that of its
         session, in SESSION/subagents. At first from where they end, as
         of a session that is not the latest. Later from where they ended
-        when the following began, as their session is, see
-        _note_subagents: what a subagent did before that is not shown as
-        done now. One that is new is read from its start. A session with
-        more of them than are followed is said to have them, once, and so
-        is that the sessions have more than MOST_FOLLOWED_SUBAGENTS."""
+        when the following began, as the files they were then, as their
+        session is, see _note_subagents: what a subagent did before that
+        is not shown as done now. One that is new is read from its start.
+        A session with more of them than are followed is said to have
+        them, once, and so is that the sessions have more than
+        MOST_FOLLOWED_SUBAGENTS."""
         for session in list(self._tails):
             theirs = subagent_files(session)
             # Only one that has as many as are given can have more
@@ -368,18 +447,20 @@ class Follower:
                     self._note_once(found, "subagents", "subagents", said)
                     return
                 try:
-                    size = path.lstat().st_size
+                    about = path.lstat()
                 except OSError:
                     continue
-                noted = self._subagent_sizes.pop(path, 0)
+                noted = self._subagents_seen.pop(path, UNSEEN)
+                seen = Seen.of(about) if self._rounds == 0 else noted
                 # A result always names its call: the calls of a subagent
                 # are numbered on their own, after the number it is given
                 tail = TranscriptTail(
                     path,
                     project_root(session, self._host),
                     dataclasses.replace(self._walked, name_results=True),
-                    size if self._rounds == 0 else min(noted, size),
-                    self._agents,
+                    offset=seen.size,
+                    agents=self._agents,
+                    file=seen.file,
                 )
                 self._subagents[path] = (session, tail)
 
@@ -400,7 +481,7 @@ class Follower:
         are, one that is not followed yet."""
         for path in subagent_files(session):
             with contextlib.suppress(OSError):
-                self._subagent_sizes[path] = path.lstat().st_size
+                self._subagents_seen[path] = Seen.of(path.lstat())
 
     def _look_for_sessions(self, found: Round) -> None:
         """Start to follow the captures and the watchers of the project's
@@ -410,17 +491,6 @@ class Follower:
             return
         try:
             listed = CaptureSidecar.running(self._host.project_dir)
-            # Docker did not say: what is followed is kept as it is, it is
-            # not taken to have ended, to be read again from its start
-            running = (
-                [key for key in self._captures if key not in self._ending]
-                if listed is None
-                else [
-                    (sidecar, started)
-                    for sidecar, started in listed
-                    if self._ours(CaptureSidecar.session_of(sidecar))
-                ]
-            )
             self._addresses = self._filtered_addresses()
             watched = self._health_sources()
         except Fatal:
@@ -429,6 +499,33 @@ class Follower:
                 labelled("network", "not followed, docker was not found")
             )
             return
+        running = self._follow_captures(listed, found)
+        self._follow_health(watched, found)
+        if self._rounds == 0 and not running and not self._addresses:
+            found.notes.append(
+                labelled(
+                    "network",
+                    "no session of this project is recorded now"
+                    " (none runs, CLAUDE_AIRLOCK_NET_LOG=0, or not sandboxed)",
+                )
+            )
+
+    def _follow_captures(
+        self, listed: list[Started] | None, found: Round
+    ) -> list[Started]:
+        """Start to follow the captures of the project's sessions that
+        are listed to run, let go of those that ended (see _last_looks),
+        and note which are behind the egress filter. Which are running.
+        With listed none, Docker did not say: what is followed is kept as
+        it is, it is not taken to have ended, to be read again from its
+        start."""
+        running = (
+            [key for key in self._captures if key not in self._ending]
+            if listed is None
+            else [
+                key for key in listed if self._ours(CaptureSidecar.session_of(key[0]))
+            ]
+        )
         for sidecar, started in running:
             if (sidecar, started) not in self._captures:
                 self._known = known_destinations(self._host)
@@ -455,8 +552,15 @@ class Follower:
         filtered = set(self._addresses.values())
         for tail in self._captures.values():
             tail.filtered = tail.filtered or tail.session in filtered
-        # How each is doing, without a word on the following of it,
-        # unless what said so is gone and the session is not
+        return running
+
+    def _follow_health(
+        self, watched: dict[Started, tuple[str, SaidSince]], found: Round
+    ) -> None:
+        """Start to follow how each of the sessions watched is doing, and
+        let go of those no longer watched: without a word on the
+        following of it, unless what said so is gone and the session is
+        not."""
         gone = [self._health.pop(key) for key in set(self._health) - set(watched)]
         left = running_containers() if gone else set()
         for health in gone:
@@ -471,14 +575,6 @@ class Follower:
         for key, (session, said) in watched.items():
             if key not in self._health:
                 self._health[key] = HealthTail(session, said)
-        if self._rounds == 0 and not running and not self._addresses:
-            found.notes.append(
-                labelled(
-                    "network",
-                    "no session of this project is recorded now"
-                    " (none runs, CLAUDE_AIRLOCK_NET_LOG=0, or not sandboxed)",
-                )
-            )
 
     def _last_looks(self, found: Round, now: float) -> None:
         """Let go of the captures whose session ended, each once the copy
@@ -502,15 +598,15 @@ class Follower:
             name = clean(tail.session)
             found.notes.append(labelled("network", f"the capture of {name} ended"))
 
-    def _health_sources(self) -> dict[tuple[str, float], tuple[str, SaidSince]]:
+    def _health_sources(self) -> dict[Started, tuple[str, SaidSince]]:
         """The source of health readings for each running session of the
         project: its watcher sidecar, or the record its launcher writes
         when there is no watcher (see host_health.py). Each key is the
         watcher's name or the record's path, with the start time. Each
         value is the session's name and the function that reads it."""
-        sources: dict[tuple[str, float], tuple[str, SaidSince]] = {}
+        sources: dict[Started, tuple[str, SaidSince]] = {}
         listed = Watcher.running(self._host.project_dir)
-        # As for the captures, see _look_for_sessions
+        # As for the captures, see _follow_captures
         running = (
             set(self._watchers)
             if listed is None
@@ -523,7 +619,10 @@ class Follower:
         for gone in set(self._watchers) - running:
             del self._watchers[gone]
         for key in running:
-            tail = self._watchers.setdefault(key, WatcherTail(key[0]))
+            if key not in self._watchers:
+                aloud = aloud_path(self._host, key[0])
+                self._watchers[key] = WatcherTail(key[0], aloud)
+            tail = self._watchers[key]
             sources[key] = (tail.session, tail.health_since)
         written = running_health(self._host)
         kept = {(record, started) for record, _, started in written}
@@ -567,27 +666,49 @@ class Follower:
         return len(names.union(self._addresses.values())) > 1
 
     def _poll_network(self, found: Round) -> None:
+        """What the sessions followed did on the network since the last
+        look, and how they are doing."""
         if not self._docker:
             return
         several = self._several()
         # What the watchers said first: which process made a connection
         # is said with the connection
+        records = self._poll_processes(several, found)
+        self._poll_captures(records, several, found)
+        if self._addresses:
+            requests = self._proxy.poll(self._addresses, several)
+            self._denied += sum(bool(event.fields["denied"]) for event in requests)
+            found.events += [(None, event) for event in requests]
+        self._poll_health(several, found)
+
+    def _poll_processes(self, several: bool, found: Round) -> dict[str, ProcessRecord]:
+        """What was said of the processes of the sessions since the last
+        look, by their watchers and in the records of those recorded from
+        outside, and what each was said to run so far, by its session."""
         records: dict[str, ProcessRecord] = {}
         tails: list[ProcessTail] = [*self._watchers.values(), *self._records.values()]
-        for watcher in tails:
-            events = watcher.poll()
-            records[watcher.session] = watcher.record
-            name_container(events, watcher.session, several)
+        for tail in tails:
+            events = tail.poll()
+            records[tail.session] = tail.record
+            name_container(events, tail.session, several)
             found.events += [(None, event) for event in events]
-            if watcher.newly_hushed():
+            if tail.newly_hushed():
                 found.notes.append(
                     labelled(
                         "processes",
                         "which process makes a connection is no longer said as"
-                        f" {clean(watcher.session)} runs, its watcher said as much"
+                        f" {clean(tail.session)} runs, its watcher said as much"
                         " as it says aloud: --trace has it once the session is over",
                     )
                 )
+        return records
+
+    def _poll_captures(
+        self, records: dict[str, ProcessRecord], several: bool, found: Round
+    ) -> None:
+        """What the captures of the running sessions took since the last
+        look, each connection with the process its record says made it,
+        and that one is INCOMPLETE or STOPPED, once it is found so."""
         for key, capture in self._captures.items():
             if key in self._ending:
                 # Stopped, its copy is waited for
@@ -615,10 +736,11 @@ class Follower:
                         " what comes later is missing",
                     )
                 )
-        if self._addresses:
-            requests = self._proxy.poll(self._addresses, several)
-            self._denied += sum(bool(event.fields["denied"]) for event in requests)
-            found.events += [(None, event) for event in requests]
+
+    def _poll_health(self, several: bool, found: Round) -> None:
+        """How the sessions are doing, as far as was said since the last
+        look, and that the record of one is INCOMPLETE, once nothing was
+        said of it for too long (see HealthTail.newly_silent)."""
         for health in self._health.values():
             events = health.poll()
             name_container(events, health.session, several)
@@ -665,8 +787,7 @@ class Follower:
             del found.events[:earlier]
             said.append(f"{earlier} earlier events")
         if any(tail.cut for tail in self._tails.values()):
-            size = f"{MOST_HISTORY >> 20} MB"
-            said.append(f"what the transcript holds before its last {size}")
+            said.append(f"what the transcript holds before {LAST_OF_HISTORY}")
         if said:
             found.notes.append(f"{' and '.join(said)}, see claude-airlock --trace")
 

@@ -10,10 +10,14 @@ it sees and the processes that hold each TCP connection (procwatch.py).
 A connection of the capture is then tied to its process by its ports.
 
 While the session runs the record stays in the sidecar. What its watcher
-says aloud is read meanwhile (said_lines): how the session is doing, and
+says aloud is read meanwhile (said_since): how the session is doing, and
 each connection with the process that holds it and those that one comes
 from, for what follows a session to say who made a connection as it is
-made.
+made. It says that to a file of the launcher's, mounted in the sidecar
+alone (see aloud_path), not to its output: docker keeps the output of a
+container for whoever asks, and a session given the docker socket can
+ask, of the watchers of every other session too, whose command lines can
+carry a token.
 
 The sidecar looks many times a second, it is not told: what lived shorter
 than that can be missed, and a connection without a process falls back on
@@ -45,13 +49,14 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
 from ..background import in_background, wait_for
-from ..docker import container_running, docker, docker_output, mount_arg
+from ..docker import container_running, docker, mount_arg
+from ..files import private_dir, whole_lines, write_whole
 from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
@@ -77,10 +82,13 @@ SOON_OVER = 5.0
 HELD_WITHIN = 5.0
 # A watcher that said nothing for so many of its beats has ended, or hung
 SILENT_BEATS = 2.5
-# What a watcher said aloud is asked for again from so many seconds
-# before the last of what is known of it: docker goes by when it took a
-# line, not by when the watcher wrote it
-SAID_AGAIN = 2.0
+# Where in the sidecar the file its watcher says aloud to is mounted, and
+# the directory of those files among the records
+ALOUD_FILE = "/aloud.jsonl"
+ALOUD_DIR = "aloud"
+# The most of what a watcher said aloud that is read at a time: more than
+# it says in one look, MOST_ALOUD bounds the most of it
+ALOUD_READ = 4 * 1024 * 1024
 
 
 class Watcher(Sidecar):
@@ -109,8 +117,25 @@ class Watcher(Sidecar):
     def recorded(self, copied: Path) -> bool:
         return watcher_started(copied)
 
+    def collect(self, host: Host, left_behind: bool = False) -> None:
+        """As every sidecar is collected, and what its watcher said aloud
+        let go of with it: the record has all of it."""
+        try:
+            super().collect(host, left_behind)
+        finally:
+            with suppress(OSError):
+                os.unlink(aloud_path(host, self.name))
+
     def nothing_recorded(self) -> None:
         _say_not_recorded(self)
+
+
+def aloud_path(host: Host, watcher: str) -> str:
+    """The file the watcher of that name says aloud to, see procwatch.py:
+    among the records, where no session is given anything. Its name is
+    docker's, which has no slash."""
+    directory = private_dir(os.path.join(host.process_records_dir, ALOUD_DIR))
+    return os.path.join(directory, os.path.basename(watcher) + ".jsonl")
 
 
 def _start_watcher(
@@ -121,8 +146,13 @@ def _start_watcher(
     capture sidecar). It runs the sandbox image, which has Python, as root
     with the two capabilities it takes to read as the session's user, and
     lets go of those itself. It is told which files hold secrets, see
-    secrets.py."""
+    secrets.py, and given the file it says aloud to, empty, see
+    aloud_path."""
     watcher = Watcher.for_session(session, host.project_dir)
+    aloud = aloud_path(host, watcher.name)
+    # Made anew, the user's alone: a watcher of an earlier session of the
+    # name may have left one, with what it said and the mode it had
+    write_whole(aloud, "")
     docker(
         "run",
         "--detach",
@@ -130,24 +160,38 @@ def _start_watcher(
         f"--pid=container:{session}",
         f"--network=container:{owner}",
         mount_arg(WATCHER, "/procwatch.py", "ro,z"),
+        mount_arg(aloud, ALOUD_FILE, "z"),
         "--entrypoint=python3",
         image_tag,
         *("-I", "/procwatch.py", RECORD_FILE, str(os.getuid()), str(os.getgid())),
         secrets.as_json(),
+        ALOUD_FILE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     return watcher
 
 
-def said_lines(watcher: str, since: float) -> list[str]:
-    """What the watcher of a running session said aloud since a time, and
-    all of it for no time: the record itself stays in the sidecar until
-    the session is over, and a command run there to read it would be
-    noted as one of the session's. Nothing when it cannot be asked. How
-    much a watcher says aloud is bounded, see MOST_ALOUD of procwatch.py."""
-    asked = [f"--since={since:.3f}"] if since else []
-    return docker_output("logs", *asked, watcher).splitlines()
+def said_since(path: str, offset: int) -> tuple[list[str], int]:
+    """What the watcher of a running session said aloud past a place in
+    the file it says it to (see aloud_path), or what the launcher wrote
+    past it in the record it keeps of a session from outside (see
+    host_health.py), its lines whole, and where that leaves off: a line
+    still being written is read once it is whole. The watcher's own
+    record stays in the sidecar until the session is over, and a command
+    run there to read it would be noted as one of the session's. Nothing
+    when the file cannot be read. How much a watcher says aloud is
+    bounded, see MOST_ALOUD of procwatch.py, and so is a record, see
+    MOST_BYTES there: no more than ALOUD_READ of either is read at a
+    time, see whole_lines."""
+    try:
+        with open(path, "rb") as file:
+            file.seek(offset)
+            read = file.read(ALOUD_READ)
+    except OSError:
+        return [], offset
+    lines, taken = whole_lines(read, ALOUD_READ)
+    return [line.decode("utf-8", "replace") for line in lines], offset + taken
 
 
 def health_said(lines: Iterable[str], since: float) -> list[Sample | Ended]:
@@ -265,9 +309,11 @@ class Process:
         return " ".join([self.name, *self.argv[1:]])
 
 
-# What a process and a gap of the record are put in order by
+# What a process, a gap of the record and what held a connection are put
+# in order by
 _noted_when = operator.attrgetter("when")
 _until = operator.attrgetter("until")
+_held_when = operator.itemgetter(0)
 
 
 @dataclass(frozen=True)
@@ -344,7 +390,9 @@ class ProcessRecord:
     # In the order they were noted
     processes: list[Process] = field(default_factory=list)
     # The processes that held each connection, by its port, the address
-    # and the port at the other end, with when that was noted
+    # and the port at the other end, with when that was noted, the
+    # earliest first: what the runtime tells of a connection under gVisor
+    # has no port of the session, and one address can have thousands
     holders: dict[tuple[int, str, int], list[tuple[float, tuple[int, ...]]]] = field(
         default_factory=dict
     )
@@ -497,7 +545,11 @@ class ProcessRecord:
     def _connection(self, when: float, said: dict) -> None:
         key = (int(said["port"]), str(said["to"]), int(said["to_port"]))
         pids = tuple(int(pid) for pid in said["pids"])
-        self.holders.setdefault(key, []).append((when, pids))
+        # By when, which a time that is no number would not keep in order
+        if math.isfinite(when):
+            bisect.insort(
+                self.holders.setdefault(key, []), (when, pids), key=_held_when
+            )
 
     def _process(self, when: float, said: dict) -> None:
         argv = tuple(str(argument) for argument in said["argv"])
@@ -579,15 +631,13 @@ class ProcessRecord:
         """What was noted of the processes that held a connection made at
         a time: by its ports, else by where it went alone, as the runtime
         tells of a connection (see gvisor.py), without the port it was
-        made from."""
+        made from. Those within HELD_WITHIN of the time, looked up by it."""
         for key in ((source_port, address, port), (0, address, port)):
-            noted = [
-                (at, pids)
-                for at, pids in self.holders.get(key, [])
-                if abs(at - when) <= HELD_WITHIN
-            ]
-            if noted:
-                return noted
+            held = self.holders.get(key, [])
+            first = bisect.bisect_left(held, when - HELD_WITHIN, key=_held_when)
+            last = bisect.bisect_right(held, when + HELD_WITHIN, key=_held_when)
+            if first < last:
+                return held[first:last]
         return []
 
     def silent_from(self, until: float) -> float | None:

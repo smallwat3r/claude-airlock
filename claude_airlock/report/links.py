@@ -26,8 +26,9 @@ import math
 from collections.abc import Iterator
 
 from ..events import connection_link
+from ..recording.packets import Key
 from ..recording.pcap import Capture, Connection
-from ..recording.uploads import Key, Upload
+from ..recording.uploads import Upload
 
 
 class Links:

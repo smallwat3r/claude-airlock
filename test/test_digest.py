@@ -25,7 +25,9 @@ from packets import (
 )
 
 from claude_airlock import files, projects
+from claude_airlock.recording.secrets import session_secrets
 from claude_airlock.report import digest
+from claude_airlock.settings import CONTAINER_HOME, Settings
 
 HEADING = "claude-airlock: of this session"
 
@@ -165,6 +167,50 @@ class DigestTest(LauncherTest):
         said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
         assert "  written outside the project:\n    /home/me/.bashrc\n" in said
 
+    def test_what_was_done_outside_the_sandbox_and_on_secrets_is_said(self):
+        stamp = prompts_at(time.time())[0]["timestamp"]
+        routine = {"type": "tool_use", "id": "c1", "name": "RemoteTrigger"}
+        routine["input"] = {"action": "create", "body": {"cron": "0 9 * * *"}}
+        listed = {"type": "tool_use", "id": "c2", "name": "RemoteTrigger"}
+        listed["input"] = {"action": "list"}
+        key = {"type": "tool_use", "id": "c3", "name": "Read"}
+        key["input"] = {"file_path": "~/.ssh/id_ed25519"}
+        code = {"type": "server_tool_use", "id": "s1", "name": "code_execution"}
+        code["input"] = {"code": "print(1)"}
+        entry = {"type": "assistant", "timestamp": stamp}
+        entry["message"] = {"content": [routine, listed, key, code]}
+        transcript = self.write_transcript("0a", [])
+        said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
+        assert (
+            "  acted OUTSIDE SANDBOX, through Anthropic:\n"
+            "    RemoteTrigger: a routine of claude.ai, which runs on its own and"
+            " outlives the session (create)\n"
+            "    code_execution: code run in a container of Anthropic's\n"
+        ) in said
+        assert (
+            "  files of secrets that Claude Code's own tools were called on:\n"
+            "    ~/.ssh/id_ed25519, a file of SSH\n"
+        ) in said
+
+    def test_a_hidden_file_of_the_project_as_the_session_names_it_is_said(self):
+        # A sandboxed session names the project under the container's
+        # home, see project_roots, and its transcript is kept by that name
+        sandboxed = f"{CONTAINER_HOME}/{self.project.name}"
+        stamp = prompts_at(time.time())[0]["timestamp"]
+        read = {"type": "tool_use", "id": "c1", "name": "Read"}
+        read["input"] = {"file_path": ".env"}
+        entry = {"type": "assistant", "timestamp": stamp, "cwd": sandboxed}
+        entry["message"] = {"content": [read]}
+        kept = self.home / ".claude" / "projects" / sandboxed.replace("/", "-")
+        kept.mkdir(parents=True)
+        transcript = kept / "0a.jsonl"
+        transcript.touch()
+        said = self.session(session=f"echo '{json.dumps(entry)}' >> '{transcript}'")
+        assert (
+            "  files of secrets that Claude Code's own tools were called on:\n"
+            "    .env, a file hidden as one of secrets\n"
+        ) in said
+
     def test_a_part_that_cannot_be_worked_out_leaves_the_others(self, capsys):
         start = time.time() - 5
         stamp = prompts_at(time.time())[0]["timestamp"]
@@ -174,8 +220,9 @@ class DigestTest(LauncherTest):
         entry["message"] = {"content": [write]}
         self.write_transcript("0a", [entry])
         full = OSError(errno.ENOSPC, "No space left on device")
+        secrets = session_secrets(Settings(), self.host, [self.host.project_dir])
         with mock.patch.object(digest, "Recorded", side_effect=full):
-            digest.report_session(self.host, "claude-proj", start)
+            digest.report_session(self.host, "claude-proj", start, secrets)
         said = capsys.readouterr().err
         assert "  the network could not be looked at: [Errno 28] No space" in said
         assert "  written outside the project:\n    /home/me/.bashrc\n" in said

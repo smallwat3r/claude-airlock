@@ -159,7 +159,9 @@ class WireTest(LauncherTest):
         frames = [*sent(now, 5_000, 1), *sent(now + 0.0005, 7_000, 1, port=8443)]
         found = self.captured(opened(now - 1), sorted(frames)).uploads
         assert sorted(upload.sent for upload in found.all) == [5_000, 7_000]
-        assert [upload.sent for upload in found.on(KEY, now - 1, now + 1)] == [5_000]
+        # Counted of each connection alone
+        assert found.sized_on(KEY, now - 1, now + 1) == 1
+        assert found.sized_on(KEY, now + 0.0001, now + 1) == 0
 
     def test_only_what_the_session_sends_is_an_upload(self):
         back = ipv4(6, API, "172.20.0.5", tcp_header(40443, 0x18, 443) + b"y" * 900)
@@ -331,6 +333,22 @@ class WireTest(LauncherTest):
         (event,) = capture_events(capture, verbose=False)
         assert event.details[0].endswith(", 2 uploads")
         assert event.fields["uploads"] == 2
+        # Of one left open, those sent over it from when it was opened,
+        # and none of another sent in that time
+        frames = sorted(
+            [
+                *sent(now - 40, 60_000, 1),
+                *sent(now, 60_000, 60_001),
+                *sent(now + 2, 70_000, 1, port=8443),
+                *sent(now + 5, 61_000, 120_001),
+            ]
+        )
+        capture = self.captured([*opened(now - 30), *opened(now - 30, 8443)], frames)
+        left = {
+            event.fields["port"]: (event.fields["outcome"], event.fields.get("uploads"))
+            for event in capture_events(capture, verbose=False)
+        }
+        assert left == {443: ("open", 2), 8443: ("open", 1)}
         # Nothing of one that nothing was sent over
         (quiet,) = capture_events(self.captured(opened(now), []), verbose=False)
         assert "uploads" not in quiet.details[0]
@@ -410,6 +428,29 @@ class WireTest(LauncherTest):
         first, second = map(json.loads, only.splitlines())
         assert first["wire"]["bytes"] == 80_000
         assert second["wire"] is None
+
+    def test_a_request_of_no_known_length_is_not_looked_for(self):
+        # Any upload would have room for it, what keeps a connection going
+        # too: one the session wrote out would pass for seen
+        now = self.now
+        self.traced(
+            opened(now - 30), [*sent(now - 20, 80_000, 1), *sent(now - 5, 60, 80_001)]
+        )
+        recorded = Recorded.between(self.host, now - 40, now + 40)
+        known = request(now - 20.1, 79_000)
+        withheld = request(now - 5, 0, sent=None, withheld=True)
+        rows, _ = wire.on_the_wire([known, withheld], recorded)
+        assert known.notes == ["wire: [n1.1] 80 kB"]
+        assert withheld.notes == []
+        assert "wire" not in withheld.fields
+        assert withheld.fields["unmeasured"] is True
+        assert "unmeasured" not in known.fields
+        assert rows == [
+            (
+                "requests",
+                "1 seen on the wire, 1 not looked for (their length is not known)",
+            )
+        ]
 
     def test_a_request_of_another_container_is_not_placed_in_this_capture(self):
         now = self.now
@@ -736,10 +777,12 @@ class WireTest(LauncherTest):
         assert last.fields["bytes_in"] == 800
         assert tail._answers_over() == []
 
-    def tunnelled(self, now: float, host: str) -> tuple[Frames, Frames]:
+    def tunnelled(
+        self, now: float, host: str, proxy: str = "172.20.0.2"
+    ) -> tuple[Frames, Frames]:
         """A connection to the egress proxy that asks it for a host and
         then sends 80 kB there: what starts it, and what it sends."""
-        proxy, port = "172.20.0.2", 3128
+        port = 3128
         asked = f"CONNECT {host}:443 HTTP/1.1\r\n\r\n".encode()
         main = [
             (now - 30, tcp(proxy, port), True),
@@ -784,6 +827,32 @@ class WireTest(LauncherTest):
         main, frames = self.tunnelled(now, "evil.test")
         other = wire.Sent(self.captured(main, None, [main[2], *frames]), filtered=True)
         assert (other.model, len(other.others)) == ([], 2)
+
+    def test_behind_the_filter_requests_are_looked_for_among_those_to_the_model(self):
+        # Told apart once for all the requests placed: what went elsewhere
+        # through the proxy at the same time is none of theirs
+        now = self.now
+        main, frames = self.tunnelled(now, "api.anthropic.com")
+        side, elsewhere = self.tunnelled(now + 0.5, "evil.test", "172.20.0.3")
+        capture = self.captured(
+            sorted([*main, *side]),
+            None,
+            sorted([main[2], side[2], *frames, *elsewhere]),
+        )
+        seen, placer = wire.Sent(capture, filtered=True), wire.Wire()
+        first, second = request(now - 0.1, 79_000), request(now + 0.4, 79_000)
+        placer.place(first, seen)
+        placer.place(second, seen)
+        assert first.notes == ["wire: [n1.1] 80 kB"]
+        assert second.notes == [wire.NOT_SEEN]
+        asking, upload = seen.model_between(now - 60, now + 5)
+        assert (asking.sized, upload.sent, upload.key[1]) == (
+            False,
+            80_000,
+            "172.20.0.2",
+        )
+        assert seen.model_between(now + 0.1, now + 5) == []
+        assert [sent.key[1] for sent in seen.others] == ["172.20.0.3"] * 2
 
     def test_the_trace_of_a_filtered_session_tells_its_uploads_apart(self):
         now = self.now

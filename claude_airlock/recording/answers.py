@@ -29,8 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .packets import Packet
-from .uploads import Key, Reached, Upload, Uploads
+from .packets import Key, Packet
+from .uploads import Reached, Upload, Uploads
 
 # The names of the parts of a capture these packets are in, see
 # capture.py: what comes back from the model's API, and a sample of what
@@ -95,7 +95,7 @@ class Answers:
         what the other end says while it is still being sent to."""
         if packet.sent or not packet.length:
             return
-        key = (packet.port, packet.source, packet.source_port)
+        key = packet.key
         ahead, another = self._reached.adds(key, packet)
         if not ahead:
             return

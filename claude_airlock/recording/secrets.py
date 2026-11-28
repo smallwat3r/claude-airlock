@@ -99,8 +99,17 @@ def own_login(kind: str, program: str) -> bool:
 def session_secrets(settings: Settings, host: Host, roots: Sequence[str]) -> Secrets:
     """The files of secrets of a session with these settings: those of
     the homes it has, and any of a name hidden from it in the directories
-    it is given (roots, see mounted_dirs of mounts.py)."""
+    it is given (roots, see mounted_dirs of mounts.py). Each of those as
+    the host names it and, under the user's home, as the session does:
+    the image links the host's home to the container's, and the kernel
+    names a file a process holds by the second, gVisor one opened through
+    the link by the first."""
     homes = dict.fromkeys((CONTAINER_HOME, host.home))
+    roots = list(
+        dict.fromkeys(
+            named for root in roots for named in (root, _as_named(root, host))
+        )
+    )
     files: dict[str, str] = {
         os.path.join(CONTAINER_CLAUDE, ".credentials.json"): Kind.CLAUDE
     }
@@ -115,3 +124,12 @@ def session_secrets(settings: Settings, host: Host, roots: Sequence[str]) -> Sec
         )
     names = dict.fromkeys((*SHADOWED_NAMES, *settings.shadow), Kind.HIDDEN)
     return Secrets(files, dirs, PASSED, names, SHADOW_EXEMPT, roots)
+
+
+def _as_named(root: str, host: Host) -> str:
+    """A directory a session is given as the session names it: one under
+    the user's home is under the container's there."""
+    home = host.home.rstrip(os.sep)
+    if root == home or root.startswith(home + os.sep):
+        return CONTAINER_HOME + root[len(home) :]
+    return root
