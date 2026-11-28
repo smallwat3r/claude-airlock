@@ -30,8 +30,9 @@ never depends on it: a watcher that did not get to watch is said when the
 session is over, and that is all.
 
 Under some runtimes, such as gVisor, a sidecar cannot see into the
-session. The launcher then records only memory and CPU use, from outside
-the session, see host_health.py."""
+session. The launcher then records memory and CPU use from outside the
+session (see host_health.py), and what runs in it as the runtime tells,
+where it can (see gvisor.py), in the same lines."""
 
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ from ..notice import warn
 from ..settings import Host, Settings
 from .health import Ended, Sample, read_health
 from .packets import is_loopback
-from .procwatch import Note, started_last
+from .procwatch import Note, Secrets, started_last
 from .records import TracedSession
 from .sidecar import Sidecar
 
@@ -112,12 +113,15 @@ class Watcher(Sidecar):
         _say_not_recorded(self)
 
 
-def _start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watcher:
+def _start_watcher(
+    host: Host, session: str, owner: str, image_tag: str, secrets: Secrets
+) -> Watcher:
     """Start the sidecar in the namespaces of a session that is up: its
     processes', and its network's, which is owner's (the session, or its
     capture sidecar). It runs the sandbox image, which has Python, as root
     with the two capabilities it takes to read as the session's user, and
-    lets go of those itself."""
+    lets go of those itself. It is told which files hold secrets, see
+    secrets.py."""
     watcher = Watcher.for_session(session, host.project_dir)
     docker(
         "run",
@@ -129,6 +133,7 @@ def _start_watcher(host: Host, session: str, owner: str, image_tag: str) -> Watc
         "--entrypoint=python3",
         image_tag,
         *("-I", "/procwatch.py", RECORD_FILE, str(os.getuid()), str(os.getgid())),
+        secrets.as_json(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -188,6 +193,7 @@ def _watch_when_up(
     session: str,
     owner: str,
     image_tag: str,
+    secrets: Secrets,
     started: list[Watcher],
     stop: threading.Event,
 ) -> None:
@@ -195,21 +201,29 @@ def _watch_when_up(
     namespace can only be joined once it is there, by when the launcher
     is waiting on the session, hence the thread."""
     if wait_for(lambda: container_running(session), stop):
-        started.append(_start_watcher(host, session, owner, image_tag))
+        started.append(_start_watcher(host, session, owner, image_tag, secrets))
 
 
 @contextmanager
 def processes_recorded(
-    settings: Settings, host: Host, session: str, owner: str, image_tag: str
+    settings: Settings,
+    host: Host,
+    session: str,
+    owner: str,
+    image_tag: str,
+    secrets: Secrets,
 ) -> Iterator[None]:
-    """While a session runs, record its processes. owner is the container
-    whose network namespace the session is in."""
+    """While a session runs, record its processes, and the files of
+    secrets they open (see secrets.py). owner is the container whose
+    network namespace the session is in."""
     if not settings.proc_log:
         yield
         return
     started: list[Watcher] = []
     try:
-        with in_background(_watch_when_up, host, session, owner, image_tag, started):
+        with in_background(
+            _watch_when_up, host, session, owner, image_tag, secrets, started
+        ):
             yield
     finally:
         for watcher in started:
@@ -287,6 +301,18 @@ class Listener:
 
 
 @dataclass(frozen=True)
+class Opened:
+    """A file of secrets a process was noted to hold open, see Secrets
+    of procwatch.py: when, its path as the process held it, the kind of
+    secrets it holds (see secrets.py) and the process."""
+
+    when: float
+    path: str
+    kind: str
+    pid: int
+
+
+@dataclass(frozen=True)
 class Slowed:
     """What a watcher noted of its looks that came much later than they
     are meant to: by when, how many did since it last said so, how many
@@ -324,6 +350,10 @@ class ProcessRecord:
     )
     # The sockets that waited for connections, in the order they were noted
     listeners: list[Listener] = field(default_factory=list)
+    # The files of secrets that were held open, in the order they were
+    # noted, and whether there were more than the watcher notes
+    opened: list[Opened] = field(default_factory=list)
+    too_many_opened: bool = False
     # How often the session could not start a process for its limit of
     # them, as last noted
     process_limit: int = 0
@@ -353,9 +383,15 @@ class ProcessRecord:
     beat: float | None = None
     last_line: float = 0.0
     # The runtime's name when the launcher wrote the record from outside
-    # the session, with memory and CPU use only (see host_health.py).
-    # Empty for a watcher's record.
+    # the session, with memory and CPU use (see host_health.py). Empty
+    # for a watcher's record.
     outside: str = ""
+    # Of such a record, from when the runtime told the launcher what ran
+    # (see gvisor.py), none when it did not: the record has only memory
+    # and CPU use then. And how many of what it would have told it said
+    # it could not, as last noted
+    monitored_from: float | None = None
+    dropped: int = 0
     _by_pid: dict[int, list[Process]] = field(default_factory=dict, repr=False)
     # When each process was noted, the earliest first: the lines of a
     # record come in that order but for a clock that was set back
@@ -383,6 +419,12 @@ class ProcessRecord:
         return self.full_at is not None
 
     @property
+    def processes_known(self) -> bool:
+        """Whether the record tells what ran: a watcher's, or one the
+        runtime told the launcher of."""
+        return not self.outside or self.monitored_from is not None
+
+    @property
     def limit_ends_session(self) -> bool:
         """Whether running into the process limit ends the session as a
         whole. That is so under the runtimes the launcher records from
@@ -399,6 +441,9 @@ class ProcessRecord:
             self.full_at = when
         if note == Note.HUSHED and self.hushed_at is None:
             self.hushed_at = when
+        self.too_many_opened |= note == Note.TOO_MANY_OPENED
+        if note == Note.MONITORED and self.monitored_from is None:
+            self.monitored_from = when
         if note == Note.UNWRITTEN:
             gap = Unwritten(
                 float(said["since"]), float(said["until"]), int(said["lines"])
@@ -440,6 +485,15 @@ class ProcessRecord:
             Listener(when, int(said["listen"]), str(said["on"]), pids)
         )
 
+    def _opened(self, when: float, said: dict) -> None:
+        pids = [int(pid) for pid in said["pids"]]
+        self.opened.append(
+            Opened(when, str(said["opened"]), str(said["secret"]), pids[0])
+        )
+
+    def _dropped(self, _when: float, said: dict) -> None:
+        self.dropped = max(self.dropped, int(said["dropped"]))
+
     def _connection(self, when: float, said: dict) -> None:
         key = (int(said["port"]), str(said["to"]), int(said["to_port"]))
         pids = tuple(int(pid) for pid in said["pids"])
@@ -469,6 +523,8 @@ class ProcessRecord:
         ("oom", _health),
         ("slow", _slowed),
         ("listen", _listener),
+        ("opened", _opened),
+        ("dropped", _dropped),
         ("port", _connection),
     )
 
@@ -502,11 +558,7 @@ class ProcessRecord:
         that hold it the one started last, the last of them as the watcher
         lists them (see started_last of procwatch.py): a socket is handed
         down, the one that made it is as a rule the last of the line."""
-        noted = [
-            (at, pids)
-            for at, pids in self.holders.get((source_port, address, port), [])
-            if abs(at - when) <= HELD_WITHIN
-        ]
+        noted = self._held(source_port, address, port, when)
         if not noted:
             return []
         at, pids = min(noted, key=lambda found: abs(found[0] - when))
@@ -518,12 +570,25 @@ class ProcessRecord:
         """Whether a connection made at a time was only ever noted
         without a process that holds it: the watcher saw it and could
         look into none that did, see procwatch.py."""
-        noted = [
-            pids
-            for at, pids in self.holders.get((source_port, address, port), [])
-            if abs(at - when) <= HELD_WITHIN
-        ]
+        noted = [pids for _, pids in self._held(source_port, address, port, when)]
         return bool(noted) and not any(noted)
+
+    def _held(
+        self, source_port: int, address: str, port: int, when: float
+    ) -> list[tuple[float, tuple[int, ...]]]:
+        """What was noted of the processes that held a connection made at
+        a time: by its ports, else by where it went alone, as the runtime
+        tells of a connection (see gvisor.py), without the port it was
+        made from."""
+        for key in ((source_port, address, port), (0, address, port)):
+            noted = [
+                (at, pids)
+                for at, pids in self.holders.get(key, [])
+                if abs(at - when) <= HELD_WITHIN
+            ]
+            if noted:
+                return noted
+        return []
 
     def silent_from(self, until: float) -> float | None:
         """When its watcher last said anything, if that was longer
@@ -546,7 +611,9 @@ class ProcessRecord:
         launcher wrote it from outside the session, or its watcher was
         not up yet at the first of them, had stopped noting processes by
         the second, or could not write some of them in between."""
-        if self.outside or self.watched_from is None or start < self.watched_from:
+        if not self.processes_known or self.watched_from is None:
+            return None
+        if start < max(self.watched_from, self.monitored_from or 0.0):
             return None
         if self.full_at is not None and end > self.full_at:
             return None

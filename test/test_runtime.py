@@ -19,6 +19,7 @@ from harness import LauncherTest, prompts_at
 from claude_airlock import settings
 from claude_airlock.launcher import Launcher
 from claude_airlock.recording import host_health, processes
+from claude_airlock.report import tails
 from claude_airlock.sandbox import runtime
 
 CONTAINER = "0a1b2c3d4e5f"
@@ -255,7 +256,9 @@ class HostHealthTest(LauncherTest):
             ),
             mock.patch.object(stop, "wait", wait),
         ):
-            host_health.watch(self.host, "claude-proj", "gVisor (gv)", records, stop)
+            host_health.watch(
+                self.host, "claude-proj", "gVisor (gv)", records, None, stop
+            )
         (record,) = records
         return record
 
@@ -365,10 +368,23 @@ class HostHealthTest(LauncherTest):
 
     def test_readings_after_a_time_are_read_from_a_growing_record(self):
         record = self.watched(looks=2)
-        (sample,) = host_health.said_in(str(record.path), record.start - 1)
+        tail = tails.RecordTail(str(record.path), "claude-proj")
+        (sample,) = tail.health_since(record.start - 1)
         assert sample.memory == (2 * GIB, 16 * GIB)
-        assert host_health.said_in(str(record.path), time.time() + 1) == []
-        assert host_health.said_in(str(self.work / "none"), 0.0) == []
+        assert tail.health_since(time.time() + 1) == []
+        assert tails.RecordTail(str(self.work / "none"), "x").health_since(0.0) == []
+
+    def test_a_growing_record_is_taken_a_whole_line_at_a_time(self):
+        record = self.watched(looks=1)
+        tail = tails.RecordTail(str(record.path), "claude-proj")
+        tail.poll()
+        with open(record.path, "a", encoding="utf-8") as file:
+            file.write('{"t": 5.0, "listen": 8080, "on": "0.0.0.0", "pi')
+        assert tail.poll() == []
+        with open(record.path, "a", encoding="utf-8") as file:
+            file.write('ds": []}\n')
+        (event,) = tail.poll()
+        assert "tcp 0.0.0.0:8080  OPEN to its network" in event.details[0]
 
     def test_the_next_launcher_finishes_the_record_of_a_killed_one(self):
         record = self.watched(looks=1)

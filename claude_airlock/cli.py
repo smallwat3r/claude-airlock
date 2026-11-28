@@ -9,7 +9,8 @@ import io
 import os
 import sys
 import time
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -24,9 +25,12 @@ from .recording.address import session_address_recorded
 from .recording.api_log import api_logged
 from .recording.capture import CaptureSidecar, session_captured
 from .recording.egress_log import net_log
+from .recording.gvisor import session_monitored
 from .recording.host_health import collect_left_behind, health_recorded
 from .recording.processes import Watcher, processes_recorded
+from .recording.procwatch import Secrets
 from .recording.recorder import transcripts_copied
+from .recording.secrets import session_secrets
 from .recording.socket_watch import socket_proxy_watched
 from .recording.ssh_agent import refuse_unreachable_agent, ssh_agent_door
 from .recording.started import Start, note_end, note_start
@@ -243,7 +247,7 @@ def session(plan: Plan) -> int:
     # started for the session
     runtime = session_runtime(settings)
     refuse_unreachable_agent(settings, os.environ, runtime)
-    say_runtime_notes(runtime, settings)
+    say_runtime_notes(runtime, settings, host.pod_init_config)
     say_without_socket(settings)
     # The name, then the network and the proxies a session leans on, before
     # the arguments that name them
@@ -260,12 +264,27 @@ def _session_watched(
     is normally a sidecar that records the session's processes and its
     memory and CPU use. Under a runtime where a sidecar cannot see into
     the session, the launcher records memory and CPU use from outside
-    instead. owner is the container whose network namespace the session
-    is in."""
+    instead, and what runs in it as the runtime tells where it can.
+    owner is the container whose network namespace the session is in."""
     settings, host = plan.settings, plan.host
+    # The files of secrets whose opening either records
+    secrets = session_secrets(settings, host, mounted_dirs(plan.dirs, host))
     if settings.proc_log and not runtime.JOINABLE:
-        return health_recorded(host, name, runtime.shown)
-    return processes_recorded(settings, host, name, owner, plan.image.tag)
+        return _recorded_from_outside(host, name, runtime, secrets)
+    return processes_recorded(settings, host, name, owner, plan.image.tag, secrets)
+
+
+@contextmanager
+def _recorded_from_outside(
+    host: Host, name: str, runtime: Runtime, secrets: Secrets
+) -> Iterator[None]:
+    """The memory and CPU use of a session, and what runs in it as its
+    runtime tells, where it can (see gvisor.py)."""
+    with (
+        session_monitored(host, name, runtime, secrets) as monitor,
+        health_recorded(host, name, runtime.shown, monitor),
+    ):
+        yield
 
 
 def _hidden(plan: Plan, remembered: Remembered) -> Hidden:

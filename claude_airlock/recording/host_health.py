@@ -20,6 +20,9 @@ container, about a tenth of a second later, so a look every second would
 miss it: the launcher waits for the kernel to say that the count changed
 and reads it at once (see watch_process_limit).
 
+What runs in the session is not in the cgroup. gVisor can tell it, and
+what it tells goes to the same record, see gvisor.py.
+
 The readings come from CgroupHealth in procwatch.py and are written in the
 watcher's line format, to a file in the same directory, so --trace reads
 both kinds of record the same way. While the session runs, the file name
@@ -40,6 +43,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from ..background import ASK_EVERY, in_background, wait_for
 from ..docker import docker_output
@@ -47,9 +51,16 @@ from ..files import is_under, json_object, private_dir
 from ..launcher import Launcher, session_alive
 from ..notice import warn
 from ..settings import Host
-from .health import Ended, Sample
-from .processes import KEPT_RECORDS, SOON_OVER, Watcher, health_said
-from .procwatch import LIMITS_EVERY, MOST_BYTES, CgroupHealth, Note, stamped
+from .processes import KEPT_RECORDS, SOON_OVER, Watcher
+from .procwatch import (
+    LIMITS_EVERY,
+    MOST_BYTES,
+    RESERVED,
+    CgroupHealth,
+    Note,
+    lined,
+    stamped,
+)
 from .records import TracedSession, record_traced_session
 from .sidecar import keep_latest
 
@@ -95,6 +106,16 @@ def cgroup_of(pid: int, container: str, proc: str = "/proc") -> str:
     return ""
 
 
+class SessionMonitor(Protocol):
+    """What tells what runs in a session, which its cgroup does not, to
+    its record: told when the session's container is found, then when
+    its record has begun, see gvisor.py."""
+
+    def sandbox_made(self) -> None: ...
+
+    def attach(self, record: HealthRecord, container: str) -> None: ...
+
+
 @dataclass
 class HealthRecord:
     """The file in which a launcher records the memory and CPU use of one
@@ -108,6 +129,8 @@ class HealthRecord:
     start: float
     launcher: Launcher
     _written: int = 0
+    # Whether the part of it for the processes is full, see note_at
+    _full: bool = False
     # Lines come from the thread that reads the health and from the one
     # that waits on the process limit
     _writing: threading.Lock = field(
@@ -148,14 +171,31 @@ class HealthRecord:
 
     def note(self, **said: object) -> None:
         """Add a line to the record, in the format the watcher of
-        procwatch.py uses. Lines past the size limit are dropped."""
-        line = stamped(**said)
+        procwatch.py uses, of the part of it kept for what the launcher
+        notes itself. Lines past the size limit are dropped."""
+        self.note_at(None, reserved=True, said=said)
+
+    def note_at(self, when: float | None, reserved: bool, said: dict) -> None:
+        """Add a line to the record that tells of a time, none for now.
+        What is not reserved, the processes gVisor told of (see gvisor.py),
+        leaves RESERVED of the record for what is: a session that starts
+        processes without end must not be rid of its connections and of
+        how it was doing that way. The record says that it is full when
+        that part is."""
+        line = stamped(**said) if when is None else lined(when, said)
         with self._writing:
-            if self._written + len(line) > MOST_BYTES:
+            room = MOST_BYTES if reserved else MOST_BYTES - RESERVED
+            if self._written + len(line) > room:
+                if not reserved and not self._full:
+                    self._full = True
+                    self._write(stamped(note=Note.FULL))
                 return
-            with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
-                file.write(line)
-                self._written += len(line)
+            self._write(line)
+
+    def _write(self, line: str) -> None:
+        with suppress(OSError), open(self.path, "a", encoding="utf-8") as file:
+            file.write(line)
+            self._written += len(line)
 
     def keep(self, host: Host, end: float) -> None:
         """Finish the record: remove the .part suffix, add the session
@@ -192,16 +232,6 @@ def running_health(host: Host) -> list[tuple[str, str, float]]:
         for record in being_written(host)
         if record.project == host.project_dir
     ]
-
-
-def said_in(path: str, since: float) -> list[Sample | Ended]:
-    """The health lines written to a record after the given time, or an
-    empty list when the file cannot be read."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as file:
-            return health_said(file, since)
-    except OSError:
-        return []
 
 
 def collect_left_behind(host: Host) -> None:
@@ -269,21 +299,27 @@ def watch(
     session: str,
     runtime: str,
     records: list[HealthRecord],
+    monitor: SessionMonitor | None,
     stop: threading.Event,
 ) -> None:
     """Wait for the session's container, then record its memory and CPU
     use for as long as its cgroup exists, and each time it runs into its
     process limit. The record is appended to records, which stays empty
-    when the cgroup was not found."""
+    when the cgroup was not found. What a monitor is told of what runs
+    in the container goes to the record as well, see gvisor.py."""
     found = wait_for(lambda: container_process(session), stop)
+    if monitor and found:
+        monitor.sandbox_made()
     cgroup = cgroup_of(*found) if found else ""
-    if not cgroup:
+    if not found or not cgroup:
         return
     try:
         record = HealthRecord.begin(host, session, runtime)
     except OSError:
         return
     records.append(record)
+    if monitor:
+        monitor.attach(record, found[1])
     health = CgroupHealth(record.note)
     with in_background(watch_process_limit, cgroup, record.note):
         while os.path.isdir(cgroup):
@@ -293,16 +329,19 @@ def watch(
 
 
 @contextmanager
-def health_recorded(host: Host, session: str, runtime: str) -> Iterator[None]:
+def health_recorded(
+    host: Host, session: str, runtime: str, monitor: SessionMonitor | None = None
+) -> Iterator[None]:
     """Record the memory and CPU use of a session while it runs, and
     whether it ran into its process limit, from the cgroup of its
-    container. runtime is the runtime's name as shown to
-    the user. When the cgroup was not found, this is reported once the
-    session is over, unless the session ended within a few seconds."""
+    container, with what a monitor is told of what runs in it. runtime
+    is the runtime's name as shown to the user. When the cgroup was not
+    found, this is reported once the session is over, unless the session
+    ended within a few seconds."""
     records: list[HealthRecord] = []
     started = time.time()
     try:
-        with in_background(watch, host, session, runtime, records):
+        with in_background(watch, host, session, runtime, records, monitor):
             yield
     finally:
         for record in records:

@@ -92,6 +92,8 @@ class Kind(enum.StrEnum):
     DNS = "dns"
     EXEC = "exec"
     LISTEN = "listen"
+    # A file of secrets a process held open, see recording/secrets.py
+    SECRET = "secret"  # noqa: S105, a kind of event, not a secret
     HEALTH = "health"
     # What the launchers noted, see noted.py
     STARTED = "started"

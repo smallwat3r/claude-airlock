@@ -16,6 +16,7 @@ missed. What it does note is what was there.
     {"t": 3.0, "health": {"mem": [used, limit], "cpu": 240.0, "pids": [87, 512], ...}}
     {"t": 4.0, "oom": 1, "gone": [[812, 9876543210, "node"]]}
     {"t": 5.0, "slow": {"looks": 12, "seconds": 2.6, "longest": 0.31}}
+    {"t": 6.0, "opened": "/home/me/.config/gh/hosts.yml", "secret": "gh", "pids": [812]}
     {"t": 9.0, "note": "..."}
 
 The first when a process is first seen or has become another program, the
@@ -39,7 +40,11 @@ is over. The seventh when
 looks came much later than they are meant to, which is the session's
 doing: how many did since it was last said, how long after the look before
 them in all, and the longest of those. What lived shorter than that, then,
-was not seen.
+was not seen. The eighth when a process is seen to hold a file of
+secrets open (see Secrets), with the kind of secrets it holds, once for
+each process and file, and said aloud with the process as a connection
+is. A file a process opened and closed again between two looks is not
+seen.
 
 It runs as root, so that the session, which shares its process namespace,
 can neither stop it nor reach its file. To read what a process of the
@@ -51,12 +56,13 @@ from __future__ import annotations
 
 import ctypes
 import enum
+import fnmatch
 import ipaddress
 import json
 import os
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import NamedTuple
 
 # Seconds between two looks
@@ -117,6 +123,13 @@ HEALTH_EVERY = 30.0
 NEAR_LIMIT = (70, 90)
 WELL_BELOW = 5
 OUT_OF_TURN_EVERY = 5.0
+# The files of secrets seen open that are noted, one for each process and
+# file: a session can open them in as many processes as it likes, and
+# must not fill the part of the record kept for its connections that way
+MOST_OPENED = 1000
+# What the kernel puts after the path of a file that was removed while
+# it was open
+DELETED = " (deleted)"
 # The largest processes that are named, and the tmpfs that are looked at
 LARGEST = 3
 # The processes that hold a socket that are named, the ones started last
@@ -161,6 +174,12 @@ class Note(enum.StrEnum):
     # session can bring about), said once one can again: how many, from
     # when and until when, see Watch._write
     UNWRITTEN = "unwritten"
+    # More files of secrets were seen open than are noted, see
+    # MOST_OPENED: those past them were not
+    TOO_MANY_OPENED = "too many opened"
+    # Not the watcher's: the runtime began to tell the launcher what runs
+    # in the session, see gvisor.py
+    MONITORED = "monitored"
 
 
 def _take_identity(uid: int, gid: int) -> None:
@@ -397,8 +416,13 @@ def _is_loopback(address: str) -> bool:
 
 
 def stamped(**said: object) -> str:
-    """A line of a record: what is said, and when."""
-    return json.dumps({"t": round(time.time(), 3), **said}) + "\n"
+    """A line of a record: what is said, and now."""
+    return lined(time.time(), said)
+
+
+def lined(when: float, said: dict) -> str:
+    """A line of a record: what is said, and when it was so."""
+    return json.dumps({"t": round(when, 3), **said}) + "\n"
 
 
 def percent(used: float, of: float | None) -> int | None:
@@ -679,6 +703,180 @@ class Holders:
         return found
 
 
+def _kinds(said: object) -> dict[str, str]:
+    """Paths or names, each with a kind of secrets, as the launcher
+    wrote them: none of what is not."""
+    if not isinstance(said, dict):
+        return {}
+    return {
+        str(key): str(kind)
+        for key, kind in said.items()
+        if isinstance(key, str) and isinstance(kind, str)
+    }
+
+
+def _names(said: object) -> tuple[str, ...]:
+    if not isinstance(said, list):
+        return ()
+    return tuple(name for name in said if isinstance(name, str))
+
+
+def _under(directories: Sequence[str]) -> tuple[str, ...]:
+    """Directories, each as a path in it starts: with a / at its end,
+    one alone for the root."""
+    return tuple(
+        os.path.join(os.path.normpath(directory), "") for directory in directories
+    )
+
+
+class Secrets:
+    """Which files are taken to hold secrets, by the path a process holds
+    one under, each with the kind of secrets it holds: a file by its
+    path, a file in a directory but for the names passed over there (a
+    public key, the hosts ssh knows), and a file of a name in one of the
+    roots, but for the templates of those names. The roots are where
+    files of those names are hidden from a session (the project and the
+    directories mounted next to it, see hidden_files of mounts.py): one
+    made elsewhere, in /tmp say, is no secret kept from it. The launcher
+    says which they are (see secrets.py), the watcher is given them as
+    JSON."""
+
+    def __init__(
+        self,
+        files: Mapping[str, str] | None = None,
+        dirs: Mapping[str, str] | None = None,
+        passed: Sequence[str] = (),
+        names: Mapping[str, str] | None = None,
+        exempt: Sequence[str] = (),
+        roots: Sequence[str] = (),
+    ) -> None:
+        self._files = {
+            os.path.normpath(path): kind for path, kind in (files or {}).items()
+        }
+        self._dirs = {
+            os.path.normpath(directory) + "/": kind
+            for directory, kind in (dirs or {}).items()
+        }
+        self._passed = tuple(passed)
+        self._names = dict(names or {})
+        self._exempt = frozenset(exempt)
+        self._roots = _under(roots)
+
+    @classmethod
+    def read(cls, said: str) -> Secrets:
+        """The rules as as_json wrote them. Raises ValueError for what is
+        not JSON, and passes over what is not one of them."""
+        rules = json.loads(said)
+        if not isinstance(rules, dict):
+            rules = {}
+        return cls(
+            _kinds(rules.get("files")),
+            _kinds(rules.get("dirs")),
+            _names(rules.get("passed")),
+            _kinds(rules.get("names")),
+            _names(rules.get("exempt")),
+            _names(rules.get("roots")),
+        )
+
+    def as_json(self) -> str:
+        """The rules, for the watcher to be given on its command line."""
+        return json.dumps(
+            {
+                "files": self._files,
+                "dirs": {
+                    directory.rstrip("/"): kind
+                    for directory, kind in self._dirs.items()
+                },
+                "passed": list(self._passed),
+                "names": self._names,
+                "exempt": sorted(self._exempt),
+                "roots": [os.path.normpath(root) for root in self._roots],
+            },
+            separators=(",", ":"),
+        )
+
+    def markers(self) -> tuple[bytes, ...] | None:
+        """Bytes of which a path taken to hold secrets has one at least,
+        for what tells of paths to be passed over unread when it has none
+        of them (see gvisor.py): the name of each file and directory, and
+        the longest run of letters of each pattern. None when a pattern
+        has no run that has to be there, or a class of letters ([ab]),
+        whose letters need not be."""
+        found = [os.path.basename(path) for path in self._files]
+        found += [os.path.basename(directory.rstrip("/")) for directory in self._dirs]
+        for pattern in self._names:
+            if "[" in pattern:
+                return None
+            longest = max(pattern.replace("?", "*").split("*"), key=len)
+            if not longest:
+                return None
+            found.append(longest)
+        return tuple(dict.fromkeys(marker.encode() for marker in found if marker))
+
+    def of(self, path: str) -> str | None:
+        """The kind of secrets a file holds, none for one that is not
+        taken to hold any. Of an absolute path only: what a descriptor
+        links to otherwise (a socket, a pipe) is no file. The names are
+        the session's to choose, each pattern is the launcher's, and a
+        pattern of fnmatch takes no more than a pass over a name."""
+        if not path.startswith("/"):
+            return None
+        path = os.path.normpath(path.removesuffix(DELETED))
+        kind = self._files.get(path)
+        if kind:
+            return kind
+        name = os.path.basename(path)
+        for directory, kind in self._dirs.items():
+            if path.startswith(directory):
+                passed = any(fnmatch.fnmatchcase(name, one) for one in self._passed)
+                return None if passed else kind
+        if name in self._exempt or not path.startswith(self._roots):
+            return None
+        for pattern, kind in self._names.items():
+            if fnmatch.fnmatchcase(name, pattern):
+                return kind
+        return None
+
+
+class Telling(enum.Enum):
+    """What to do of a file of secrets a process was seen to open, see
+    OpenedOnce."""
+
+    # Note it
+    NEW = enum.auto()
+    # Nothing: it was noted already, or there were too many
+    KNOWN = enum.auto()
+    # Note that there were more than are noted, this once
+    TOO_MANY = enum.auto()
+
+
+class OpenedOnce:
+    """The files of secrets noted of each process, for one to be noted
+    once for each process and file, and no more than MOST_OPENED in all:
+    a session can open them in as many processes as it likes. A process
+    is known by what the caller gives, its id and when it started say."""
+
+    def __init__(self) -> None:
+        self._noted: dict[Hashable, set[str]] = {}
+        self._count = 0
+        self.too_many = False
+
+    def take(self, process: Hashable, path: str) -> Telling:
+        if self.too_many or path in self._noted.get(process, ()):
+            return Telling.KNOWN
+        if self._count >= MOST_OPENED:
+            self.too_many = True
+            return Telling.TOO_MANY
+        self._count += 1
+        self._noted.setdefault(process, set()).add(path)
+        return Telling.NEW
+
+    def forget(self, process: Hashable) -> None:
+        """A process that is another now: its files are noted again, and
+        counted again."""
+        self._noted.pop(process, None)
+
+
 def started_last(pids: Sequence[int]) -> int:
     """Of the processes that hold a socket, as the watcher lists them in
     the order they started (see Watch._by_start), the one started last.
@@ -689,9 +887,14 @@ def started_last(pids: Sequence[int]) -> int:
 
 class Watch:
     def __init__(
-        self, out, read_process: Callable[[int], ProcessRead | None] = process
+        self,
+        out,
+        read_process: Callable[[int], ProcessRead | None] = process,
+        secrets: Secrets | None = None,
+        proc: str = "/proc",
     ) -> None:
         self._out = out
+        self._proc = proc
         self._written = 0
         # Of the lines that could not be written since the last that was,
         # how many, and the times of the first and of the last of them
@@ -736,6 +939,11 @@ class Watch:
         self._late_seconds = 0.0
         self._latest = 0.0
         self._late_said = 0.0
+        # Which files hold secrets, and the files of them each process was
+        # seen to hold, by the process (its id and when it started), see
+        # _look_at_files
+        self._secrets = secrets
+        self._opened = OpenedOnce()
 
     def name_of(self, pid: int) -> str:
         """What a process is called for short: its program, else what it
@@ -931,6 +1139,46 @@ class Watch:
                 if now - first > YOUNG and now - last < SETTLED_EVERY:
                     continue
             self._look_at_process(pid, now)
+            self._look_at_files(pid)
+
+    def _look_at_files(self, pid: int) -> None:
+        """Note each file of secrets a process holds open that it was not
+        seen to hold before, said aloud with the process as a connection
+        is. As often as the process is looked at: a file opened and
+        closed between two looks is not seen. No more than MOST_OPENED in
+        all, then a word that there were more."""
+        known = self._processes.get(pid)
+        if self._secrets is None or known is None or self._opened.too_many:
+            return
+        directory = f"{self._proc}/{pid}/fd"
+        try:
+            descriptors = os.listdir(directory)
+        except OSError:
+            return
+        process = (pid, known[0][0])
+        for descriptor in descriptors:
+            try:
+                path = os.readlink(f"{directory}/{descriptor}")
+            except OSError:
+                continue
+            kind = self._secrets.of(path)
+            if kind is None:
+                continue
+            telling = self._opened.take(process, path)
+            if telling is Telling.TOO_MANY:
+                self.note(reserved=True, note=Note.TOO_MANY_OPENED)
+                return
+            if telling is Telling.KNOWN:
+                continue
+            self._say_who([pid])
+            self.note(
+                reserved=True,
+                aloud=True,
+                counted=True,
+                opened=path[:MOST_ARGUMENT],
+                secret=kind,
+                pids=[pid],
+            )
 
     def _look_at_process(self, pid: int, now: float) -> None:
         """Note a process when it is new, or has become another program
@@ -1080,7 +1328,8 @@ def _main(args: list[str]) -> int:
     try:
         if len(args) > 1:
             _take_identity(int(args[1]), int(args[2]))
-        watch = Watch(out)
+        secrets = Secrets.read(args[3]) if len(args) > 3 else None
+        watch = Watch(out, secrets=secrets)
         watch.note(reserved=True, note=Note.STARTED, beat=HEARTBEAT_EVERY)
         while True:
             watch.look()

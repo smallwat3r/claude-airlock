@@ -93,6 +93,9 @@ and CPU the sandbox uses](img/line-mode.png)
 - Every connection made to the session from outside it (`IN from`), and
   each socket that starts to wait for them on more than its own
   loopback (`listen`).
+- Each file of secrets a process of the session opens, with the
+  process (`secret`), but for Claude Code reading its own login, see
+  [What ran](trace.md#what-ran).
 - Each thing of 4 kB or more the session sends, as the capture sees it
   go: a request to the model, a push, a file sent somewhere, with how
   much it was, and each answer of the model's API, with how long it

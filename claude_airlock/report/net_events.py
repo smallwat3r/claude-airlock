@@ -29,10 +29,13 @@ from ..recording.pcap import (
 )
 from ..recording.processes import (
     UNREADABLE_PROGRAM,
+    Opened,
+    Process,
     ProcessRecord,
     shown_lineage,
 )
 from ..recording.records import TracedSession
+from ..recording.secrets import own_login, said
 from ..recording.uploads import LEAST
 from .links import Links, links_of
 from .recorded import Recorded, Traced
@@ -496,14 +499,19 @@ def name_processes(events: list[Event], record: ProcessRecord) -> None:
                 fields["process"] = None
                 event.notes.append(f"by: {HIDDEN_HOLDER}")
             continue
-        made_it = lineage[0]
-        fields["process"] = {
-            "pid": made_it.pid,
-            "exe": made_it.program,
-            "argv": list(made_it.argv),
-            "parents": [parent.name for parent in lineage[1:]],
-        }
+        fields["process"] = _process_fields(lineage)
         event.notes.append(f"by: {flat(shown_lineage(lineage))}")
+
+
+def _process_fields(lineage: list[Process]) -> dict:
+    """A process and those it comes from, as --json has them."""
+    made_it = lineage[0]
+    return {
+        "pid": made_it.pid,
+        "exe": made_it.program,
+        "argv": list(made_it.argv),
+        "parents": [parent.name for parent in lineage[1:]],
+    }
 
 
 def _process_events(record: ProcessRecord) -> list[Event]:
@@ -552,6 +560,77 @@ def listener_events(record: ProcessRecord, past: int = 0) -> list[Event]:
     return events
 
 
+def own_opening(record: ProcessRecord, opened: Opened) -> bool:
+    """Whether a file of secrets was opened by the one it is for, see
+    own_login: no sign of anything."""
+    process = record.process(opened.pid, opened.when)
+    return own_login(opened.kind, process.program if process else "")
+
+
+def opened_events(
+    record: ProcessRecord, past: int = 0, own_too: bool = True
+) -> list[Event]:
+    """One event per file of secrets a process was seen to hold open,
+    with the process, marked as what went wrong: a file that is not the
+    process's own to read (see own_opening), which own_too leaves out.
+    Of a record read as it grows, past being how many it had at the last
+    reading, only those that came since."""
+    events = []
+    for opened in record.opened[past:]:
+        own = own_opening(record, opened)
+        if own and not own_too:
+            continue
+        what = said(opened.kind)
+        detail = flat(f"{opened.path}, {what}")
+        fields: dict = {
+            "path": opened.path,
+            "secret": opened.kind,
+            "said": what,
+            "own": own,
+            "pid": opened.pid,
+        }
+        lineage = record.lineage(opened.pid, opened.when)
+        if lineage:
+            fields["process"] = _process_fields(lineage)
+        if own:
+            detail += ", opened by Claude Code itself"
+        else:
+            detail += ", OPENED"
+            if lineage:
+                detail += f"  by: {flat(shown_lineage(lineage))}"
+        wrong = Wrong.NO if own else Wrong.THROUGHOUT
+        events.append(
+            Event(opened.when, Who.SANDBOX, Kind.SECRET, [detail], fields, wrong=wrong)
+        )
+    return events
+
+
+def opened_files(record: ProcessRecord) -> list[str]:
+    """The files of secrets that processes opened that were not theirs
+    to (see own_opening), each once, with what each holds."""
+    return list(
+        dict.fromkeys(
+            flat(f"{opened.path}, {said(opened.kind)}")
+            for opened in record.opened
+            if not own_opening(record, opened)
+        )
+    )
+
+
+def _opened_lines(record: ProcessRecord) -> list[str]:
+    """The lines of the header on the files of secrets opened."""
+    lines = []
+    files = opened_files(record)
+    if files:
+        lines.append(f"  {len(files)} files of secrets OPENED by its processes")
+    if record.too_many_opened:
+        lines.append(
+            "  more files of secrets were opened than are noted, those past"
+            " them were NOT NOTED"
+        )
+    return lines
+
+
 def _limit_lines(record: ProcessRecord) -> list[str]:
     """The line of the header on a session that ran into its process
     limit, nothing for one that did not."""
@@ -580,17 +659,24 @@ def watched_summary(
     """The lines of the header on what a session's watcher noted: its
     processes, and how it was doing. With until, when the session ended,
     a watcher that had stopped noting before then is said."""
-    if record.outside:
-        under = clean(record.outside)
-        said = f"  processes not recorded under {under}, only memory and CPU use"
+    under = clean(record.outside)
+    if not record.processes_known:
+        unrecorded = f"  processes not recorded under {under}, only memory and CPU use"
         return [
-            said,
+            unrecorded,
             *_limit_lines(record),
             *health_summary(record.samples, record.ended),
         ]
     hint = "" if verbose else ", each one shown with --verbose"
-    lines = [f"  processes {len(record.processes)} seen to run{hint}"]
+    told = f", as {under} told" if record.outside else ""
+    lines = [f"  processes {len(record.processes)} seen to run{told}{hint}"]
+    if record.dropped:
+        lines.append(
+            f"  {record.dropped} of what {under} would have told COULD NOT BE"
+            " TOLD, what ran then may be missing"
+        )
     lines += _limit_lines(record)
+    lines += _opened_lines(record)
     reachable = sum(listener.open for listener in record.listeners)
     if reachable:
         lines.append(
@@ -651,9 +737,11 @@ def _captured_connections(
 
 def _watched_events(record: ProcessRecord, verbose: bool) -> list[Event]:
     """What a session's watcher noted, as events: the sockets that waited
-    for connections, how the session was doing, and with --verbose each
-    process that was seen to run."""
-    ran = listener_events(record) + (_process_events(record) if verbose else [])
+    for connections, the files of secrets that were opened, how the
+    session was doing, and with --verbose each process that was seen to
+    run and Claude Code's own opening of its login."""
+    ran = listener_events(record) + opened_events(record, own_too=verbose)
+    ran += _process_events(record) if verbose else []
     ran += [sample.event() for sample in record.samples]
     return ran + [ended.event() for ended in record.ended]
 

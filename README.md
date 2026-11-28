@@ -175,7 +175,7 @@ What is recorded, for `--trace`:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_AIRLOCK_NET_LOG` | `1` | Records every connection the session makes and every one made to it, what is sent by UDP or a ping, every name looked up, and when and how much is sent over each connection, a request to the model as a push, with how long the model's answer took. `0` records nothing |
-| `CLAUDE_AIRLOCK_PROC_LOG` | `1` | Records the processes that run, which of them made each connection, and the memory and CPU the session uses. `0` records nothing |
+| `CLAUDE_AIRLOCK_PROC_LOG` | `1` | Records the processes that run, which of them made each connection, the files of secrets they open, and the memory and CPU the session uses. `0` records nothing |
 | `CLAUDE_AIRLOCK_API_LOG` | `0` | `1` keeps every request Claude Code sends to the model and each answer: the system prompt, the tools and the conversation as they were sent. With the capture on, each request is placed on the connection it was seen to go over, see [docs/trace.md](docs/trace.md#the-requests-to-the-model) |
 
 How Claude Code runs:

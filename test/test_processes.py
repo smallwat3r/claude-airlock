@@ -27,7 +27,14 @@ from harness import LauncherTest, prompts_at, reads_proc
 from packets import pcap_file, tcp
 
 from claude_airlock.events import Event, Who
-from claude_airlock.recording import health, processes, procwatch, records, sidecar
+from claude_airlock.recording import (
+    health,
+    processes,
+    procwatch,
+    records,
+    secrets,
+    sidecar,
+)
 from claude_airlock.recording.records import TracedSession
 from claude_airlock.report import follow, net_events, tails, unseen
 
@@ -1102,7 +1109,14 @@ class SidecarTest(LauncherTest):
             "--cap-add=SETUID",
             "--cap-add=SETGID",
         ]
-        assert sidecar[-2:] == [str(os.getuid()), str(os.getgid())]
+        assert sidecar[-3:-1] == [str(os.getuid()), str(os.getgid())]
+        # Told which files hold secrets, the session's login among them
+        secrets = procwatch.Secrets.read(sidecar[-1])
+        assert secrets.of("/home/sandbox/.claude/.credentials.json") == "claude"
+        # A hidden name, in the session's project alone
+        assert secrets.of(f"{self.project}/.env") == "hidden"
+        assert secrets.of(f"{self.project}/.env.example") is None
+        assert secrets.of("/tmp/fixture/.env") is None
         # The session is not made to wait for it, nor to depend on it
         assert SIDECAR not in " ".join(result.flags)
 
@@ -1236,6 +1250,46 @@ class SidecarTest(LauncherTest):
         )
         assert re.search(r"listen      tcp 127\.0\.0\.1:9229  by: \[7\] claude", shown)
         assert "2 sockets waited for connections, OPEN" in shown
+
+    def test_a_file_of_secrets_opened_is_said_with_its_process(self):
+        home = "/home/sandbox"
+        opened = [
+            {
+                "t": self.now + 3,
+                "opened": f"{home}/.config/gh/hosts.yml",
+                "secret": "gh",
+                "pids": [812],
+            },
+            # Claude Code's own login, by Claude Code
+            ran(self.now + 4, 9, 1, "claude"),
+            {
+                "t": self.now + 5,
+                "opened": f"{home}/.claude/.credentials.json",
+                "secret": "claude",
+                "pids": [9],
+            },
+        ]
+        opened[1]["exe"] = secrets.CLAUDE_PROGRAM
+        with open(self.record_file, "a") as record:
+            record.write("".join(json.dumps(line) + "\n" for line in opened))
+        ended = self.watched()
+        assert "opened files of secrets:" in ended.stderr
+        assert f"{home}/.config/gh/hosts.yml, the login of gh" in ended.stderr
+        assert ".credentials.json" not in ended.stderr
+        self.write_transcript("0a", prompts_at(self.now, self.now + 10))
+        shown = self.launch("--trace").stdout
+        assert re.search(
+            r"sandbox  secret      /home/sandbox/\.config/gh/hosts\.yml, the login of"
+            r" gh, OPENED  by: \[812\] curl -sS https://good\.test < claude",
+            shown,
+        )
+        assert "#   1 files of secrets OPENED by its processes" in shown
+        assert ".credentials.json" not in shown
+        assert (
+            "opened by Claude Code itself" in self.launch("--trace", "--verbose").stdout
+        )
+        failed = self.launch("--trace", "--failed").stdout
+        assert failed.count("sandbox  secret") == 1
 
     def test_the_trace_says_how_the_session_was_doing(self):
         lines = [

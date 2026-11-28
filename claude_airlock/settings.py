@@ -180,6 +180,18 @@ class Host:
         return os.path.join(self.state_dir, "processes")
 
     @property
+    def gvisor_dir(self) -> str:
+        # What gVisor is told to send what runs in a session to, and where
+        # the launcher listens for it, see gvisor.py
+        return os.path.join(self.state_dir, "gvisor")
+
+    @property
+    def pod_init_config(self) -> str:
+        # The file a runtime of gVisor is registered to read as a sandbox
+        # starts (--pod-init-config), see gvisor.py
+        return os.path.join(self.gvisor_dir, "pod-init.json")
+
+    @property
     def doors_file(self) -> str:
         # Each use of the SSH agent and of the Docker socket, see doors.py
         return os.path.join(self.state_dir, "door-use.jsonl")

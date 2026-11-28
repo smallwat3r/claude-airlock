@@ -105,7 +105,8 @@ class Timeline:
 
     def take(self, event: Event) -> None:
         """Note a tool call or its result, or mark an event of the
-        network with the calls running at its time."""
+        network, or a file of secrets opened, with the calls running at
+        its time."""
         fields = event.fields
         # No later than it is: an entry is the session's to date, and one
         # dated ahead would have all that is read after it be too long ago
@@ -119,7 +120,7 @@ class Timeline:
             and fields.get("stage") not in (Stage.OUTCOME, Stage.PROGRESS)
             # Not what Claude Code sends to the model, which no call makes
             and not fields.get("model_api")
-        ):
+        ) or event.kind is Kind.SECRET:
             self._mark(event)
 
     def _note(self, event: Event, call: str) -> None:

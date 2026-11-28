@@ -51,7 +51,6 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 
 from ..docker import running_containers
@@ -67,7 +66,7 @@ from ..projects import (
 from ..recording.capture import (
     CaptureSidecar,
 )
-from ..recording.host_health import running_health, said_in
+from ..recording.host_health import running_health
 from ..recording.processes import (
     ProcessRecord,
     Watcher,
@@ -95,7 +94,9 @@ from .tails import (
     MOST_POLLED,
     CaptureTail,
     HealthTail,
+    ProcessTail,
     ProxyTail,
+    RecordTail,
     SaidSince,
     Traffic,
     TranscriptTail,
@@ -184,6 +185,9 @@ class Follower:
         self._health: dict[tuple[str, float], HealthTail] = {}
         # What the watcher of each session says aloud
         self._watchers: dict[tuple[str, float], WatcherTail] = {}
+        # The records the launchers write of the sessions they record from
+        # outside, by their path and start time, see host_health.py
+        self._records: dict[tuple[str, float], RecordTail] = {}
         # The destinations the project was noted to reach before, for
         # those that are new to be said: as they were when the capture
         # of a session was last begun to be followed, a session notes
@@ -521,8 +525,15 @@ class Follower:
         for key in running:
             tail = self._watchers.setdefault(key, WatcherTail(key[0]))
             sources[key] = (tail.session, tail.health_since)
-        for record, session, started in running_health(self._host):
-            sources[(record, started)] = (session, partial(said_in, record))
+        written = running_health(self._host)
+        kept = {(record, started) for record, _, started in written}
+        for gone in set(self._records) - kept:
+            del self._records[gone]
+        for record, session, started in written:
+            read = self._records.setdefault(
+                (record, started), RecordTail(record, session)
+            )
+            sources[(record, started)] = (session, read.health_since)
         return {key: asked for key, asked in sources.items() if self._ours(asked[0])}
 
     def _filtered_addresses(self) -> dict[str, str]:
@@ -562,7 +573,8 @@ class Follower:
         # What the watchers said first: which process made a connection
         # is said with the connection
         records: dict[str, ProcessRecord] = {}
-        for watcher in self._watchers.values():
+        tails: list[ProcessTail] = [*self._watchers.values(), *self._records.values()]
+        for watcher in tails:
             events = watcher.poll()
             records[watcher.session] = watcher.record
             name_container(events, watcher.session, several)

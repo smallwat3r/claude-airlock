@@ -16,7 +16,9 @@ kernel. This has four consequences for the launcher:
 - A sidecar that joins the session sees gVisor's kernel process, not the
   session's processes. The watcher of processes.py is therefore not
   started, and the launcher records memory and CPU use from the host
-  instead (see host_health.py).
+  instead (see host_health.py). What runs in the session is told by
+  gVisor itself when the runtime is registered to read the file the
+  launcher writes for that (--pod-init-config, see gvisor.py).
 - The cgroup of the container counts gVisor's own threads, so the process
   limit given to Docker is raised to make room for them.
 - A session that reaches its process or memory limit is ended as a whole,
@@ -122,16 +124,30 @@ class Runtime:
         many processes of its own as the setting says."""
         return limit
 
-    def notes(self, settings: Settings) -> list[str]:
+    def monitored(self, config: str) -> bool:
+        """Whether the runtime can tell the launcher what runs in a
+        session, from the file of that path, which the launcher writes
+        (see gvisor.py). A sidecar sees that under Docker's own."""
+        return False
+
+    def notes(self, settings: Settings, config: str = "") -> list[str]:
         """What a session lacks under this runtime compared with Docker's
-        own, to be said at launch. Usually nothing."""
-        if not settings.proc_log or self.JOINABLE:
+        own, to be said at launch. Usually nothing. config is the file a
+        runtime is to read to tell what runs, see monitored."""
+        if not settings.proc_log or self.JOINABLE or self.monitored(config):
             return []
         unrecorded = (
             "processes are not recorded, nor which process made each"
             " connection. Only memory and CPU use are recorded"
         )
-        return [unrecorded]
+        how = self.how_to_monitor(config)
+        return [f"{unrecorded}. {how}" if how else unrecorded]
+
+    def how_to_monitor(self, config: str) -> str:
+        """What the user is to do for the runtime to tell what runs in a
+        session, see monitored, to be said with what is not recorded.
+        Empty when there is nothing to do."""
+        return ""
 
 
 @dataclass(frozen=True)
@@ -195,7 +211,17 @@ class Gvisor(Runtime):
             return limit
         return str(self.OWN_SLOTS + self.SLOTS_PER_PROCESS * int(limit))
 
-    def notes(self, settings: Settings) -> list[str]:
+    def monitored(self, config: str) -> bool:
+        """Registered to read the launcher's file, or with arguments that
+        are not visible, which may be so: the launcher listens either
+        way, and says when the session is over that nothing came."""
+        if not config:
+            return False
+        return (
+            not self._args_visible or self.registered.flag("pod-init-config") == config
+        )
+
+    def notes(self, settings: Settings, config: str = "") -> list[str]:
         notes = []
         if self.own_network_stack:
             notes.append(
@@ -207,7 +233,15 @@ class Gvisor(Runtime):
             "the session is ended as a whole when it reaches its memory or"
             " process limit, and the process limit is an estimate"
         )
-        return notes + super().notes(settings)
+        return notes + super().notes(settings, config)
+
+    def how_to_monitor(self, config: str) -> str:
+        if not config:
+            return ""
+        return (
+            f"Register it with --pod-init-config={config} for gVisor to tell"
+            " them, see docs/sandbox.md"
+        )
 
 
 # The runtimes that need their own handling. The first that recognises a
@@ -242,10 +276,11 @@ def session_runtime(settings: Settings) -> Runtime:
         return Runtime(settings.runtime)
 
 
-def say_runtime_notes(runtime: Runtime, settings: Settings) -> None:
+def say_runtime_notes(runtime: Runtime, settings: Settings, config: str = "") -> None:
     """Print the runtime's notes before the session starts. Once it runs,
-    the terminal belongs to the session."""
-    notes = runtime.notes(settings)
+    the terminal belongs to the session. config is the file a runtime is
+    to read to tell what runs, see Runtime.monitored."""
+    notes = runtime.notes(settings, config)
     if notes:
         warn(
             f"under {runtime.shown}:",

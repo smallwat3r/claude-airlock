@@ -12,6 +12,7 @@ import dataclasses
 import math
 import os
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,12 +50,15 @@ from .net_events import (
     capture_events,
     listener_events,
     name_container,
+    opened_events,
     proxy_event,
 )
 from .shown import over, reached, size
 from .transcript import Walk, WalkOptions
 from .wire import Sent, Wire, answer_event, tunnel_to_model, upload_event
 
+# The most read of the record of a session at once, see RecordTail
+RECORD_READ = 4 * 1024 * 1024
 # Seconds between two questions to a watcher on how its session is doing:
 # it says so every 30 seconds, and at once when a limit is near
 HEALTH_EVERY = 10.0
@@ -711,40 +715,39 @@ def _progress_event(
     return Event(time.time(), Who.SANDBOX, Kind.NET, [detail], fields, tied)
 
 
-class WatcherTail:
-    """What the watcher of a running session says aloud, read as it says
-    it: how the session is doing, each connection and each socket that
-    waits for them with the processes that hold it, and those processes
-    (see procwatch.py). Not the record of all that ran, which stays in
-    the sidecar."""
+class ProcessTail(ABC):
+    """What is said of the processes of a running session, read as it is
+    said: how the session is doing, each connection and each socket that
+    waits for them with the processes that hold it, the files of secrets
+    they open, and those processes (see procwatch.py). Where it is read
+    from is the subclass's, see _said."""
 
-    def __init__(self, watcher: str) -> None:
-        self.watcher = watcher
-        self.session = Watcher.session_of(watcher)
-        # What it said so far, as a record of the session's processes
-        # with only those in it that hold a socket
+    def __init__(self, session: str) -> None:
+        self.session = session
+        # What was said so far, as a record of the session's processes
         self.record = ProcessRecord()
-        # The lines of the last look: what it said then is asked for
-        # again in part, see SAID_AGAIN
-        self._last: set[str] = set()
         self._listeners = 0
+        self._opened = 0
         self._said_hushed = False
 
     def poll(self) -> list[Event]:
-        """Take in what it said since the last time. The sockets that
-        started to wait for connections since, as events."""
-        since = max(self.record.last_line - SAID_AGAIN, 0.0)
-        lines = said_lines(self.watcher, since)
-        for line in lines:
-            if line not in self._last:
-                self.record.take(line)
-        if lines:
-            # Not after a look that gave nothing, it may not have been
-            # answered: what it said before would be taken again
-            self._last = set(lines)
+        """Take in what was said since the last time. The sockets that
+        started to wait for connections since and the files of secrets
+        opened, as events."""
+        self._take()
         events = listener_events(self.record, self._listeners)
+        events += opened_events(self.record, self._opened, own_too=False)
         self._listeners = len(self.record.listeners)
+        self._opened = len(self.record.opened)
         return events
+
+    def _take(self) -> None:
+        for line in self._said():
+            self.record.take(line)
+
+    @abstractmethod
+    def _said(self) -> list[str]:
+        """The lines said since the last time, none of them twice."""
 
     def health_since(self, since: float) -> list[Sample | Ended]:
         """How the session was doing later than a time, as far as read."""
@@ -754,12 +757,73 @@ class WatcherTail:
         )
 
     def newly_hushed(self) -> bool:
-        """Whether it said that it says no more aloud of connections and
-        their processes, once."""
+        """Whether it was said that no more is said aloud of connections
+        and their processes, once."""
         if self._said_hushed or self.record.hushed_at is None:
             return False
         self._said_hushed = True
         return True
+
+
+class WatcherTail(ProcessTail):
+    """What the watcher of a running session says aloud, as docker gives
+    it: of the processes, only those that hold a socket or a file of
+    secrets. Not the record of all that ran, which stays in the
+    sidecar."""
+
+    def __init__(self, watcher: str) -> None:
+        super().__init__(Watcher.session_of(watcher))
+        self.watcher = watcher
+        # The lines of the last look: what it said then is asked for
+        # again in part, see SAID_AGAIN
+        self._last: set[str] = set()
+
+    def _said(self) -> list[str]:
+        """From a little before the last of it, see SAID_AGAIN, without
+        what was taken then."""
+        since = max(self.record.last_line - SAID_AGAIN, 0.0)
+        lines = said_lines(self.watcher, since)
+        fresh = [line for line in lines if line not in self._last]
+        if lines:
+            # Not after a look that gave nothing, it may not have been
+            # answered: what it said before would be taken again
+            self._last = set(lines)
+        return fresh
+
+
+class RecordTail(ProcessTail):
+    """The record a launcher writes of a session it records from outside
+    (see host_health.py), read as it grows: how the session is doing,
+    and what its runtime told of what runs in it (see gvisor.py). The
+    file is the launcher's, on the host, all of it is read."""
+
+    def __init__(self, path: str, session: str) -> None:
+        super().__init__(session)
+        self.path = path
+        self._offset = 0
+
+    def _said(self) -> list[str]:
+        """The lines written whole since the last time, no more than
+        RECORD_READ of them at once: one still being written is taken
+        once it is whole."""
+        try:
+            with open(self.path, "rb") as file:
+                file.seek(self._offset)
+                read = file.read(RECORD_READ)
+        except OSError:
+            return []
+        whole, ended, _ = read.rpartition(b"\n")
+        if not ended:
+            return []
+        self._offset += len(whole) + 1
+        return whole.decode("utf-8", "replace").splitlines()
+
+    def health_since(self, since: float) -> list[Sample | Ended]:
+        """As far as written, not only as far as polled: the file is the
+        launcher's own, cheap to read, and what --trace follows asks for
+        how the session is doing at times of its own."""
+        self._take()
+        return super().health_since(since)
 
 
 # A function that returns a session's health readings later than a time

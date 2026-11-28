@@ -142,7 +142,7 @@ What a session is given and what it is kept from.
 [gVisor](https://gvisor.dev) runs a session on its own kernel, in user
 space, so a session cannot exploit a flaw in the host's kernel. It is
 available on Linux only. To use it, install `runsc`, register it in
-`/etc/docker/daemon.json` with the two arguments below, restart the daemon,
+`/etc/docker/daemon.json` with the arguments below, restart the daemon,
 and name the runtime in `CLAUDE_AIRLOCK_RUNTIME`:
 
 ```json
@@ -150,11 +150,19 @@ and name the runtime in `CLAUDE_AIRLOCK_RUNTIME`:
   "runtimes": {
     "runsc-hostnet": {
       "path": "/usr/local/bin/runsc",
-      "runtimeArgs": ["--network=host", "--host-uds=open"]
+      "runtimeArgs": [
+        "--network=host",
+        "--host-uds=open",
+        "--pod-init-config=/home/<user>/.local/state/claude-airlock/gvisor/pod-init.json"
+      ]
     }
   }
 }
 ```
+
+The path of `--pod-init-config` is under your own home, in
+`$XDG_STATE_HOME` when that is set. The launcher says which it is when a
+session starts without it.
 
 ```
 CLAUDE_AIRLOCK_RUNTIME=runsc-hostnet claude-airlock
@@ -175,11 +183,21 @@ prints what differs from Docker's own runtime:
 - **`--host-uds=open` is required for the SSH agent**, because the agent is
   reached through a socket of the host. Without it, a session that asks
   for the agent is refused.
-- **Processes are not recorded**, nor which process made each connection.
-  A sidecar that joins the session sees gVisor's kernel process, not the
-  session's processes, and the launcher does not run a watcher inside the
-  session. The capture, the egress filter and the records of the SSH agent
-  and Docker socket work as they do under Docker's own runtime.
+- **`--pod-init-config` is required for the processes.** A sidecar that
+  joins the session sees gVisor's kernel process, not the session's
+  processes, and the launcher does not run a watcher inside the session.
+  gVisor tells what runs instead (its runtime monitoring): each program
+  started, each connection with the process that made it, and each file
+  of secrets opened, to a socket the launcher listens on for the session.
+  It is told, not looked for, so a process that lives a moment and a file
+  opened and closed at once are seen too. As the file is read when a
+  sandbox is made, the launcher writes its session's socket into it and
+  holds it until the session runs, and another launcher waits meanwhile.
+  What gVisor could not send in time is counted, and the session is
+  slowed a little first: what it tells is retried, then dropped. Without
+  the argument, processes are not recorded. The capture, the egress filter
+  and the records of the SSH agent and Docker socket work as they do
+  under Docker's own runtime.
 - **Memory and CPU use are still recorded.** The launcher reads them from
   the cgroup of the container, along with the time the session waited for
   memory, CPU or disk. The process count, the use of each tmpfs and the

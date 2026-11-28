@@ -43,7 +43,7 @@ from ..recording.records import recorded_sessions
 from ..settings import EGRESS_PORT, Host
 from .calls import written_paths
 from .entries import read_entries, short_id, unreadable_lines
-from .net_events import reached_from, slowed
+from .net_events import opened_files, reached_from, slowed
 from .noted import noted_events
 from .outcomes import outside
 from .planted import FLAG, read_said
@@ -186,6 +186,7 @@ def _network_lines(host: Host, recorded: Recorded) -> list[str]:
                 "waited for connections, open to the other sessions on its network:",
                 list(waited),
             )
+            lines += _headed("opened files of secrets:", opened_files(record))
         if record and record.process_limit:
             then = (
                 f"which under {flat(record.outside)} ends the session as a whole"

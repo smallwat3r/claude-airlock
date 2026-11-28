@@ -667,6 +667,34 @@ can reach it, those of other projects too.
 sandbox  listen  tcp 0.0.0.0:8080  OPEN to its network  by: [812] node server.js < bash < claude
 ```
 
+A file of secrets a process holds open is a line too (`secret`), with
+the process and the command it was opened during, as one of what
+`--failed` keeps:
+
+```
+sandbox  secret  /home/me/.config/gh/hosts.yml, the login of gh, OPENED  by: [812] cat /home/me/.config/gh/hosts.yml < bash < claude  during: $ cat ~/.config/gh/hosts.yml
+```
+
+- The files are the login of Claude Code, of `gh` and of git
+  (`~/.git-credentials`), Docker's logins, the keys of AWS, Kubernetes,
+  gcloud and Azure, every file of `~/.ssh` and `~/.gnupg` but what holds
+  nothing secret (`known_hosts`, `config`, a public key), and any file of
+  a name hidden from the session (`.env`, `.netrc`, those of
+  `CLAUDE_AIRLOCK_SHADOW`) in the project or a directory mounted next to
+  it, where such files are hidden. A hidden file reads as empty: what
+  opens one is after what it held. One of those names elsewhere, in
+  `/tmp` say, is the session's own.
+- Claude Code reading its own login, as it does when it starts and to
+  renew it, is no sign of anything: with `--verbose` alone, as `opened by
+  Claude Code itself`.
+- The sidecar sees a file as it looks at a process, so one opened and
+  closed between two looks, by `cat` for one, is not seen. What the file
+  is named by is the kernel's, a link to it is seen through.
+- Each file once for each process, and no more than 1000 in all: the
+  header says when there were more (`NOT NOTED`). The header counts them
+  (`files of secrets OPENED`), the launcher names them when the session
+  is over, `--json` has `path`, `secret` (its kind), `own` and `process`.
+
 A connection the sidecar saw and found no process for says
 `by: a process that cannot be looked into`: a process can close itself to
 the others of its user, its connection is noted all the same.
@@ -751,9 +779,10 @@ sandbox  health  ALMOST OUT OF memory  mem 15g of 16g (93%), short of it 35% of 
 sandbox  health  OUT OF MEMORY, a process was ended for it  gone since: [812] node 14g
 ```
 
-Under [gVisor](sandbox.md#gvisor) there is no such sidecar. Processes are
-not recorded, and the launcher records the memory and CPU use of the
-session itself, along with the time it waited for memory, CPU or disk.
+Under [gVisor](sandbox.md#gvisor) there is no such sidecar. The launcher
+records the memory and CPU use of the session itself, along with the time
+it waited for memory, CPU or disk, and gVisor tells it what runs when
+its runtime is registered for that, see [Under gVisor](#under-gvisor).
 
 - A line comes out of turn when the session first uses 70% of its
   memory, its processes or a tmpfs (`running low on`), and 90% (`ALMOST
@@ -782,6 +811,29 @@ session itself, along with the time it waited for memory, CPU or disk.
   set. What went over the network is in units of 1000 (`14 MB`), as
   network tools count.
 - It takes cgroup v2. On a host with version 1 the lines are not there.
+
+### Under gVisor
+
+With its runtime registered with `--pod-init-config` (see
+[gVisor](sandbox.md#gvisor)), gVisor tells the launcher what runs in the
+session, and the lines above are there as under Docker's own runtime, the
+header says by whom (`processes 120 seen to run, as gVisor (runsc) told`).
+What differs:
+
+- Every program started is told, and every file opened or closed, so
+  what lives a moment is there, and a file of secrets read at once too.
+  A file opened through a link is told by the link, then by the file
+  itself once it is closed.
+- A process made is said to be the program its parent is, until it
+  becomes another, and its parent is the one that made it.
+- A connection is told by where it went, not by the port it was made
+  from: of the capture's, the one made to the same place nearest in time
+  is taken to be it.
+- What gVisor could not send in time is dropped and counted, the header
+  says how many (`COULD NOT BE TOLD`): what ran then may be missing. A
+  file opened by `openat2` and not closed is not told.
+- A session whose sandbox did not connect is said when it is over, and
+  its record has memory and CPU use alone.
 
 ## How the sandbox was started
 
