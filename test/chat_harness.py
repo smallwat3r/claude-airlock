@@ -272,7 +272,7 @@ def a_chat(
         host,
         sandbox,
         Layout(),
-        lambda _on_end: claude,
+        lambda *_told: claude,
         screen,
         guard=guard,
         hosts=hosts,

@@ -63,6 +63,29 @@ class ConsoleTest(LauncherTest):
         assert offered("@/etc/pas") == []
         assert offered("plain") == []
 
+    def test_no_more_files_are_looked_at_than_are_offered(self):
+        # A directory is the session's to fill: not listed whole, sorted
+        # and each name looked up for being one, for a Tab
+        for number in range(10):
+            (self.project / f"f{number}").mkdir()
+        (self.project / "g").touch()
+        looked: list[str] = []
+        isdir = console.os.path.isdir
+
+        def looked_up(path: str) -> bool:
+            looked.append(path)
+            return isdir(path)
+
+        with (
+            unittest.mock.patch.object(console, "NAMES_OFFERED", 3),
+            unittest.mock.patch.object(console.os.path, "isdir", looked_up),
+        ):
+            offered = console.completions("@f", True, [], str(self.project))
+        assert len(offered) == 3
+        assert offered == sorted(offered)
+        assert all(name.startswith("@f") and name.endswith("/") for name in offered)
+        assert len(looked) == 3
+
     def test_a_name_that_is_not_shown_as_it_is_is_not_offered(self):
         # The names are a session's to choose, readline writes them out
         for name in ("plain.py", "es\x1b[2Jcape", "bi\u202edi", "line\nbreak"):
@@ -368,6 +391,25 @@ class ConsoleTest(LauncherTest):
             padded = "ab" + unseen * 25
             assert screens.columns_of(padded) == 2, f"U+{ord(unseen):04X}"
             assert screens.erased("> ", padded, 10) == "\r\x1b[J"
+
+    def test_where_terminals_differ_on_a_width_the_fewer_rows_are_erased(self):
+        # An emoji takes one column where a terminal has the widths of
+        # before Unicode 9: counted two, a question of them would have the
+        # rows above it erased, the call it shows whole among them
+        emoji = "\U0001f600"
+        assert screens.columns_of(emoji * 5) == 5
+        assert screens.erased("> ", emoji * 5, 10) == "\r\x1b[J"
+        # What every terminal shows wide is counted so
+        assert screens.columns_of("中" * 5) == 10
+        # Where readline has the cursor in its row, an emoji is as wide as
+        # wcwidth has it now
+        assert screens.columns_of(emoji * 5, fewest=False) == 10
+        assert screens.cursor_back("> ", emoji * 2 + "ab", emoji * 2, 20) == "\r\x1b[6C"
+        # And never on a row above the one it is on: the rows up to it
+        # are those of all that was typed counted the fewest, less those
+        # before it counted not
+        typed = emoji * 4 + "abcdefg"
+        assert screens.cursor_back("> ", typed, emoji * 4, 10) == "\r"
 
     def test_a_question_with_tabs_has_only_the_rows_it_takes_erased(self):
         # A terminal moves a tab to the next stop and at its edge by none:

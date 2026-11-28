@@ -20,6 +20,7 @@ its own (see Asked), and whoever listens to claude goes on listening."""
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
@@ -28,7 +29,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..events import clean, flat, labelled
-from ..report.calls import call_whole
+from ..files import HELD_BY_LINE, HELD_BY_VALUE, held_by
+from ..report.calls import call_parts, call_whole
 from ..report.layout import (
     BLANK,
     BOLD,
@@ -100,6 +102,14 @@ NARROWEST_TEXT = 20
 # In colour, of the diff of an edit shown whole, the lines it takes out
 # and those it puts in, by how they start
 DIFF_STYLES = {"  diff: -": RED, "  diff: +": GREEN, "  diff: @": CYAN}
+# No more of what claude asked than this waits for its turn to be put,
+# the one being put too, nor more bytes of it than MOST_WAITING_BYTES as
+# it is held (see waiting_size): what comes past either is refused at
+# once. A session can ask any number of times while the first question
+# waits for the user, each time with an input as large as a line may
+# be. One alone is always kept, however large: it is bounded as a line
+MOST_WAITING = 100
+MOST_WAITING_BYTES = 256 << 20
 
 
 class Question:
@@ -207,6 +217,29 @@ def _suggested_rule(request: dict) -> tuple[str, dict] | None:
     return None
 
 
+def waiting_size(request: dict, most: int = MOST_WAITING_BYTES) -> int:
+    """About how many bytes what claude asked takes as it waits, as
+    held_size counts what was read: for each character of a text as
+    many as held_by says of it, and so many for each value. Counted no
+    further than past most: what is larger is not kept anyway, and one
+    of a great many small values would else be gone through whole. A
+    value at a time, not a level of it at a time by calling itself: what
+    was read can be nested deeper than that goes."""
+    held = HELD_BY_LINE
+    left: list[object] = [request]
+    while left and held <= most:
+        value = left.pop()
+        held += HELD_BY_VALUE
+        if isinstance(value, str):
+            held += held_by(value) * len(value)
+        elif isinstance(value, dict):
+            left += value.keys()
+            left += value.values()
+        elif isinstance(value, list):
+            left += value
+    return held
+
+
 @dataclass(frozen=True)
 class Unanswered:
     """What claude asked under an id and has no answer to yet, and
@@ -215,7 +248,12 @@ class Unanswered:
     for its turn, nor any longer while it is put, a line says so when
     its question was before the user, and it is not answered."""
 
-    asked: object
+    asked: str
+    request: dict
+    # How often the asker had given up when it was asked, see attend
+    asked_at: int
+    # How large it is as it waits, see waiting_size
+    size: int
     withdrawn: threading.Event = field(default_factory=threading.Event)
 
 
@@ -422,14 +460,13 @@ class Asker:
             return self._questions(tool_input)
         return self._permission(tool, tool_input, _suggested_rule(request))
 
-    def _acted(self, tool: str, tool_input: dict) -> list[str]:
-        """The lines of a call as it would be made, whole. Not the reason
-        claude gives for a command, which is no part of what runs."""
-        acted = tool_input
-        if tool == "Bash":
-            acted = {
-                key: said for key, said in tool_input.items() if key != "description"
-            }
+    def _acted(self, tool: str, tool_input: dict, whole: list[str]) -> list[str]:
+        """The lines of a call as it would be made, given those it is
+        shown whole with. Not the reason claude gives for a command,
+        which is no part of what runs."""
+        if tool != "Bash":
+            return whole
+        acted = {key: said for key, said in tool_input.items() if key != "description"}
         return call_whole(tool, acted, self._project_dir)
 
     def _reviewed(self, tool: str, tool_input: dict) -> str:
@@ -444,7 +481,8 @@ class Asker:
         subagent's can come after the question. A plan comes with every
         other argument of its call, which a yes allows as well: those that
         grant what the plan needs (allowedPrompts) among them."""
-        acted = self._acted(tool, tool_input)
+        details, rest = call_parts(tool, tool_input, self._project_dir)
+        acted = self._acted(tool, tool_input, details + rest)
         named = flat(acted[0]) if acted else ""
         plan = tool_input.get("plan")
         if tool == "ExitPlanMode" and isinstance(plan, str):
@@ -460,14 +498,20 @@ class Asker:
                 self._page.note("plan", "what else a yes allows with it:")
                 self._page.put_said(prefixed("  ", besides))
         elif len(acted) > 1 or len(named) > ABOUT_WIDTH:
-            whole = call_whole(tool, tool_input, self._project_dir)
             # On one line: a name is claude's to give, and what followed
             # a line break in it would read as a line of the chat's own
             name = flat(tool).lower()[:WHAT_WIDTH]
             self._page.say([f"{name:<{WHAT_WIDTH}}  the call whole:"])
-            self._page.put_said(
-                prefixed("  ", whole), lambda line: DIFF_STYLES.get(line[:9], "")
+            # Of an Edit, what call_details tells of it has its diff, in
+            # colour. Not the arguments it has besides, nor those of any
+            # other tool, whatever they are named: one named diff would
+            # pass for the diff, a line that is taken out for one that is
+            # put in
+            diffed, plain = (details, rest) if tool == "Edit" else ([], details + rest)
+            diff = self._page.said(
+                prefixed("  ", diffed), lambda line: DIFF_STYLES.get(line[:9], "")
             )
+            self._page.put(diff + self._page.said(prefixed("  ", plain)))
         return named[:ABOUT_WIDTH]
 
     def _permission(
@@ -526,52 +570,62 @@ class Answered(Protocol):
     """Who is given the answer to what it asked under an id: claude, see
     Agent."""
 
-    def respond(self, asked: object, decision: dict) -> None: ...
+    def respond(self, asked: str, decision: dict) -> None: ...
 
-    def refuse(self, asked: object, why: str) -> None: ...
+    def refuse(self, asked: str, why: str) -> None: ...
 
 
 class Asked:
     """What claude asked and has no answer to yet, put to the user one
     question after the other on a thread of its own, and each answer
-    given to claude."""
+    given to claude. No more of it waits than MOST_WAITING says: it is
+    held until it is answered, and the user answers one at a time."""
 
     def __init__(self, asker: Asker, page: Page):
         self._asker = asker
         self._page = page
-        # Each what claude asked, the request and how often the asker had
-        # given up by then, or what the chat itself has to ask, then None
-        # when nothing more is asked
-        self._waiting: queue.Queue[
-            tuple[Unanswered, dict, int] | Callable[[], None] | None
-        ] = queue.Queue()
+        # Each what claude asked, or what the chat itself has to ask, then
+        # None when nothing more is asked
+        self._waiting: queue.Queue[Unanswered | Callable[[], None] | None] = (
+            queue.Queue()
+        )
         # How many of them have no answer yet, the one being put too
         self._count = 0
         self._counting = threading.Lock()
         # What claude asked and has no answer yet, by the id it asked
         # under, for it to be withdrawn by, see cancel
         self._unanswered: dict[str, Unanswered] = {}
+        # How many of what claude asked have no answer yet, and how large
+        # they are together, see MOST_WAITING: counted apart from the
+        # ids, claude can ask under one of them twice
+        self._kept = 0
+        self._kept_bytes = 0
 
     def start(self, claude: Answered) -> None:
         """Have what is asked from now on put, and claude given each
         answer, until nothing more is asked, see close."""
         threading.Thread(target=self._decide, args=(claude,), daemon=True).start()
 
-    def put(self, asked: object, request: dict) -> None:
-        """Keep what claude asked under an id until its turn comes. Whoever
-        listens to claude is not held up by it."""
-        unanswered = Unanswered(asked)
+    def put(self, asked: str, request: dict) -> bool:
+        """Keep what claude asked under an id until its turn comes, and
+        whether it is: not past MOST_WAITING, which claude is to be
+        refused at once. Whoever listens to claude is not held up by it."""
+        size = waiting_size(request)
+        unanswered = Unanswered(asked, request, self._asker.given_up, size)
         with self._counting:
+            full = self._kept >= MOST_WAITING
+            if self._kept and (full or self._kept_bytes + size > MOST_WAITING_BYTES):
+                return False
+            self._kept += 1
+            self._kept_bytes += size
             self._count += 1
-            if isinstance(asked, str):
-                self._unanswered[asked] = unanswered
-        self._waiting.put((unanswered, request, self._asker.given_up))
+            self._unanswered[asked] = unanswered
+        self._waiting.put(unanswered)
+        return True
 
-    def cancel(self, asked: object) -> None:
+    def cancel(self, asked: str) -> None:
         """Claude no longer asks what it asked under an id, and waits for
         no answer to it (control_cancel_request): see Unanswered."""
-        if not isinstance(asked, str):
-            return
         with self._counting:
             unanswered = self._unanswered.get(asked)
         if unanswered is not None:
@@ -599,31 +653,34 @@ class Asked:
 
     def _decide(self, claude: Answered) -> None:
         """Put each question and give claude its answer. One that cannot
-        be put is refused: claude waits for an answer to each."""
+        be put is refused: claude waits for an answer to each. Whatever
+        becomes of one, the next is put: a thread that ended here would
+        put no question again, of claude's or of the chat's own."""
         while True:
             waiting = self._waiting.get()
             if waiting is None:
                 return
             try:
-                if callable(waiting):
-                    self._own(waiting)
+                if isinstance(waiting, Unanswered):
+                    self._answered(claude, waiting)
                 else:
-                    self._answered(claude, *waiting)
+                    self._own(waiting)
+            except Exception as error:  # noqa: BLE001
+                with contextlib.suppress(Exception):
+                    self._page.note("chat", f"FAILED to answer: {flat(repr(error))}")
             finally:
                 with self._counting:
                     self._count -= 1
 
-    def _answered(
-        self, claude: Answered, unanswered: Unanswered, request: dict, asked_at: int
-    ) -> None:
+    def _answered(self, claude: Answered, unanswered: Unanswered) -> None:
         """Put what claude asked and give it the answer. What it asked
         of a turn the user interrupted since is refused unseen, as the
         question that was on the screen then was: claude waits for an
         answer to each. Unless it withdrew what it asked, see Unanswered."""
         asked, withdrawn = unanswered.asked, unanswered.withdrawn
         try:
-            wanted = self._asker.attend(asked_at, unanswered)
-            decision = self._asker.decide(request) if wanted else REFUSED
+            wanted = self._asker.attend(unanswered.asked_at, unanswered)
+            decision = self._asker.decide(unanswered.request) if wanted else REFUSED
             if not withdrawn.is_set():
                 claude.respond(asked, decision)
         except Exception as error:  # noqa: BLE001
@@ -632,7 +689,9 @@ class Asked:
                 claude.refuse(asked, "the question could not be put")
         finally:
             with self._counting:
-                if isinstance(asked, str) and self._unanswered.get(asked) is unanswered:
+                self._kept -= 1
+                self._kept_bytes -= unanswered.size
+                if self._unanswered.get(asked) is unanswered:
                     del self._unanswered[asked]
 
     def _own(self, ask: Callable[[], None]) -> None:

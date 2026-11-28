@@ -21,6 +21,7 @@ from chat_harness import (
 from claude_airlock.chat import console, drift, notices
 from claude_airlock.chat import said as saying
 from claude_airlock.chat import tasks as tasking
+from claude_airlock.events import labelled
 from claude_airlock.report.layout import Layout
 
 
@@ -34,6 +35,17 @@ class NoticesTest:
             about = {"pre_tokens": 29232, "post_tokens": 7898}
             said.system(system("compact_boundary", compact_metadata=about))
             said.system(system("api_retry", error="overloaded\x1b[2J"))
+            # Of a subagent, which its transcript does not have, as claude
+            # says it once each time. Not how long a call has run
+            retry = {"agent_id": "a1", "attempt": 1, "max_retries": 10}
+            said.call_progress(
+                {
+                    "type": "tool_progress",
+                    "subagent_retry": {**retry, "error_category": "rate_limit"},
+                }
+            )
+            said.call_progress({"type": "tool_progress", "elapsed_time_seconds": 5})
+            said.call_progress({"type": "tool_progress", "subagent_retry": "x"})
             said.system(system("task_started", task_id="a1", description="Run it"))
             still_running = started.running.others
             said.system(system("task_notification", task_id="a1", status="completed"))
@@ -44,10 +56,101 @@ class NoticesTest:
             "# chat        compacting the conversation",
             "# chat        the conversation was compacted, 29.2k tokens to 7.9k",
             "# chat        the API did not answer, trying again  overloaded[2J",
+            "# chat        the API did not answer a subagent, trying again  rate_limit",
             "# task        started: Run it",
             "# task        completed: Run it",
             "# chat        a new conversation, the one before is cleared",
         ]
+
+    def test_what_claude_does_on_its_own_with_the_session_is_said(self):
+        # As Claude Code sends them, which are new with it: each would
+        # else be left out without a word
+        said = notices.Notices(page())
+        with written() as lines:
+            said.system(
+                system(
+                    "permission_denied",
+                    tool_name="Bash",
+                    tool_use_id="t1",
+                    decision_reason="denied by a rule\x1b[2J",
+                    message="Permission to use Bash has been denied.",
+                )
+            )
+            said.system(
+                system(
+                    "permission_denied",
+                    tool_name="WebFetch",
+                    agent_id="a1",
+                    message="Permission denied.",
+                )
+            )
+            said.system(
+                system(
+                    "model_fallback",
+                    trigger="overloaded",
+                    original_model="claude-opus-5-5",
+                    fallback_model="claude-fable-5-2",
+                    content="x",
+                )
+            )
+            # Not a request the model refused, which the transcript says
+            # (see told_over_the_pipe of followed.py)
+            said.system(
+                system(
+                    "model_fallback",
+                    trigger="refusal",
+                    original_model="claude-opus-5-5",
+                    fallback_model="claude-fable-5-2",
+                )
+            )
+            said.system(system("plugin_install", status="started"))
+            said.system(
+                system("plugin_install", status="failed", name="m", error="no\nway")
+            )
+            paths = [f"/home/sandbox/.claude/memory/{n}.md" for n in range(5)]
+            said.system(system("memory_saved", written_paths=paths, verb="Updated"))
+            said.system(system("memory_saved", written_paths=paths[:1]))
+            said.system(
+                system(
+                    "peer_message_hold",
+                    state="held",
+                    lane="socket",
+                    **{"from": "uds:/tmp/x.sock"},
+                    from_name="other",
+                    cause="mode-mismatch",
+                )
+            )
+            said.system(
+                system(
+                    "peer_message_hold",
+                    state="dropped",
+                    lane="bridge",
+                    outcome="expired",
+                    **{"from": ""},
+                )
+            )
+            # What is not what it should be says no more than it holds
+            said.system(system("memory_saved", written_paths="x", verb=["x"]))
+            said.system(system("permission_denied", tool_name={"x": 1}))
+        listed = ", ".join(paths[:3])
+        other = "a message of another session"
+        assert lines == [
+            f"# {labelled('chat', said)}"
+            for said in (
+                "claude refused bash without asking: denied by a rule[2J",
+                "claude refused webfetch of a subagent without asking: Permission denied.",
+                "claude-opus-5-5 failed (overloaded), this turn goes on with claude-fable-5-2",
+                "plugin install: started",
+                "plugin m install: failed, no\\nway",
+                f"claude updated 5 memories to {listed} and 2 more",
+                f"claude saved 1 memory to {paths[0]}",
+                f"{other} said to be from other (socket): held, mode-mismatch",
+                f"{other} (bridge): dropped, expired",
+                "claude saved 0 memories",
+                "claude refused a tool without asking",
+            )
+        ]
+        assert {"init", "hook_started", "memory_saved"} <= said.known
 
     def test_a_limit_of_the_account_is_said_once(self):
         said = notices.Notices(page())

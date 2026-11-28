@@ -54,14 +54,33 @@ and CPU the sandbox uses](img/line-mode.png)
   the permission mode. Both start with the number of the call (`[7]`).
 - What claude was given besides your prompts: the instruction files it
   read (each `CLAUDE.md`), a file that changed since it read it, a line
-  you typed while it worked.
+  you typed while it worked, and a prompt that did not come from you,
+  `NOT FROM YOU` with where it came from (another session, an MCP
+  server), see [Reading the lines](trace.md#reading-the-lines).
+- Each hook that ran, with its event, its command and how it ended, one
+  that blocked, stopped or failed in red, see
+  [The hooks](trace.md#the-hooks).
+- A call that acted outside the sandbox through Anthropic (`OUTSIDE
+  SANDBOX`, see [Outside the sandbox](trace.md#outside-the-sandbox)),
+  and one of Claude Code's own file tools on a file of secrets (`SECRETS
+  FILE`). Remote Control switched on, in red, and what it published.
 - A change of permission mode or model, the conversation being
-  compacted, and a request to the API that is tried again. At the first
+  compacted, and a request to the API that is tried again, a subagent's
+  too. At the first
   turn, the MCP servers of the session with those that are not
   connected, and again when they change.
+- What Claude Code does on its own: a task of its schedule that fired,
+  a turn no one typed, with its prompt, a call it refused without asking
+  you, by a rule or its mode, and why, another model it goes on with
+  for the turn when the model failed, a plugin it installs, the memories
+  it saves and to which files, and a message of another session that it
+  holds back from the model, with who that session says it is.
 - Each reply, and what the subagents do, see
   [The subagents](#the-subagents). The lines of a subagent start with
-  its number (`[a2]`), its calls with theirs after it (`[a2.3]`).
+  its number (`[a2]`), its calls with theirs after it (`[a2.3]`). What
+  the session does while a reply is written comes under it, or between
+  two of its lines once the reply has been written for 5 seconds, or
+  has said nothing more for 2.
 - What the session writes to its errors, or as a line that is not a
   Claude Code message. No more than can be read: past 500 lines within 5
   seconds, a line says how many were left out, and while it keeps up that
@@ -278,7 +297,7 @@ You can type a line at any time, and claude takes it up when it can.
 | `/help` | Lists what can be typed |
 | `/model`, `/context`, `/usage`, `/compact`, `/clear`, your own commands and skills | Claude Code's commands that answer in text, as typed |
 | `/mode`, `/mode plan` | Shows the permission mode, or changes it (`default`, `acceptEdits`, `plan`) |
-| `/resume`, `/resume ID` | Leaves this session for an earlier one of the project, picked from a list or by its id |
+| `/resume`, `/resume ID` | Leaves this session for an earlier one of the project, picked by its id or from a list of the latest 15, the latest as `--trace` has it (see [The transcript](trace.md#the-transcript)) |
 | `/mcp` | The MCP servers of the session |
 | `/status`, `/statusline` | The status in full, see [The status](#the-status) |
 | `!make test` | Runs a command in the sandbox, claude is not told |
@@ -297,6 +316,12 @@ allows all of them. A plan claude asks to go ahead with is shown as a
 reply, with every other argument of its call under it, such as the
 permissions it asks for to carry it out. When any of it holds characters
 that do not show (control, direction or zero width), a line says so.
+
+Claude, and its subagents, can ask again before you have answered: you
+are asked one call at a time. No more than 100 calls wait to be asked
+about, nor more than 256 MB of what they would be made with: a call
+asked about past that is refused at once, and a line says so
+(`REFUSED bash unasked`).
 
 When claude asks you a question with options, you answer with a number,
 several numbers separated by commas, or in words.

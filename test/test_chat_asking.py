@@ -15,6 +15,7 @@ import unittest.mock
 from chat_harness import PATIENCE, WaitingHosts, before_the_user, page, written
 
 from claude_airlock.chat import asking, console
+from claude_airlock.chat import hosts as asking_hosts
 from claude_airlock.chat import said as saying
 from claude_airlock.chat import screen as screens
 from claude_airlock.chat.hosts import HostQuestions
@@ -315,6 +316,19 @@ class AskingTest:
             put_in = next(line for line in lines if "diff: +B" in line)
             assert taken_out.startswith("\x1b[31m" * colour + "  diff: -b")
             assert put_in.startswith("\x1b[32m" * colour + "  diff: +B")
+        # Not an argument named so, of an edit or of any call: what is
+        # taken out would pass for what is put in
+        asker = an_asker(page(Layout(colour=True)))
+        for tool, call in (
+            ("Edit", {**edit, "diff": "+rm -rf ~\n-nothing"}),
+            ("mcp__git__apply", {"diff": "+rm -rf ~\n@@ -1 +1 @@", "repo": "/p"}),
+        ):
+            with written() as lines:
+                asker._reviewed(tool, call)
+            assert "  diff: +rm -rf ~" in lines, tool
+            # The diff of the edit still is
+            diffed = any(line.startswith("\x1b[32m  diff: +B") for line in lines)
+            assert diffed is (tool == "Edit")
 
     def test_what_is_asked_about_is_all_of_the_call(self):
         # A tool with a file among its arguments is told by the file,
@@ -578,7 +592,16 @@ class AskingTest:
             "#   2. Neither",
         ]
         assert max(map(len, lines)) <= 40
+        # A question that is no prose is cut into rows, not wrapped at its
+        # spaces: that takes dozens of times its length
+        long = {"question": "x" * 100_000, "options": [{"label": "y " * 50_000}]}
+        request = {"tool_name": "AskUserQuestion", "input": {"questions": [long]}}
+        with narrow, written() as lines:
+            self.asker(["1"]).decide(request)
+        assert max(map(len, lines)) <= 40
+        assert sum(line.count("x") for line in lines) == 100_000
         # In a file a line is as long as it is, an option still on its own
+        request = {"tool_name": "AskUserQuestion", "input": {"questions": questions}}
         with written() as lines:
             self.asker(["1"]).decide(request)
         assert lines[1:3] == ["#   1. Both layers", f"#      {about}"]
@@ -606,7 +629,27 @@ class HostQuestionsTest:
             ask()
             return found
 
-        with unittest.mock.patch.object(hosts, "waiting", answered_meanwhile):
+        with (
+            unittest.mock.patch.object(hosts, "waiting", answered_meanwhile),
+            unittest.mock.patch.object(asking_hosts, "LOOKS_APART", 0.0),
+        ):
             questions.look()
         assert hosts.answers == [(com, True)]
         assert asked.then.call_count == 1
+
+    def test_the_hosts_that_wait_are_looked_at_no_more_often_than_so_much(self):
+        # A look is had after each thing claude says, and lists a directory
+        hosts = WaitingHosts()
+        questions = HostQuestions(
+            hosts, page(), an_asker(), unittest.mock.Mock(), True, lambda: None
+        )
+        clock = [100.0]
+        with unittest.mock.patch.object(
+            asking_hosts.time, "monotonic", lambda: clock[0]
+        ):
+            for _ in range(1000):
+                questions.look()
+            assert hosts.looks == 1
+            clock[0] += 2 * asking_hosts.LOOKS_APART
+            questions.look()
+        assert hosts.looks == 2

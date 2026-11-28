@@ -25,16 +25,17 @@ from claude_airlock.events import labelled
 
 
 @contextlib.contextmanager
-def played(*command: str) -> Iterator[pipe.Agent]:
+def played(*command: str, late: pipe.Errors | None = None) -> Iterator[pipe.Agent]:
     """Claude played by a command, in the place of the docker command
-    that runs it. Ended once done with, however it was left: stopped,
+    that runs it, what it writes to its errors once it has ended written
+    where late says. Ended once done with, however it was left: stopped,
     what it still says let go of for what reads its pipes to end, and
     those pipes closed."""
 
     def run(*_args: str, **options) -> subprocess.Popen:
         return subprocess.Popen(command, **options)
 
-    agent = pipe.Agent([], lambda: None, run)
+    agent = pipe.Agent([], lambda: None, run, late)
     try:
         yield agent
     finally:
@@ -193,12 +194,71 @@ class PipeTest:
             assert not agent._errors.is_alive()
             # As many as may wait were passed on, for whoever listens to
             # count. Of the rest the first are shown, and a line says
-            # that there was more
+            # that there was more. On the launcher's own errors where no
+            # chat is to write them
             assert agent.ended.is_set()
             assert len(agent.messages._held) <= pipe.BACKLOG
             written = capsys.readouterr().err.splitlines()
             assert written.count("y") == pipe.LAST_WORDS
             assert written[pipe.LAST_WORDS :] == [f"claude-airlock: {pipe.NO_MORE}"]
+
+    def test_what_a_session_leaves_on_its_errors_is_written_where_the_chat_writes(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # Above the line being read, as the lines of the chat are: not
+        # around it, where the next erase would be counted from a cursor
+        # that is not where it was left
+        script = "exec >&-; yes | head -n 5000 >&2"
+        with written() as lines, played("sh", "-c", script, late=page()) as agent:
+            assert agent.status() == 0
+            agent._errors.join(PATIENCE)
+        assert capsys.readouterr().err == ""
+        assert lines.count("y") == pipe.LAST_WORDS
+        assert lines[-1] == f"# {labelled('chat', pipe.NO_MORE)}"
+
+    def test_a_thread_that_cannot_be_started_leaves_no_session_running(self):
+        # As at the launcher's limit of them: the session it has started
+        # is not left with nothing to talk to it
+        started = threading.Thread.start
+        threads: list[threading.Thread] = []
+        ran: list[subprocess.Popen] = []
+
+        def run(*_args: str, **options) -> subprocess.Popen:
+            ran.append(subprocess.Popen(["cat"], **options))
+            return ran[-1]
+
+        def start(thread: threading.Thread) -> None:
+            if thread.name.endswith("(_write)"):
+                raise RuntimeError("can't start new thread")
+            started(thread)
+            threads.append(thread)
+
+        with (
+            unittest.mock.patch.object(threading.Thread, "start", start),
+            pytest.raises(RuntimeError, match="can't start new thread"),
+        ):
+            pipe.Agent([], lambda: None, run)
+        (process,) = ran
+        assert process.poll() is not None
+        # What read its pipes is over, the session having ended
+        for thread in threads:
+            thread.join(PATIENCE)
+            assert not thread.is_alive()
+        for piped in (process.stdout, process.stderr):
+            if piped:
+                piped.close()
+
+    def test_an_answer_that_cannot_be_written_is_a_refusal(self, agent: pipe.Agent):
+        # An input given back as claude gave it, nested as deep as could
+        # just be read: claude is not left waiting for an answer
+        deep: list = []
+        for _ in range(100_000):
+            deep = [deep]
+        assert not agent.send({"deep": deep})
+        agent.respond("r1", {"behavior": "allow", "updatedInput": {"x": deep}})
+        sent: Any = agent.messages.get(timeout=PATIENCE)
+        assert sent["response"]["request_id"] == "r1"
+        assert sent["response"]["subtype"] == "error"
 
     def test_what_claude_is_told_is_a_line_each(self, agent: pipe.Agent):
         agent.prompt("hello")

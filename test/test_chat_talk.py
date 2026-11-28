@@ -25,6 +25,7 @@ from chat_harness import (
     agent_started,
     got_on,
     lines_now,
+    page,
     task_over,
     written,
 )
@@ -32,11 +33,15 @@ from harness import LauncherTest
 
 from claude_airlock.chat import commands, pipe, plain, talk
 from claude_airlock.chat import followed as following
+from claude_airlock.chat import reply as replying
 from claude_airlock.chat import said as saying
 from claude_airlock.chat import tasks as tasking
+from claude_airlock.chat.turn import Turns
 from claude_airlock.events import Event, Who, labelled
 from claude_airlock.recording.changes import change_events
+from claude_airlock.report import told as telling
 from claude_airlock.report.follow import Follower, Round
+from claude_airlock.report.layout import Layout
 from claude_airlock.settings import Host
 
 
@@ -419,13 +424,42 @@ class TalkTest(LauncherTest):
             # A turn that did not go well may not say what its model reads
             {"type": "result", "subtype": "error_during_execution", "usage": usage},
             {},
+            # What claude says of the session that is said, or is known
+            # and has no use here
+            {"type": "system", "subtype": "memory_saved", "written_paths": []},
+            {"type": "system", "subtype": "hook_started"},
+            {"type": "system", "subtype": "turn_duration"},
+            # How a call goes on, which says nothing more than how long it
+            # ran but of a subagent's request to the API tried again
+            {"type": "tool_progress", "tool_use_id": "t1", "elapsed_time_seconds": 3},
         )
         assert changed == []
+
+    def test_a_request_of_a_subagent_to_the_api_tried_again_is_said(self):
+        # No transcript has it, claude says it in the progress of the call
+        # that started the subagent
+        chat = a_chat(self.host)
+        retry = {"agent_id": "a1", "attempt": 2, "max_retries": 10}
+        progress = {
+            "type": "tool_progress",
+            "tool_use_id": "t1",
+            "subagent_retry": {**retry, "error_category": "overloaded"},
+        }
+        with written() as lines:
+            chat._heard(progress)
+        said = "the API did not answer a subagent, trying again  overloaded"
+        assert lines == [f"# {labelled('chat', said)}"]
 
     def test_a_chat_says_what_changed_in_what_claude_says(self):
         usage = {"input_tokens": 10, "output_tokens": 5}
         for message, what in (
             ({"type": "new_thing"}, "a message line mode does not know, new_thing"),
+            # What claude says of the session in a way of its own
+            (
+                {"type": "system", "subtype": "new_thing"},
+                "a system message line mode does not know, new_thing",
+            ),
+            ({"type": "system"}, "a system message line mode does not know, none"),
             # As it came the day the status lost its limits
             (
                 {
@@ -560,6 +594,67 @@ class FollowedTest(LauncherTest):
         assert follower._ours("claude-test")
         assert not follower._ours("claude-test-2")
 
+    def test_a_reply_left_open_holds_back_what_the_session_did_for_a_while(self):
+        # Its end never told, a reply that kept the launcher's own lines
+        # back until it is over would hide them for as long as it likes
+        shown = page(Layout(compact=True))
+        turns = Turns()
+        turns.begin()
+        replies = replying.ReplyStream(shown, lambda: followed.show(now=True))
+        followed = following.Followed(self.host, "claude-test", shown, turns, replies)
+        rounds: list[Round] = []
+        follower = unittest.mock.Mock()
+        follower.poll.side_effect = lambda: rounds.pop(0) if rounds else Round()
+        followed._follower = follower
+        clock = [1000.0]
+
+        def denied(host: str) -> Round:
+            event = Event(time.time(), Who.CLAUDE, "net", [f"DENIED {host}"], {})
+            return Round(events=[(None, event)])
+
+        def said(text: str) -> None:
+            replies.piece({"type": "content_block_delta", "delta": {"text": text}})
+
+        start = {"type": "content_block_start", "content_block": {"type": "text"}}
+        with (
+            written() as lines,
+            unittest.mock.patch.object(time, "monotonic", lambda: clock[0]),
+        ):
+            replies.piece(start)
+            said("one\n")
+            rounds.append(denied("a.example"))
+            # Held while it goes on, written once it has for a while
+            for _ in range(int(replying.HOLD_OPEN / following.POLL) - 1):
+                clock[0] += following.POLL
+                said("t")
+                followed.show()
+                assert "DENIED" not in lines_now(lines)
+            clock[0] += following.POLL
+            said("wo")
+            followed.show()
+            assert "DENIED a.example" in lines_now(lines)
+            # Held again for a while, what comes of the reply since is
+            # under a line of its own
+            said("\nthree\n")
+            rounds.append(denied("b.example"))
+            clock[0] += following.POLL
+            followed.show()
+            assert "DENIED b.example" not in lines_now(lines)
+            # Not once it is quiet for a moment
+            clock[0] += replying.HOLD_QUIET
+            followed.show()
+            assert "DENIED b.example" in lines_now(lines)
+            replies.piece({"type": "content_block_stop"})
+        text = "\n".join(lines)
+        said_in = ("one", "DENIED a.example", "ttttttttwo", "three", "DENIED b.example")
+        places = [text.index(part) for part in said_in]
+        assert places == sorted(places)
+        assert sum(line.endswith("claude   reply") for line in lines) == 2
+        # What was written of the reply ends there as a reply ends
+        for host in ("a.example", "b.example"):
+            at = next(n for n, line in enumerate(lines) if f"DENIED {host}" in line)
+            assert lines[at - 1] == ""
+
     def test_a_cleared_session_is_followed_in_its_new_transcript(self):
         chat = a_chat(self.host)
         other = SESSION.replace("3fa9", "4fa9")
@@ -593,6 +688,85 @@ class FollowedTest(LauncherTest):
         # What only the transcript has is shown from it
         for what in ("context", "mode", "model", "prompt"):
             assert not told(Event(soon, Who.CLAUDE, what, ["x"], {}), began)
+        # So are the memories saved, a call refused without asking and a
+        # model fallen back on, which claude says too. Not the change of
+        # mode or model, nor a request the model refused
+        for what, fields in (
+            ("memory", {}),
+            ("mode", {"denied_tool": "Bash"}),
+            ("model", {"trigger": "overloaded", "refused": False}),
+        ):
+            assert told(Event(soon, Who.CLAUDE, what, ["x"], fields), began)
+        refused = {"trigger": "", "refused": True}
+        assert not told(Event(soon, Who.CLAUDE, "model", ["x"], refused), began)
+        # Nor a task of the schedule that fired, which claude says nothing of
+        fired = {"task_id": "t1", "cron": "*/5 * * * *", "prompt": "look"}
+        assert not told(Event(soon, Who.CLAUDE, "task", ["x"], fired), began)
+
+    def test_what_a_trace_reads_of_what_claude_said_live_is_not_said_again(self):
+        # As the transcript has them, read as a trace reads them (told.py):
+        # a field renamed there would have the chat say one twice, or not
+        # at all
+        began = time.time()
+        asides = telling.Asides(verbose=False, live=True)
+
+        def told_live(entry: dict) -> list[bool]:
+            made = asides.take(entry, began + 1)
+            assert made, entry
+            return [following.told_over_the_pipe(event, began) for event in made]
+
+        def system(subtype: str, **more: object) -> dict:
+            return {"type": "system", "subtype": subtype, **more}
+
+        models = {
+            "originalModel": "claude-opus-5-5",
+            "fallbackModel": "claude-fable-5-2",
+        }
+        ended = "<task-notification><status>completed</status></task-notification>"
+        said = [
+            system(
+                "api_error",
+                error={"message": "Overloaded"},
+                retryInMs=500,
+                retryAttempt=1,
+                maxRetries=10,
+            ),
+            system("compact_boundary", compactMetadata={"trigger": "auto"}),
+            {
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "commandMode": "task-notification",
+                    "prompt": ended,
+                },
+            },
+            system(
+                "permission_denied",
+                tool_name="Bash",
+                tool_use_id="t1",
+                decision_reason="denied by a rule",
+            ),
+            system("model_fallback", trigger="overloaded", **models),
+            system("memory_saved", writtenPaths=["/home/sandbox/.claude/memory/a.md"]),
+        ]
+        for entry in said:
+            assert told_live(entry) == [True], entry
+        # What claude says nothing of, and a request the model refused,
+        # which the chat leaves to the transcript
+        unsaid = [
+            system(
+                "scheduled_task_fire", taskId="t1", cron="*/5 * * * *", prompt="look"
+            ),
+            system("model_fallback", trigger="refusal", **models),
+            system("model_refusal_fallback", trigger="refusal", **models),
+        ]
+        for entry in unsaid:
+            assert told_live(entry) == [False], entry
+        # Nor a change of mode, of which a prompt says the mode it was in
+        prompted = {"type": "user", "message": {"content": "hi"}}
+        for mode in ("default", "plan"):
+            made = asides.prompted({**prompted, "permissionMode": mode}, began + 1)
+        assert [following.told_over_the_pipe(event, began) for event in made] == [False]
 
 
 class SessionTest:
@@ -607,6 +781,11 @@ class SessionTest:
     def test_what_claude_says_of_the_session_is_taken_when_it_is_what_it_should(self):
         session = saying.Session()
         assert not session.heard({"subtype": "status", "permissionMode": "plan"})
+        assert session.mode == "plan"
+        # A mode is a name, as /mode takes one: what is none leaves the
+        # one before, as there
+        for mode in (7, ["acceptEdits"], {"x": 1}, ""):
+            session.heard({"subtype": "status", "permissionMode": mode})
         assert session.mode == "plan"
         init = {
             "subtype": "init",

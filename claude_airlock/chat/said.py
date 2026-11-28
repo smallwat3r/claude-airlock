@@ -45,6 +45,12 @@ def kept_id(value: object) -> str | None:
     return value if isinstance(value, str) and 0 < len(value) <= ID_WIDTH else None
 
 
+def kept_name(value: object, width: int = NAME_KEPT) -> str:
+    """A name or a text claude gives, as it is kept: on one line and no
+    longer than a width, empty for what is no text."""
+    return flat(value)[:width] if isinstance(value, str) else ""
+
+
 def keep_open[T](calls: dict[str, T], call: str, kept: T) -> None:
     """Keep what a call without a result yet is remembered by, under its
     id, the oldest let go of past MOST_OPEN."""
@@ -135,7 +141,7 @@ class Session:
             if starts
             else message.get("permissionMode")
         )
-        self.mode = flat(mode or self.mode)[:NAME_KEPT]
+        self.mode_told(mode)
         self.first_mode = self.first_mode or self.mode
         if not starts:
             return False
@@ -150,6 +156,12 @@ class Session:
         # Not said by every version, and not missed
         self.fast = message.get("fast_mode_state") == "on"
         return True
+
+    def mode_told(self, mode: object) -> None:
+        """Take in the permission mode claude says the session is in, as
+        a name the status shows: the one before stays for what is none,
+        see kept_name."""
+        self.mode = kept_name(mode) or self.mode
 
     def settled(self, applied: dict) -> None:
         """Take in the settings claude says it goes by, as it answers

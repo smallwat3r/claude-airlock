@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from typing import Protocol
 
 from ..docker import docker_popen, unstartable
 from ..events import clean
@@ -58,8 +59,34 @@ PLAIN_WIDTH = 2000
 LAST_WORDS = 20
 # What is said of the rest of them, once
 NO_MORE = "the session wrote more to its errors as it ended, which is not shown"
+# Seconds a session whose pipes cannot all be read is given to end at
+# each step of stopping it, see Agent._stop
+STOP_STEP = 2.0
 # What is told the answer claude gives to a request of the chat's
 type Answer = Callable[[dict], None]
+
+
+class Errors(Protocol):
+    """Where what the session still writes to its errors once claude has
+    ended is written, see Agent._read_errors: the page of the chat, which
+    writes it among its lines (see Page), or the launcher's own errors.
+    The session's word, and a line of the launcher's own under a label."""
+
+    def put_said(self, texts: list[str]) -> None: ...
+
+    def note(self, label: str, text: str) -> None: ...
+
+
+class LauncherErrors:
+    """The launcher's own errors, where what the session writes there is
+    written when no chat is to write it."""
+
+    def put_said(self, texts: list[str]) -> None:
+        for text in texts:
+            print(clean(text), file=sys.stderr)
+
+    def note(self, _label: str, text: str) -> None:
+        warn(text)
 
 
 class Unread(enum.Enum):
@@ -122,13 +149,16 @@ class Backlog:
 class Agent:
     """Claude Code in its container, spoken to over the pipes of the
     docker command that runs it. With run, what starts that command in
-    docker's place, given what docker_popen is."""
+    docker's place, given what docker_popen is. With late, where what
+    the session writes to its errors once claude has ended is written,
+    see _read_errors."""
 
     def __init__(
         self,
         docker_args: list[str],
         on_end: Callable[[], None],
         run: Callable[..., subprocess.Popen] = docker_popen,
+        late: Errors | None = None,
     ):
         try:
             # A session of its own: Ctrl-C at the terminal is for the chat
@@ -144,6 +174,7 @@ class Agent:
         except OSError as problem:
             raise unstartable(problem, docker_args) from None
         self._on_end = on_end
+        self._late = late or LauncherErrors()
         # What is to be said to claude, a line each, then None when no
         # more is: written by a thread of its own, see _write
         self._to_say: queue.Queue[bytes | None] = queue.Queue(SAID_BACKLOG)
@@ -160,9 +191,30 @@ class Agent:
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._errors = threading.Thread(target=self._read_errors, daemon=True)
         self._writer = threading.Thread(target=self._write, daemon=True)
-        self._errors.start()
-        self._reader.start()
-        self._writer.start()
+        try:
+            self._errors.start()
+            self._reader.start()
+            self._writer.start()
+        except BaseException:
+            # A thread that cannot be started, the launcher may be at
+            # its limit of them: the session it has started is not left
+            # running with nothing to talk to it, nor to stop it
+            self._stop()
+            raise
+
+    def _stop(self) -> None:
+        """End a session the chat has no way to talk to: told that no
+        more prompts come, by its input closed, then stopped as docker
+        passes a signal on to it, and at last the docker command killed."""
+        with contextlib.suppress(OSError, ValueError):
+            if self._process.stdin:
+                self._process.stdin.close()
+        for end in (None, self._process.terminate, self._process.kill):
+            if end is not None:
+                with contextlib.suppress(OSError):
+                    end()
+            if self.over_within(STOP_STEP):
+                return
 
     def _write(self) -> None:
         """Say to claude what waits to be said, in the order it was
@@ -215,7 +267,9 @@ class Agent:
         """Pass on what the session writes to its errors, as lines that
         are no object: docker's own word when it cannot run the session,
         and whatever a process of the session writes there, which is not
-        to reach the terminal as it is."""
+        to reach the terminal as it is. Once claude has ended, written
+        where late says, as the session's word: the chat may still read
+        a line, and what is written goes above it."""
         errors = self._process.stderr
         # How many lines came once nobody listened any more
         late = 0
@@ -232,9 +286,9 @@ class Agent:
             # for docker not to wait on a pipe that is full
             late += 1
             if late <= LAST_WORDS:
-                print(clean(text), file=sys.stderr)
+                self._late.put_said([text])
             elif late == LAST_WORDS + 1:
-                warn(NO_MORE)
+                self._late.note("chat", NO_MORE)
 
     def _passed_on(self, text: str, size: int) -> bool:
         """Have a line of the errors wait to be taken in with what claude
@@ -254,9 +308,14 @@ class Agent:
         """Say something to claude, nothing to one that has ended. It is
         said in its turn, see _write. Whether it is: not once as much
         waits to be said as SAID_BACKLOG, to a session that does not
-        read it."""
+        read it, nor what cannot be written as JSON, given back as claude
+        gave it, nested as deep as could just be read."""
         try:
-            self._to_say.put_nowait(json.dumps(message).encode() + b"\n")
+            line = json.dumps(message).encode() + b"\n"
+        except (ValueError, TypeError, RecursionError):
+            return False
+        try:
+            self._to_say.put_nowait(line)
         except queue.Full:
             return False
         return True
@@ -311,12 +370,16 @@ class Agent:
         with self._asking:
             return bool(self._answers.keys() - self._unwaited)
 
-    def respond(self, asked: object, decision: dict) -> None:
-        """Answer what claude asked under an id."""
+    def respond(self, asked: str, decision: dict) -> None:
+        """Answer what claude asked under an id. An answer that cannot be
+        said (see send), one that gives back an input too deep to be
+        written, is a refusal: claude waits for one, and its turn with
+        it."""
         response = {"request_id": asked, "subtype": "success", "response": decision}
-        self.send({"type": "control_response", "response": response})
+        if not self.send({"type": "control_response", "response": response}):
+            self.refuse(asked, "the answer could not be said")
 
-    def refuse(self, asked: object, why: str) -> None:
+    def refuse(self, asked: str, why: str) -> None:
         """Say that what claude asked under an id is not answered."""
         response = {"request_id": asked, "subtype": "error", "error": why}
         self.send({"type": "control_response", "response": response})

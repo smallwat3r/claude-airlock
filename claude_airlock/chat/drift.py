@@ -9,8 +9,9 @@ So what reads a field a chat goes by asks for it here (see Drift.field),
 and one that is not there, or not of its kind, is kept. Once the message
 is taken in, what was missed of it is said, once in a chat, with the shape
 of the message for the reading to be put right: its fields and the kind
-of each, none of their values. A kind of message no part of a chat takes
-in is said the same way. The chat notes it for --trace too (see
+of each, none of their values. A kind of message a chat does not know is
+said the same way, and so is a kind of what claude says of the session
+(the subtypes of system). The chat notes it for --trace too (see
 changes.py), where nothing else tells that it showed less."""
 
 from __future__ import annotations
@@ -30,6 +31,9 @@ MOST_SAID = 20
 # How much is kept as missed of one message, and by a reader nobody asks
 # what it missed
 MOST_MISSED = 50
+# The kind of what claude says of the session, whose subtypes are known
+# one by one: a new one is said as a new kind of message is
+SYSTEM = "system"
 
 
 def _shape(value: object, depth: int = SHAPE_DEPTH) -> str:
@@ -87,21 +91,30 @@ class Drift:
             self._missed.append(what)
 
     def told(
-        self, message: dict, known: Collection[str], version: str = ""
+        self,
+        message: dict,
+        known: Collection[str],
+        version: str = "",
+        system: Collection[str] = (),
     ) -> Change | None:
         """What to say of a message once it was taken in, given the
-        kinds of message a chat knows: nothing when it was all there, or
-        when the same was said before."""
+        kinds of message a chat knows, and the subtypes of what claude
+        says of the session (system) it knows: nothing when it was all
+        there, or when the same was said before."""
         missed, self._missed = self._missed, []
         if len(self._said) >= MOST_SAID:
             return None
         kind = message.get("type")
+        subtype = message.get("subtype")
         if not isinstance(kind, str):
             differs = ["a message without a type"]
         elif kind not in known:
             differs = [f"a message line mode does not know, {flat(kind)[:NAME_WIDTH]}"]
+        elif kind == SYSTEM and system and subtype not in system:
+            unknown = flat(subtype)[:NAME_WIDTH] if isinstance(subtype, str) else "none"
+            differs = [f"a system message line mode does not know, {unknown}"]
         else:
-            subtype = flat(message.get("subtype") or "")[:NAME_WIDTH]
+            subtype = flat(subtype or "")[:NAME_WIDTH]
             name = f"{kind} {subtype}".rstrip()
             differs = [f"no {what} in {name}" for what in dict.fromkeys(missed)]
         new = [what for what in differs if what not in self._said]

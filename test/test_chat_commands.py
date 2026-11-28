@@ -29,6 +29,7 @@ from harness import LauncherTest, reads_proc
 from claude_airlock.chat import asking, commands, shell, talk, turn
 from claude_airlock.chat import said as saying
 from claude_airlock.events import labelled
+from claude_airlock.files import HELD_BY_BYTE, HELD_BY_VALUE, HELD_BY_WIDE_BYTE
 from claude_airlock.sandbox.asked_hosts import Destination
 
 
@@ -339,6 +340,110 @@ class CommandsTest(LauncherTest):
             chat._asked.close()
         assert claude.said == [("r1", "allow")]
 
+    def test_no_more_of_what_claude_asks_waits_than_may(self):
+        # Each with an input as large as a line may be, while the first
+        # waits for the user: what is past the bound is refused at once
+        claude = AnsweredClaude()
+        chat = a_chat(self.host, claude)
+        small = asking.waiting_size(ASKS)
+        large = {**ASKS, "input": {"content": "x" * 4 * small}}
+        asks = {"type": "control_request", "request": ASKS}
+        with (
+            written() as lines,
+            unittest.mock.patch.object(asking, "MOST_WAITING", 2),
+            unittest.mock.patch.object(asking, "MOST_WAITING_BYTES", 3 * small),
+        ):
+            # One alone is kept whatever its size, it is bounded as a line
+            chat._heard({**asks, "request_id": "r1", "request": large})
+            # Past the bytes with it
+            chat._heard({**asks, "request_id": "r2"})
+            # Refused unseen, the turn was interrupted
+            chat._asker.give_up()
+            chat._asked.start(claude)
+            assert chat._asked.answered_within(PATIENCE)
+            # Past how many with two, the one being put among them
+            chat._heard({**asks, "request_id": "r3"})
+            chat._heard({**asks, "request_id": "r4"})
+            self.asked(chat)
+            chat._heard({**asks, "request_id": "r5"})
+            chat._asker.give_up()
+            assert chat._asked.answered_within(PATIENCE)
+            chat._asked.close()
+        assert claude.said == [
+            ("r2", "refused"),
+            ("r1", "deny"),
+            ("r5", "refused"),
+            ("r3", "deny"),
+            ("r4", "deny"),
+        ]
+        refused = (
+            f"# {labelled('chat', f'REFUSED bash unasked: {talk.TOO_MUCH_ASKED}')}"
+        )
+        assert lines.count(refused) == 2
+        assert (chat._asked._kept, chat._asked._kept_bytes) == (0, 0)
+        # Counted no further than past the bound, a value at a time
+        many = {"input": {"values": [0] * 1_000_000}}
+        assert asking.waiting_size(many, 1000) < 1000 + 2 * HELD_BY_VALUE
+        # A text past ASCII as Python can keep it, at four bytes a character
+        narrow = asking.waiting_size({"text": "x" * 1000})
+        wide = asking.waiting_size({"text": "\U0001f600" + "x" * 999})
+        assert wide - narrow == (HELD_BY_WIDE_BYTE - HELD_BY_BYTE) * 1000
+
+    def test_what_is_asked_under_an_id_that_is_none_is_not_answered(self):
+        # No answer could name it: written back it would raise, nested as
+        # deep as could just be read, and the answer would be for nothing
+        claude = AnsweredClaude()
+        chat = a_chat(self.host, claude)
+        deep: list = []
+        for _ in range(100_000):
+            deep = [deep]
+        with written() as lines:
+            chat._asked.start(claude)
+            for asked in (deep, ["r1"], 7, "", "r" * 1000):
+                for request in (ASKS, {"subtype": "initialize"}):
+                    chat._heard(
+                        {
+                            "type": "control_request",
+                            "request_id": asked,
+                            "request": request,
+                        }
+                    )
+            assert chat._asked.answered_within(PATIENCE)
+            chat._asked.close()
+        assert claude.said == []
+        assert lines == [f"# {labelled('chat', talk.NO_ID)}"] * 10
+
+    def test_what_cannot_be_answered_leaves_the_next_question_put(self):
+        # Neither the answer nor the refusal could be said to claude:
+        # what is asked next is put all the same, by the same thread
+        class Unanswerable(AnsweredClaude):
+            def respond(self, asked: object, decision: dict) -> None:
+                if asked == "r1":
+                    raise RecursionError("nested too deep")
+                super().respond(asked, decision)
+
+            def refuse(self, asked: object, why: str) -> None:
+                if asked == "r1":
+                    raise RecursionError("nested too deep")
+                super().refuse(asked, why)
+
+        claude = Unanswerable()
+        chat = a_chat(self.host, claude)
+        asks = {"type": "control_request", "request": ASKS}
+        with written() as lines:
+            chat._asked.start(claude)
+            chat._heard({**asks, "request_id": "r1"})
+            chat._asker.give_up()
+            assert chat._asked.answered_within(PATIENCE)
+            chat._heard({**asks, "request_id": "r2"})
+            self.asked(chat)
+            before_the_user(chat._asker)
+            assert chat._asker.take("y")
+            assert chat._asked.answered_within(PATIENCE)
+            chat._asked.close()
+        assert claude.said == [("r2", "allow")]
+        assert any("FAILED to answer: RecursionError" in line for line in lines)
+
     def typing(self, chat: talk.Chat, typed: Iterator[str | None]) -> list[str]:
         """Have a chat read the lines someone types, each when the one
         before is done with, and do what they ask. What it wrote."""
@@ -505,6 +610,12 @@ class CommandsTest(LauncherTest):
         assert len(told) == 1
         assert "mode not changed" in told[0]
         assert "mode plan" not in told[0]
+        # A mode is a name, no longer than one is kept: the status is made
+        # of it whenever claude says anything
+        with written():
+            for mode in (["plan"], {"x": 1}, 7, "", "m" * 100_000):
+                answered({"subtype": "success", "response": {"mode": mode}})
+        assert self.session.mode == "m" * saying.NAME_KEPT
 
     def test_what_completes_and_what_help_says_are_the_same_commands(self):
         said = "\n".join(commands.HELP)

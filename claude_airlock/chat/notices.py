@@ -1,15 +1,19 @@
 """What claude does besides answering, said in a line each: a conversation
 being compacted, a request to the API tried again, a task of its that
-starts or ends, a limit of the account that is near, the MCP servers it
+starts or ends, a call it refused without asking, a model it fell back
+on, a plugin it installs, memories it saved, a message of another
+session it holds, a limit of the account that is near, the MCP servers it
 has and how each is."""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from ..events import flat, labelled
 from ..report.entries import measured
 from .console import Page
+from .said import kept_name
 from .tasks import Tasks, ended_line, started_line
 from .turn import tokens
 
@@ -17,6 +21,79 @@ from .turn import tokens
 ABOUT_WIDTH = 200
 # How claude says an MCP server is when it can be used
 CONNECTED = "connected"
+# Of the paths of memories saved, how many are named
+PATHS_NAMED = 3
+# What claude says set off another model when the model refused the
+# request, as told.py reads it too
+REFUSAL = "refusal"
+# What claude says of the session that a chat knows and says nothing of:
+# the start of a turn, which Session takes in, and what Claude Code's own
+# screen has and a chat has no use for, or has in another way (the
+# transcript, the line at the end of a turn, the api_retry claude says
+# with each api_error). Any other is new, see Drift
+SYSTEM_PASSED_OVER = frozenset(
+    {
+        "init",
+        "agents_killed",
+        "api_error",
+        "away_summary",
+        "background_tasks_changed",
+        "cloud_session_delta",
+        "code_change_published",
+        "commands_changed",
+        "control_request_progress",
+        "dev_intent",
+        "elicitation_complete",
+        "feedback_draft_queued",
+        "file_attachments_missing",
+        "file_snapshot",
+        "files_persisted",
+        "hook_progress",
+        "hook_response",
+        "hook_started",
+        "informational",
+        "inherited_asks_settled",
+        "instruction_size_warning",
+        "late_allow_not_run",
+        "local_command_output",
+        "memory_recall",
+        "mirror_error",
+        "model_consent_fallback",
+        "model_refusal_fallback",
+        "model_refusal_no_fallback",
+        "notification",
+        "per_turn_effort_changed",
+        "permission_check_status",
+        "permission_retry",
+        "post_turn_summary",
+        "scheduled_task_fire",
+        "session_metadata",
+        "session_state_changed",
+        "session_title_changed",
+        "session_writes_lost",
+        "stop_hook_summary",
+        "task_summary",
+        "task_updated",
+        "thinking",
+        "thinking_tokens",
+        "turn_duration",
+        "turn_handoff_available",
+        "turn_preempted",
+        "ui_focus",
+        "ui_invalidate",
+        "ui_log",
+        "ui_notify",
+        "ui_notify_cancel",
+        "ui_panes",
+        "ui_placed",
+        "ui_scroll",
+        "ui_status",
+        "ui_toast",
+        "upgrade_relay_marker",
+        "vcs_state_changed",
+        "worker_shutting_down",
+    }
+)
 
 
 def _servers_line(servers: list[tuple[str, str]]) -> str:
@@ -44,25 +121,118 @@ class Notices:
         self._limit = "allowed"
         # The MCP servers claude last said it has, as they were told
         self._servers: list[tuple[str, str]] = []
+        # What takes in each subtype of what claude says of the session
+        self._takes: dict[str, Callable[[dict], None]] = {
+            "status": self._status,
+            "compact_boundary": self._compacted,
+            "api_retry": self._retried,
+            "task_started": self._task_started,
+            # Said in the rows of its own, see Progress of tasks.py
+            "task_progress": self._tasks.progressed,
+            "task_notification": self._task_ended,
+            "permission_denied": self._denied,
+            "model_fallback": self._fell_back,
+            "plugin_install": self._plugin,
+            "memory_saved": self._remembered,
+            "peer_message_hold": self._held,
+        }
+        # The subtypes of what claude says of the session that a chat
+        # knows, see SYSTEM_PASSED_OVER
+        self.known = SYSTEM_PASSED_OVER.union(self._takes)
 
     def system(self, message: dict) -> None:
         """Take in what claude says of the session while a turn runs."""
-        match message.get("subtype"):
-            case "status" if message.get("status") == "compacting":
-                self._page.note("chat", "compacting the conversation")
-            case "compact_boundary":
-                self._compacted(message.get("compact_metadata"))
-            case "api_retry":
-                why = flat(message.get("error") or "")[:ABOUT_WIDTH]
-                line = labelled("chat", f"the API did not answer, trying again  {why}")
-                self._page.say([line.rstrip()])
-            case "task_started":
-                self._task_started(message)
-            case "task_progress":
-                # Said in the rows of its own, see Progress of tasks.py
-                self._tasks.progressed(message)
-            case "task_notification":
-                self._task_ended(message)
+        subtype = message.get("subtype")
+        take = self._takes.get(subtype) if isinstance(subtype, str) else None
+        if take:
+            take(message)
+
+    def _status(self, message: dict) -> None:
+        if message.get("status") == "compacting":
+            self._page.note("chat", "compacting the conversation")
+
+    def _retried(self, message: dict) -> None:
+        self._say_retried(message.get("error"))
+
+    def call_progress(self, message: dict) -> None:
+        """How a call of claude's goes on, as claude says while it runs
+        (tool_progress): of it a chat says a request of a subagent's to
+        the API that is tried again, once each time, which no transcript
+        has. How long a call has run it says in its own way, see
+        Heartbeat of turn.py."""
+        retry = message.get("subagent_retry")
+        if isinstance(retry, dict):
+            self._say_retried(retry.get("error_category"), " a subagent")
+
+    def _say_retried(self, error: object, whom: str = "") -> None:
+        """A request to the API is tried again, of claude's or of a
+        subagent's as whom says, for the error it says."""
+        why = flat(error or "")[:ABOUT_WIDTH]
+        line = labelled("chat", f"the API did not answer{whom}, trying again  {why}")
+        self._page.say([line.rstrip()])
+
+    def _denied(self, message: dict) -> None:
+        """A call claude refused without asking the user, by a rule or its
+        mode: the call and its result are in the transcript, why it was
+        refused only here."""
+        tool = kept_name(message.get("tool_name")).lower() or "a tool"
+        why = kept_name(message.get("decision_reason"), ABOUT_WIDTH) or kept_name(
+            message.get("message"), ABOUT_WIDTH
+        )
+        of = " of a subagent" if message.get("agent_id") else ""
+        said = f"claude refused {tool}{of} without asking" + (f": {why}" if why else "")
+        self._page.note("chat", said)
+
+    def _fell_back(self, message: dict) -> None:
+        """Claude goes on with another model for the rest of the turn, the
+        one it was given failed. Not when it refused the request, which
+        the transcript says, see told_over_the_pipe."""
+        trigger = message.get("trigger")
+        if trigger == REFUSAL:
+            return
+        was = kept_name(message.get("original_model"), ABOUT_WIDTH) or "the model"
+        now = kept_name(message.get("fallback_model"), ABOUT_WIDTH) or "another"
+        why = kept_name(trigger, ABOUT_WIDTH).replace("_", " ")
+        because = f" ({why})" if why else ""
+        self._page.note("chat", f"{was} failed{because}, this turn goes on with {now}")
+
+    def _plugin(self, message: dict) -> None:
+        """How the installing of a plugin goes, as claude says it: its
+        error is the plugin's word, and is said as no more than a line."""
+        status = kept_name(message.get("status"), ABOUT_WIDTH) or "?"
+        name = kept_name(message.get("name"), ABOUT_WIDTH)
+        error = kept_name(message.get("error"), ABOUT_WIDTH)
+        said = f"plugin {name + ' ' if name else ''}install: {status}"
+        self._page.note("chat", said + (f", {error}" if error else ""))
+
+    def _remembered(self, message: dict) -> None:
+        """Claude wrote memories of its own, the files it wrote them to."""
+        given = message.get("written_paths")
+        paths = given if isinstance(given, list) else []
+        named = ", ".join(
+            filter(None, (kept_name(path, ABOUT_WIDTH) for path in paths[:PATHS_NAMED]))
+        )
+        if named and len(paths) > PATHS_NAMED:
+            named += f" and {len(paths) - PATHS_NAMED} more"
+        to = f" to {named}" if named else ""
+        verb = kept_name(message.get("verb")).lower() or "saved"
+        memories = "memory" if len(paths) == 1 else "memories"
+        self._page.note("chat", f"claude {verb} {len(paths)} {memories}{to}")
+
+    def _held(self, message: dict) -> None:
+        """A message of another session for this one, which claude holds
+        rather than gives the model, and what became of it. Whom it is
+        from is what the sender says."""
+        state = kept_name(message.get("state"), ABOUT_WIDTH) or "?"
+        sender = kept_name(message.get("from_name"), ABOUT_WIDTH) or kept_name(
+            message.get("from"), ABOUT_WIDTH
+        )
+        lane = kept_name(message.get("lane"), ABOUT_WIDTH)
+        why = kept_name(message.get("cause") or message.get("outcome"), ABOUT_WIDTH)
+        said = "a message of another session"
+        said += f" said to be from {sender}" if sender else ""
+        said += f" ({lane})" if lane else ""
+        self._page.note("chat", f"{said}: {state}" + (f", {why}" if why else ""))
 
     def servers(self, servers: list[tuple[str, str]]) -> None:
         """Say which MCP servers the session has, when that is another
@@ -76,7 +246,8 @@ class Notices:
     def cleared(self) -> None:
         self._page.note("chat", "a new conversation, the one before is cleared")
 
-    def _compacted(self, given: object) -> None:
+    def _compacted(self, message: dict) -> None:
+        given = message.get("compact_metadata")
         about = given if isinstance(given, dict) else {}
         before = measured(about.get("pre_tokens"))
         after = measured(about.get("post_tokens"))

@@ -23,6 +23,8 @@ from .said import NAME_KEPT, keep_open, kept_id, own
 # QUIET seconds.
 QUIET = 5.0
 QUIET_MOST = 60.0
+# The least a context window can be, in tokens, see _window_of
+LEAST_WINDOW = 1.0
 
 
 @dataclass
@@ -222,15 +224,19 @@ class Usage:
 
 def _window_of(result: dict, model: str) -> float:
     """How much the model of the session can read at most, as the end of
-    a turn says of each model it used."""
+    a turn says of each model it used. Not one of less than a token:
+    the context used is said as a share of the window, and a window of
+    almost nothing makes that share more than a number can hold."""
     given = result.get("modelUsage")
     models = given if isinstance(given, dict) else {}
     windows = {
-        name: measured(about.get("contextWindow"))
+        name: window
         for name, about in models.items()
         if isinstance(about, dict)
+        and (window := measured(about.get("contextWindow"))) is not None
+        and window >= LEAST_WINDOW
     }
-    return windows.get(model) or max(filter(None, windows.values()), default=0.0)
+    return windows.get(model) or max(windows.values(), default=0.0)
 
 
 def working_line(turn: Turn, step: float = 1.0) -> str:

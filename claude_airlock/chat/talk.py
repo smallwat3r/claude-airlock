@@ -62,7 +62,7 @@ from .notices import Notices
 from .pipe import Agent, Answer, Unread
 from .plain import PlainLines
 from .reply import ReplyStream
-from .said import Session, own
+from .said import NAME_KEPT, Session, kept_id, own
 from .screen import Prompt, as_prompt
 from .shell import Shell
 from .status import Sandbox, StatusLine
@@ -70,7 +70,8 @@ from .tasks import Progress, Running, Tasks, still_running
 from .turn import Heartbeat, Turns, Usage, ended_badly, turn_line
 
 # What reaches claude for a chat, given what to tell once claude has ended
-type Connect = Callable[[Callable[[], None]], Agent]
+# and the page to write what it still writes to its errors after that
+type Connect = Callable[[Callable[[], None], Page], Agent]
 
 # The messages of claude a chat knows and has no use for
 PASSED_OVER = frozenset(
@@ -78,7 +79,6 @@ PASSED_OVER = frozenset(
         "auth_status",
         "keep_alive",
         "prompt_suggestion",
-        "tool_progress",
         "tool_use_summary",
         "update_environment_variables",
     }
@@ -131,6 +131,11 @@ ANSWER_WAIT = 1.0
 # Seconds lines that are all there, a file or a pipe, wait for claude to
 # answer what one of them asked of it, see _wait_for_turn
 ANSWER_PATIENCE = 10.0
+# What is said of what claude asks under an id that is none, and of a
+# call it asks about while as much of what it asked waits as may (see
+# MOST_WAITING of asking.py), which is refused without a question
+NO_ID = "claude asked under an id that is none, it cannot be answered"
+TOO_MUCH_ASKED = "as much of what claude asked waits for an answer as may"
 
 
 class Life(enum.Enum):
@@ -218,10 +223,10 @@ class Chat:
         self._notices = Notices(self._page, self._tasks)
         # What the session writes that is no message of claude's
         self._plain = PlainLines(self._page)
-        self._followed = Followed(
-            host, sandbox.name, self._page, self._turns, lambda: self._replies.writing
-        )
         self._replies = ReplyStream(self._page, lambda: self._followed.show(now=True))
+        self._followed = Followed(
+            host, sandbox.name, self._page, self._turns, self._replies
+        )
         # Set when a turn ends, a question is put or claude ends
         self._wake = threading.Event()
         # The paths claude asks about are those of the sandbox: the project
@@ -279,10 +284,13 @@ class Chat:
             "conversation_reset": self._reset,
             "rate_limit_event": self._limited,
             "stream_event": self._piece,
+            "tool_progress": self._notices.call_progress,
             "result": self._turn_over,
             "assistant": self._said,
             "user": self._said,
         }
+        # The kinds of message a chat knows, see Drift
+        self._known = PASSED_OVER.union(self._takes)
         # Whether claude was asked for its settings and has not answered,
         # and set once it answered the first time, or ended
         self._settings_asked = False
@@ -305,7 +313,7 @@ class Chat:
         previous = signal.signal(signal.SIGINT, self._on_interrupt)
         connected = False
         try:
-            self._agent = self._connect(self._session_ended)
+            self._agent = self._connect(self._session_ended, self._page)
             connected = True
             title = labelled("chat", flat(self._host.project_dir))
             columns = self._page.layout.columns
@@ -440,21 +448,17 @@ class Chat:
                     self._page.note("chat", "the lines left are not sent, leaving")
                     return
             try:
-                if lines:
-                    line = self._read_line(MORE)
-                else:
-                    line = self._read_line(PROMPT, headed=True)
+                line = (
+                    self._read_line(MORE)
+                    if lines
+                    else self._read_line(PROMPT, headed=True)
+                )
             except KeyboardInterrupt:
-                # Ctrl-C drops what was typed, unless the session is over.
-                # A second one right after it leaves, as Ctrl-D does
-                lines = []
-                if self._life.over:
+                lines.clear()
+                again = self._dropped_again(dropped)
+                if again is None:
                     return
-                now = time.monotonic()
-                if now - dropped <= LEAVE_WITHIN:
-                    return
-                dropped = now
-                self._page.note("chat", "Ctrl-C again leaves")
+                dropped = again
                 continue
             dropped = -math.inf
             if line is None:
@@ -462,11 +466,7 @@ class Chat:
                 return
             if line is Taken.ANSWER:
                 continue
-            if line.endswith("\\"):
-                lines.append(line[:-1])
-                continue
-            text = "\n".join([*lines, line]).strip()
-            lines = []
+            text = _joined(lines, line)
             if not text:
                 continue
             did = self._commands.do(text)
@@ -474,6 +474,19 @@ class Chat:
                 return
             if did is Did.NOTHING:
                 self._send(text)
+
+    def _dropped_again(self, dropped: float) -> float | None:
+        """Ctrl-C at the prompt dropped what was typed, given when it last
+        did: when it did now, for the one after it. None to leave, when
+        the session is over, and as Ctrl-D does when it comes right after
+        the one before, see LEAVE_WITHIN."""
+        if self._life.over:
+            return None
+        now = time.monotonic()
+        if now - dropped <= LEAVE_WITHIN:
+            return None
+        self._page.note("chat", "Ctrl-C again leaves")
+        return now
 
     def _wait_for_turn(self) -> None:
         """Wait until claude has nothing left to do, or asks something.
@@ -650,8 +663,9 @@ class Chat:
     def _changed(self, message: dict) -> None:
         """Say what of a message was not as a chat reads it, and note it
         for a trace of the session, which has no other way to know."""
-        known = PASSED_OVER.union(self._takes)
-        change = self._drift.told(message, known, self._session.version)
+        change = self._drift.told(
+            message, self._known, self._session.version, self._notices.known
+        )
         if not change:
             return
         self._page.note("chat", change.said)
@@ -910,9 +924,14 @@ class Chat:
     def _answer(self, message: dict) -> None:
         """Answer what claude asks its host: whether a tool may be used,
         which is the user's to say. Anything else is not for a chat, and
-        said to be asked."""
+        said to be asked. Not what is asked under an id that is none,
+        which no answer could name: it is the session's to send, nested
+        as deep as can be read, and answered it would be written back."""
         request = message.get("request")
-        asked = message.get("request_id")
+        asked = kept_id(message.get("request_id"))
+        if asked is None:
+            self._page.note("chat", NO_ID)
+            return
         if not isinstance(request, dict) or request.get("subtype") != "can_use_tool":
             what = (
                 flat(request.get("subtype", "?")) if isinstance(request, dict) else "?"
@@ -931,13 +950,32 @@ class Chat:
             self._followed.settle(ASK_SETTLE)
         finally:
             # Put however that went: claude waits for an answer to what
-            # it asked, and the turn with it
-            self._asked.put(asked, request)
+            # it asked, and the turn with it. Refused at once when as
+            # much of it waits as may
+            if not self._asked.put(asked, request):
+                self._agent.refuse(asked, "too much is asked at once")
+                tool = flat(request.get("tool_name", "?")).lower()[:NAME_KEPT]
+                self._page.note("chat", f"REFUSED {tool} unasked: {TOO_MUCH_ASKED}")
 
     def _withdrawn(self, message: dict) -> None:
         """Claude no longer asks what it asked under an id, see
-        Asked.cancel."""
-        self._asked.cancel(message.get("request_id"))
+        Asked.cancel. Not under one that is none, which nothing was
+        asked under, see _answer."""
+        asked = kept_id(message.get("request_id"))
+        if asked is not None:
+            self._asked.cancel(asked)
+
+
+def _joined(lines: list[str], line: str) -> str | None:
+    """What a line that was entered says, with the lines before it that
+    ended with a backslash, which takes the next one too: none while it
+    does, the line kept in lines until one does not, which takes them."""
+    if line.endswith("\\"):
+        lines.append(line[:-1])
+        return None
+    text = "\n".join([*lines, line]).strip()
+    lines.clear()
+    return text
 
 
 def _waiting_line(layout: Layout) -> Shown:
@@ -991,8 +1029,8 @@ def chat(
     sent = SENT_STYLE if layout.colour else ""
     console = Console(host.project_dir, history, sent)
 
-    def connect(on_end: Callable[[], None]) -> Agent:
-        agent = Agent(docker_args, on_end)
+    def connect(on_end: Callable[[], None], page: Page) -> Agent:
+        agent = Agent(docker_args, on_end, late=page)
         on_started()
         return agent
 

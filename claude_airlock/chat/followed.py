@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 from ..events import Event, Kind, Stage, Who
 from ..report.follow import Follower
@@ -25,27 +26,65 @@ IDLE_POLL = 2.0
 SETTLE = 3.0
 # What a chat shows whole of what the transcript has, see said_whole
 READ_WHOLE = (Kind.COMMAND,)
-# The events a chat is told of by claude itself as they happen, which it
-# says in its own words (see notices.py), and the one it notes itself
-# (see changes.py)
-SAID_LIVE = frozenset({Kind.API, Kind.COMPACT, Kind.TASK, Kind.CHANGED})
+
+
+def _always(_event: Event) -> bool:
+    """Every event of a kind claude tells the chat of."""
+    return True
+
+
+# Of the events of the transcript, by their kind, whether one is what
+# claude told the chat of as it happened, which the chat says in its own
+# words (see notices.py), or notes itself (see changes.py), by the fields
+# told.py gives it. A request the API did not answer, which claude says
+# with an api_retry for each api_error. A task, but not one of the
+# schedule that fired, a turn that no user started, which notices.py
+# passes over. A call refused without asking the user, not a change of
+# mode, and another model gone on with when one failed, not a change of
+# model nor a request the model refused: those the chat leaves to the
+# transcript
+SAID_LIVE: dict[Kind, Callable[[Event], bool]] = {
+    Kind.API: _always,
+    Kind.COMPACT: _always,
+    Kind.CHANGED: _always,
+    Kind.MEMORY: _always,
+    Kind.TASK: lambda event: "cron" not in event.fields,
+    Kind.MODE: lambda event: "denied_tool" in event.fields,
+    Kind.MODEL: lambda event: (
+        "trigger" in event.fields and not event.fields.get("refused")
+    ),
+}
 
 
 def told_over_the_pipe(event: Event, since: float) -> bool:
     """Whether an event is one the chat wrote, or will, from what
     claude says over the pipe: a reply of claude's (see ReplyStream),
-    and what claude says of the session as it happens (see Notices).
-    Any since the chat started, one from before is the history of a
-    session that is resumed, which only the transcript has."""
-    claudes = event.who is Who.CLAUDE and event.kind is Kind.REPLY
-    said = claudes or event.kind in SAID_LIVE
+    and what claude says of the session as it happens (see Notices and
+    SAID_LIVE). Any since the chat started, one from before is the
+    history of a session that is resumed, which only the transcript
+    has."""
+    kind = event.kind
+    claudes = event.who is Who.CLAUDE and kind is Kind.REPLY
+    live = SAID_LIVE.get(kind) if kind else None
+    said = claudes or (live is not None and live(event))
     return said and event.when >= since
+
+
+class Writing(Protocol):
+    """A reply of claude's that is being written, which what is found is
+    not written into while it holds that back, and which makes way for
+    it once it no longer does: see ReplyStream."""
+
+    @property
+    def holding(self) -> bool: ...
+
+    def make_way(self) -> None: ...
 
 
 class Followed:
     """The session of a chat as it is followed, and what it did written
-    to the page. With writing, whether a reply is being written: what is
-    found is not written into it."""
+    to the page. With reply, the reply that is being written, which what
+    is found is not written into while it holds that back."""
 
     def __init__(
         self,
@@ -53,14 +92,14 @@ class Followed:
         name: str,
         page: Page,
         turns: Turns,
-        writing: Callable[[], bool],
+        reply: Writing,
     ):
         self._host = host
         # Of the session's container
         self._name = name
         self._page = page
         self._turns = turns
-        self._writing = writing
+        self._reply = reply
         self._follower: Follower | None = None
         # When what is followed was last looked at, and when the chat
         # started: what the transcript has of before is its history
@@ -87,16 +126,16 @@ class Followed:
         """Write what the session did since the last look. Not more often
         than every POLL seconds, less often still while no turn runs,
         unless it has to be now. And not into a reply that is being
-        written."""
+        written while it holds that back, between two of its lines once
+        it no longer does (see HOLD_OPEN of reply.py)."""
         if not self._follower:
             return
         pace = POLL if self._turns.running else IDLE_POLL
         waited = time.monotonic() - self._looked
-        if not now and (self._writing() or waited < pace):
+        if not now and (self._reply.holding or waited < pace):
             return
         found = self._follower.poll()
         self._looked = time.monotonic()
-        self._page.say(found.notes)
         lines: list[Shown] = []
         # The events since the last one that is shown whole
         together: list[Event] = []
@@ -110,7 +149,11 @@ class Followed:
                 together = []
             else:
                 together.append(event)
-        self._page.put(lines + self._page.events(together))
+        lines += self._page.events(together)
+        if not now and (found.notes or lines):
+            self._reply.make_way()
+        self._page.say(found.notes)
+        self._page.put(lines)
 
     def network(self) -> str:
         """What the session did on the network since this was last

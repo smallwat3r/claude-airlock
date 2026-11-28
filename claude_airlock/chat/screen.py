@@ -34,33 +34,43 @@ NO_COLUMN = ("Mn", "Me", "Cf")
 JOINED = ((0x1160, 0x11FF), (0xD7B0, 0xD7FF))
 
 
-def columns_of(text: str) -> int:
+# The categories of what one terminal shows wide and another does not,
+# whatever Unicode says of its width: the symbols emoji are among, and
+# what this Python does not know yet and a terminal may
+MAYBE_WIDE = ("So", "Cn", "Co")
+
+
+def columns_of(text: str, *, fewest: bool = True) -> int:
     """How many columns of a terminal a text takes, as wcwidth counts
     them for readline and a terminal for itself: two for the wide
     characters of East Asia, none for what is put on the one before or
     shows nothing. Counted too wide, a text would have more rows erased
     than it takes, those above it: what is counted is in part the
-    session's choice. Where terminals differ, the fewer are counted."""
-    return sum(
-        (
-            0
-            if unicodedata.combining(c)
-            or unicodedata.category(c) in NO_COLUMN
-            or any(first <= ord(c) <= last for first, last in JOINED)
-            else 2
-            if unicodedata.east_asian_width(c) in "WF"
-            else 1
-        )
-        for c in text
-    )
+    session's choice. Where terminals differ, the fewer are counted: one
+    for an emoji, which a terminal with the widths of before Unicode 9
+    shows in one. Not fewest, two for an emoji too, as wcwidth has it
+    now: where readline has the cursor in a row, which says nothing of
+    what is erased (see cursor_back)."""
+    return sum(_char_columns(c, fewest=fewest) for c in text)
+
+
+def _char_columns(char: str, *, fewest: bool) -> int:
+    """How many columns of a terminal a character takes, see columns_of."""
+    category = unicodedata.category(char)
+    if (
+        unicodedata.combining(char)
+        or category in NO_COLUMN
+        or any(first <= ord(char) <= last for first, last in JOINED)
+    ):
+        return 0
+    wide = unicodedata.east_asian_width(char) in "WF"
+    if wide and not (fewest and category in MAYBE_WIDE):
+        return 2
+    return 1
 
 
 # What a tab can take, to the next stop
 TAB_COLUMNS = 8
-# The categories of what one terminal shows wide and another does not,
-# whatever Unicode says of its width: the symbols emoji are among, and
-# what this Python does not know yet and a terminal may
-MAYBE_WIDE = ("So", "Cn", "Co")
 # The selector that has the character before it shown as an emoji, wide
 EMOJI_SELECTOR = "\ufe0f"
 # An escape of colour that ends every style
@@ -132,12 +142,12 @@ def as_prompt(text: str, style: str = "") -> Prompt:
     return Prompt(painted(style, flattened) if style else flattened)
 
 
-def _row_columns(row: str, columns: int) -> int:
+def _row_columns(row: str, columns: int, *, fewest: bool = True) -> int:
     """How many columns a row of a prompt and what is typed after it
     takes, as columns_of counts them, a tab to the next stop: no further
     than the last column of the row of the terminal it is on, where a
     terminal stops it and readline may go on with spaces on the next.
-    The fewer, as columns_of has it."""
+    The fewer unless not fewest, as columns_of has it."""
     taken = 0
     for at, part in enumerate(row.split("\t")):
         if at:
@@ -145,16 +155,17 @@ def _row_columns(row: str, columns: int) -> int:
             taken += max(
                 0, min(TAB_COLUMNS - on_row % TAB_COLUMNS, columns - 1 - on_row)
             )
-        taken += columns_of(part)
+        taken += columns_of(part, fewest=fewest)
     return taken
 
 
-def _rows_above(text: str, columns: int) -> int:
+def _rows_above(text: str, columns: int, *, fewest: bool = True) -> int:
     """How many rows a prompt and what is typed after it take above
     the row their end is on. What ends at the edge has its end on the
     row after, as readline writes it."""
     rows = text.split("\n")
-    return len(rows) - 1 + sum(_row_columns(row, columns) // columns for row in rows)
+    wrapped = sum(_row_columns(row, columns, fewest=fewest) // columns for row in rows)
+    return len(rows) - 1 + wrapped
 
 
 def erased(prompt: str, typed: str, columns: int) -> str:
@@ -179,7 +190,12 @@ def cursor_back(prompt: str, typed: str, before: str, columns: int) -> str:
     again: they leave the cursor where readline has it, after what is
     before it. A terminal keeps the cursor on the row of what ends at
     its edge until more is written, readline has it on the next: a
-    space takes it there."""
+    space takes it there. It is never put on a row above the one it is
+    on for the terminal: the next erase starts from there (see erased),
+    and would take a row of what is above with it. So the rows it goes
+    up are those of all that was typed, counted the fewest, less those
+    of what is before it, counted not: where terminals differ, no more
+    than there are. In its row it is where readline has it."""
     columns = max(1, columns)
     prompt = SGR.sub("", prompt).rpartition("\n")[2]
     whole, part = prompt + typed, prompt + before
@@ -187,8 +203,8 @@ def cursor_back(prompt: str, typed: str, before: str, columns: int) -> str:
     out = " \r" if last and last % columns == 0 else ""
     if before == typed:
         return out
-    up = _rows_above(whole, columns) - _rows_above(part, columns)
-    across = _row_columns(part.rpartition("\n")[2], columns) % columns
+    up = max(0, _rows_above(whole, columns) - _rows_above(part, columns, fewest=False))
+    across = _row_columns(part.rpartition("\n")[2], columns, fewest=False) % columns
     out += f"\x1b[{up}A" if up else ""
     return out + "\r" + (f"\x1b[{across}C" if across else "")
 

@@ -42,19 +42,37 @@ _HEADING = re.compile(r"(\s*)#{1,6}\s+(\S.*)")
 _TICKS = re.compile(r"`+")
 _BOLD = "**"
 # A line longer than this is not looked through for marks, it is the
-# model's to write and no prose. A shorter one is looked through once,
-# however many of its marks are opened and not closed: see _code_spans
-# and _bold_marked
+# model's to write and no prose, nor wrapped at its spaces: it is cut into
+# rows as wide as there is room for, see wrapped. A shorter one is looked
+# through once, however many of its marks are opened and not closed: see
+# _code_spans and _bold_marked
 MOST_MARKED = 4000
 # No more of a line whose end has not come is held than this, in
 # characters: what came of it is a line of its own past it
 LONGEST_HELD = 64 * 1024
+# Where lines are written once a reply is whole, in a file, no more of
+# them are kept than so many, nor more characters: past either, those
+# kept are written, a reply can be as long as the session makes it
+KEPT_LINES = 1000
+KEPT_CHARACTERS = 1 << 20
+# Seconds a reply that is being written keeps what the session did from
+# being written into it, since it started or last made way for that, and
+# since its last piece: past either, what the session did comes between
+# two of its lines (see make_way). Else a reply that is left open, its end
+# never told, would keep the launcher's own lines from being written
+HOLD_OPEN = 5.0
+HOLD_QUIET = 2.0
 
 
 def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
     """A line as the lines that fit a width, each indented as it is, or
-    those after the first by what they are to be under."""
+    those after the first by what they are to be under. One past
+    MOST_MARKED as rows of the width cut wherever they fall, what is not
+    prose is not broken at its spaces: textwrap takes dozens of times
+    the length of a line to do that, and the session gives the length."""
     indent = line[: len(line) - len(line.lstrip())] if under is None else under
+    if len(line) > MOST_MARKED:
+        return _rows(line, width, indent)
     return textwrap.wrap(
         line,
         width,
@@ -62,6 +80,17 @@ def wrapped(line: str, width: int, under: str | None = None) -> list[str]:
         break_long_words=False,
         break_on_hyphens=False,
     ) or [""]
+
+
+def _rows(line: str, width: int, indent: str) -> list[str]:
+    """A line as rows of a width, the first as wide as that and each of
+    the others under an indent. No more indent than half the width, an
+    indent is the session's to make as long as the line."""
+    under = indent[: width // 2]
+    room = max(1, width - len(under))
+    rest = line[width:]
+    after = (under + rest[at : at + room] for at in range(0, len(rest), room))
+    return [line[:width], *after]
 
 
 def _code_spans(text: str) -> list[tuple[int, int, int]]:
@@ -329,8 +358,14 @@ class ReplyStream:
         self._before = before
         self._writer: ReplyWriter | None = None
         self._started = 0.0
-        # Its lines, where it is written once it is whole
+        # Since when it holds back what the session did, and when its
+        # last piece came, see holding
+        self._holds_since = 0.0
+        self._heard = 0.0
+        # Its lines, where it is written once it is whole, and how many
+        # characters they have
         self._lines: list[Styled] = []
+        self._kept = 0
         # Whether its first line is out, and whether its whole was told
         self._headed = False
         self._met = False
@@ -339,9 +374,30 @@ class ReplyStream:
 
     @property
     def writing(self) -> bool:
-        """Whether a reply is being written, which nothing else is to be
-        written into."""
+        """Whether a reply is being written."""
         return self._writer is not None
+
+    @property
+    def holding(self) -> bool:
+        """Whether a reply is being written that nothing else is to be
+        written into yet, see HOLD_OPEN."""
+        now = time.monotonic()
+        held = now - self._holds_since < HOLD_OPEN and now - self._heard < HOLD_QUIET
+        return self.writing and held
+
+    def make_way(self) -> None:
+        """Have what else is written come between two lines of the reply
+        that is being written, once that holds it back no longer: what
+        was written of the reply ends there, as a reply ends, and what is
+        written of it after has a line of its own over it again. In a
+        file, what was kept of it is written first."""
+        if self._writer is None:
+            return
+        if self._headed:
+            self._page.put([BLANK])
+            self._headed = False
+        self._let_out()
+        self._holds_since = time.monotonic()
 
     def piece(self, event: dict) -> None:
         """Take in a piece of what claude is making."""
@@ -355,10 +411,12 @@ class ReplyStream:
                 self._owed = 0
                 self._writer = ReplyWriter(self._page.width, styled_replies(self._page))
                 self._started = time.time()
+                self._holds_since = self._heard = time.monotonic()
         elif kind == "content_block_delta" and self._writer:
             given = event.get("delta")
             text = given.get("text") if isinstance(given, dict) else None
             if isinstance(text, str):
+                self._heard = time.monotonic()
                 self._take(self._writer.feed(text))
         elif kind == "content_block_stop":
             self.finish()
@@ -388,13 +446,11 @@ class ReplyStream:
         self._take(self._writer.end())
         if self._headed:
             self._page.put([BLANK])
-        elif self._lines:
+        if self._lines:
             self._before()
-            said = Event(self._started, Who.CLAUDE, Kind.REPLY, [*self._lines], {})
-            self._page.put(self._page.layout.event(said))
+        self._let_out()
         self._owed += not self._met
         self._writer = None
-        self._lines = []
         self._headed = self._met = False
 
     def turn_over(self) -> None:
@@ -405,11 +461,15 @@ class ReplyStream:
     def _take(self, lines: list[Styled]) -> None:
         """Write lines of the reply, at a terminal: under the line that
         says when and who, none of its own does. In a file they are
-        kept for its end."""
+        kept for its end, no more of them than KEPT_LINES says."""
         if not lines:
             return
         if not self._page.layout.compact:
             self._lines += lines
+            self._kept += sum(map(len, lines))
+            if len(self._lines) >= KEPT_LINES or self._kept >= KEPT_CHARACTERS:
+                self._before()
+                self._let_out()
             return
         shown = self._page.replied(lines)
         if not self._headed:
@@ -418,3 +478,15 @@ class ReplyStream:
             head = Event(self._started, Who.CLAUDE, Kind.REPLY, [""], {})
             shown = self._page.layout.event(head) + shown
         self._page.put(shown)
+
+    def _let_out(self) -> None:
+        """Write the lines kept of a reply in a file, each of them saying
+        when and who as the lines of an event do: once the reply is over,
+        once as many are kept as may be, or to make way. What the session
+        did up to then is written above them by what lets them out, but
+        when that is make_way, which is called as it is written."""
+        lines, self._lines, self._kept = self._lines, [], 0
+        if not lines:
+            return
+        said = Event(self._started, Who.CLAUDE, Kind.REPLY, [*lines], {})
+        self._page.put(self._page.layout.event(said))

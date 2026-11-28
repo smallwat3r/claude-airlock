@@ -18,7 +18,9 @@ refused."""
 from __future__ import annotations
 
 import functools
+import math
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
@@ -31,6 +33,9 @@ if TYPE_CHECKING:
 
 # The label of what a chat says about a host that is asked about
 LABEL = "net"
+# Seconds between two looks at the hosts that wait: each lists a directory,
+# and a look is had after each thing claude says, thousands a second
+LOOKS_APART = 0.1
 
 
 def reached(asked: Destination) -> str:
@@ -75,11 +80,18 @@ class HostQuestions:
         # the thread of the questions once one is answered
         self._put: set[Destination] = set()
         self._putting = threading.Lock()
+        # When the hosts that wait were last listed
+        self._looked = -math.inf
 
     def look(self) -> None:
         """Have the user asked about each host that waits since the
-        last look. New is not asked about as the list is made: one that
-        is answered meanwhile is still on it, and is no new request."""
+        last look, no sooner than LOOKS_APART after it. New is not asked
+        about as the list is made: one that is answered meanwhile is
+        still on it, and is no new request."""
+        now = time.monotonic()
+        if now - self._looked < LOOKS_APART:
+            return
+        self._looked = now
         with self._putting:
             put = set(self._put)
         new = [host for host in self._hosts.waiting() if host not in put]

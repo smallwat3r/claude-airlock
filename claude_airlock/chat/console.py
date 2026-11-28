@@ -169,7 +169,9 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
     and readline writes them to the terminal as they are: one with
     anything in it that is not shown as it is (see clean) is passed over.
     So is what a link leads to outside the project, a session has nothing
-    else mounted there and could have made the link."""
+    else mounted there and could have made the link. No more than
+    NAMES_OFFERED are looked for, a directory is the session's to fill:
+    in the order it lists them, then sorted."""
     if first and word.startswith("/"):
         return sorted(name for name in commands if name.startswith(word))
     if not word.startswith("@"):
@@ -180,19 +182,25 @@ def completions(word: str, first: bool, commands: list[str], root: str) -> list[
     real_root = os.path.realpath(root)
     if os.path.commonpath([real_root, place]) != real_root:
         return []
+    names: list[str] = []
     try:
-        names = sorted(os.listdir(place))
+        with os.scandir(place) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.startswith(start) or (name.startswith(".") and not start):
+                    continue
+                if clean(name) != name or "\n" in name or "\t" in name:
+                    continue
+                names.append(name)
+                if len(names) >= NAMES_OFFERED:
+                    break
     except OSError:
         return []
     found = []
-    for name in names:
-        if not name.startswith(start) or (name.startswith(".") and not start):
-            continue
-        if clean(name) != name or "\n" in name or "\t" in name:
-            continue
+    for name in sorted(names):
         ending = "/" if os.path.isdir(os.path.join(place, name)) else ""
         found.append("@" + (f"{directory}/" if directory else "") + name + ending)
-    return found[:NAMES_OFFERED]
+    return found
 
 
 # The code readline runs of a console within the wait for a line, where
@@ -1018,11 +1026,9 @@ class Page:
             self._console.write(lines)
             self.touched()
 
-    def put_said(
-        self, texts: list[str], style: Callable[[str], str] | None = None
-    ) -> None:
+    def put_said(self, texts: list[str]) -> None:
         """Write texts of the session's own word, see said."""
-        self.put(self.said(texts, style))
+        self.put(self.said(texts))
 
     def touched(self) -> None:
         """Something was written, or read, that is no line of the page:

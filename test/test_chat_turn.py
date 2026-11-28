@@ -7,7 +7,7 @@ import re
 import time
 import unittest.mock
 
-from chat_harness import page, written
+from chat_harness import lines_now, page, written
 
 from claude_airlock.chat import console, turn
 from claude_airlock.chat import reply as replying
@@ -127,6 +127,15 @@ class TurnTest:
         used.step({"message": {"usage": usage}})
         assert "context 100%" in used.parts(result, "m")
         assert used.context_used == 100
+        # A window of less than a token is none: what is used of it would
+        # be more than a number can hold, and the status is made of it
+        # with every message claude says
+        for window in (5e-324, 0.5, 0, -1):
+            tiny = {"usage": usage, "modelUsage": {"m": {"contextWindow": window}}}
+            fresh = turn.Usage()
+            fresh.step({"message": {"usage": usage}})
+            assert "context" not in " ".join(fresh.parts(tiny, "m"))
+            assert fresh.context_used is None
 
     def test_a_turn_that_is_quiet_says_that_it_still_runs(self):
         shown, turns = page(), turn.Turns()
@@ -220,6 +229,42 @@ class ReplyTest:
             assert not replies.writing
         assert re.search(r"^\d\d:\d\d:\d\d  claude   reply$", lines[1])
         assert lines[2:] == ["one", "two", ""]
+
+    def test_a_line_that_is_no_prose_is_cut_into_rows_not_wrapped(self):
+        # Wrapped at its spaces, a line takes dozens of times its length
+        # and seconds for some megabytes: one delta of a reply can be that
+        long = "word " * 200_000
+        rows = replying.reply_lines(long, 80, False)
+        assert "".join(rows) == long
+        assert {len(row) for row in rows[:-1]} == {80}
+        # Each row under an indent of its own, no more of one than half a
+        # row: the session makes it as long as it likes
+        indented = "first\n" + " " * 1000 + "x" * 5000
+        rows = replying.reply_lines(indented, 80, False)
+        assert max(map(len, rows)) == 80
+        assert len(rows) == 2 + (6000 - 80) // 40
+        assert rows[-1] == " " * 40 + "x" * 40
+        # A line of prose is wrapped at its spaces as it was
+        prose = replying.reply_lines("a few words " * 20, 40, False)
+        assert prose[0] == "a few words a few words a few words a"
+
+    def test_in_a_file_no_more_of_a_reply_is_kept_than_so_much(self):
+        # Written once it is whole, a reply whose end never comes would
+        # be held as long as the session makes it
+        replies, before = self.stream(Layout())
+        with written() as lines:
+            replies.piece(piece("content_block_start", content_block={"type": "text"}))
+            many = "line\n" * (replying.KEPT_LINES + 10)
+            replies.piece(piece("content_block_delta", delta={"text": many}))
+            assert len(lines_now(lines).splitlines()) == replying.KEPT_LINES + 10
+            long = "x" * replying.KEPT_CHARACTERS + "\n"
+            replies.piece(piece("content_block_delta", delta={"text": long}))
+            assert len(lines_now(lines).splitlines()) == replying.KEPT_LINES + 11
+            replies.piece(piece("content_block_stop"))
+        # Each line says when and who, as those of a reply written whole
+        assert len(lines) == replying.KEPT_LINES + 11
+        assert all(re.search(r"  claude   reply ", line) for line in lines)
+        assert before == ["before", "before"]
 
     def test_a_reply_that_was_not_told_in_pieces_is_written_whole(self):
         replies, before = self.stream(Layout(compact=True))

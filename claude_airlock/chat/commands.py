@@ -241,14 +241,14 @@ class Commands:
 
     def _mode_answered(self, response: dict) -> None:
         """Take in what claude answers to a request for a mode: whether
-        it changed."""
+        it changed. A mode as Session.mode_told takes one, a name it
+        gives that the status shows."""
         if response.get("subtype") != "success":
             reason = flat(response.get("error", "claude refused"))
             self._page.note("chat", f"mode not changed: {reason}")
             return
         told = response.get("response")
-        mode = told.get("mode") if isinstance(told, dict) else None
-        self._session.mode = flat(mode or self._session.mode)
+        self._session.mode_told(told.get("mode") if isinstance(told, dict) else None)
         self._changed()
         self._page.note("chat", f"mode {self._session.mode}")
 
