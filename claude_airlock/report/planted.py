@@ -119,14 +119,29 @@ _UNSHOWN_RUN = re.compile(
 # The apostrophes a text can be written with but the plain one a pattern
 # looks for: a model reads a curly one as it reads that
 _APOSTROPHES = re.compile("[\u2018\u2019\u02bc\u2032]")
+# The controls but tab and line feed, which the trace drops from what it
+# shows (see clean of events.py): a word split by one is shown whole, and
+# is found so. Of them, those a pattern takes for a space between two
+# words: dropped they join two words, kept they split one, and a text
+# that has any is read both ways (see planted). Not a carriage return
+# ahead of a line feed, which ends a line either way.
+_CONTROLS = "\x00-\x08\x0b-\x1f\x7f-\x9f"
+_SPACING = re.compile("[\x0b\x0c\x1c-\x1f\x85]|\r(?!\n)")
+_NOT_SPACING = "\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f"
 # What splits a word or sets it off without a model reading it any
-# other way: the marks of emphasis, and the characters that are not shown
-_FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}]+")
-# The same but for what a path is written with, which is left where what
-# was found is shown (see _as_shown): a ~ ahead of the first / of a path,
-# and a * next to a /
+# other way: the marks of emphasis, the characters that are not shown and
+# the controls. And the same with the controls that space words left in.
+_FILLERS = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}{_CONTROLS}]+")
+_FILLERS_SPACED = re.compile(f"[*`~^\u00b7\u2022\u00a6{_UNSHOWN}{_NOT_SPACING}]+")
+# The marks of emphasis written with _ at the start or the end of a word,
+# not those within one (snake_case, <system_warning>)
+_UNDERLINED = re.compile(r"(?<!\w)_+(?=\w)|(?<=\w)_+(?!\w)")
+# The same as the fillers but for what a path is written with, which is
+# left where what was found is shown (see _as_shown): a ~ ahead of the
+# first / of a path, a * next to a /, and a _ at either end of a name
 _SET_OFF = re.compile(
-    f"(?:[`^\u00b7\u2022\u00a6{_UNSHOWN}]|~(?![\\w.-]{{0,64}}/)|(?<!/)\\*(?!/))+"
+    f"(?:[`^\u00b7\u2022\u00a6{_UNSHOWN}{_CONTROLS}]|~(?![\\w.-]{{0,64}}/)"
+    "|(?<!/)\\*(?!/))+"
 )
 
 # What finds a sign in a text: where it is, for what is shown with the
@@ -161,12 +176,16 @@ def _plain(text: str) -> str:
     return _APOSTROPHES.sub("'", unicodedata.normalize("NFKC", text))
 
 
-def _as_read(plain: str) -> str:
+def _as_read(plain: str, spaced: bool = False) -> str:
     """A text in its plain form (see _plain) as a model reads it,
     whatever was done to the way it is written to pass for something
-    else: without what splits a word (see _FILLERS). There is no end to
-    such ways, these are the cheap ones."""
-    return _FILLERS.sub("", plain)
+    else: without what splits a word or sets it off (see _FILLERS and
+    _UNDERLINED). Spaced, with the controls that a pattern takes for a
+    space left in, see _CONTROLS. There is no end to such ways, these are
+    the cheap ones."""
+    read = (_FILLERS_SPACED if spaced else _FILLERS).sub("", plain)
+    # Most texts have no _, which is quicker to tell than to look for
+    return _UNDERLINED.sub("", read) if "_" in read else read
 
 
 def _as_shown(plain: str) -> str:
@@ -386,6 +405,18 @@ class Planted:
         return {**found, "source": self.source} if self.source else found
 
 
+def _first_found(
+    sign: Sign, readings: list[str]
+) -> tuple[str, re.Match[str] | str | None]:
+    """What finds a sign gives of the first of some readings of a text
+    that has it, with that reading. None when none has it."""
+    for read in readings:
+        found = sign.find(read)
+        if found is not None:
+            return read, found
+    return readings[0], None
+
+
 def planted(text: object, source: str = "") -> tuple[Planted, ...]:
     """The signs a text shows of being written to instruct who reads it,
     each once, with the first place it is found: in the text as it reads
@@ -396,12 +427,16 @@ def planted(text: object, source: str = "") -> tuple[Planted, ...]:
         return ()
     text = text[:MOST_SCANNED]
     plain = _plain(text)
-    read = _as_read(plain)
+    # As it reads, and where it has controls that space words also with
+    # those left in, see _CONTROLS: a second pass of a pattern at most
+    readings = [_as_read(plain)]
+    if _SPACING.search(plain):
+        readings.append(_as_read(plain, spaced=True))
     # Made when the first sign is found: most texts show none
     shown: str | None = None
     signs = []
     for sign in SIGNS:
-        found = sign.find(text if sign.as_written else read)
+        read, found = _first_found(sign, [text] if sign.as_written else readings)
         if found is None:
             continue
         if isinstance(found, str):

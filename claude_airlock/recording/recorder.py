@@ -29,7 +29,9 @@ at a time, to the transcripts in the order they were first written to
 (see Copier). A copy that stopped short for it is noted to have, and
 --trace says so of its transcript. Nor does it follow more transcripts
 than MOST_FOLLOWED, nor look at more of the others than MOST_CHECKED at a
-time: a session that makes many does not have the looks come far apart.
+time, nor list them all at every look when that takes long (see
+LISTING_SHARE): a session that makes many does not have the looks come
+far apart.
 
 What this does not give: a line a session takes back within the moment
 before it is copied, what is written once a launcher has no room left or
@@ -97,6 +99,14 @@ MOST_A_TURN = 16 * 1024 * 1024
 # Far more than a session and its subagents write to.
 MOST_FOLLOWED = 2000
 MOST_CHECKED = 2000
+# Nor are they all listed again at every look, for those written to
+# since, when that takes long: no sooner than this many times as long as
+# the last listing took, so that those that are followed have their turns
+# as often as they would. How long a listing takes is the session's to
+# make, with the transcripts it makes or left from before: one written to
+# meanwhile is found that much later. And no more once as many are
+# followed as can be, nothing more is taken in then.
+LISTING_SHARE = 10
 # A transcript of more different lines than this is not compared with its
 # copies, and of the lines found gone no more is held than this, as the
 # entries they are once read (see held_size): both are a session's to
@@ -282,8 +292,10 @@ class Copier:
     No more transcripts are followed than MOST_FOLLOWED, and of those that
     are not, no more than MOST_CHECKED are looked at in one look, see
     _take_in: a look takes as long as the transcripts it looks at, and a
-    session can make any number. One written to once there are as many as
-    are followed is not copied, which is said when the session is over."""
+    session can make any number. Nor are they all listed at every look,
+    see LISTING_SHARE. One written to once there are as many as are
+    followed is not copied, which is said when the session is over, and
+    they are no longer listed then."""
 
     def __init__(self, host: Host, since: float) -> None:
         self._host = host
@@ -308,8 +320,9 @@ class Copier:
         self._written: dict[Path, int | None] = {}
         # Of the transcripts that were there when the session started and
         # are not followed, where the next look goes on looking at them,
-        # see _take_in
+        # see _take_in, and when they are next listed, see LISTING_SHARE
         self._next_checked = 0
+        self._list_at = 0.0
         # Whether one was written to once MOST_FOLLOWED were followed
         self.unfollowed = False
         # How much may still be added to the copies, see MOST_A_SESSION
@@ -359,10 +372,33 @@ class Copier:
         """Give each transcript that was written to its turn, the first
         seen first, see _turn: all it has to copy when told so, of a
         session that is over. Returns whether a turn left more to copy
-        that there is room for, the next look is then due at once."""
+        that there is room for, the next look is then due at once. The
+        transcripts are listed for those written to since when that is
+        due, see LISTING_SHARE, at the last look too."""
+        if not self.unfollowed and (whole or time.monotonic() >= self._list_at):
+            started = time.monotonic()
+            self._list()
+            took = time.monotonic() - started
+            # One that is quick at every look
+            slow = took * LISTING_SHARE > LOOK_EVERY
+            self._list_at = started + took * (LISTING_SHARE + 1) if slow else 0.0
+        more = False
+        for transcript in self._written:
+            try:
+                more |= self._turn(transcript, whole)
+            except OSError as problem:
+                # A full disk or the like: the session goes on without,
+                # and it is said once it is over
+                self.failed += 1
+                self.problem = str(problem)
+        return more and self._room > 0
+
+    def _list(self) -> None:
+        """List the transcripts that are there, and take in those that
+        were written to, see _take_in. Those that are gone are let go of,
+        a session can make any number."""
         transcripts = session_transcripts(self._host)
         there = set(transcripts)
-        # Not of those that are gone, a session can make any number
         self._copies = {
             transcript: copy
             for transcript, copy in self._copies.items()
@@ -375,16 +411,6 @@ class Copier:
         }
         self._short &= there
         self._take_in(transcripts)
-        more = False
-        for transcript in self._written:
-            try:
-                more |= self._turn(transcript, whole)
-            except OSError as problem:
-                # A full disk or the like: the session goes on without,
-                # and it is said once it is over
-                self.failed += 1
-                self.problem = str(problem)
-        return more and self._room > 0
 
     def _take_in(self, transcripts: list[Path]) -> None:
         """Follow those of the transcripts there that were written to, see
@@ -395,10 +421,8 @@ class Copier:
         resumed session adds to one of those. Once as many are followed
         as can be, the new ones alone, until one of them is found to be
         written to, which is then said (see unfollowed): nothing more is
-        taken in."""
+        listed then, see look."""
         full = len(self._written) >= MOST_FOLLOWED
-        if full and self.unfollowed:
-            return
         unknown = [path for path in transcripts if path not in self._written]
         new = [path for path in unknown if path not in self._lengths][:MOST_CHECKED]
         old = [] if full else [path for path in unknown if path in self._lengths]
@@ -598,6 +622,23 @@ def copied_at(host: Host, transcript: Path) -> float:
         return copy_path(host, transcript).stat().st_mtime
     except OSError:
         return 0.0
+
+
+def copy_rank(host: Host, transcript: Path) -> tuple[bool, float]:
+    """What a transcript is ranked by among those of the project, the
+    latest last, for what is the latest session: one the launcher copied
+    by when it last added to that copy, by its own clock, and one it has
+    no copy of, of a session run outside the sandbox, by the time of its
+    file and below all of those. That time is the session's to set, as
+    far ahead as it likes, and one set ahead would have another
+    transcript pass for the latest."""
+    copied = copied_at(host, transcript)
+    if copied:
+        return True, copied
+    try:
+        return False, transcript.stat().st_mtime
+    except OSError:
+        return False, 0.0
 
 
 def last_written(host: Host, transcript: Path) -> float:

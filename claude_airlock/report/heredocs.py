@@ -63,8 +63,13 @@ _BEFORE_COMMANDS = "<>"
 # with ( ) and | that are none of a command: a word of its own, in [[ ]]
 _REGEX = re.compile(r"(?<![^ \t])=~(?=[ \t]|\Z)")
 # What a shell runs in a here-document whose word is not quoted, see
-# _expanded: a $( ), a backquote, and the ${ } of bash that runs commands
-_RUN = re.compile(r"\$\(|`|\$\{[ \t|]|\$\{\Z")
+# _expanded: a $( ), a backquote, and any ${ } but of a plain name (see
+# _PARAMETER), with the $[ ] of bash, as _Command._dollar has it for a
+# command's own line.
+# The ${ } of bash runs commands, and a subscript, a substring or a $[ ]
+# is arithmetic, which runs the $( ) a variable's value holds, as ${x@P}
+# runs that of a prompt
+_RUN = re.compile(r"\$\(|`|\$\[|(?!" + _PARAMETER.pattern + r")\$\{")
 
 
 @dataclass(frozen=True)

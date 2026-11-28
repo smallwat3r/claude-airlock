@@ -85,6 +85,13 @@ class Kind(enum.StrEnum):
     COMPACT = "compact"
     MODE = "mode"
     MODEL = "model"
+    # A hook that ran, see hooks.py
+    HOOK = "hook"
+    # What Claude Code wrote to its memory, what it published, and that
+    # the session can be driven from claude.ai, see told.py
+    MEMORY = "memory"
+    PUBLISHED = "published"
+    REMOTE = "remote"
     # A line of the transcript that cannot be read
     TRANSCRIPT = "transcript"
     # What the launcher recorded of the network and of the processes

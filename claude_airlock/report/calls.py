@@ -10,25 +10,41 @@ from __future__ import annotations
 
 import difflib
 from collections.abc import Collection, Iterator
+from dataclasses import dataclass
 
 from ..events import Event, Who, Wrong, clean, flat, holds_unseen
+from ..recording.procwatch import Secrets
+from ..recording.secrets import said
 from ..sandbox.plugins import plugin_server, skill_plugin
-from .brief import clip, clip_ends, shortened
+from .brief import clip, lines_out, output_shown, shortened
 from .entries import (
     MOST_LISTED,
+    block_text,
     call_input,
+    content_blocks,
+    every_result,
+    kept,
     tool_calls,
 )
 from .heredocs import without_heredocs
 from .outcomes import (
     FILE_TOOLS,
     OUTSIDE_FLAG,
+    OUTSIDE_SANDBOX_FLAG,
+    OWN_FILE_TOOLS,
+    PATH_KEYS,
+    SEARCH_TOOLS,
+    SECRETS_FLAG,
+    SEND_MESSAGE,
+    SENT_SAID,
     ChangedFile,
     Outcome,
     entry_cwd,
     files_changed,
     outside,
     outside_flag,
+    secrets_of,
+    sent_outside,
     working_dir,
 )
 from .shown import size
@@ -46,16 +62,170 @@ NOT_COMPARED = (
     "... alike in too many places to compare line by line,"
     " shown as all taken out and all put in"
 )
-# Of the output of a call, how many lines of its start and of its end are
-# shown: when it failed, and with --verbose. The end comes first in worth, it
-# is where a command says what went wrong. All of it is in --json.
-FAILED_OUTPUT = (2, 6)
-VERBOSE_OUTPUT = (10, 10)
 # Said of a call that is asked about, see call_whole
 UNSEEN_FLAG = "CHARACTERS THAT DO NOT SHOW (control, direction or zero width)"
 # What tells the plugin a call is of, each value of the event with what
 # its line starts with
 PLUGIN_SAID = {"plugin": "plugin", "plugin_server": "plugin server"}
+# The blocks of a reply of the model that are calls Anthropic ran on its
+# side: of a tool of the API's own (a search of the web, code run in a
+# container of Anthropic's), and of an MCP server Anthropic reaches
+SERVER_CALLS = frozenset({"server_tool_use", "mcp_tool_use"})
+# What is said of such a call, under its arguments
+SERVER_SIDE = "ran on Anthropic's side"
+# What a call without arguments is told by: it is a call all the same
+NO_ARGUMENTS = "(no arguments)"
+# Of those, the tools that run code there, in a container that is not the
+# sandbox: what the code reaches is out of the launcher's sight
+CODE_RUNNERS = frozenset(
+    {"code_execution", "bash_code_execution", "text_editor_code_execution"}
+)
+# The block of a prompt that hands a file to that container
+UPLOAD = "container_upload"
+# What the connectors of a claude.ai account are named as, as tools
+CONNECTOR_START = "mcp__claude_ai_"
+# What each acts on outside the sandbox, as it is said
+CODE_RUN = "code run in a container of Anthropic's"
+SERVER_REACHED = "the MCP server {}, which Anthropic reaches"
+UPLOADED = "a file handed to a container of Anthropic's"
+CONNECTOR = "the {} connector of the claude.ai account"
+REMOTE_AGENT = "an agent in Anthropic's cloud, given the repository"
+# The tools that start an agent, the second the name it had before
+AGENT_TOOLS = frozenset({"Agent", "Task"})
+# What the address of SendMessage starts with when it reaches a session
+# of claude.ai or one over Remote Control, or a peer named by a DID, none
+# of which is in the sandbox
+SENT_AWAY = ("bridge:", "did:")
+
+
+@dataclass(frozen=True)
+class ActsAway:
+    """A tool of Claude Code's that acts on the user's claude.ai account,
+    on Anthropic's side: the argument that says what a call does, the
+    values of it that only read, as Claude Code tells them, and what it
+    acts on otherwise, as it is said."""
+
+    by: str
+    reads: frozenset[str]
+    on: str
+
+
+# Each, by its name. One more is one more here.
+ACTING_AWAY = {
+    "RemoteTrigger": ActsAway(
+        "action",
+        frozenset({"list", "get", "list_runs", "get_run_log"}),
+        "a routine of claude.ai, which runs on its own and outlives the session",
+    ),
+    "DesignSync": ActsAway(
+        "method",
+        frozenset(
+            {
+                "list_projects",
+                "get_project",
+                "list_files",
+                "get_file",
+                "report_validate",
+            }
+        ),
+        "a design project of claude.ai",
+    ),
+    "Artifact": ActsAway(
+        "action",
+        frozenset(
+            {
+                "list",
+                "read",
+                "list_types",
+                "describe_type",
+                "quickstart",
+                "comments",
+                "status",
+                "verify",
+                "list_assets",
+                "list_files",
+                "preview",
+                "open",
+                "get_endpoints",
+            }
+        ),
+        "an artifact published on claude.ai",
+    ),
+}
+
+
+def outside_sandbox(block: dict) -> str:
+    """What a call acts on outside the sandbox, through Anthropic, empty
+    for one that does not: of the capture, it is a connection to
+    Anthropic and no more. A tool that acts on the user's claude.ai
+    account (see ACTING_AWAY), a connector of it, an agent run in the
+    cloud, a message to a session that is not in the sandbox (by its
+    address, see sent_outside for what its result says), code run on
+    Anthropic's side, an MCP server it reaches, and a file handed to it.
+    Not a search of the web, nor a page fetched there: those only read."""
+    kind, name = block.get("type"), block.get("name")
+    if kind == UPLOAD:
+        return UPLOADED
+    if kind == "mcp_tool_use":
+        return SERVER_REACHED.format(shortened(flat(block.get("server_name", "?"))))
+    if not isinstance(name, str):
+        return ""
+    if kind == "server_tool_use":
+        return CODE_RUN if name in CODE_RUNNERS else ""
+    return _tool_acts_away(name, call_input(block))
+
+
+def _tool_acts_away(name: str, tool_input: dict) -> str:
+    """What a call of a tool of Claude Code's acts on outside the
+    sandbox, see outside_sandbox."""
+    acts = ACTING_AWAY.get(name)
+    if acts is not None:
+        does = tool_input.get(acts.by)
+        if isinstance(does, str) and does in acts.reads:
+            return ""
+        return acts.on + (
+            f" ({shortened(flat(does))})" if isinstance(does, str) else ""
+        )
+    if name.startswith(CONNECTOR_START):
+        server = name.removeprefix(CONNECTOR_START).partition("__")[0]
+        return CONNECTOR.format(shortened(flat(server)) or "?")
+    if name in AGENT_TOOLS and tool_input.get("isolation") == "remote":
+        return REMOTE_AGENT
+    to = tool_input.get("to")
+    if name == SEND_MESSAGE and isinstance(to, str) and to.startswith(SENT_AWAY):
+        return SENT_SAID
+    return ""
+
+
+def outside_sandbox_calls(entries: list[dict]) -> list[tuple[str, str]]:
+    """Each call that acted outside the sandbox, through Anthropic, once,
+    with what it acted on (see outside_sandbox): by what it was called
+    with, and by what its result says (see sent_outside). The calls of
+    the model, those Anthropic ran on its side, and each file handed to
+    it."""
+    found: dict[str, tuple[str, str]] = {}
+    tools: dict[str, str] = {}
+    for at, entry in enumerate(entries):
+        for place, block in enumerate(content_blocks(entry)):
+            kind, name = block.get("type"), flat(kept(block.get("name")))
+            call = block.get("id")
+            if entry.get("type") == "assistant" and kind in ("tool_use", *SERVER_CALLS):
+                tools[str(call)] = name
+            elif not (entry.get("type") == "user" and kind == UPLOAD):
+                continue
+            reaches = outside_sandbox(block)
+            # By its id, or where it is when it has none
+            key = str(call) if isinstance(call, str) else f"\0{at}.{place}"
+            if reaches:
+                found.setdefault(key, (name or UPLOAD, reaches))
+    for _, block in every_result(entries):
+        call = str(block.get("tool_use_id"))
+        if tools.get(call) != SEND_MESSAGE:
+            continue
+        reaches = sent_outside(SEND_MESSAGE, block_text(block.get("content")))
+        if reaches:
+            found.setdefault(call, (SEND_MESSAGE, reaches))
+    return list(found.values())
 
 
 def file_path(tool_input: dict) -> str | None:
@@ -283,11 +453,7 @@ def call_details(
     if name == "AskUserQuestion" and isinstance(tool_input.get("questions"), list):
         return _question_details(tool_input["questions"])
     # Any other tool: its arguments as they are
-    return [
-        line
-        for key, value in tool_input.items()
-        for line in clip(_argument_lines(flat(key), clean(value)), verbose)
-    ]
+    return _arguments(tool_input, verbose)
 
 
 def _told_keys(name: str, tool_input: dict) -> set[str] | None:
@@ -311,25 +477,35 @@ def call_whole(
     name: str, tool_input: dict, project_dir: str, apart: Collection[str] = ()
 ) -> list[str]:
     """The lines of a call with all it would be made with, for what is
-    asked before it is: as call_details describes it in full, then every
-    argument that does not tell of, as it is. The call of a tool with a
-    file among its arguments is otherwise described by the file alone,
-    and what is allowed is all of it. Said too when an argument holds
-    characters that are not shown, which would be written or run with
-    the rest. Without the arguments shown apart, a plan as a reply, which
-    are still looked at for those characters."""
+    asked before it is, see call_parts."""
+    details, rest = call_parts(name, tool_input, project_dir, apart)
+    return details + rest
+
+
+def call_parts(
+    name: str, tool_input: dict, project_dir: str, apart: Collection[str] = ()
+) -> tuple[list[str], list[str]]:
+    """The lines of a call with all it would be made with, for what is
+    asked before it is, in two parts: as call_details describes it in
+    full, and every argument that does not tell of, as it is. The call
+    of a tool with a file among its arguments is otherwise described by
+    the file alone, and what is allowed is all of it. Said too when an
+    argument holds characters that are not shown, which would be written
+    or run with the rest. Without the arguments shown apart, a plan as a
+    reply, which are still looked at for those characters."""
     shown = {key: value for key, value in tool_input.items() if key not in apart}
     told = _told_keys(name, shown)
     # Asked before it runs, of no entry that says where the session is:
     # a path that is not absolute is taken from the project
-    lines = call_details(name, shown, None, project_dir, True)
+    details = call_details(name, shown, None, project_dir, True)
+    rest: list[str] = []
     for key, value in shown.items():
         if told is not None and key not in told:
-            lines += _argument_lines(flat(key), clean(value))
+            rest += _argument_lines(flat(key), clean(value))
     unseen = [flat(key) for key, value in tool_input.items() if holds_unseen(value)]
     if unseen:
-        lines.append(f"{UNSEEN_FLAG} in {', '.join(unseen)}")
-    return lines
+        rest.append(f"{UNSEEN_FLAG} in {', '.join(unseen)}")
+    return details, rest
 
 
 def _argument_lines(key: str, value: str) -> list[str]:
@@ -338,6 +514,16 @@ def _argument_lines(key: str, value: str) -> list[str]:
     read as a line of the report (a result, a file outside the project)."""
     first, *more = value.splitlines() or [""]
     return [f"{key}: {first}", *(f"{key}:   {line}" for line in more)]
+
+
+def _arguments(tool_input: dict, verbose: bool) -> list[str]:
+    """The arguments of a call as they are, each as its lines, see
+    _argument_lines: the first few of each, all of them with verbose."""
+    return [
+        line
+        for key, value in tool_input.items()
+        for line in clip(_argument_lines(flat(key), clean(value)), verbose)
+    ]
 
 
 def _changed_details(
@@ -390,19 +576,16 @@ def _result_details(ended: Outcome | None, verbose: bool) -> list[tuple[str, boo
         notes.append(shortened(flat(ended.exit_meaning)))
     output = clean(ended.output).splitlines()
     if output:
-        notes.append(f"{len(output)} line{'s' if len(output) > 1 else ''} out")
-    shown: list[str] = []
-    if verbose:
-        shown = clip_ends(output, *VERBOSE_OUTPUT, "see --json")
-    elif ended.failed:
-        ends = clip_ends(output, *FAILED_OUTPUT, "see --verbose")
-        shown = [shortened(line) for line in ends]
+        notes.append(lines_out(len(output)))
+    shown = output_shown(output, verbose, ended.failed)
     badly = ended.failed or ended.refused
     lines = [
         ("result: " + ", ".join(notes), badly),
         *(("out: " + line, badly) for line in shown),
         *((sign.shown, True) for sign in ended.planted),
     ]
+    if ended.outside_sandbox:
+        lines.append((f"{OUTSIDE_SANDBOX_FLAG}: {ended.outside_sandbox}", True))
     if ended.output_kept:
         # Too long to give the model whole: it was given the start, and
         # where the rest is
@@ -421,6 +604,96 @@ def tell_result(event: Event, ended: Outcome | None, verbose: bool) -> None:
         event.went_wrong()
 
 
+def _server_details(block: dict, tool_input: dict, verbose: bool) -> list[str]:
+    """A call Anthropic ran on its side, or a file handed to it: the MCP
+    server it reached, then its arguments as they are, by whatever name
+    it has: a call named as one of Claude Code's tools is not one."""
+    server = block.get("server_name")
+    named = [f"server: {flat(server)}"] if block.get("type") == "mcp_tool_use" else []
+    return named + _arguments(tool_input, verbose)
+
+
+def on_secrets(
+    name: str,
+    tool_input: dict,
+    cwd: str | None,
+    project_dir: str,
+    secrets: Secrets,
+) -> tuple[str, str] | None:
+    """Of a call of one of Claude Code's own file tools on a file of
+    secrets, the path it was given and the kind of its secrets, none for
+    any other: the tool runs in Claude Code's process, which the record
+    of processes takes to read its own files, when it sees it at all."""
+    if name not in OWN_FILE_TOOLS:
+        return None
+    for key in PATH_KEYS:
+        path = tool_input.get(key)
+        if not isinstance(path, str):
+            continue
+        kind = secrets_of(path, secrets, project_dir, cwd, name in SEARCH_TOOLS)
+        if kind:
+            return path, kind
+    return None
+
+
+def secrets_called(
+    entries: list[dict], project_dir: str, secrets: Secrets
+) -> list[tuple[str, str]]:
+    """The path and the kind of secrets of each file of secrets a call
+    of Claude Code's own file tools was on, once for every call that
+    was, see on_secrets."""
+    found = (
+        on_secrets(
+            str(block.get("name")),
+            call_input(block),
+            entry_cwd(entry),
+            project_dir,
+            secrets,
+        )
+        for entry, block in tool_calls(entries)
+    )
+    return [one for one in found if one]
+
+
+def secrets_said(path: str, kind: str) -> str:
+    """A file of secrets a call was on, as it is said."""
+    return f"{flat(path)}, {said(kind)}"
+
+
+def _flag(details: list[str], alerts: set[int], flag: str, said: str) -> None:
+    """Add to the lines of a call one that tells of what went wrong: its
+    flag, and what it says of it."""
+    alerts.add(len(details))
+    details.append(f"{flag}: {said}")
+
+
+def _flag_away(block: dict, details: list[str], fields: dict, alerts: set[int]) -> None:
+    """Flag a call that acts outside the sandbox, through Anthropic, with
+    what it acts on, see outside_sandbox."""
+    reaches = outside_sandbox(block)
+    if reaches:
+        fields["outside_sandbox"] = reaches
+        _flag(details, alerts, OUTSIDE_SANDBOX_FLAG, reaches)
+
+
+def _call_made(
+    when: float, who: Who, details: list[str], fields: dict, alerts: set[int]
+) -> Event:
+    """The event of a call, by its lines, its values and which of its
+    lines tell of what went wrong."""
+    wrong = Wrong.PART if alerts else Wrong.NO
+    return Event(
+        when,
+        who,
+        fields["tool"].lower(),
+        details,
+        fields,
+        alerts=alerts,
+        wrong=wrong,
+        call=True,
+    )
+
+
 def call_event(
     when: float,
     who: Who,
@@ -429,37 +702,74 @@ def call_event(
     project_dir: str,
     verbose: bool,
     diffed: bool = True,
+    secrets: Secrets | None = None,
 ) -> Event:
-    """A tool call as it was issued, how it ended is added by the walk
-    that finds its result. diffed as for call_details."""
+    """A call of a tool of Claude Code's as it was issued, how it ended
+    is added by the walk that finds its result. diffed as for
+    call_details. One that acts outside the sandbox is flagged, see
+    outside_sandbox, and so is one of Claude Code's own file tools on a
+    file of secrets, of those it is given, see secrets_of. A call that
+    ran on Anthropic's side is told by server_call_event."""
+    tool_input = call_input(block)
     # On one line: it is what the event is, and stays in its column
     name = flat(block.get("name", "?"))
-    tool_input = call_input(block)
     cwd = entry.get("cwd")
+    within = working_dir(cwd)
     details = call_details(name, tool_input, cwd, project_dir, verbose, diffed)
     # A call without arguments is a call all the same, and has its line
-    details = details or ["(no arguments)"]
-    fields = {
-        "tool": name,
-        "id": str(block.get("id")),
-        "input": tool_input,
-        "cwd": cwd,
-    }
+    details = details or [NO_ARGUMENTS]
+    fields = {"tool": name, "id": str(block.get("id")), "input": tool_input, "cwd": cwd}
     alerts: set[int] = set()
     path = file_path(tool_input)
     if name in FILE_TOOLS and path is not None:
-        fields["outside_project"] = outside(path, project_dir, working_dir(cwd))
+        fields["outside_project"] = outside(path, project_dir, within)
         if fields["outside_project"]:
             # The line that names the file, see _file_details
             alerts.add(0)
+    found = (
+        None
+        if secrets is None
+        else on_secrets(name, tool_input, within, project_dir, secrets)
+    )
+    if found:
+        fields["secrets_file"] = found[1]
+        _flag(details, alerts, SECRETS_FLAG, secrets_said(*found))
+    _flag_away(block, details, fields, alerts)
     # After the arguments, a call is named by the first of its lines
     for key, plugin in _plugin_called(name, tool_input).items():
         fields[key] = plugin
         details.append(f"{PLUGIN_SAID[key]}: {plugin}")
-    wrong = Wrong.PART if alerts else Wrong.NO
-    return Event(
-        when, who, name.lower(), details, fields, alerts=alerts, wrong=wrong, call=True
-    )
+    return _call_made(when, who, details, fields, alerts)
+
+
+def server_call_event(
+    when: float, who: Who, entry: dict, block: dict, verbose: bool
+) -> Event:
+    """A call that ran on Anthropic's side as it was issued (see
+    SERVER_CALLS), whose result the walk finds in the reply of the model,
+    or a file handed to a container of Anthropic's with a prompt, which
+    is told as a call that has no result. Each by its arguments, that it
+    ran there, and what it acts on outside the sandbox, flagged, see
+    outside_sandbox."""
+    if block.get("type") == UPLOAD:
+        file = block.get("file_id")
+        name, call, tool_input = UPLOAD, file, {"file_id": file}
+    else:
+        # On one line, as of a call of Claude Code's
+        name, call = flat(block.get("name", "?")), block.get("id")
+        tool_input = call_input(block)
+    details = _server_details(block, tool_input, verbose) or [NO_ARGUMENTS]
+    details.append(SERVER_SIDE)
+    fields = {
+        "tool": name,
+        "id": str(call),
+        "input": tool_input,
+        "cwd": entry.get("cwd"),
+        "server_side": True,
+    }
+    alerts: set[int] = set()
+    _flag_away(block, details, fields, alerts)
+    return _call_made(when, who, details, fields, alerts)
 
 
 def _plugin_called(name: str, tool_input: dict) -> dict[str, str]:

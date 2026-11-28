@@ -568,6 +568,34 @@ class RecorderTest(LauncherTest):
             copier.look()
         assert self.copy.read_bytes() == self.transcript.read_bytes()
 
+    def test_a_listing_that_takes_long_does_not_hold_up_the_turns(self):
+        listed, lists = recorder.session_transcripts, []
+
+        def slow(host: object) -> list[Path]:
+            # As many transcripts as take a fifth of a look to list
+            lists.append(host)
+            time.sleep(recorder.LOOK_EVERY * 2 / recorder.LISTING_SHARE)
+            return listed(host)
+
+        copier = recorder.Copier(self.host, time.time() - 60)
+        with unittest.mock.patch.object(recorder, "session_transcripts", slow):
+            copier.look()
+            # The session's own has its turn at each look all the same
+            for number in range(3):
+                added = json.dumps(prompts_at(self.now + 5 + number)[0]) + "\n"
+                with open(self.transcript, "a") as transcript:
+                    transcript.write(added)
+                copier.look()
+                assert self.copy.read_bytes() == self.transcript.read_bytes()
+            assert len(lists) == 1
+            # The last look lists them whatever
+            copier.look(whole=True)
+            assert len(lists) == 2
+            # And once as many are followed as can be, none does
+            copier.unfollowed = True
+            copier.look(whole=True)
+            assert len(lists) == 2
+
     def test_one_of_many_older_transcripts_is_found_in_its_turn(self):
         older = [self.decoy(f"d{number}", 10) for number in range(5)]
         with unittest.mock.patch.object(recorder, "MOST_CHECKED", 2):
@@ -655,9 +683,10 @@ class RecorderTest(LauncherTest):
         # What it was asked is not a prompt of the user
         assert traced.count("user     prompt") == 1
         # A session without any says nothing of them
-        other = self.write_transcript("0b", prompts_at(self.now + 9))
-        os.utime(other, (self.now + 99, self.now + 99))
-        assert "# subagents" not in self.launch("--trace").stdout
+        self.write_transcript("0b", prompts_at(self.now + 9))
+        traced = self.launch("--trace", "0b").stdout
+        assert "# session     0b" in traced
+        assert "# subagents" not in traced
 
     def test_the_copies_of_subagents_go_when_they_are_old(self):
         theirs = self.subagent(prompts_at(self.now))

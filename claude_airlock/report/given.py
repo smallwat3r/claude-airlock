@@ -12,6 +12,8 @@ from inside the sandbox, see events.py."""
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -23,6 +25,30 @@ from .planted import Planted, flagged, planted
 
 # The kind of the event that tells of them, a name given here
 GIVEN = "given"
+# The bytes of what a text is known by, see digest_of: as many as no other
+# text is found to have, and few for thousands of them to be kept
+DIGEST_SIZE = 32
+
+
+def digest_of(text: object) -> bytes:
+    """What a text is told from another by, which takes a pass over it:
+    what is given again is known so before it is looked at for signs,
+    which takes many, and a long id is kept as it, see kept_id of
+    transcript.py. Empty for what is no text."""
+    if not isinstance(text, str):
+        return b""
+    # JSON can hold half a surrogate pair, which is no UTF-8
+    said = text.encode("utf-8", "surrogatepass")
+    return hashlib.blake2b(said, digest_size=DIGEST_SIZE).digest()
+
+
+def hook_named(event: str, name: str) -> str:
+    """A hook as it is named: by the event it ran on, with its own name
+    when that is another (PreToolUse:Bash is its event and what it is
+    for, tool.call one of its own)."""
+    if name in ("", event):
+        return event
+    return name if name.startswith(f"{event}:") else f"{event} ({name})"
 
 
 class Text(NamedTuple):
@@ -47,6 +73,8 @@ class Given:
     source: str
     size: int
     planted: tuple[Planted, ...] = ()
+    # What the text is told from another by, see digest_of
+    digest: bytes = b""
 
     @property
     def what(self) -> str:
@@ -96,8 +124,7 @@ def _resource(given: dict) -> list[Text]:
 def _hook(given: dict) -> list[Text]:
     """content.*: what a hook added, by the event it ran on and its name"""
     event, name = kept(given.get("hookEvent")), kept(given.get("hookName"))
-    source = event if name in ("", event) else f"{event} ({name})"
-    return [Text(source, _joined(given.get("content")))]
+    return [Text(hook_named(event, name), _joined(given.get("content")))]
 
 
 def _plugin(given: dict) -> list[Text]:
@@ -132,19 +159,24 @@ ATTACHED = {
     "plugin_note": Attached("plugin noted", _plugin),
     "relevant_memories": Attached("memory recalled", _memories),
 }
-# The kinds of attachment texts_given reads
+# The kinds of attachment texts_read reads
 GIVING = frozenset(ATTACHED)
 
 
-def texts_given(given: dict, scan: bool = True) -> tuple[Given, ...]:
-    """The texts an attachment put before the model, each with the signs
-    it shows unless told not to look, none for an attachment of another
-    kind. All of them: what is past those shown is looked at too."""
+def texts_read(given: dict) -> list[tuple[Given, str]]:
+    """The texts an attachment put before the model, each as it is told
+    without the signs it shows, and its text to look for them in: none
+    for an attachment of another kind."""
     kind = given.get("type")
     if not isinstance(kind, str) or kind not in ATTACHED:
-        return ()
-    return tuple(
-        Given(kind, source, len(text), planted(text, source) if scan else ())
+        return []
+    return [
+        (Given(kind, source, len(text), digest=digest_of(text)), text)
         for source, text in ATTACHED[kind].read(given)
         if isinstance(text, str) and text
-    )
+    ]
+
+
+def scanned(read: Given, text: str) -> Given:
+    """A text as it is told, with the signs it shows."""
+    return dataclasses.replace(read, planted=planted(text, read.source))

@@ -90,6 +90,10 @@ STYLES = {
     # commands, the network asked for through a tool, and those that
     # write files
     "bash": YELLOW,
+    # A hook runs a command as one does, and what Claude Code wrote to
+    # its memory is a file written
+    Kind.HOOK: YELLOW,
+    Kind.MEMORY: MAGENTA,
     "webfetch": BLUE,
     "websearch": BLUE,
     "edit": MAGENTA,

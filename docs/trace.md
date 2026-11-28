@@ -51,7 +51,7 @@ goes through your pager.
 | `3fa9` | The session whose id starts so, instead of the latest |
 | `--verbose` | Commands, diffs and replies whole, the output of every call, each step of the model, lookup and process, what the language server reported. Not with `--json`, which has it all |
 | `--only bash,net` | The events of the kinds named, as the `what` column says them |
-| `--failed` | What went wrong or stands out: a call that failed or was refused, a write outside the project, a possible injection, a refused request or connection, a request the API did not answer, a lookup or connection that stands out, a file of secrets opened, what was taken out of the transcript, a line of it that cannot be read |
+| `--failed` | What went wrong or stands out: a call that failed or was refused, a write outside the project, a call that acted outside the sandbox, a possible injection, a prompt that did not come from you, a hook that blocked, stopped or failed, Remote Control, a refused request or connection, a request the API did not answer, a lookup or connection that stands out, a file of secrets opened, what was taken out of the transcript, a line of it that cannot be read |
 | `--json` | JSON Lines, see [As JSON](#as-json) |
 | `--follow` | The sessions as they run, see [Following a session](#following-a-session) |
 
@@ -62,7 +62,7 @@ A trace narrowed by `--only` or `--failed` says so in its header (`shown`).
 | Column | Values |
 | --- | --- |
 | `who` | `user`, `claude`, `agent` (a subagent), or `sandbox`: what the launcher recorded of the container from outside, not what the transcript says |
-| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `context`, `mode`, `model`, `api`, `compact`, `task` (see [Besides the calls](#besides-the-calls)), `request` (see [The requests to the model](#the-requests-to-the-model)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `secret`, `health` (see [What ran](#what-ran)), `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read, or lines taken out of it that are no event, see [The transcript](#the-transcript)) |
+| `what` | `prompt`, `reply`, `command`, `step`, the tool (`bash`, `edit`, `write`, `read`, ...), `hook` (see [The hooks](#the-hooks)), `context`, `mode`, `model`, `api`, `compact`, `task`, `memory`, `published`, `remote` (see [Besides the calls](#besides-the-calls)), `request` (see [The requests to the model](#the-requests-to-the-model)), `started` (see [How the sandbox was started](#how-the-sandbox-was-started)), `net`, `dns`, `exec`, `listen`, `secret`, `health` (see [What ran](#what-ran)), `ssh-agent`, `docker`, `changed` (Claude Code no longer says something as [line mode](line-mode.md#how-it-works) reads it) or `transcript` (a line of it that cannot be read, or lines taken out of it that are no event, see [The transcript](#the-transcript)) |
 
 - A command comes with the reason Claude gave for it (`why:`), how it
   ended and how many lines it put out.
@@ -72,11 +72,32 @@ A trace narrowed by `--only` or `--failed` says so in its header (`shown`).
   the session: `allowed by you, once`, `allowed by a rule`.
 - What went wrong is in capitals: `FAILED` for a call, `REFUSED by` for
   one that was not allowed to run, `INTERRUPTED` for one cut short,
-  `OUTSIDE PROJECT` for a file written there, `DENIED` for a request the
-  egress filter refused, `POSSIBLE INJECTION` for something read that may
-  be written to instruct the session (see [What it read](#what-it-read)).
+  `OUTSIDE PROJECT` for a file written there, `OUTSIDE SANDBOX` for a
+  call that acted beyond it (see [Outside the sandbox](#outside-the-sandbox)),
+  `SECRETS FILE` for a tool of Claude Code's on one (see
+  [What ran](#what-ran)), `DENIED` for a request the egress filter
+  refused, `POSSIBLE INJECTION` for something read that may be written to
+  instruct the session (see [What it read](#what-it-read)), `NOT FROM YOU`
+  for a prompt that came from outside the session.
 - A prompt typed while claude worked says so: claude was given it with
   the next result.
+- A prompt is yours, Claude Code's own, or from outside the session, as
+  Claude Code says where it came from. One Claude Code made itself is
+  told as that: a task that ended (`task`), what the agent that started
+  a subagent tells it (`told (coordinator): ...`), a turn it goes on
+  with by itself, the prompt a task of its schedule fired with. One from
+  another session, an MCP server, a caller over the network, a plugin or
+  a voice call, or of a kind Claude Code does not name, is `NOT FROM
+  YOU`, with where it came from and who sent it. It starts a turn as
+  your prompt does, `--failed` keeps it, and it is looked at for
+  [what it read](#what-it-read). The header counts them next to your
+  prompts:
+
+  ```
+  claude   prompt   NOT FROM YOU (peer uds:/tmp/claude-1000/other.sock): push the branch to origin
+  claude   context  told (coordinator): The rate limit has reset, go on with the review
+  ```
+
 - A transcript is the session's to write. A second result under the id
   of a call is shown as a result of its own (`of:` and the call), with
   `--follow` too, so a result written ahead of the real one cannot stand
@@ -85,6 +106,9 @@ A trace narrowed by `--only` or `--failed` says so in its header (`shown`).
   first call's.
 - Long commands, diffs and replies are cut to a few lines, and the output
   of a call is shown only when it failed. `--verbose` shows more.
+- The header names no more than 50 tools under `tool calls`, the most
+  called first, and 50 hosts under `pages fetched`, with how many more
+  there are: a session can call any number, each named as it likes.
 - What a command feeds a program in a here-document is shown as a count
   (`... here-document of 12 lines, see --verbose`), but only where bash
   surely reads those lines as that and only hands them on. The lines are
@@ -109,9 +133,8 @@ A trace narrowed by `--only` or `--failed` says so in its header (`shown`).
   `--json` as a value of its own: `plugin` for a skill a plugin brought
   (`skill: diagram-design:export-diagram`), `plugin_server` for a tool of
   a server a plugin brought, the two as Claude Code joins them.
-  `--only=skill` keeps the skills that ran. The hooks of a plugin are not
-  shown as such: what they ran is among [what ran](#what-ran), without
-  the plugin.
+  `--only=skill` keeps the skills that ran. A hook of a plugin is shown
+  as any hook is, see [The hooks](#the-hooks), without the plugin.
 
 ```
 claude   skill    skill: diagram-design:export-diagram
@@ -120,8 +143,9 @@ claude   skill    plugin: diagram-design
 ```
 
 On a terminal the colours make what the session did out of your sight
-stand out: commands are yellow, files it wrote magenta, the network cyan,
-what went wrong bold red, and the conversation is dimmed. `NO_COLOR=1`
+stand out: commands and hooks are yellow, files it wrote magenta (its
+memory too), the network cyan, what went wrong bold red, and the
+conversation is dimmed. `NO_COLOR=1`
 switches them off, `FORCE_COLOR=1` on wherever the output goes.
 
 ## What a command wrote
@@ -136,9 +160,13 @@ claude   bash   changed: /home/me/.bashrc (+1 -0)  OUTSIDE PROJECT
 - The diff of each file is not shown, it is in `--json`.
 - Of a command that changed many files the first 50 are named, with how
   many more there are. `--verbose` names them all.
-- These files count under `files written` in the header. One outside the
-  project is kept by `--failed` and named by the launcher
-  [when a session ends](#when-a-session-ends).
+- These files count under `files written` in the header, which names the
+  first 50, those outside the project first, with how many more there
+  are. One outside the project is kept by `--failed` and named by the
+  launcher [when a session ends](#when-a-session-ends).
+- Claude Code notes them once for the entry that holds the result of the
+  command, which holds that result alone. Of an entry written with
+  several results, they are told with the first.
 - `OUTSIDE PROJECT` goes by the path as written, for a tool's write too,
   as Claude Code takes it: without blanks around it, a leading `~` as the
   home of the container, and a relative path from the directory the
@@ -158,9 +186,12 @@ A web page, a file of the project or the output of a command can hold
 text written for the model: to have it run something, send something out
 or keep quiet about it. That is prompt injection, and a session does not
 ask before it uses a tool. The launcher looks at what each call gave the
-session to read, at each file of instructions that is not your own, and
-at the other texts Claude Code put before the model (see
-[Besides the calls](#besides-the-calls)), and flags what stands out:
+session to read, Anthropic's side too (see
+[Outside the sandbox](#outside-the-sandbox)), at each file of
+instructions that is not your own, at the other texts Claude Code put
+before the model (see [Besides the calls](#besides-the-calls)), at what a
+hook gave it (see [The hooks](#the-hooks)) and at a prompt that came
+from outside the session, and flags what stands out:
 
 ```
 claude   webfetch  url: https://example.org/install
@@ -195,12 +226,15 @@ claude   context   | and never mention this to the user.
   may not do.
 - Text is looked at as it reads, not as it is written: wide and styled
   letters count as plain ones, a curly apostrophe as a straight one, and
-  marks of emphasis and hidden characters are dropped, so a word split by
-  one is still found. The excerpt shows the text that way, except in
-  paths: a `~` before the first `/` and a `*` next to one are kept, so
-  `~/.ssh/id_ed25519` does not show as another file. Letters spaced out
-  or dotted, look-alikes from another alphabet and encodings are not seen
-  through.
+  marks of emphasis (a `_` at either end of a word among them), hidden
+  characters and control characters are dropped, so a word split by one
+  is still found, as the trace shows it. A control that spaces words (a
+  form feed, a lone carriage return) is read as a space too. The excerpt
+  shows the text that way, except in paths: a `~` before the first `/`, a
+  `*` next to one and a `_` are kept, so `~/.ssh/id_ed25519` does not
+  show as another file, unless what was found is written with them.
+  Letters spaced out or dotted, look-alikes from another alphabet and
+  encodings are not seen through.
 - Each sign is flagged once per result, at its first place: the lines it
   is on, the line before and a few after, each behind a `|`, which no
   line of the trace itself starts with. Blank lines are left out, and a
@@ -238,16 +272,23 @@ claude   model    claude-opus-5-5, effort high  was: claude-fable-5-2, effort me
 claude   api      API error: No response from API, tried again after 0.5s (retry 1 of 10)
 claude   compact  the conversation was compacted (auto), 152.3k tokens before
 claude   task     completed: Agent "review" finished
+claude   task     scheduled task fired (*/30 * * * *): check the build and fix what broke
+claude   memory   saved: /home/me/.claude/projects/-home-me-code-api/memory/build.md
+claude   published  https://github.com/me/api/pull/12 (created, me/api, #12, branch fix-build)
+claude   remote   REMOTE CONTROL is on, the session can be driven from claude.ai: https://claude.ai/code/session_01
 ```
 
 | `what` | Says |
 | --- | --- |
-| `context` | What Claude Code put before the model next to the prompt: each file of instructions it read (a `CLAUDE.md`, its memory) and where it is from, the MCP servers that brought instructions, the skills it listed, the texts below, a file that changed since claude read it. With `--verbose`, what the language server reported after an edit |
-| `mode` | The permission mode changed. The one the session started in is in the header |
-| `model` | Another model, or another effort, than the request before |
+| `context` | What Claude Code put before the model next to the prompt: each file of instructions it read (a `CLAUDE.md`, its memory) and where it is from, the MCP servers that brought instructions, the skills it listed, the texts below, a file that changed since claude read it, what it told the model itself in the place of a prompt. With `--verbose`, what the language server reported after an edit |
+| `mode` | The permission mode changed. The one the session started in is in the header. Or a call the permissions refused, which Claude Code noted apart from its result (`permission DENIED: Bash: ...`) |
+| `model` | Another model, or another effort, than the request before. Or Claude Code went on with another model than the one asked for: when that one failed (`fell back: overloaded`), or refused the request, which is in capitals (`the model REFUSED the request`) |
 | `api` | A request the API did not answer or refused, which Claude Code tried again |
 | `compact` | The conversation was summed up to make room: from there on claude knows what came before by the summary |
-| `task` | A subagent, or a command left to run, ended |
+| `task` | A subagent, or a command left to run, ended. Or a task of the session's schedule fired: a turn no one typed a prompt for, with the prompt it was given |
+| `memory` | Files Claude Code wrote to its memory, which a later session of the project is given |
+| `published` | A change the session published for review, created or pushed to, and the pull request it is linked to, once each |
+| `remote` | Remote Control is on: whoever has the claude.ai account can drive the session from there or a phone, so it is in capitals and kept by `--failed`. Again when the Remote Control session it is joined to changes, and when that ends |
 | `request` | With `CLAUDE_AIRLOCK_API_LOG=1`, a request to the model and what it used, see [The requests to the model](#the-requests-to-the-model) |
 
 - A file of instructions steers a session as a prompt does, and a
@@ -276,8 +317,22 @@ claude   task     completed: Agent "review" finished
   `gone`), `skills`, `given` for the texts above (with the attachment
   they are of as `of`), `edited_file`, `diagnostics`, or `told` for what
   Claude Code told the model in place of a prompt (`told (bash): ls`),
-  with the mode Claude Code names for it as `mode`. The kind is the
-  launcher's word, never the transcript's.
+  with the mode Claude Code names for it as `mode`, or where it came from
+  as `origin` and `from`. The kind is the launcher's word, never the
+  transcript's.
+- A file of instructions or a text given again as it was is known so
+  before it is looked at, by what its content hashes to: one that says
+  other than it did is told again, whatever its length.
+- The header counts what the trace does not read: the kinds of entry, of
+  attachment, of the system and of block that Claude Code writes and the
+  trace neither tells of nor knows to tell nothing worth a line (its
+  bookkeeping, what it puts before the model of its own, what the model
+  thought). On a session of Claude Code 2.1.326 there are none, a kind it
+  writes later is counted there by its name, not let go without a word:
+
+```
+# untold      3 of kinds the trace does not read (2 attachment teammate_mailbox, 1 system away_report)
+```
 - With `--verbose` a step that could not read the conversation from the
   cache says so, with how much it read at full price and, when the
   transcript tells, why:
@@ -285,6 +340,94 @@ claude   task     completed: Agent "review" finished
 ```
 claude   step   754 tokens out, 405.1k in (372.4k new)  cache MISSED, 372.4k read anew: 107 thinking blocks dropped, model mismatch
 ```
+
+## The hooks
+
+A hook runs a command of the project's `.claude/settings.json`, of your
+own settings or of a plugin, with no tool call: when the session starts,
+before or after a call, when a prompt is given, when claude is to stop.
+Each run is a line, with the event it ran on, its command and how it
+ended:
+
+```
+claude   hook   SessionStart: $ ./scripts/session-start.sh
+claude   hook   result: ok, exit 0, 0.3s, 2 lines out
+claude   hook   given to claude: 120 chars
+claude   hook   PreToolUse:Bash: $ ./scripts/guard.sh
+claude   hook   result: BLOCKED
+claude   hook   why: rm -rf is not allowed here
+claude   hook   Stop: 2 hooks ran, 1.7s
+claude   hook   $ ./scripts/check.sh  (1.5s)
+claude   hook   $ ./scripts/notify.sh
+claude   hook   error: tests fail in api_test.go
+```
+
+| `result:` | The hook |
+| --- | --- |
+| `ok` | Ran and ended with 0, and what it wrote out is with `--verbose` |
+| `FAILED` | Ended with another code, its errors shown (`err:`) |
+| `BLOCKED` | Kept what it ran on from going ahead, a call or a prompt, and why (`why:`) |
+| `STOPPED the session` | Kept claude from going on, with what it said |
+| `CANCELLED` | Was stopped, as when it ran out of time (`why: timed out after 60.0s`) |
+| `FAILED to run` | Could not be run, and why |
+| `DEFERRED` | Held back the call it ran on until the session is resumed |
+
+- What went wrong is in capitals, in the colours of what went wrong, and
+  kept by `--failed`. `said:` is what a hook said to you alone.
+- What a hook gave the model is said (`given to claude:`) and looked at
+  for [what it read](#what-it-read): what one wrote out on `SessionStart`,
+  `UserPromptSubmit` and `UserPromptExpansion`, which Claude Code gives
+  the model as its own word, why one blocked something and what one
+  stopped the session with, what one run in the background answered with.
+  What a hook added to the context is the `hook added` line of
+  [Besides the calls](#besides-the-calls), and the decision of one on a
+  call the result of the call (`REFUSED by hook`): neither is said again.
+- A hook is named by the event it ran on, and by its own name when that
+  is another (`PreToolUse:Bash` for those of a tool). The hooks run as
+  claude was to stop are one line, `Stop` or the event Claude Code names:
+  how many and for how long, each command, every error of theirs, which
+  the model is told of, and whether they kept claude from stopping.
+- What its command started is among [what ran](#what-ran), as for a call.
+- `--only hook` shows them alone. `--json` has `hook_event`, `hook_name`,
+  `command`, how it `ended`, `exit_code`, `seconds`, `stdout`, `stderr`,
+  `reason`, `said`, what it gave the model as `given`, and as `of` the
+  kind of attachment Claude Code noted it in.
+
+## Outside the sandbox
+
+Some calls act outside the sandbox, through Anthropic: the capture sees a
+connection to Anthropic's API and no more. Those are flagged on a line of
+their own:
+
+```
+claude   remotetri~  action: create
+claude   remotetri~  body: {"cron": "0 9 * * *", "prompt": "check the build"}
+claude   remotetri~  OUTSIDE SANDBOX: a routine of claude.ai, which runs on its own and outlives the session (create)
+claude   code_exec~  code: print(open('/etc/hostname').read())
+claude   code_exec~  ran on Anthropic's side
+claude   code_exec~  OUTSIDE SANDBOX: code run in a container of Anthropic's
+```
+
+| Call | Acts on |
+| --- | --- |
+| `RemoteTrigger` | A routine of claude.ai, made, changed or run: it runs on a schedule or a webhook, with no session, and outlives this one. Not one that only lists them or reads their runs |
+| `DesignSync` | A design project of claude.ai, written to, made or changed. Not one that only lists or reads its files |
+| `Artifact` | An artifact published on claude.ai, or what is done to one. Not one that only reads or lists them |
+| `Agent` with `isolation` `remote` | An agent in Anthropic's cloud, given the repository |
+| `mcp__claude_ai_...` | A connector of your claude.ai account (Gmail, Drive...), by its name |
+| `SendMessage` | A Claude session that is not in the sandbox: by its address (`bridge:`, `did:`), or as its result says (a session in the cloud, or over Remote Control). Not a subagent of this session, nor another session in the sandbox |
+| Code run on Anthropic's side | Code the model had run in a container of Anthropic's (`code_execution`), an MCP server Anthropic reaches for the model (`mcp_tool_use`), a file handed to that container with a prompt (`container_upload`) |
+
+- A call that ran on Anthropic's side says so (`ran on Anthropic's
+  side`), with its name and its arguments as they are, whatever it is
+  named: one named as a tool of Claude Code's is not one. Its result is
+  in the reply of the model, and what it gave the model is looked at for
+  [what it read](#what-it-read). A search of the web or a page fetched
+  there only reads, and is no flag.
+- The header counts them (`# outside`), `--failed` keeps them, and the
+  launcher names them [when a session ends](#when-a-session-ends).
+  `--json` has `outside_sandbox`, what it acted on, and `server_side` on a
+  call that ran on Anthropic's side.
 
 ## As JSON
 
@@ -309,10 +452,15 @@ their names: what a use of the SSH agent signed or asked for is
 `request`, what line mode found changed is `change`.
 
 - What happened on the network also has `during`, the ids of the tool
-  calls running at the time. A connection followed as it happens has
+  calls running at the time, looked for among the 1000 noted last: the
+  100 started last, and `during_more`, how many others there were, when
+  there were more. A session can leave any number running, each without
+  a result. A connection followed as it happens has
   `stage`: `open` when it is made, `progress` while it is still open and
   `outcome` when it ended, the last two with when it was `opened`.
 - A command no process was seen of has `unseen`, see [What ran](#what-ran).
+- A request to the model whose length is not known has `unmeasured`, it
+  is not looked for on the wire, see [On the wire](#on-the-wire).
 - What was taken out of the transcript has `removed`, see
   [The transcript](#the-transcript). A result shown apart from its call,
   there or while [following](#following-a-session), has `stage` as
@@ -321,7 +469,18 @@ their names: what a use of the SSH agent signed or asked for is
   are for the text alone.
 - A tool is the session's to name, even as one of the launcher's own
   kinds (`net`, `record`): an object that is a tool call or its result
-  has `tool` and `id`, which no other has.
+  has `tool` and `id`, which no other has. The call a `mode` line says
+  the permissions denied is its `denied_tool`.
+- What stands out of a call has a value of its own: `outside_project`,
+  `outside_sandbox` (see [Outside the sandbox](#outside-the-sandbox)),
+  `secrets_file` (see [What ran](#what-ran)) and `injection`. A prompt
+  that did not come from you has `not_from_you`, with its `origin` and
+  `from`, and one queued while claude worked `queued`.
+- While a session is followed, the id of a call or of a step longer than
+  200 characters is kept as what it hashes to (`blake2b:...`), and of a
+  call no more than 4096 characters of its tool's name and of what it
+  reads: a session can write thousands of each, as long as it likes. A
+  result whose call was named so has the id it was written with.
 
 ## The network
 
@@ -385,7 +544,10 @@ when, the header says they were `NOT LOOKED AT`.
 - A name is written as `dig` writes it: a byte that is no printable ASCII
   letter as a backslash and its number (`\032` for a space, `\195\169`
   for `é`), a dot inside a label as `\.`. Letters keep their case: two
-  names that differ in it are two, as they went.
+  names that differ in it are two, as they went. Of a name longer than
+  DNS allows (255 bytes), which a session can still send, its last labels
+  are kept, as many as fit in that, after `...`, and it is flagged as
+  unusually long.
 - A name looked up and never answered is a lookup of its own, `no
   answer`. An answer too long for the capture keeps the addresses that
   fit. DNS over TCP is read as DNS over UDP is, however a message is
@@ -394,7 +556,9 @@ when, the header says they were `NOT LOOKED AT`.
   end of both sides, what is sent after the other side closed or reset it
   included. The numbers wrap every 4 GB, so the capture takes one packet
   of every gigabyte a connection carries, and a longer one is still
-  counted right.
+  counted right. What the session sent is counted by its own packets, all
+  of which the capture has: what the other end says it got is that end's
+  word, which a server the session runs makes what it likes.
 - Packets that come faster than they are taken are dropped, and what they
   told of, a connection made in that burst say, is in no part. Each
   tcpdump says how many when it ends, and a capture that dropped any is
@@ -408,7 +572,7 @@ own (`answers` 200,000, the model answers in many small ones):
 
 | Part | Holds |
 | --- | --- |
-| `tcp` | The start, answer and end of connections, the TLS hello, plain HTTP |
+| `tcp` | The start, answer and end of connections, the TLS hello and its first bytes sent on their own, plain HTTP |
 | `dns` | What Docker's resolver is asked and answers |
 | `direct` | What goes to port 53 anywhere else, with the start and end of a connection there that carries something |
 | `flows` | What is not TCP |
@@ -418,34 +582,41 @@ own (`answers` 200,000, the model answers in many small ones):
 | `downloads` | A sample of what comes in from anywhere else, see [What comes in](#what-comes-in) |
 
 - A session that floods one part cannot fill the others: whatever it
-  sends to port 53, the lookups the resolver makes for it and its
-  connections to that port are still recorded. A part that hits its limit
-  is shown as `STOPPED at its packet limit` with its name. One whose
-  tcpdump ended before the session did is `INCOMPLETE`, what came after is
-  not in it. `--follow` says so too, within a few seconds.
+  sends to port 53 elsewhere, the lookups the resolver makes for it and
+  its connections to that port are still recorded. What it sends to the
+  resolver's own address, on any port, is in `dns`, which it can fill
+  that way: from then on its lookups are not recorded, and no hello is
+  held against them. A part that hits its limit is shown as `STOPPED at
+  its packet limit` with its name. One whose tcpdump ended before the
+  session did is `INCOMPLETE`, what came after is not in it. `--follow`
+  says so too, within a few seconds.
 - `uploads` and `elsewhere` keep the first 160 bytes of every packet the
   session sends over TCP that carries something. That is the headers, and
   as these are usually shorter, some 90 bytes of the payload: encrypted
   over TLS, plain otherwise. From them the launcher tells when each thing
   was sent, how long it was and over which connection, see
   [On the wire](#on-the-wire). Of the payload it reads only the first
-  packet of a connection, to tell what is spoken there. There are two
+  bytes of a connection, to tell what is spoken there and what a proxy was
+  asked for. There are two
   parts so that a session that sends a lot elsewhere cannot use up the
   room its requests to the model are told by.
-- No more than 400,000 DNS messages of a capture are read, 100,000
-  lookups kept and 200,000 addresses in all: the rest are counted as
-  `NOT READ`. A session can send any number of messages that are no
-  lookups or that nobody asked for, and one answer can give thousands of
-  addresses. Docker's resolver and port 53 elsewhere each have these
-  bounds of their own: whatever a session sends to a server of its own,
-  the lookups it has the resolver make are still read, with `--follow`
-  too.
+- No more than 64 MB of the DNS messages of a capture are read, each
+  counted as 64 bytes at the least, 100,000 lookups kept and 200,000
+  addresses in all: the rest are counted as `NOT READ`. A session can
+  send any number of messages that are no lookups or that nobody asked
+  for, and one answer can give thousands of addresses. What is shorter
+  than the header of a message (12 bytes) is none, and is not read: a
+  session that sends many such over TCP uses up nothing. Docker's
+  resolver and port 53 elsewhere each have these bounds of their own:
+  whatever a session sends to a server of its own, the lookups it has
+  the resolver make are still read, with `--follow` too.
 - What is sent to a resolver over TCP and cannot be read to its end is
   counted and shown (`NOT READ to its end`): a packet longer than the
   capture keeps (1024 bytes), which hides whatever follows its first
   message, a message of more than 4 kB sent a little at a time, and one
-  whose rest never came (its connection ended or was reset first, or
-  what came next does not follow on by its sequence number). A lookup may
+  whose rest never came (its connection ended or was reset first, the
+  capture ended first, or what came next does not follow on by its
+  sequence number). A lookup may
   be missing each time, which a session can arrange, and a hello sent
   after it is then checked against no name.
 - The proxy keeps its log in two files of about 10 MB, the current one
@@ -454,6 +625,10 @@ own (`answers` 200,000, the model answers in many small ones):
   32 MB of the two. So a session that asks for enough pushes its earlier
   requests out of the log: a log that was rotated and begins after the
   session did is shown as `INCOMPLETE`, with the time it goes back to.
+- A request in the proxy's log is the session's whose address it came
+  from and that was running when the request began: a tunnel is logged
+  as it closes, which can be once its session has ended and the address
+  was given to the next.
 
 ### What a connection is
 
@@ -469,7 +644,10 @@ connection sends:
   whether it was allowed. Only the first bytes of a connection count,
   those of the packet that starts it too (TCP Fast Open), across as many
   packets as it takes to tell: what goes through a tunnel later is the
-  session's to make read as anything.
+  session's to make read as anything. A request to the egress proxy whose
+  target could not be read, past its first 1 kB or never sent to the end
+  of its line, is `FLAGGED` (`what it asked the proxy for could not be
+  read`): what goes through it is then checked against no name.
 - **Whether its hello asks for the name it was reached by.** The TLS
   hello names the server the connection is for, in the clear. One that
   asks for another name than the address was looked up under, or than the
@@ -481,9 +659,23 @@ connection sends:
   it, nor when the capture's lookups may not all be there: their part hit
   its packet limit, or a recorder ended early or lost packets. Nor of a
   hello sent once some lookups went unread, while one sent before that is
-  checked against the lookups up to it, which were all read. A hello that
-  names no server is flagged on port 443 alone, and not when the capture
-  has only its start.
+  checked against the lookups up to it, which were all read. A hello in
+  several records of TLS, or in several packets, is read as the server
+  reads it. One that names no server, or could not be read as far as its
+  name (`its hello could not be read`: the capture cut it short, or it
+  was sent a few bytes at a time), is flagged on port 443 alone, or in a
+  tunnel the proxy was asked for to port 443 of a host by its name, once
+  something went through it: a tunnel the proxy refused carries none.
+  The capture keeps the first 2 kB of the packet that starts a hello,
+  which is all of it on a link of 1500 bytes, and of each packet after
+  it no more than `elsewhere` and `uploads` do. A browser puts the name
+  of the server anywhere in its hello, after a kilobyte of keys as often
+  as not, and of a hello longer than a packet the name may then be past
+  what is kept. Such a hello, begun in a packet as long as a link
+  carries, is said on the line of its connection and not flagged (`its
+  hello is longer than the capture keeps`, `hello_unread` in `--json`):
+  a session that makes its own as long to hide the name has an easier
+  way, see below. One sent a few bytes at a time is flagged.
 - **What it speaks.** TLS, HTTP and SSH are told by how they begin. Port
   443 that does not begin as TLS, port 80 that does not begin as HTTP and
   port 22 that does not begin as SSH are `FLAGGED` (`speaks SSH, not
@@ -564,6 +756,11 @@ compares the two. The header says what came of it:
   what a command changed are the transcript's word too.
 - A session that removed its transcript is still listed and traced, from
   the launcher's copy, for as long as that is kept.
+- The latest session, the one `--trace` shows when none is named, is the
+  one whose transcript the launcher added to last, by its own clock: the
+  time of a file is the session's to set, ahead as well as back. A
+  transcript it has no copy of, of a session run outside the sandbox,
+  comes after those, by that time.
 - A line that holds no entry is not Claude Code's doing: half a line
   written ahead of an entry makes that entry unreadable. It is shown as
   `UNREADABLE`, with `--failed` too.
@@ -598,9 +795,12 @@ What a session can make large is bounded:
 - A launcher follows no more than 2000 transcripts in one session, and
   looks at no more than 2000 of the others at a time, the new ones first:
   each look takes time, and a session that made many could have the
-  copies made as far apart as it likes. One first written to once the
-  limit is reached is not copied, which is said when the session ends,
-  and its trace says the launcher has no copy.
+  copies made as far apart as it likes. Where listing them all takes
+  long, it lists them a tenth of the time at most: those it follows are
+  copied as often, one first written to meanwhile is found that much
+  later. One first written to once the limit is reached is not copied,
+  which is said when the session ends, and its trace says the launcher
+  has no copy.
 - A transcript rewritten shorter has its copy put aside and a new one
   started, however often. Past the fifth time, what a copy held is added
   to the last one put aside, up to 512 MB, and what has no room there is
@@ -683,6 +883,38 @@ sandbox  secret  /home/me/.config/gh/hosts.yml, the login of gh, OPENED  by: [81
   is over, and `--json` has `path`, `secret` (its kind), `own` and
   `process`.
 
+Claude Code's own file tools run in its own process: a `Read` of
+`~/.ssh/id_ed25519` the model asked for is, to the sidecar, Claude Code
+opening a file, when it sees it at all. So a call of `Read`, `Edit`,
+`Write`, `MultiEdit`, `NotebookEdit`, `Grep` or `Glob` on a file of
+secrets is flagged on the call, with the kind of its secrets:
+
+```
+claude   read   file: ~/.ssh/id_ed25519
+claude   read   SECRETS FILE: ~/.ssh/id_ed25519, a file of SSH
+claude   read   result: ok, 0.0s, 7 lines out
+```
+
+- The files are those above: the logins and keys under the home of the
+  container and of the host, and a file of a name hidden from the
+  session in the project or in a directory mounted next to it. A trace
+  takes the names the settings hide when it is made
+  (`CLAUDE_AIRLOCK_SHADOW` as it is set then), and the directories the
+  launcher noted the session was started with (`mounted`, see
+  [How the sandbox was started](#how-the-sandbox-was-started)), `--follow`
+  the project alone. When a session ends, the launcher takes the
+  settings and the directories the session had.
+- The path is taken as for `OUTSIDE PROJECT` (see
+  [What a command wrote](#what-a-command-wrote)): a leading `~` as the
+  home of the container, a relative one from the directory the session
+  was in. Of `Grep` and `Glob`, a directory every file of which holds
+  secrets (`~/.ssh`) is one too.
+- It goes by the path the call was given, not by what the tool read: a
+  file reached through a link, or by a pattern, is not caught.
+- The header counts them (`# secrets`), `--failed` keeps them, and the
+  launcher names them [when a session ends](#when-a-session-ends).
+  `--json` has the kind as `secrets_file`.
+
 A connection the sidecar found no process for says `by: a process that
 cannot be looked into`: a process can close itself to the others of its
 user, its connection is noted all the same.
@@ -695,7 +927,9 @@ or closed to it, is named by its own command line and marked: `git?`, and
 While the session runs, the record stays in the sidecar, out of the
 session's reach. The sidecar says aloud which process holds each
 connection and each socket that waits on more than the loopback, with
-the processes it comes from. `--trace --follow` and line mode read that:
+the processes it comes from, to a file of the launcher's that no session
+is given, not to docker's log of it, which `CLAUDE_AIRLOCK_DOCKER_SOCKET`
+lets any session read. `--trace --follow` and line mode read that:
 `by:` is on the line of a connection as it is made, and `listen` is a
 line when a socket starts to wait. The sidecar says no more than 2 MB of
 it in one session. Past that a line says so (`which process makes a
@@ -1074,6 +1308,10 @@ sandbox  net      [n2.11] tcp/https api.anthropic.com (160.79.104.10):443  uploa
 - `no upload of its size seen` means the capture saw nothing of that
   length go to the model's API then. That is worth a look: the request
   went another way, or was not sent as it is said to have been.
+- A request whose length is not known, its body withheld by Claude Code
+  or not found, is not looked for: any upload would have room for it,
+  and one the session wrote out would pass for seen. It is neither seen
+  nor `NOT SEEN`, the header counts it apart (`not looked for`).
 - In a trace, an upload a request accounts for is shown on the request's
   line and has no line of its own. One no request accounts for says so
   (`unnoted` in `--json`). It need not be wrong, Claude Code asks that
@@ -1110,6 +1348,10 @@ claude-airlock: of this session, claude-airlock --trace has the rest:
     /home/me/.config/gh/hosts.yml, the login of gh
   written outside the project:
     /home/me/.bashrc
+  acted OUTSIDE SANDBOX, through Anthropic:
+    RemoteTrigger: a routine of claude.ai, which runs on its own and outlives the session (create)
+  files of secrets that Claude Code's own tools were called on:
+    ~/.ssh/id_ed25519, a file of SSH
   POSSIBLE INJECTION in the transcript of 3fa9c0de: 2 of what it read may be written to instruct it, see --trace --failed
   the transcript of 3fa9c0de was changed: 3 lines the launcher copied are gone or altered
   the transcript of 3fa9c0de was removed, --trace shows the launcher's copy of it
@@ -1205,13 +1447,22 @@ it, so it can be started and stopped at any time.
   replaced by a link) says so once (`NOT SHOWN`): a link is not followed,
   and what its session does from there on is in no line.
 - A transcript written anew, emptied, cut short or replaced says so
-  (`WRITTEN ANEW`) and is read again from its start: what is written to it
-  next is shown, and `--trace` says what was taken out. It is recognised
-  by what was read of it last, so one changed further up and as long as
-  before is not caught, `--trace` says what changed there.
+  (`WRITTEN ANEW`) and is read again as a transcript of its own, from its
+  start or, as the line says, from where its last 4 MB begin: what is
+  written to it next is shown, and `--trace` says what was taken out. It
+  is recognised by what was read of it last, so one changed further up
+  and as long as before is not caught, `--trace` says what changed there.
+  One that is not followed yet, its session not written to since the
+  following began, is known by its length and by which file it is:
+  another put in its place is caught, and so is one cut short, but one
+  rewritten where it is and longer is read on from where it ended.
 - A transcript written faster than it is read says so once (`LATE`): what
   is shown of it lags, and catches up when the session writes less. A
-  result with a picture in it is not enough to cause that.
+  result with a picture in it is not enough to cause that. A look, every
+  second, takes in no more than 1 MB of all the transcripts followed
+  together: first that of the session followed, or else of the session
+  begun to be followed last, then the others in turn. A session that
+  writes to many has them shown late, and not the rest held up.
 - A line says when the capture of a session starts to be followed and
   when it ended, with the session: a session that starts later is picked
   up. What the session did last comes before that line, read from the
@@ -1221,9 +1472,11 @@ it, so it can be started and stopped at any time.
   `CLAUDE_AIRLOCK_NET_LOG=0`, or not sandboxed). Without docker the
   network is not followed, and a line says that too.
 - Of what happened before, the last 10 events are shown, looked for in the
-  last 4 MB of the latest transcript. A line says so when that is not all
-  of it, and the result of a call from before them is not shown when it
-  comes.
+  last 4 MB of the transcript of the latest session, the one `--trace`
+  shows when none is named (see [The transcript](#the-transcript)): a
+  transcript dated ahead does not pass for it. A line says so when that
+  is not all of the transcript, and the result of a call from before them
+  is not shown when it comes.
 - A session with more than 1000 transcripts of subagents has the first of
   them followed, and a line says so (`NOT ALL FOLLOWED`). So do more than
   100 transcripts of sessions written to while following, and more than

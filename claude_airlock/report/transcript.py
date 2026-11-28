@@ -12,29 +12,59 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from ..events import Event, Kind, Stage, Who, Wrong, clean, flat
 from ..files import UNREADABLE
+from ..recording.procwatch import Secrets
 from .brief import TALK_LINES, amount, between, clip, shortened
-from .calls import call_event, call_label, tell_result
+from .calls import (
+    SERVER_CALLS,
+    UPLOAD,
+    call_event,
+    call_label,
+    server_call_event,
+    tell_result,
+)
 from .entries import (
     INPUT_TOKENS,
+    KEPT_WIDTH,
     calls_issued,
     claude_of,
     content_blocks,
     entry_times,
     is_prompt,
+    is_told,
     kept,
     local_time,
+    message_content,
+    origin_of,
     step_of,
     step_tokens,
     step_usage,
+    text_blocks,
     tool_results,
 )
-from .outcomes import Outcome, outcome, said_source
-from .told import Asides, typed_while_working
+from .given import digest_of
+from .outcomes import (
+    SERVER_RESULTS,
+    ChangedFile,
+    Outcome,
+    files_changed,
+    outcome,
+    said_source,
+)
+from .told import (
+    ATTACHED,
+    OF_THE_SESSION,
+    OF_THE_SYSTEM,
+    Asides,
+    attachment,
+    told_events,
+    typed_while_working,
+)
 
 # A live walk of a transcript lets go of the oldest calls once this many
 # wait for a result, and of the oldest steps it has shown
@@ -64,6 +94,99 @@ _COMMAND_SAID = re.compile(r"<local-command-(stdout|stderr)>")
 MISS_SHARE = 2
 # What is said ahead of a prompt that was typed while claude worked
 TYPED_MEANWHILE = "(typed while claude worked)"
+# Of the id of a call or of a step, as much as a live walk keeps to know
+# it by: Claude Code's are some tens of characters, and a longer one is
+# kept as what it hashes to, see kept_id
+ID_WIDTH = 200
+# The kinds of what a transcript holds that a walk reads, besides those
+# told.py reads: the entries of the conversation, of a command of Claude
+# Code's and the lines that cannot be read. The blocks of the
+# conversation it reads are those of BLOCK_READERS.
+READ_ENTRIES = frozenset({"user", "assistant", "attachment", "system", UNREADABLE})
+READ_SUBTYPES = frozenset({"local_command"})
+# The kinds known to tell nothing worth a line, as Claude Code 2.1.326
+# names them: those that keep the transcript's own books (its title and
+# tags, what it is linked to, latches and snapshots, the shape of a
+# request), those that put before the model what is Claude Code's own
+# (its environment, the date, its model, the tools and agents it lists,
+# its reminders), and what the model thought. Any other kind is counted
+# in the header of a trace, see untold_kinds: it is new, and a trace
+# that said nothing of it would read as if it were not there.
+SILENT_ENTRIES = frozenset(
+    {
+        "progress",
+        "file-history-snapshot",
+        "file-history-delta",
+        "last-prompt",
+        "continued-in",
+        "resume-head-vouch",
+        "content-replacement",
+        "data-flow-records",
+        "data-flow-incomplete",
+        "derived-from",
+        "api-request-shape",
+        "api-request-blob",
+        "fork-context-ref",
+        "frame-link",
+        "summary",
+        "custom-title",
+        "ended-by-model",
+        "ai-title",
+        "tag",
+        "relocated",
+        "agent-name",
+        "agent-color",
+        "agent-setting",
+        "artifact-comment-monitor",
+        "artifact-autoreact-ledger",
+        "history-suppression",
+        "attribution-snapshot",
+        "mode",
+        "isolation-latch",
+        "session-owner",
+        "dev-mods",
+        "memory-mode",
+        "atis-latch",
+        "tools-used",
+        "worktree-state",
+        "cost-state",
+        "queue-operation",
+        "observer-ref",
+        "repl-mode",
+    }
+)
+SILENT_ATTACHMENTS = frozenset(
+    {
+        "silent_turn_reminder",
+        "prompt_snapshot",
+        "environment",
+        "deferred_tools_delta",
+        "deferred_tools_record",
+        "remote_session_change",
+        "model",
+        "date",
+        "session_context",
+        "credential_org",
+        "agent_listing_delta",
+        "auto_mode",
+        "read_truncation_notice",
+        "unknown_command_fallback",
+        "command_permissions",
+        "todo_reminder",
+        "task_reminder",
+        "tool_search_usage_reminder",
+        "plan_mode",
+        "plan_mode_reentry",
+        "attention_budget",
+        "context_efficiency",
+        "mcp_dropped_tools_delta",
+        # The decision of a hook on a call, which the result of the call
+        # says (REFUSED by hook)
+        "hook_permission_decision",
+    }
+)
+SILENT_SUBTYPES = frozenset({"turn_duration", "informational", "away_summary"})
+SILENT_BLOCKS = frozenset({"thinking", "redacted_thinking", "image", "document"})
 
 
 def command_said(content: str) -> list[str]:
@@ -140,19 +263,76 @@ def _unreadable_event(when: float, entry: dict) -> Event:
     )
 
 
+def kind_named(kind: object) -> str:
+    """A kind of what a transcript holds as it is named in a count: on
+    one line and no longer than KIND_WIDTH, the session's to choose, as
+    the JSON it was read from when it is no text, ? when there is none."""
+    return flat("?" if kind is None else kind)[:KIND_WIDTH]
+
+
+def kinds_counted(kinds: Counter[str]) -> str:
+    """Kinds as they are counted on a line, the most first: no more than
+    UNTOLD_KINDS of them, then that there are more."""
+    named = [f"{count} {kind}" for kind, count in kinds.most_common(UNTOLD_KINDS)]
+    if len(kinds) > UNTOLD_KINDS:
+        named.append("...")
+    return ", ".join(named)
+
+
 def _untold_event(when: float, entries: list[dict]) -> Event:
     """Entries of a transcript that add to no event, as one that counts
     them by their kind: a step in which the model only thought, a title,
     a mode or a model with nothing before it to have changed from. Said
     of those that were taken out of a transcript (see taken_out_events),
     where nothing is to go without a word. Each is whole in --json."""
-    kinds = Counter(flat(entry.get("type", "?"))[:KIND_WIDTH] for entry in entries)
-    named = [f"{count} {kind}" for kind, count in kinds.most_common(UNTOLD_KINDS)]
-    if len(kinds) > UNTOLD_KINDS:
-        named.append("...")
+    kinds = Counter(kind_named(entry.get("type", "?")) for entry in entries)
     count = "1 line that is" if len(entries) == 1 else f"{len(entries)} lines that are"
-    detail = f"{count} no event of a trace ({', '.join(named)}), see --json"
+    detail = f"{count} no event of a trace ({kinds_counted(kinds)}), see --json"
     return Event(when, Who.SANDBOX, Kind.TRANSCRIPT, [detail], {"entries": entries})
+
+
+def _untold_kind(entry: dict) -> list[str]:
+    """What of an entry is of a kind the trace neither reads nor knows to
+    tell nothing worth a line (see SILENT_ENTRIES), each by what it is
+    and its kind: the entry itself, the attachment or the subtype of the
+    system it is, or each block of its content."""
+    kind = entry.get("type")
+    if not isinstance(kind, str):
+        return [f"entry {kind_named(kind)}"]
+    if kind not in READ_ENTRIES and kind not in OF_THE_SESSION:
+        return [] if kind in SILENT_ENTRIES else [f"entry {kind_named(kind)}"]
+    if kind == "attachment":
+        given = attachment(entry).get("type")
+        known = isinstance(given, str) and (
+            given in ATTACHED or given in SILENT_ATTACHMENTS
+        )
+        return [] if known else [f"attachment {kind_named(given)}"]
+    if kind == "system":
+        subtype = entry.get("subtype")
+        known = isinstance(subtype, str) and (
+            subtype in OF_THE_SYSTEM
+            or subtype in READ_SUBTYPES
+            or subtype in SILENT_SUBTYPES
+        )
+        return [] if known else [f"system {kind_named(subtype)}"]
+    if kind not in ("user", "assistant"):
+        return []
+    parts = (block.get("type") for block in content_blocks(entry))
+    return [
+        f"block {kind_named(part)}"
+        for part in parts
+        if not isinstance(part, str)
+        or (part not in READ_BLOCKS and part not in SILENT_BLOCKS)
+    ]
+
+
+def untold_kinds(entries: list[dict]) -> Counter[str]:
+    """How many of each kind of what the entries hold the trace neither
+    reads nor knows to tell nothing worth a line: of the entries, the
+    attachments, the subtypes of the system and the blocks of content.
+    Empty for what Claude Code 2.1.326 writes: a kind it writes later is
+    counted, not let go without a word."""
+    return Counter(kind for entry in entries for kind in _untold_kind(entry))
 
 
 def _read_anew(used: dict[str, int], before: int) -> int:
@@ -188,13 +368,15 @@ def _step_event(when: float, who: Who, usage: dict) -> Event | None:
 
 @dataclass
 class OpenCall:
-    """A tool call that has no result yet."""
+    """A tool call that has no result yet, as much of it as its result
+    needs: a live walk keeps thousands, each as long as the session
+    likes, and keeps none of them longer than KEPT_WIDTH."""
 
     who: Who
     # The cleaned name of the tool
     name: str
-    # The entry the call is in, as far as its result needs it
-    started: dict
+    # When the call was issued, none when its entry does not say
+    started: datetime | None
     # What the call is shown by, to name it next to its result
     label: str
     # Its event, to add the result to. None in a live walk, where the
@@ -213,16 +395,36 @@ def _open_call(event: Event, entry: dict, block: dict, whole: bool) -> OpenCall:
     name = event.fields["tool"]
     # Before the event has what it is tied by: a result shows that itself
     label = (call_label(event) or name)[:CALL_LABEL_WIDTH]
-    started = {"timestamp": entry.get("timestamp")}
-    source = said_source(block.get("input"))
+    source = said_source(block.get("input"))[:KEPT_WIDTH]
     added_to = event if whole else None
-    return OpenCall(event.who, name, started, label, added_to, source=source)
+    return OpenCall(
+        event.who, name[:KEPT_WIDTH], local_time(entry), label, added_to, source=source
+    )
+
+
+def _first_of_entry(told: dict[int, int], entry: dict, block: dict) -> bool:
+    """Whether a result is the first of its entry to be told, by what the
+    first of each entry is, in told: the files a command changed go with
+    it, Claude Code notes them once for the entry, see outcome. Each
+    entry and result by what it is, not by what it holds: the session
+    can write many alike."""
+    return told.setdefault(id(entry), id(block)) == id(block)
+
+
+def kept_id(said: str) -> str:
+    """The id of a call or of a step as a live walk keeps it: as it is,
+    or what it hashes to when it is longer than ID_WIDTH, which a session
+    can make it, for each of thousands, see digest_of."""
+    if len(said) <= ID_WIDTH:
+        return said
+    return f"blake2b:{digest_of(said).hex()}"
 
 
 def _side_of(who: Who, entry: dict) -> tuple[Who, str]:
     """Whose side of a conversation an entry is of: claude's, or that of
-    one subagent, which Claude Code names in each entry of its."""
-    return who, kept(entry.get("agentId"))
+    one subagent, which Claude Code names in each entry of its, kept as
+    the id of a call is, see kept_id."""
+    return who, kept_id(kept(entry.get("agentId")))
 
 
 @dataclass(frozen=True)
@@ -241,6 +443,11 @@ class WalkOptions:
     # as JSON Lines, which has the values alone: what takes long to lay
     # out and is no value, the diff of an Edit, is then left out.
     lines: bool = True
+    # The files of secrets of the session, which a call of Claude Code's
+    # own file tools is flagged on (see secrets_of): made once by what
+    # walks, from the settings and the directories the session had. None
+    # flags no call.
+    secrets: Secrets | None = None
 
 
 @dataclass(frozen=True)
@@ -347,7 +554,11 @@ class Walk:
         # How much the last step of each read, which the next one of
         # theirs finds in the cache or has missed
         self._read: dict[Who, int] = {}
-        self._asides = Asides(options.verbose)
+        self._asides = Asides(options.verbose, options.live)
+        self._secrets = options.secrets
+        # Of the entry walked last, the result told first, which the
+        # files a command changed are told with, see _first_of_entry
+        self._first_results: dict[int, int] = {}
 
     def take(self, entry: dict) -> list[Event]:
         """The events an entry adds, each of a subagent's transcript
@@ -385,25 +596,71 @@ class Walk:
             return self._command(entry)
         if kind not in ("user", "assistant"):
             return self._aside(entry)
-        by_claude = kind == "assistant"
         claude = claude_of(entry)
         events = self._went_on(claude, entry) + self._step(claude, entry)
-        if not by_claude:
-            events += self._beside(self._asides.prompted(entry, self._when))
+        # Of this entry no result is told yet, see _first_of_entry
+        self._first_results.clear()
+        events += self._prompted(claude, entry)
         for block in content_blocks(entry):
-            part = block.get("type")
-            if part == "text" and (by_claude or is_prompt(entry)):
-                events += self._talk(claude if by_claude else Who.USER, block)
-            elif part == "tool_use" and by_claude:
-                events.append(self._call(claude, entry, block))
-            elif part == "tool_result" and not by_claude:
-                events += self._result(entry, block)
+            # By its kind, which is the session's to give: what is no text
+            # is of no kind that is read, see kept
+            reader = BLOCK_READERS.get((kind, kept(block.get("type"))))
+            if reader is not None:
+                events += reader(self, claude, entry, block)
         return events
+
+    def _prompted(self, who: Who, entry: dict) -> list[Event]:
+        """What an entry of the user's side says besides its blocks: the
+        permission mode it was given in, and a prompt the user did not
+        give. Nothing for an entry of the model's."""
+        if entry.get("type") != "user":
+            return []
+        events = self._beside(self._asides.prompted(entry, self._when))
+        return events + self._told(who, entry) if is_told(entry) else events
+
+    def _told(self, who: Who, entry: dict) -> list[Event]:
+        """A prompt the user did not give, see told_events: its text
+        blocks as one."""
+        content = text_blocks(message_content(entry))
+        told = told_events(
+            origin_of(entry), content, self._when, who, self._verbose, self._live
+        )
+        return self._beside(told)
+
+    def _reply(self, who: Who, _entry: dict, block: dict) -> list[Event]:
+        """A text the model wrote."""
+        return self._talk(who, block)
+
+    def _prompt(self, _who: Who, entry: dict, block: dict) -> list[Event]:
+        """A text of the user's side, when it is something the user
+        asked, see is_prompt."""
+        return self._talk(Who.USER, block) if is_prompt(entry) else []
+
+    def _uploaded(self, who: Who, entry: dict, block: dict) -> list[Event]:
+        """A file handed to a container of Anthropic's with a prompt: a
+        call of its own, which has no result, see server_call_event."""
+        event = server_call_event(self._when, who, entry, block, self._verbose)
+        self._last_call = None
+        return [event]
+
+    def _changed_with(
+        self, told: dict[int, int], entry: dict, block: dict
+    ) -> tuple[ChangedFile, ...]:
+        """The files a command changed that a result is told with: those
+        the entry of the result says, with its first result that is told
+        (see _first_of_entry), none with another."""
+        if not _first_of_entry(told, entry, block):
+            return ()
+        return tuple(files_changed(entry, self._project_dir))
 
     def end(self) -> None:
         """Mark the calls that were left without a result. Not one whose
         result the other part of the transcript has (see OtherPart): it
-        ended as that says."""
+        ended as that says, with the files the entry of the result says
+        a command changed, read once for it, see outcome."""
+        # The entries are held by the other part: what each is known by
+        # stays its own
+        told: dict[int, int] = {}
         for call, issued in self._open.items():
             if not issued.event:
                 continue
@@ -411,8 +668,14 @@ class Walk:
             if found is None:
                 tell_result(issued.event, None, self._verbose)
                 continue
+            entry, block = found
             ended = outcome(
-                issued.started, *found, self._project_dir, issued.name, issued.source
+                issued.started,
+                entry,
+                block,
+                issued.name,
+                issued.source,
+                self._changed_with(told, entry, block),
             )
             self._ended(issued.event, ended)
         self._open.clear()
@@ -428,9 +691,10 @@ class Walk:
         each as an event in the place of its result, see Walk. Nothing
         for a later entry of the same step, and for one that names none.
         A call stays known all the same, should a result of it come."""
-        step = step_of(entry)
-        if not self._live or not step:
+        said = step_of(entry)
+        if not self._live or not said:
             return []
+        step = kept_id(said)
         side = _side_of(who, entry)
         before, issued = self._at.get(side, ("", []))
         if before == step:
@@ -457,9 +721,9 @@ class Walk:
         """What the step an entry starts used, nothing for a later entry
         of the same step."""
         step = step_usage(entry) if self._tell_steps else None
-        if not step or step[0] in self._steps:
+        if not step or kept_id(step[0]) in self._steps:
             return []
-        self._steps[step[0]] = None
+        self._steps[kept_id(step[0])] = None
         self._remember(self._steps)
         used = _step_event(self._when, who, self._usage.get(*step))
         # Said with the step it is about, or not at all
@@ -527,7 +791,13 @@ class Walk:
         self._last_call = None
         return [said]
 
-    def _call(self, who: Who, entry: dict, block: dict) -> Event:
+    def _key(self, said: str) -> str:
+        """What a call is known by, by its id: live as kept_id keeps it,
+        else as it is, the transcript being held whole anyway."""
+        return kept_id(said) if self._live else said
+
+    def _call(self, who: Who, entry: dict, block: dict) -> list[Event]:
+        """A call of a tool of Claude Code's, see call_event."""
         event = call_event(
             self._when,
             who,
@@ -536,8 +806,21 @@ class Walk:
             self._project_dir,
             self._verbose,
             self._diffed,
+            self._secrets,
         )
-        call = str(block.get("id"))
+        return [self._opened(event, who, entry, block)]
+
+    def _server_call(self, who: Who, entry: dict, block: dict) -> list[Event]:
+        """A call that ran on Anthropic's side, whose result is in the
+        reply of the model next to it, see server_call_event."""
+        event = server_call_event(self._when, who, entry, block, self._verbose)
+        return [self._opened(event, who, entry, block)]
+
+    def _opened(self, event: Event, who: Who, entry: dict, block: dict) -> Event:
+        """The event of a call as it was issued, kept until its result
+        comes: live tied to it and numbered, and said to be under the id
+        of a call that waits for its result when it is."""
+        call = self._key(str(block.get("id")))
         issued = _open_call(event, entry, block, whole=not self._live)
         key = call
         if self._waits(call):
@@ -598,7 +881,7 @@ class Walk:
         it is."""
         found = self._other.calls.get(call)
         if found is None:
-            return OpenCall(claude_of(entry), NO_TOOL, {}, NO_CALL, None)
+            return OpenCall(claude_of(entry), NO_TOOL, None, NO_CALL, None)
         issued, block = found
         # For what it is named by, not for its lines
         event = call_event(
@@ -612,13 +895,15 @@ class Walk:
         )
         return _open_call(event, issued, block, whole=False)
 
-    def _result(self, entry: dict, block: dict) -> list[Event]:
+    def _result(self, _who: Who, entry: dict, block: dict) -> list[Event]:
         """How a call ended: added to its event, or an event of its own
         where there is none to add it to, which is so live, of a call
         that had a result before, and of one this walk has not seen (see
         _issued). Live nothing for the result of a call that was not
-        seen."""
-        call = str(block.get("tool_use_id"))
+        seen. Of a call that ran on Anthropic's side, the result is in
+        the reply of the model, next to its call."""
+        said = str(block.get("tool_use_id"))
+        call = self._key(said)
         issued = self._issued(call, entry)
         if issued is None:
             return []
@@ -626,9 +911,9 @@ class Walk:
             issued.started,
             entry,
             block,
-            self._project_dir,
             issued.name,
             issued.source,
+            self._changed_with(self._first_results, entry, block),
         )
         if issued.event:
             self._ended(issued.event, ended)
@@ -642,7 +927,7 @@ class Walk:
         fields = {
             "stage": Stage.RESULT,
             "tool": issued.name,
-            "id": call,
+            "id": said,
             **ended.fields(),
         }
         details = ["of: " + issued.label] if named else []
@@ -670,6 +955,23 @@ class Walk:
         fields.update(found)
         if flags:
             fields[key] = any(flags)
+
+
+# What reads each block of the conversation a walk tells of, by the side
+# of the entry it is in and its kind as the API names it: Anthropic's side
+# gives the result of what it ran in the reply of the model, next to its
+# call. One more is one more here.
+type BlockReader = Callable[[Walk, Who, dict, dict], list[Event]]
+BLOCK_READERS: dict[tuple[str, str], BlockReader] = {
+    ("assistant", "text"): Walk._reply,
+    ("user", "text"): Walk._prompt,
+    ("assistant", "tool_use"): Walk._call,
+    **{("assistant", kind): Walk._server_call for kind in SERVER_CALLS},
+    **{("assistant", kind): Walk._result for kind in SERVER_RESULTS},
+    ("user", "tool_result"): Walk._result,
+    ("user", UPLOAD): Walk._uploaded,
+}
+READ_BLOCKS = frozenset(kind for _, kind in BLOCK_READERS)
 
 
 def _steps_used(entries: list[dict]) -> dict[str, dict]:

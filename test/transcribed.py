@@ -5,10 +5,24 @@ of the same minute, and the events a trace makes of them in the project
 from __future__ import annotations
 
 from claude_airlock.events import Event
+from claude_airlock.recording.procwatch import Secrets
+from claude_airlock.recording.secrets import session_secrets
 from claude_airlock.report import transcript
 from claude_airlock.report.transcript import WalkOptions
+from claude_airlock.settings import CONTAINER_HOME, Host, Settings
 
 PROJECT = "/p"
+
+
+def project_secrets(settings: Settings | None = None) -> Secrets:
+    """The files of secrets of a session of the project with these
+    settings, the defaults without, under the container's home."""
+    host = Host(CONTAINER_HOME, PROJECT, CONTAINER_HOME, CONTAINER_HOME)
+    return session_secrets(settings or Settings(), host, (PROJECT,))
+
+
+# Those the events are made with, see events
+SECRETS = project_secrets()
 
 
 def at(second: int) -> str:
@@ -49,6 +63,48 @@ def attached(kind: str, second: int = 0, **given) -> dict:
         "type": "attachment",
         "timestamp": at(second),
         "attachment": {"type": kind, **given},
+    }
+
+
+def system(subtype: str, second: int = 0, **more) -> dict:
+    """An entry of the system, as Claude Code writes one of a subtype."""
+    return {
+        "type": "system",
+        "subtype": subtype,
+        "timestamp": at(second),
+        "uuid": f"u{second}",
+        "isMeta": False,
+        **more,
+    }
+
+
+def sent(text: str, kind: str, second: int = 0, **origin) -> dict:
+    """A prompt that did not come from the user, as Claude Code writes
+    one of an origin: what another session or a server sent it is meta,
+    a task that ended is not."""
+    meta = {} if kind == "task-notification" else {"isMeta": True}
+    return {
+        "type": "user",
+        "timestamp": at(second),
+        "message": {"role": "user", "content": text},
+        "origin": {"kind": kind, **origin},
+        **meta,
+    }
+
+
+def hook(kind: str, event: str, second: int = 0, **given) -> dict:
+    """An attachment of a hook that ran on an event, named as the hooks of
+    that event are unless it says (PostToolUse:Bash for those of a tool)."""
+    named = {"hookName": event, "hookEvent": event, "toolUseID": f"h{second}"}
+    return attached(kind, second, **{**named, **given})
+
+
+def replied(*blocks: dict, second: int = 1) -> dict:
+    """A reply of the model of these blocks."""
+    return {
+        "type": "assistant",
+        "timestamp": at(second),
+        "message": {"content": list(blocks)},
     }
 
 
@@ -111,6 +167,10 @@ def step(step_id: str, second: int, **usage: int) -> dict:
     }
 
 
-def events(entries: list[dict], verbose: bool = False) -> list[Event]:
-    """The events of a transcript that is all there."""
-    return transcript.left_events(entries, [], PROJECT, WalkOptions(verbose))
+def events(
+    entries: list[dict], verbose: bool = False, secrets: Secrets | None = SECRETS
+) -> list[Event]:
+    """The events of a transcript that is all there, a call on a file of
+    those secrets flagged, none without any."""
+    options = WalkOptions(verbose, secrets=secrets)
+    return transcript.left_events(entries, [], PROJECT, options)

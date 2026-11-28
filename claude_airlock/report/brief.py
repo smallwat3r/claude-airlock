@@ -9,6 +9,12 @@ from __future__ import annotations
 PREVIEW_LINES = 8
 TALK_LINES = 3
 PREVIEW_WIDTH = 200
+# Of the output of a call or a hook, how many lines of its start and of
+# its end are shown: when it failed, and with --verbose. The end comes
+# first in worth, it is where a command says what went wrong. All of it
+# is in --json.
+FAILED_OUTPUT = (2, 6)
+VERBOSE_OUTPUT = (10, 10)
 
 
 def shortened(line: str) -> str:
@@ -33,6 +39,23 @@ def clip_ends(lines: list[str], head: int, tail: int, hint: str) -> list[str]:
     if left_out <= 0:
         return lines
     return [*lines[:head], f"... {left_out} more lines, {hint}", *lines[-tail:]]
+
+
+def output_shown(lines: list[str], verbose: bool, failed: bool) -> list[str]:
+    """Of the lines a call or a hook put out, those shown: the ends of
+    them when it failed, more of them with --verbose, none otherwise.
+    Never all of them, a command can put out thousands of lines."""
+    if verbose:
+        return clip_ends(lines, *VERBOSE_OUTPUT, "see --json")
+    if not failed:
+        return []
+    ends = clip_ends(lines, *FAILED_OUTPUT, "see --verbose")
+    return [shortened(line) for line in ends]
+
+
+def lines_out(count: int) -> str:
+    """How many lines a call or a hook put out, as its result says it."""
+    return f"{count} line{'s' if count > 1 else ''} out"
 
 
 def between(text: str, opening: str, closing: str) -> str | None:

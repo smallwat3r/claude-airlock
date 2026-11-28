@@ -8,6 +8,7 @@ a count is one a session could reach, a list and a text are bounded."""
 
 from __future__ import annotations
 
+import functools
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -22,6 +23,7 @@ from ..files import (
     open_plain,
 )
 from ..projects import transcript_dirs, transcript_files
+from ..recording.recorder import copy_rank
 from ..settings import Host
 
 # The times an entry can say it was written at, as seconds since the
@@ -53,20 +55,30 @@ MOST_HELD = 2 << 30
 NOT_ALL_HELD = "(the rest of the transcript was not read, it holds too much to keep)"
 # Of a session id, as much as names it in a line
 SHORT_ID = 8
-
-
-def _modified(path: Path) -> float:
-    """When a file was last written, 0 for one that has gone since it was
-    listed."""
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+# Where a prompt came from, as Claude Code names it in its origin: the
+# user's own typing, and what Claude Code made itself, a task that ended
+# or fired on its schedule, what the agent that started a subagent tells
+# it, a turn it goes on with by itself, what an agent that watches the
+# session says. Any other came from outside the session: another session
+# (peer), an MCP server (channel), a caller over the network (remote), a
+# plugin, a voice call, or what Claude Code could not place.
+FROM_USER = "human"
+FROM_CLAUDE_CODE = frozenset(
+    {
+        "task-notification",
+        "coordinator",
+        "auto-continuation",
+        "observer",
+        "observer-activity",
+    }
+)
 
 
 def session_files(host: Host) -> list[Path]:
-    """The project's transcripts, the latest session first."""
-    files = sorted(transcript_files(host), key=_modified, reverse=True)
+    """The project's transcripts, the latest session first, see
+    copy_rank."""
+    ranked = functools.partial(copy_rank, host)
+    files = sorted(transcript_files(host), key=ranked, reverse=True)
     if not files:
         looked = ", ".join(map(str, transcript_dirs(host)))
         raise Fatal(f"no session recorded for this project (looked in {looked})")
@@ -202,11 +214,32 @@ def entry_times(entries: list[dict]) -> list[datetime]:
     return [when for when in map(local_time, entries) if when]
 
 
+def message_content(entry: dict) -> object:
+    """The content of the message of a user or assistant entry as it is
+    written: a string, a list of blocks, or what the session put there
+    instead. None for an entry without a message."""
+    message = entry.get("message")
+    return message.get("content") if isinstance(message, dict) else None
+
+
+def text_blocks(content: object) -> object:
+    """Of the content of a prompt, which is a string or a list of blocks,
+    what is its text: a string as it is, of a list its text blocks alone
+    and none of a result of a call. Anything else as it is, it holds no
+    text, see block_text."""
+    if not isinstance(content, list):
+        return content
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+
+
 def content_blocks(entry: dict) -> list[dict]:
     """The content of a user or assistant entry as blocks, a prompt typed
     as plain text becoming one text block."""
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
+    content = message_content(entry)
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     if isinstance(content, list):
@@ -229,15 +262,70 @@ def call_input(block: dict) -> dict:
     return tool_input if isinstance(tool_input, dict) else {}
 
 
+# Of what an origin names as having sent a prompt, the first there is
+SENDERS = ("from", "server", "name", "hostName", "callerSessionId")
+# The kind of an origin that is not one
+NO_KIND = "?"
+
+
+class Origin(NamedTuple):
+    """Where a prompt came from, as the origin Claude Code gives it says
+    (see FROM_USER): its kind, and who it names as having sent it, empty
+    when it names none. An entry without an origin is the user's."""
+
+    kind: str = FROM_USER
+    sender: str = ""
+
+    @property
+    def users(self) -> bool:
+        return self.kind == FROM_USER
+
+    @property
+    def claude_codes(self) -> bool:
+        """Whether Claude Code made it itself."""
+        return self.kind in FROM_CLAUDE_CODE
+
+    @property
+    def outside(self) -> bool:
+        """Whether it came from outside the session, neither the user's
+        nor Claude Code's own: what Claude Code does not name is that."""
+        return not self.users and not self.claude_codes
+
+
+def origin_of(given: dict) -> Origin:
+    """Where the prompt of an entry or of a queued command came from.
+    One whose origin is no object with a kind is of no kind there is,
+    and so from outside: Claude Code writes none such."""
+    origin = given.get("origin")
+    if origin is None:
+        return Origin()
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    if not isinstance(kind, str) or not kind:
+        return Origin(NO_KIND)
+    named = (origin.get(key) for key in SENDERS)
+    sender = next((name for name in named if isinstance(name, str) and name), "")
+    return Origin(kept(kind), kept(sender))
+
+
 def is_prompt(entry: dict) -> bool:
     """Whether an entry is something the user asked. Not what Claude Code
-    puts in their name, and not what a subagent is asked, which is in the
-    call that started it."""
+    puts in their name or made itself, not what came from outside the
+    session (see origin_of), and not what a subagent is asked, which is
+    in the call that started it."""
     return (
         entry.get("type") == "user"
         and not entry.get("isMeta")
         and not entry.get("isSidechain")
+        and origin_of(entry).users
     )
+
+
+def is_told(entry: dict) -> bool:
+    """Whether an entry of the user's side is a prompt that did not come
+    from the user, of the session or of a subagent: one with an origin
+    that is not theirs. Not what Claude Code puts in their name without
+    one, which is no prompt (a caveat, what a skill holds)."""
+    return entry.get("type") == "user" and not origin_of(entry).users
 
 
 def tool_calls(entries: list[dict]) -> list[tuple[dict, dict]]:

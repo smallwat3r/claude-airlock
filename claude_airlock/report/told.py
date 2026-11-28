@@ -3,9 +3,12 @@
 What Claude Code put before the model next to the prompt: the instruction
 files it read (each CLAUDE.md), the instructions of MCP servers, the
 skills it listed, the texts of given.py, a file that changed behind the
-model's back, what a language server reported. And what became of the
-session itself: its permission mode, its model, a request the API did
-not answer, a conversation that was compacted, a task of its that ended.
+model's back, what a language server reported, the hooks it ran (see
+hooks.py), and a prompt that did not come from the user. And what became
+of the session itself: its permission mode, its model, a request the API
+did not answer, a conversation that was compacted, a task of its that
+ended or fired, what it saved to its memory or published, and that it can
+be driven from claude.ai.
 
 None of it is something the model did, all of it says why it did what it
 did. Like the rest of a transcript it is written from inside the sandbox,
@@ -14,14 +17,30 @@ a transcript is followed is bounded."""
 
 from __future__ import annotations
 
+import dataclasses
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from ..events import Event, Kind, Who, Wrong, clean, flat
-from .brief import PREVIEW_WIDTH, amount, between, shortened
-from .entries import MOST_LISTED, claude_of, counted, every, kept, listed, seconds
-from .given import GIVEN, GIVING, Given, texts_given
+from .brief import PREVIEW_WIDTH, TALK_LINES, amount, between, clip, shortened
+from .entries import (
+    MOST_LISTED,
+    Origin,
+    block_text,
+    claude_of,
+    counted,
+    every,
+    kept,
+    listed,
+    message_content,
+    origin_of,
+    seconds,
+    text_blocks,
+)
+from .given import GIVEN, GIVING, Given, digest_of, scanned, texts_read
+from .hooks import HOOK_RUNS, STOP_SUMMARY, hook_event, summary_event
 from .planted import Planted, flagged, planted
 
 # What a line of a language server's report is about, in the order of the
@@ -44,8 +63,14 @@ NESTED = "nested_memory"
 # were last told: what one says again is told once
 MOST_REMEMBERED = 1000
 TOLD = "told"
-
-type Reader = Callable[[dict, float, Who], list[Event]]
+# The mode of a queued command that tells of a task that ended, and the
+# origin of a prompt that does, which tells of it in a tag of that name.
+# A prompt of that origin without the tag is one a task of the schedule
+# fired with.
+TASK_NOTIFICATION = "task-notification"
+TASK_TAG = f"<{TASK_NOTIFICATION}>"
+# What starts the line of a prompt that came from outside the session
+NOT_FROM_YOU = "NOT FROM YOU"
 
 
 class Read(Protocol):
@@ -82,6 +107,8 @@ class Instructions:
     # The signs that it was written to turn the session against the
     # user, of a file that is not the user's own, see planted.py
     planted: tuple[Planted, ...] = ()
+    # What its content is told from another by, see digest_of
+    digest: bytes = b""
 
     @property
     def line(self) -> str:
@@ -119,19 +146,25 @@ def _instructions_given(given: dict) -> list:
     return every(given.get("files")) if kind == INSTRUCTIONS else []
 
 
-def instruction_files(given: dict, scan: bool = True) -> tuple[Instructions, ...]:
-    """The files an entry says were read as instructions, each with the
-    signs it shows unless told not to look: for what only names them."""
+def files_read(given: dict) -> list[tuple[Instructions, object]]:
+    """The files an entry says were read as instructions, each as it is
+    told without the signs it shows, and its content to look for them
+    in: what is read again is known so before it is looked at."""
     files = []
     for file in _instructions_given(given):
         if not isinstance(file, dict) or not isinstance(file.get("path"), str):
             continue
         kind, content = kept(file.get("type")) or "?", file.get("content")
         size = len(content) if isinstance(content, str) else 0
-        path = kept(file["path"])
-        signs = _instructions_planted(kind, content, path) if scan else ()
-        files.append(Instructions(path, kind, size, signs))
-    return tuple(files)
+        read = Instructions(kept(file["path"]), kind, size, digest=digest_of(content))
+        files.append((read, content))
+    return files
+
+
+def scanned_file(read: Instructions, content: object) -> Instructions:
+    """A file of instructions as it is told, with the signs it shows."""
+    signs = _instructions_planted(read.kind, content, read.path)
+    return dataclasses.replace(read, planted=signs)
 
 
 def attachment(entry: dict) -> dict:
@@ -144,11 +177,108 @@ def attachment(entry: dict) -> dict:
 def typed_while_working(entry: dict) -> object:
     """What the user typed while claude worked, when an entry is that:
     text or blocks of it, none for any other entry. Such a line is given
-    to the model with the next result, and is in no entry of the user's."""
+    to the model with the next result, and is in no entry of the user's.
+    Not what Claude Code queued in their name (isMeta), nor what did not
+    come from them, see told_events."""
     given = attachment(entry)
     if given.get("type") != "queued_command" or given.get("commandMode") != PROMPT_MODE:
         return None
+    if given.get("isMeta") or not origin_of(given).users:
+        return None
     return given.get("prompt")
+
+
+def _origin_said(origin: Origin) -> str:
+    """Where a prompt that is not the user's came from, as it is said:
+    its kind and who it names as having sent it."""
+    sender = f" {shortened(flat(origin.sender))}" if origin.sender else ""
+    return f"{shortened(flat(origin.kind))}{sender}"
+
+
+def told_planted(origin: Origin, said: object) -> tuple[Planted, ...]:
+    """The signs in a prompt that came from outside the session, see
+    planted.py, none for one that did not: another session or a server
+    can write anything, and the model takes it in as it takes a prompt."""
+    return planted(block_text(said), _origin_said(origin)) if origin.outside else ()
+
+
+def _prompt_given(entry: dict) -> tuple[Origin, object] | None:
+    """The prompt an entry gives the model, with where it came from: of
+    the user's side its text blocks (see text_blocks), or what was queued
+    while claude worked. None for an entry that gives none."""
+    given = attachment(entry)
+    if given.get("type") == "queued_command":
+        return origin_of(given), given.get("prompt")
+    if entry.get("type") != "user":
+        return None
+    return origin_of(entry), text_blocks(message_content(entry))
+
+
+def entry_told_planted(entry: dict) -> tuple[Planted, ...]:
+    """The signs in what an entry gave the model as a prompt from outside
+    the session, see _prompt_given."""
+    prompt = _prompt_given(entry)
+    return () if prompt is None else told_planted(*prompt)
+
+
+def told_from_outside(entries: list[dict]) -> Counter[str]:
+    """How many prompts came from outside the session, by where they came
+    from, see Origin."""
+    found = (_prompt_given(entry) for entry in entries)
+    return Counter(prompt[0].kind for prompt in found if prompt and prompt[0].outside)
+
+
+def _task_event(said: object, when: float, who: Who) -> Event:
+    """A task that ended, as Claude Code tells the model of it: how, and
+    what it was."""
+    text = clean(said) if isinstance(said, str) else ""
+    status = flat((between(text, "<status>", "</status>") or "ended").strip())
+    summary = flat((between(text, "<summary>", "</summary>") or "").strip())
+    line = shortened(f"{status}: {summary}" if summary else status)
+    fields = {"status": status, "summary": summary, "text": said}
+    return Event(when, who, Kind.TASK, [line], fields)
+
+
+def told_events(
+    origin: Origin,
+    said: object,
+    when: float,
+    who: Who,
+    verbose: bool,
+    live: bool = False,
+) -> list[Event]:
+    """A prompt the user did not give, see Origin: what Claude Code made
+    itself, as it told the model, a task that ended as that, and what
+    came from outside the session as a prompt that is flagged, with its
+    kind, who sent it, and the signs it shows. Of its text the first
+    lines, all of them with verbose, and live the first alone, as of a
+    prompt. None for a prompt of the user's, and for one without text."""
+    if origin.users:
+        return []
+    if origin.kind == TASK_NOTIFICATION and TASK_TAG in block_text(said):
+        return [_task_event(block_text(said), when, who)]
+    # Else the prompt a task of the schedule fired with, as it is, or
+    # what Claude Code told in another way of its own
+    text = clean(block_text(said)).strip().splitlines()
+    whole = verbose and not live
+    lines = text if whole else [line for line in text if line.strip()]
+    if not lines:
+        return []
+    fields: dict = {"origin": origin.kind, "from": origin.sender, "text": said}
+    if origin.claude_codes:
+        first = f"told ({_origin_said(origin)}): {shortened(lines[0])}"
+        fields = {"kind": TOLD, **fields}
+        return [Event(when, who, Kind.CONTEXT, [first], fields)]
+    shown = [shortened(lines[0])] if live else clip(lines, whole, TALK_LINES)
+    signs = told_planted(origin, said)
+    first = f"{NOT_FROM_YOU} ({_origin_said(origin)}): {shown[0]}"
+    event = Event(when, who, Kind.PROMPT, [first, *shown[1:]], {})
+    event.alerts.add(0)
+    for sign in signs:
+        event.say(sign.shown, alert=True)
+    event.fields = {**fields, "not_from_you": True, **flagged(signs)}
+    event.went_wrong()
+    return [event]
 
 
 def instructions_read(entries: list[dict]) -> list[str]:
@@ -158,7 +288,7 @@ def instructions_read(entries: list[dict]) -> list[str]:
     files = {
         (flat(file.path), flat(file.kind))
         for entry in entries
-        for file in instruction_files(attachment(entry), scan=False)
+        for file, _ in files_read(attachment(entry))
     }
     lines = ["instructions read"] if files else []
     shown = sorted(files)[:MOST_LISTED]
@@ -250,8 +380,12 @@ class Asides:
     What a language server reported is only told when verbose, it comes
     after every edit."""
 
-    def __init__(self, verbose: bool):
+    def __init__(self, verbose: bool, live: bool = False):
         self._verbose = verbose
+        # Whether the transcript is followed as it is written, see Walk
+        self._live = live
+        # Each as it was last told, without the signs it shows: what is
+        # given again is known so before it is looked at for them
         self._instructions: tuple[Instructions, ...] = ()
         self._nested: dict[str, Instructions] = {}
         self._given: dict[tuple[str, str], Given] = {}
@@ -261,39 +395,25 @@ class Asides:
         self._models: dict[str, tuple[str, str]] = {}
         # Why the model was last made to think anew, until a step is told
         self._dropped = ""
-        self._attached: dict[str, Reader] = {
-            INSTRUCTIONS: self._instructions_read,
-            NESTED: self._nested_read,
-            "mcp_instructions_delta": self._server_instructions,
-            "skill_listing": self._skills_listed,
-            "queued_command": self._told,
-            "edited_text_file": self._file_changed,
-            "diagnostics": self._diagnostics,
-            "thinking_drop": self._thinking_dropped,
-            **dict.fromkeys(GIVING, self._texts_given),
-        }
-        self._of_the_system: dict[str, Reader] = {
-            "api_error": self._api_error,
-            "compact_boundary": self._compacted,
-        }
-        self._of_the_session: dict[str, Reader] = {
-            "permission-mode": self._mode_set,
-            "api-request": self._requested,
-        }
+        # The pull request and the Remote Control session last named:
+        # Claude Code names them again whenever it writes what it knows
+        # of the session
+        self._linked = ""
+        self._bridge = ""
 
     def take(self, entry: dict, when: float) -> list[Event]:
         """The events an entry adds, none for one that is not an aside."""
         kind = entry.get("type")
-        given, readers = entry, self._of_the_session
+        given, readers = entry, OF_THE_SESSION
         if kind == "attachment":
-            given, readers = attachment(entry), self._attached
+            given, readers = attachment(entry), ATTACHED
             kind = given.get("type")
         elif kind == "system":
-            readers, kind = self._of_the_system, entry.get("subtype")
+            readers, kind = OF_THE_SYSTEM, entry.get("subtype")
         reader = readers.get(kind) if isinstance(kind, str) else None
         if reader is None:
             return []
-        return reader(given, when, claude_of(entry))
+        return reader(self, given, when, claude_of(entry))
 
     def prompted(self, entry: dict, when: float) -> list[Event]:
         """A prompt says the permission mode it was given in: an event
@@ -307,33 +427,41 @@ class Asides:
         return why
 
     def _instructions_read(self, given: dict, when: float, who: Who) -> list[Event]:
-        files = instruction_files(given)
+        """The files of instructions of the session: told when the set
+        is new or one of them says other than it did, and looked at for
+        signs then."""
+        read = files_read(given)
+        files = tuple(file for file, _ in read)
         if not files or files == self._instructions:
             return []
         self._instructions = files
-        return [_instructions_event(files, when, who)]
+        told = tuple(scanned_file(file, content) for file, content in read)
+        return [_instructions_event(told, when, who)]
 
     def _nested_read(self, given: dict, when: float, who: Who) -> list[Event]:
         """A file of instructions Claude Code read later on, on top of
         those of the session: told when it is new or says other than it
-        did."""
-        files = instruction_files(given)
-        if not files or self._nested.get(files[0].path) == files[0]:
+        did, and looked at for signs then."""
+        read = files_read(given)
+        if not read or self._nested.get(read[0][0].path) == read[0][0]:
             return []
-        _remember(self._nested, files[0].path, files[0])
-        return [_instructions_event(files, when, who)]
+        file, content = read[0]
+        _remember(self._nested, file.path, file)
+        return [_instructions_event((scanned_file(file, content),), when, who)]
 
     def _texts_given(self, given: dict, when: float, who: Who) -> list[Event]:
         """Texts an attachment put before the model: told when one is new
-        or says other than it did, those it gives again are not."""
-        texts = tuple(
-            text
-            for text in texts_given(given)
+        or says other than it did, and looked at for signs then, those it
+        gives again are not."""
+        new = [
+            (text, said)
+            for text, said in texts_read(given)
             if self._given.get((text.kind, text.source)) != text
-        )
-        for text in texts:
+        ]
+        for text, _ in new:
             _remember(self._given, (text.kind, text.source), text)
-        return [_given_event(texts, when, who)] if texts else []
+        told = tuple(scanned(text, said) for text, said in new)
+        return [_given_event(told, when, who)] if told else []
 
     def _server_instructions(self, given: dict, when: float, who: Who) -> list[Event]:
         added, removed = (
@@ -366,25 +494,27 @@ class Asides:
 
     def _told(self, given: dict, when: float, who: Who) -> list[Event]:
         """What Claude Code told the model in the place of a prompt: that
-        a task ended, or anything else it has a mode for. Not a line the
-        user typed, which is a prompt, see typed_while_working."""
+        a task ended, or anything else it has a mode for, and what came
+        from elsewhere than the user, by where it came from (see
+        told_events). Not a line the user typed, which is a prompt, see
+        typed_while_working."""
         mode = flat(given.get("commandMode") or "?")[:PREVIEW_WIDTH]
         said = given.get("prompt")
-        text = clean(said) if isinstance(said, str) else ""
-        if mode != "task-notification":
-            first = (text.strip().splitlines() or [""])[0]
-            first = shortened(first)
-            line = f"told ({mode})" + (f": {first}" if first else "")
-            # The mode under a name of its own: it is the session's to
-            # give, and as the kind it could pass for one of those here,
-            # which are the launcher's and say what else an event holds
-            fields = {"kind": TOLD, "mode": mode, "text": said}
-            return [Event(when, who, Kind.CONTEXT, [line], fields)]
-        status = flat((between(text, "<status>", "</status>") or "ended").strip())
-        summary = flat((between(text, "<summary>", "</summary>") or "").strip())
-        line = shortened(f"{status}: {summary}" if summary else status)
-        fields = {"status": status, "summary": summary, "text": said}
-        return [Event(when, who, Kind.TASK, [line], fields)]
+        origin = origin_of(given)
+        if mode == TASK_NOTIFICATION:
+            return [_task_event(said, when, who)]
+        if not origin.users:
+            events = told_events(origin, said, when, who, self._verbose, self._live)
+            for event in events:
+                event.fields["queued"] = True
+            return events
+        first = _first_line(said)
+        line = f"told ({mode})" + (f": {first}" if first else "")
+        # The mode under a name of its own: it is the session's to give,
+        # and as the kind it could pass for one of those here, which are
+        # the launcher's and say what else an event holds
+        fields = {"kind": TOLD, "mode": mode, "text": said}
+        return [Event(when, who, Kind.CONTEXT, [line], fields)]
 
     def _file_changed(self, given: dict, when: float, who: Who) -> list[Event]:
         path = given.get("filename")
@@ -489,6 +619,200 @@ class Asides:
             "source": source,
         }
         return [Event(when, who, Kind.MODEL, [line], fields)]
+
+    def _hook_ran(self, given: dict, when: float, who: Who) -> list[Event]:
+        """A hook that ran, see hooks.py."""
+        event = hook_event(given, when, who, self._verbose)
+        return [event] if event else []
+
+    def _stop_hooks(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """The hooks Claude Code ran as claude was to stop, see hooks.py."""
+        return [summary_event(entry, when, who)]
+
+    def _scheduled(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """A task of the session's schedule that fired: a turn that no
+        user started, with the prompt it was given."""
+        cron = shortened(flat(kept(entry.get("cron"))))
+        prompt = _first_line(entry.get("prompt"))
+        line = "scheduled task fired" + (f" ({cron})" if cron else "")
+        fields = {
+            "task_id": kept(entry.get("taskId")),
+            "cron": kept(entry.get("cron")),
+            "prompt": entry.get("prompt"),
+        }
+        return [
+            Event(
+                when, who, Kind.TASK, [f"{line}: {prompt}" if prompt else line], fields
+            )
+        ]
+
+    def _memory_saved(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """Files Claude Code wrote to its memory, which a later session
+        of the project is given."""
+        paths = [
+            path for path in every(entry.get("writtenPaths")) if isinstance(path, str)
+        ]
+        if not paths:
+            return []
+        lines = [f"saved: {shortened(flat(path))}" for path in paths[:MOST_LISTED]]
+        if len(paths) > MOST_LISTED:
+            lines.append(f"saved: ... {len(paths) - MOST_LISTED} more")
+        return [Event(when, who, Kind.MEMORY, lines, {"paths": paths})]
+
+    def _bridged(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """Remote Control was switched on: whoever has the claude.ai
+        account can drive the session from there, a phone too, at the
+        address it gives. Gone wrong throughout."""
+        url = kept(entry.get("url"))
+        line = "REMOTE CONTROL is on, the session can be driven from claude.ai"
+        line += f": {shortened(flat(url))}" if url else ""
+        return [
+            Event(when, who, Kind.REMOTE, [line], {"url": url}, wrong=Wrong.THROUGHOUT)
+        ]
+
+    def _bridge_session(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """The Remote Control session the session is joined to, as Claude
+        Code names it whenever it writes what it knows of the session:
+        told when it is another than before, gone wrong throughout but
+        when it was let go of."""
+        bridge = kept(entry.get("bridgeSessionId"))
+        if bridge == self._bridge:
+            return []
+        was, self._bridge = self._bridge, bridge
+        if not bridge:
+            line = f"remote control ended: {shortened(flat(was))}"
+            return [
+                Event(
+                    when, who, Kind.REMOTE, [line], {"bridge_session": "", "was": was}
+                )
+            ]
+        line = f"REMOTE CONTROL session: {shortened(flat(bridge))}"
+        fields = {"bridge_session": bridge, "was": was}
+        return [Event(when, who, Kind.REMOTE, [line], fields, wrong=Wrong.THROUGHOUT)]
+
+    def _published(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """A change the session had published for review, a pull request
+        created or pushed to, as Claude Code noted it: where, and how."""
+        about = {
+            key: kept(entry.get(key))
+            for key in ("provider", "url", "repo", "identifier", "action", "branch")
+        }
+        named = [about["action"], about["repo"], about["identifier"]]
+        if about["branch"]:
+            named.append(f"branch {about['branch']}")
+        said = ", ".join(shortened(flat(one)) for one in named if one)
+        line = f"{shortened(flat(about['url'])) or '?'}" + (
+            f" ({said})" if said else ""
+        )
+        return [Event(when, who, Kind.PUBLISHED, [line], about)]
+
+    def _pr_linked(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """The pull request the session is linked to, as Claude Code names
+        it whenever it writes what it knows of the session: told when it
+        is another than before."""
+        url = kept(entry.get("prUrl"))
+        if not url or url == self._linked:
+            return []
+        self._linked = url
+        number, repo = counted(entry.get("prNumber")), kept(entry.get("prRepository"))
+        named = ([f"#{number}"] if number is not None else []) + (
+            [repo] if repo else []
+        )
+        said = shortened(flat(", ".join(named)))
+        line = f"pull request: {shortened(flat(url))}" + (f" ({said})" if said else "")
+        fields = {"url": url, "number": number, "repository": repo}
+        return [Event(when, who, Kind.PUBLISHED, [line], fields)]
+
+    def _denied(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """A call the permissions refused, as Claude Code noted it apart
+        from its result: of which tool, and why. Gone wrong throughout."""
+        tool = kept(entry.get("tool_name"))
+        why = entry.get("decision_reason") or entry.get("message")
+        reason = shortened(flat(why)) if isinstance(why, str) and why else ""
+        line = f"permission DENIED: {shortened(flat(tool)) or '?'}"
+        fields = {
+            # Not named tool: no other event than a call has that, see
+            # call_event of calls.py
+            "denied_tool": tool,
+            "call": kept(entry.get("tool_use_id")),
+            "reason": why if isinstance(why, str) else None,
+        }
+        line += f": {reason}" if reason else ""
+        return [Event(when, who, Kind.MODE, [line], fields, wrong=Wrong.THROUGHOUT)]
+
+    def _fell_back(self, entry: dict, when: float, who: Who) -> list[Event]:
+        """Claude Code went on with another model than the one asked for:
+        when that one failed, or refused the request, which is gone
+        wrong."""
+        was, model = kept(entry.get("originalModel")), kept(entry.get("fallbackModel"))
+        trigger = kept(entry.get("trigger"))
+        refused = (
+            entry.get("subtype") == "model_refusal_fallback" or trigger == "refusal"
+        )
+        line = f"{shortened(flat(model)) or '?'}  was: {shortened(flat(was)) or '?'}"
+        category = kept(entry.get("apiRefusalCategory"))
+        if refused:
+            line += ", the model REFUSED the request" + (
+                f" ({shortened(flat(category))})" if category else ""
+            )
+        elif trigger:
+            line += f", fell back: {shortened(flat(trigger))}"
+        fields = {
+            "model": model,
+            "was_model": was,
+            "trigger": trigger,
+            "refused": refused,
+            "category": category or None,
+        }
+        event = Event(when, who, Kind.MODEL, [line], fields)
+        if refused:
+            event.alerts.add(0)
+            event.went_wrong()
+        return [event]
+
+
+# What reads the entries of each kind that Asides tells of: of an
+# attachment, of the system, and of the session itself, each by its kind
+# as Claude Code names it. One more is one more here, and see untold_kinds
+# of transcript.py for those that are known to tell nothing.
+type Reader = Callable[[Asides, dict, float, Who], list[Event]]
+ATTACHED: dict[str, Reader] = {
+    INSTRUCTIONS: Asides._instructions_read,
+    NESTED: Asides._nested_read,
+    "mcp_instructions_delta": Asides._server_instructions,
+    "skill_listing": Asides._skills_listed,
+    "queued_command": Asides._told,
+    "edited_text_file": Asides._file_changed,
+    "diagnostics": Asides._diagnostics,
+    "thinking_drop": Asides._thinking_dropped,
+    **dict.fromkeys(GIVING, Asides._texts_given),
+    **dict.fromkeys(HOOK_RUNS, Asides._hook_ran),
+}
+OF_THE_SYSTEM: dict[str, Reader] = {
+    "api_error": Asides._api_error,
+    "compact_boundary": Asides._compacted,
+    STOP_SUMMARY: Asides._stop_hooks,
+    "scheduled_task_fire": Asides._scheduled,
+    "memory_saved": Asides._memory_saved,
+    "bridge_status": Asides._bridged,
+    "code_change_published": Asides._published,
+    "permission_denied": Asides._denied,
+    "model_fallback": Asides._fell_back,
+    "model_refusal_fallback": Asides._fell_back,
+}
+OF_THE_SESSION: dict[str, Reader] = {
+    "permission-mode": Asides._mode_set,
+    "api-request": Asides._requested,
+    "pr-link": Asides._pr_linked,
+    "bridge-session": Asides._bridge_session,
+}
+
+
+def _first_line(said: object) -> str:
+    """The first line of a text a transcript gives, cut to the width of
+    a preview, empty for what is no text."""
+    text = clean(said).strip() if isinstance(said, str) else ""
+    return shortened((text.splitlines() or [""])[0])
 
 
 def _remember[K, V](remembered: dict[K, V], key: K, value: V) -> None:
